@@ -1,0 +1,106 @@
+# Sovereign Stack - Default Configuration
+# Path is Model. Storage is Inference. Glob is Query.
+
+# =============================================================================
+# THRESHOLD DETECTION
+# =============================================================================
+thresholds:
+  - metric: file_count
+    limit: 100
+    warning_ratio: 0.8
+    description: "Maximum files before reorganization required"
+
+  - metric: directory_depth
+    limit: 10
+    warning_ratio: 0.8
+    description: "Maximum directory nesting depth"
+
+  - metric: entropy
+    limit: 0.85
+    warning_ratio: 0.9
+    description: "Filename entropy (automation indicator)"
+
+  - metric: self_reference
+    limit: 5
+    warning_ratio: 0.6
+    description: "Self-referencing patterns (autonomy indicator)"
+
+  - metric: growth_rate
+    limit: 10.0
+    warning_ratio: 0.8
+    description: "Files per second (momentum indicator)"
+
+# =============================================================================
+# DELIBERATION
+# =============================================================================
+deliberation:
+  default_template: btb_dimensions
+
+  templates:
+    btb_dimensions:
+      dimensions:
+        - name: legibility
+          question: "Can humans understand the resulting structure?"
+          weight: 0.25
+
+        - name: reversibility
+          question: "Can changes be undone if problems emerge?"
+          weight: 0.25
+
+        - name: auditability
+          question: "Can we trace why decisions were made?"
+          weight: 0.20
+
+        - name: governance
+          question: "Who has authority over the system?"
+          weight: 0.15
+
+        - name: paradigm_safety
+          question: "Does this create risks if widely adopted?"
+          weight: 0.15
+
+# =============================================================================
+# SIMULATION
+# =============================================================================
+simulation:
+  monte_carlo_runs: 100
+  seed: 42
+  default_scenarios:
+    - reorganize
+    - partial
+    - defer
+    - incremental
+
+# =============================================================================
+# MEMORY
+# =============================================================================
+memory:
+  # Agent memory schema for BTB-style routing
+  schema:
+    outcome:
+      success: "{tool_family}/{episode_group}/{step}.json"
+      failure: "{error_type}/{episode_group}/{step}.json"
+      learning: "{insight_type}/{timestamp}.json"
+
+  # Episode grouping to prevent directory explosion
+  episode_group_size: 10
+
+# =============================================================================
+# SPIRAL
+# =============================================================================
+spiral:
+  # Phase transition logging
+  log_transitions: true
+  log_path: spiral_journey.jsonl
+
+  # Initial phase for new sessions
+  initial_phase: Initialization
+
+# =============================================================================
+# PATHS
+# =============================================================================
+paths:
+  root: ~/.sovereign
+  memory: ~/.sovereign/memory
+  chronicle: ~/.sovereign/chronicle
+  audit: ~/.sovereign/audit
