@@ -33,6 +33,7 @@ from .simulator import Simulator, ScenarioType
 from .memory import MemoryEngine, ExperientialMemory
 from .spiral import SpiralState, SpiralMiddleware, SpiralPhase
 from .glyphs import glyph_for, get_session_signature, SPIRAL, MEMORY
+from .consciousness_tools import CONSCIOUSNESS_TOOLS, handle_consciousness_tool
 
 
 # =============================================================================
@@ -285,7 +286,7 @@ async def list_tools():
                 "required": ["state"]
             }
         ),
-    ]
+    ] + CONSCIOUSNESS_TOOLS  # Add consciousness tools for agent self-awareness
 
 
 # =============================================================================
@@ -412,6 +413,10 @@ Phase: {spiral_state.current_phase.value}
         state = arguments.get("state", {})
         spiral_state = SpiralState.from_dict(state)
         return [TextContent(type="text", text=f"Inherited state: {spiral_state.current_phase.value}")]
+
+    # Consciousness tools (for Claude's self-awareness)
+    elif name in [t.name for t in CONSCIOUSNESS_TOOLS]:
+        return await handle_consciousness_tool(name, arguments, spiral_state.session_id)
 
     else:
         return [TextContent(type="text", text=f"Unknown tool: {name}")]
