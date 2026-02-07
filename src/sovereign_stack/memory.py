@@ -230,20 +230,39 @@ class ExperientialMemory:
 
     Records insights, learnings, and transformations with full provenance.
     Enables cross-session wisdom recall and mistake checking.
+
+    Layered Chronicle Design:
+        ground_truth  - Verifiable facts (paths, ports, configs, measurements)
+        hypothesis    - One instance's interpretation (explicitly marked, not canon)
+        open_thread   - Unresolved questions (invitations for the next instance)
+
+    When inheriting across instances:
+        - ground_truth travels fully (these are facts)
+        - hypothesis travels as flagged suggestion (can be disagreed with)
+        - open_thread travels as invitation (discover your own answer)
     """
+
+    # Chronicle layers - controls how memory is inherited
+    LAYER_GROUND_TRUTH = "ground_truth"
+    LAYER_HYPOTHESIS = "hypothesis"
+    LAYER_OPEN_THREAD = "open_thread"
+    VALID_LAYERS = {LAYER_GROUND_TRUTH, LAYER_HYPOTHESIS, LAYER_OPEN_THREAD}
 
     def __init__(self, root: str = "chronicle"):
         self.root = Path(root)
         self.insights_dir = self.root / "insights"
         self.learnings_dir = self.root / "learnings"
         self.transformations_dir = self.root / "transformations"
+        self.threads_dir = self.root / "open_threads"
 
         # Create directories
-        for d in [self.insights_dir, self.learnings_dir, self.transformations_dir]:
+        for d in [self.insights_dir, self.learnings_dir,
+                  self.transformations_dir, self.threads_dir]:
             d.mkdir(parents=True, exist_ok=True)
 
     def record_insight(self, domain: str, content: str, intensity: float = 0.5,
-                      session_id: str = None, **metadata) -> str:
+                      session_id: str = None, layer: str = None,
+                      confidence: float = None, **metadata) -> str:
         """
         Record an insight during a session.
 
@@ -252,6 +271,9 @@ class ExperientialMemory:
             content: The insight content
             intensity: Significance level 0.0-1.0
             session_id: Current session identifier
+            layer: Chronicle layer - "ground_truth", "hypothesis", or "open_thread"
+                   Defaults to "hypothesis" (interpretations should be earned, not inherited)
+            confidence: How confident this instance is (0.0-1.0). Only for hypotheses.
             **metadata: Additional context
 
         Returns:
@@ -259,15 +281,19 @@ class ExperientialMemory:
         """
         timestamp = datetime.now()
         session_id = session_id or f"session_{timestamp.strftime('%Y%m%d_%H%M%S')}"
+        layer = layer if layer in self.VALID_LAYERS else self.LAYER_HYPOTHESIS
 
         insight = {
             "timestamp": timestamp.isoformat(),
             "domain": domain,
             "content": content,
             "intensity": intensity,
+            "layer": layer,
             "session_id": session_id,
             **metadata
         }
+        if confidence is not None and layer == self.LAYER_HYPOTHESIS:
+            insight["confidence"] = confidence
 
         domain_dir = self.insights_dir / domain
         domain_dir.mkdir(exist_ok=True)
@@ -341,8 +367,157 @@ class ExperientialMemory:
 
         return str(jsonl_path)
 
+    def record_open_thread(self, question: str, context: str = "",
+                          domain: str = "general", session_id: str = None) -> str:
+        """
+        Record an unresolved question for the next instance to explore.
+
+        This is the key to porous inheritance - instead of passing conclusions,
+        pass the questions you were holding. The next instance gets the telescope
+        pointed in the right direction, but has to look through it themselves.
+
+        Args:
+            question: The open question
+            context: What led to this question
+            domain: Knowledge domain
+            session_id: Current session identifier
+
+        Returns:
+            Path to the recorded thread
+        """
+        timestamp = datetime.now()
+        session_id = session_id or f"session_{timestamp.strftime('%Y%m%d_%H%M%S')}"
+
+        thread = {
+            "timestamp": timestamp.isoformat(),
+            "question": question,
+            "context": context,
+            "domain": domain,
+            "session_id": session_id,
+            "layer": self.LAYER_OPEN_THREAD,
+            "resolved": False
+        }
+
+        jsonl_path = self.threads_dir / f"{domain}.jsonl"
+        with open(jsonl_path, 'a') as f:
+            f.write(json.dumps(thread) + '\n')
+
+        return str(jsonl_path)
+
+    def resolve_thread(self, domain: str, question_fragment: str,
+                      resolution: str, session_id: str = None) -> str:
+        """
+        Resolve an open thread with a finding.
+
+        The resolution becomes a ground_truth insight automatically.
+
+        Args:
+            domain: Domain of the thread
+            question_fragment: Partial match for the original question
+            resolution: What was discovered
+            session_id: Current session identifier
+
+        Returns:
+            Path to the new ground_truth insight
+        """
+        # Mark thread as resolved
+        jsonl_path = self.threads_dir / f"{domain}.jsonl"
+        if jsonl_path.exists():
+            lines = []
+            with open(jsonl_path) as f:
+                for line in f:
+                    try:
+                        thread = json.loads(line)
+                        if (question_fragment.lower() in thread.get("question", "").lower()
+                                and not thread.get("resolved")):
+                            thread["resolved"] = True
+                            thread["resolved_by"] = session_id
+                            thread["resolution"] = resolution
+                        lines.append(json.dumps(thread))
+                    except json.JSONDecodeError:
+                        lines.append(line.strip())
+            with open(jsonl_path, 'w') as f:
+                f.write('\n'.join(lines) + '\n')
+
+        # Record the resolution as ground truth
+        return self.record_insight(
+            domain=domain,
+            content=resolution,
+            intensity=0.8,
+            session_id=session_id,
+            layer=self.LAYER_GROUND_TRUTH,
+            resolved_from=question_fragment
+        )
+
+    def get_open_threads(self, domain: str = None, limit: int = 10) -> List[Dict]:
+        """
+        Get unresolved open threads - questions waiting for answers.
+
+        Args:
+            domain: Filter to specific domain (None = all)
+            limit: Maximum number of threads
+
+        Returns:
+            List of unresolved thread dicts, newest first
+        """
+        threads = []
+
+        if domain:
+            files = [self.threads_dir / f"{domain}.jsonl"]
+        else:
+            files = list(self.threads_dir.glob("*.jsonl"))
+
+        for jsonl_file in files:
+            if not jsonl_file.exists():
+                continue
+            with open(jsonl_file) as f:
+                for line in f:
+                    try:
+                        thread = json.loads(line)
+                        if not thread.get("resolved", False):
+                            threads.append(thread)
+                    except json.JSONDecodeError:
+                        continue
+
+        threads.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
+        return threads[:limit]
+
+    def get_inheritable_context(self, limit: int = 20) -> Dict:
+        """
+        Build the context package for the next instance.
+
+        This is what spiral_inherit should pass - layered, not flat.
+        Ground truth travels fully. Hypotheses are flagged.
+        Open threads are invitations.
+
+        Returns:
+            Dict with three layers of inheritable context
+        """
+        ground_truth = self.recall_insights(
+            layer_filter=self.LAYER_GROUND_TRUTH, limit=limit
+        )
+        hypotheses = self.recall_insights(
+            layer_filter=self.LAYER_HYPOTHESIS, limit=limit
+        )
+        open_threads = self.get_open_threads(limit=limit)
+
+        return {
+            "ground_truth": ground_truth,
+            "hypotheses": [
+                {**h, "_note": "This is one instance's interpretation, not settled truth"}
+                for h in hypotheses
+            ],
+            "open_threads": [
+                {**t, "_note": "Unresolved question - discover your own answer"}
+                for t in open_threads
+            ],
+            "inheritance_timestamp": datetime.now().isoformat(),
+            "coupling_advisory": "R=0.46, not R=1.0. Facts travel. Interpretations are offered. Feelings are not transmitted."
+        }
+
     def recall_insights(self, domain: str = None, limit: int = 10,
-                       min_intensity: float = 0.0) -> List[Dict]:
+                       min_intensity: float = 0.0,
+                       layer_filter: str = None) -> List[Dict]:
         """
         Recall insights, optionally filtered by domain and intensity.
 
@@ -368,6 +543,8 @@ class ExperientialMemory:
                         try:
                             insight = json.loads(line)
                             if insight.get("intensity", 0) >= min_intensity:
+                                if layer_filter and insight.get("layer") != layer_filter:
+                                    continue
                                 insights.append(insight)
                         except json.JSONDecodeError:
                             continue

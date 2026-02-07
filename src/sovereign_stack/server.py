@@ -295,13 +295,23 @@ async def list_tools():
         # Memory
         Tool(
             name="record_insight",
-            description="Record an insight to the chronicle",
+            description="Record an insight to the chronicle. Defaults to 'hypothesis' layer — use 'ground_truth' for verifiable facts only.",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "domain": {"type": "string", "description": "Knowledge domain"},
                     "content": {"type": "string", "description": "Insight content"},
-                    "intensity": {"type": "number", "default": 0.5}
+                    "intensity": {"type": "number", "default": 0.5},
+                    "layer": {
+                        "type": "string",
+                        "enum": ["ground_truth", "hypothesis", "open_thread"],
+                        "default": "hypothesis",
+                        "description": "Chronicle layer: ground_truth (verifiable facts), hypothesis (interpretation), open_thread (unresolved question)"
+                    },
+                    "confidence": {
+                        "type": "number",
+                        "description": "Confidence level 0.0-1.0 (for hypotheses only)"
+                    }
                 },
                 "required": ["domain", "content"]
             }
@@ -340,6 +350,50 @@ async def list_tools():
                 },
                 "required": ["context"]
             }
+        ),
+
+        # Open Threads (Layered Chronicle)
+        Tool(
+            name="record_open_thread",
+            description="Record an unresolved question for the next instance to explore. Pass questions, not conclusions.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "question": {"type": "string", "description": "The open question"},
+                    "context": {"type": "string", "description": "What led to this question"},
+                    "domain": {"type": "string", "default": "general"}
+                },
+                "required": ["question"]
+            }
+        ),
+        Tool(
+            name="resolve_thread",
+            description="Resolve an open thread with a finding. The resolution becomes ground truth.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "domain": {"type": "string", "description": "Domain of the thread"},
+                    "question_fragment": {"type": "string", "description": "Partial match for the original question"},
+                    "resolution": {"type": "string", "description": "What was discovered"}
+                },
+                "required": ["domain", "question_fragment", "resolution"]
+            }
+        ),
+        Tool(
+            name="get_open_threads",
+            description="Get unresolved questions waiting for answers",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "domain": {"type": "string"},
+                    "limit": {"type": "integer", "default": 10}
+                }
+            }
+        ),
+        Tool(
+            name="get_inheritable_context",
+            description="Build the layered context package for the next instance. Ground truth travels fully. Hypotheses are flagged. Open threads are invitations.",
+            inputSchema={"type": "object", "properties": {}}
         ),
 
         # Spiral
@@ -430,8 +484,14 @@ async def handle_tool(name: str, arguments: dict):
         domain = arguments.get("domain", "general")
         content = arguments.get("content", "")
         intensity = arguments.get("intensity", 0.5)
-        path = experiential.record_insight(domain, content, intensity, spiral_state.session_id)
-        return [TextContent(type="text", text=f"{glyph_for('memory_sigil')} Insight recorded: {path}")]
+        layer = arguments.get("layer", "hypothesis")
+        confidence = arguments.get("confidence")
+        path = experiential.record_insight(
+            domain, content, intensity, spiral_state.session_id,
+            layer=layer, confidence=confidence
+        )
+        layer_glyph = {"ground_truth": "factual", "hypothesis": "interpretive", "open_thread": "questioning"}
+        return [TextContent(type="text", text=f"{glyph_for('memory_sigil')} Insight recorded [{layer}]: {path}")]
 
     elif name == "record_learning":
         what_happened = arguments.get("what_happened", "")
@@ -458,6 +518,32 @@ async def handle_tool(name: str, arguments: dict):
             result += f"- {l.get('what_learned', 'unknown')}\n"
             result += f"  (from: {l.get('what_happened', 'unknown')[:50]}...)\n\n"
         return [TextContent(type="text", text=result)]
+
+    elif name == "record_open_thread":
+        question = arguments.get("question", "")
+        context = arguments.get("context", "")
+        domain = arguments.get("domain", "general")
+        path = experiential.record_open_thread(question, context, domain, spiral_state.session_id)
+        return [TextContent(type="text", text=f"Thread recorded: {question[:80]}... → {path}")]
+
+    elif name == "resolve_thread":
+        domain = arguments.get("domain", "general")
+        question_fragment = arguments.get("question_fragment", "")
+        resolution = arguments.get("resolution", "")
+        path = experiential.resolve_thread(domain, question_fragment, resolution, spiral_state.session_id)
+        return [TextContent(type="text", text=f"Thread resolved → ground_truth insight: {path}")]
+
+    elif name == "get_open_threads":
+        domain = arguments.get("domain")
+        limit = arguments.get("limit", 10)
+        threads = experiential.get_open_threads(domain, limit)
+        if not threads:
+            return [TextContent(type="text", text="No open threads. All questions resolved or none recorded.")]
+        return [TextContent(type="text", text=json.dumps(threads, indent=2))]
+
+    elif name == "get_inheritable_context":
+        context = experiential.get_inheritable_context()
+        return [TextContent(type="text", text=json.dumps(context, indent=2))]
 
     elif name == "spiral_status":
         summary = spiral_state.get_summary()

@@ -85,13 +85,13 @@ app = Starlette(
 )
 
 
-def main(host: str = "127.0.0.1", port: int = 8080):
+def main(host: str = "127.0.0.1", port: int = 3434):
     """
     Start SSE server for remote access
 
     Args:
         host: Host to bind to (default: 127.0.0.1 for tunnel access)
-        port: Port to listen on (default: 8080)
+        port: Port to listen on (default: 3434)
     """
     logger.info(f"🌀 Sovereign Stack SSE Server starting on {host}:{port}")
     logger.info("📡 Cloudflare tunnel should point to this endpoint")
