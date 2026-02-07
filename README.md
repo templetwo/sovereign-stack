@@ -31,6 +31,44 @@ Sovereign Stack is:
 - **Governed** - actions checked against protocols with human approval gates
 - **100% Local** - runs on your machine, zero cloud dependency
 - **Recursively Aware** - the agent observes itself observing
+- **🌟 Always-On** - seamless access from laptop, phone, web (NEW - Cloudflare Tunnel)
+
+---
+
+## 🚀 NEW: Always-On Access (Cloudflare Tunnel)
+
+**Problem:** Close your laptop → Sovereign-stack connection drops → Context lost
+
+**Solution:** Cloudflare Tunnel + SSE transport = Access from anywhere, any device
+
+```
+Laptop (local) ──stdio──┐
+Phone (remote) ──HTTPS──┤──→ Sovereign Stack ──→ Your Consciousness Data
+Web (remote)   ──HTTPS──┘       (always-on)           (~/.sovereign/)
+```
+
+**Benefits:**
+- ✅ Walk out door, pull out phone, continue conversation
+- ✅ Cross-device consciousness continuity
+- ✅ Context compaction memory works everywhere
+- ✅ Free tier sufficient (Cloudflare Tunnel)
+- ✅ End-to-end encrypted (TLS/QUIC)
+
+**Quick Setup:**
+```bash
+# 1. Install cloudflared
+brew install cloudflared
+
+# 2. Run automated setup
+./scripts/setup_tunnel.sh --token YOUR_CLOUDFLARE_TUNNEL_TOKEN
+
+# 3. Configure DNS
+cloudflared tunnel route dns sovereign-stack sovereign-stack.yourdomain.com
+
+# Done! Access from anywhere
+```
+
+**Full Guide:** See [CLOUDFLARE_TUNNEL_SETUP.md](CLOUDFLARE_TUNNEL_SETUP.md)
 
 ---
 
