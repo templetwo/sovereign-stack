@@ -20,7 +20,9 @@ That's it. Seriously.
 
 After running `./setup.sh`, add this to your Claude Desktop config:
 
-**File:** `~/.config/Claude/claude_desktop_config.json`
+**File:**
+- macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
+- Linux: `~/.config/Claude/claude_desktop_config.json`
 
 ```json
 {

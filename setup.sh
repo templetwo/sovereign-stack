@@ -74,12 +74,20 @@ echo ""
 echo "QUICK START:"
 echo ""
 echo "1️⃣  Local MCP (Claude Desktop):"
-echo "   Add to ~/.config/Claude/claude_desktop_config.json:"
+echo ""
+# Detect config path
+if [ "$(uname)" = "Darwin" ]; then
+    CONFIG_PATH="$HOME/Library/Application Support/Claude/claude_desktop_config.json"
+else
+    CONFIG_PATH="$HOME/.config/Claude/claude_desktop_config.json"
+fi
+echo "   Add to: $CONFIG_PATH"
 echo ""
 echo '   {
      "mcpServers": {
        "sovereign-stack": {
-         "command": "'$(pwd)'/venv/bin/sovereign"
+         "command": "'$(pwd)'/venv/bin/sovereign",
+         "env": { "SOVEREIGN_ROOT": "'$HOME'/.sovereign" }
        }
      }
    }'

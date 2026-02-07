@@ -69,7 +69,7 @@ if [ ! -f ~/.cloudflared/config.yml ]; then
         echo "   tunnel: YOUR_TUNNEL_ID"
         echo "   credentials-file: ~/.cloudflared/YOUR_TUNNEL_ID.json"
         echo "   ingress:"
-        echo "     - service: http://localhost:8080"
+        echo "     - service: http://localhost:3434"
         echo ""
         echo "4. Run this script again"
         echo ""
@@ -84,11 +84,11 @@ echo ""
 echo "📍 Starting SSE server..."
 
 # Check if already running
-if lsof -ti:8080 &> /dev/null; then
-    echo "⚠️  Port 8080 already in use (SSE server may already be running)"
+if lsof -ti:3434 &> /dev/null; then
+    echo "⚠️  Port 3434 already in use (SSE server may already be running)"
     read -p "Kill existing process and restart? [y/N]: " kill_choice
     if [ "$kill_choice" = "y" ]; then
-        lsof -ti:8080 | xargs kill
+        lsof -ti:3434 | xargs kill
         sleep 2
     else
         echo "Using existing SSE server..."
@@ -96,7 +96,7 @@ if lsof -ti:8080 &> /dev/null; then
 fi
 
 # Start in background if not running
-if ! lsof -ti:8080 &> /dev/null; then
+if ! lsof -ti:3434 &> /dev/null; then
     nohup sovereign-sse > ~/.sovereign/sse.log 2>&1 &
     sleep 2
     echo "✅ SSE server started (logs: ~/.sovereign/sse.log)"
@@ -105,7 +105,7 @@ else
 fi
 
 # Test locally
-if curl -s http://localhost:8080/health | grep -q "healthy"; then
+if curl -s http://localhost:3434/health | grep -q "healthy"; then
     echo "✅ Health check passed"
 else
     echo "❌ SSE server not responding"
@@ -122,7 +122,7 @@ if [ "$USE_QUICK_TUNNEL" = true ]; then
     echo "Starting Quick Tunnel (temporary URL)..."
     echo "Press Ctrl+C to stop"
     echo ""
-    $CLOUDFLARED tunnel --url http://localhost:8080
+    $CLOUDFLARED tunnel --url http://localhost:3434
 else
     # Check if tunnel already running
     if pgrep -f "cloudflared tunnel run" > /dev/null; then
@@ -151,7 +151,7 @@ else
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo ""
     echo "Services running:"
-    echo "  • SSE Server: http://localhost:8080"
+    echo "  • SSE Server: http://localhost:3434"
     echo "  • Cloudflare Tunnel: (check dashboard for URL)"
     echo ""
     echo "Configure MCP clients with your tunnel URL:"
