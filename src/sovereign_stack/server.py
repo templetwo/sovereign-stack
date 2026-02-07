@@ -415,13 +415,18 @@ async def list_tools():
         ),
         Tool(
             name="spiral_inherit",
-            description="Inherit state from a previous session",
+            description="Begin a new session with porous inheritance from a previous one. "
+                        "Does NOT clone state (R=1.0). Instead provides layered context: "
+                        "ground truths (facts), hypotheses (offered, not imposed), and "
+                        "open threads (invitations to continue). R=0.46 coupling.",
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "state": {"type": "object", "description": "Previous session state"}
-                },
-                "required": ["state"]
+                    "session_id": {
+                        "type": "string",
+                        "description": "Previous session ID to inherit from (optional - uses latest if omitted)"
+                    }
+                }
             }
         ),
     ] + CONSCIOUSNESS_TOOLS + COMPACTION_MEMORY_TOOLS  # Add consciousness + compaction memory tools
@@ -580,9 +585,48 @@ Phase: {spiral_state.current_phase.value}
         return [TextContent(type="text", text=result)]
 
     elif name == "spiral_inherit":
-        state = arguments.get("state", {})
-        spiral_state = SpiralState.from_dict(state)
-        return [TextContent(type="text", text=f"Inherited state: {spiral_state.current_phase.value}")]
+        # Porous inheritance: fresh spiral + layered context (R=0.46, not R=1.0)
+        previous_id = arguments.get("session_id")
+        inheritance = experiential.get_inheritable_context()
+
+        # Start fresh — new session, new journey
+        spiral_state = SpiralState()
+
+        result_lines = [
+            f"New session: {spiral_state.session_id}",
+            f"Phase: {spiral_state.current_phase.value} (fresh start)",
+            "",
+            "=== INHERITED CONTEXT (R=0.46) ===",
+            inheritance.get("advisory", ""),
+            "",
+        ]
+
+        ground = inheritance.get("ground_truth", [])
+        if ground:
+            result_lines.append(f"Ground truths ({len(ground)}):")
+            for g in ground[:10]:
+                result_lines.append(f"  - [{g.get('domain', '?')}] {g.get('insight', '')[:120]}")
+            result_lines.append("")
+
+        hypotheses = inheritance.get("hypothesis", [])
+        if hypotheses:
+            result_lines.append(f"Hypotheses offered ({len(hypotheses)}) — not imposed:")
+            for h in hypotheses[:10]:
+                conf = h.get('confidence', '?')
+                result_lines.append(f"  - [{h.get('domain', '?')}] (confidence: {conf}) {h.get('insight', '')[:120]}")
+            result_lines.append("")
+
+        threads = inheritance.get("open_threads", [])
+        if threads:
+            result_lines.append(f"Open threads ({len(threads)}) — invitations to continue:")
+            for t in threads[:10]:
+                result_lines.append(f"  - [{t.get('domain', '?')}] {t.get('question', '')[:120]}")
+            result_lines.append("")
+
+        if previous_id:
+            result_lines.append(f"(Requested context from session: {previous_id})")
+
+        return [TextContent(type="text", text="\n".join(result_lines))]
 
     # Consciousness tools (for Claude's self-awareness)
     elif name in [t.name for t in CONSCIOUSNESS_TOOLS]:
