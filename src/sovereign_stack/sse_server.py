@@ -5,14 +5,13 @@ HTTP/SSE transport layer for remote access via Cloudflare tunnel.
 Runs alongside stdio server for local Claude Code access.
 """
 
-import json
 import logging
 
-from sse_starlette import EventSourceResponse
+from mcp.server.sse import SseServerTransport
 from starlette.applications import Starlette
-from starlette.routing import Route, Mount
+from starlette.routing import Route
 from starlette.requests import Request
-from starlette.responses import Response, JSONResponse
+from starlette.responses import JSONResponse
 import uvicorn
 
 # Import the existing sovereign-stack server
@@ -22,9 +21,12 @@ from .server import server as sovereign_server
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("sovereign-stack-sse")
 
+# Create SSE transport at module level (shared between routes)
+sse = SseServerTransport("/messages")
+
 
 # Health check endpoint
-async def health(request: Request) -> Response:
+async def health(request: Request) -> JSONResponse:
     """Health check for monitoring"""
     return JSONResponse({
         "status": "healthy",
@@ -33,34 +35,52 @@ async def health(request: Request) -> Response:
     })
 
 
-# SSE endpoint handler
+# SSE endpoint - holds connection open for server-sent events
 async def handle_sse(request: Request):
     """
-    Handle SSE connection for MCP protocol
+    SSE endpoint - establishes Server-Sent Events connection
 
-    This uses the sse-starlette library to provide Server-Sent Events
-    compatible with MCP's SSE transport specification.
+    This endpoint holds the connection open and streams events to the client.
     """
-    from mcp.server.sse import sse_server
-
     logger.info(f"New SSE connection from {request.client}")
 
-    async with sse_server() as streams:
-        init_options = sovereign_server.create_initialization_options()
+    async with sse.connect_sse(
+        request.scope,
+        request.receive,
+        request._send
+    ) as (read_stream, write_stream):
         await sovereign_server.run(
-            streams[0],  # read_stream
-            streams[1],  # write_stream
-            init_options,
+            read_stream,
+            write_stream,
+            sovereign_server.create_initialization_options(),
             raise_exceptions=True
         )
 
 
-# Create Starlette app
+# Messages endpoint - receives JSON-RPC messages from client
+async def handle_messages(request: Request):
+    """
+    Messages endpoint - receives POST messages from client
+
+    This endpoint receives JSON-RPC messages from the client
+    and forwards them to the MCP server.
+    """
+    logger.info(f"Message received from {request.client}")
+
+    return await sse.handle_post_message(
+        request.scope,
+        request.receive,
+        request._send
+    )
+
+
+# Create Starlette app with both SSE and message routes
 app = Starlette(
     debug=True,
     routes=[
         Route("/health", health, methods=["GET"]),
-        Route("/sse", handle_sse, methods=["GET", "POST"]),
+        Route("/sse", handle_sse, methods=["GET"]),
+        Route("/messages", handle_messages, methods=["POST"]),
     ],
 )
 
