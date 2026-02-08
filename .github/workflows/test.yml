@@ -32,4 +32,4 @@ jobs:
 
       - name: Verify imports
         run: |
-          python -c "from sovereign_stack import Coherence, ThresholdDetector, Simulator, ExperientialMemory, SpiralState, GLYPHS; print('✅ All imports successful')"
+          python -c "from sovereign_stack import Coherence, ThresholdDetector, Simulator, ExperientialMemory, SpiralPhase, GLYPHS; print('✅ All imports successful')"
