@@ -93,3 +93,15 @@ configs/*.local.yaml
 .env.*
 *.pem
 *.key
+credentials*.json
+
+# Logs
+*.log
+logs/
+*.log.*
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.swp

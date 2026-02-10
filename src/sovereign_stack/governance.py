@@ -22,7 +22,7 @@ from enum import Enum
 from pathlib import Path
 from dataclasses import dataclass, field, asdict
 from typing import List, Dict, Any, Optional, Callable
-from datetime import datetime
+from datetime import datetime, timezone
 from collections import Counter
 
 try:
@@ -128,7 +128,7 @@ class StakeholderVote:
 
     def __post_init__(self):
         if not self.timestamp:
-            self.timestamp = datetime.utcnow().isoformat()
+            self.timestamp = datetime.now(timezone.utc).isoformat()
 
     def to_dict(self) -> Dict[str, Any]:
         result = asdict(self)
@@ -148,7 +148,7 @@ class DissentRecord:
 
     def __post_init__(self):
         if not self.timestamp:
-            self.timestamp = datetime.utcnow().isoformat()
+            self.timestamp = datetime.now(timezone.utc).isoformat()
 
     def to_dict(self) -> Dict[str, Any]:
         result = asdict(self)
@@ -228,7 +228,7 @@ class GateResult:
 
     def __post_init__(self):
         if not self.timestamp:
-            self.timestamp = datetime.utcnow().isoformat()
+            self.timestamp = datetime.now(timezone.utc).isoformat()
 
     def to_dict(self) -> Dict[str, Any]:
         result = asdict(self)
@@ -315,7 +315,7 @@ class ThresholdDetector:
             return []
 
         events: List[ThresholdEvent] = []
-        timestamp = datetime.utcnow().isoformat()
+        timestamp = datetime.now(timezone.utc).isoformat()
         metrics = self._gather_metrics(path, recursive)
 
         for metric_type, config in self.thresholds.items():
@@ -433,11 +433,11 @@ class DeliberationSession:
         self.session_id = session_id or self._generate_session_id()
         self.template_name: Optional[str] = None
         self.votes: List[StakeholderVote] = []
-        self._started = datetime.utcnow()
+        self._started = datetime.now(timezone.utc)
 
     def _generate_session_id(self) -> str:
         import uuid
-        timestamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
         return f"delib-{timestamp}-{uuid.uuid4().hex[:8]}"
 
     def load_template(self, template_name: str) -> None:
@@ -496,7 +496,7 @@ class DeliberationSession:
             votes=self.votes,
             dissenting_views=dissenting_views,
             conditions=list(set(conditions)),
-            timestamp=datetime.utcnow().isoformat()
+            timestamp=datetime.now(timezone.utc).isoformat()
         )
 
 
@@ -598,7 +598,7 @@ class Intervenor:
     def apply(self, decision: Dict[str, Any], target: str,
               gates: List[Gate]) -> EnforcementResult:
         """Apply a deliberation decision through gates."""
-        timestamp = datetime.utcnow().isoformat()
+        timestamp = datetime.now(timezone.utc).isoformat()
         decision_hash = decision.get("audit_hash", decision.get("session_id", "unknown"))
 
         self._log("enforcement_start", "intervenor", {
@@ -643,7 +643,7 @@ class Intervenor:
     def _log(self, action: str, actor: str, details: Dict[str, Any]) -> None:
         """Add entry to audit trail with hash chaining."""
         entry = AuditEntry(
-            timestamp=datetime.utcnow().isoformat(),
+            timestamp=datetime.now(timezone.utc).isoformat(),
             action=action, actor=actor, details=details,
             previous_hash=self._last_hash
         )

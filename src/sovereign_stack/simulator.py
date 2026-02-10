@@ -20,7 +20,7 @@ import logging
 from enum import Enum
 from dataclasses import dataclass, field, asdict
 from typing import List, Dict, Any, Optional, Tuple
-from datetime import datetime
+from datetime import datetime, timezone
 
 try:
     import networkx as nx
@@ -174,7 +174,7 @@ class Simulator:
             event_hash=event.get("event_hash", "unknown"),
             model=self.model_name,
             outcomes=outcomes,
-            timestamp=datetime.utcnow().isoformat(),
+            timestamp=datetime.now(timezone.utc).isoformat(),
             seed=self.seed,
             monte_carlo_runs=self.config.monte_carlo_runs,
         )

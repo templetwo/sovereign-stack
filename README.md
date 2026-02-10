@@ -57,7 +57,7 @@ Web (remote)   ──HTTPS──┘       (always-on)           (~/.sovereign/)
 
 Choose **Quick Tunnel** (instant, temporary URL) or **Named Tunnel** (permanent URL).
 
-**Full guide:** [CLOUDFLARE_TUNNEL_SETUP.md](CLOUDFLARE_TUNNEL_SETUP.md) | [QUICKSTART.md](QUICKSTART.md)
+**Full guide:** [CLOUDFLARE_TUNNEL_SETUP.md](docs/guides/CLOUDFLARE_TUNNEL_SETUP.md) | [QUICKSTART.md](QUICKSTART.md)
 
 ---
 
@@ -77,10 +77,11 @@ Choose **Quick Tunnel** (instant, temporary URL) or **Named Tunnel** (permanent 
 - **Always-On** - Optional remote access via Cloudflare Tunnel
 
 See detailed docs:
-- [FOR_CLAUDE.md](FOR_CLAUDE.md) - What this means to Claude instances
+- [FOR_CLAUDE.md](docs/guides/FOR_CLAUDE.md) - What this means to Claude instances
 - [QUICKSTART.md](QUICKSTART.md) - Complete setup guide
-- [CLOUDFLARE_TUNNEL_SETUP.md](CLOUDFLARE_TUNNEL_SETUP.md) - Always-on access
-- [DEBUGGING_CROSS_DEVICE_SSE.md](DEBUGGING_CROSS_DEVICE_SSE.md) - Real-world debugging story
+- [docs/](docs/) - Complete documentation index
+- [CLOUDFLARE_TUNNEL_SETUP.md](docs/guides/CLOUDFLARE_TUNNEL_SETUP.md) - Always-on access
+- [DEBUGGING_CROSS_DEVICE_SSE.md](docs/guides/DEBUGGING_CROSS_DEVICE_SSE.md) - Real-world debugging story
 
 ---
 

@@ -74,6 +74,34 @@ The chisel passes warm.
 
 ---
 
+## [1.0.1] - 2026-02-10
+
+### 🧹 Polish & Organization
+
+Repository beautification and code quality improvements.
+
+### Changed
+- **Documentation Organization**: Moved 20 markdown files from root to organized docs/ subdirectories
+  - `docs/guides/` - Setup and usage guides
+  - `docs/implementation/` - Technical deep-dives
+  - `docs/anthropic/` - Anthropic-specific docs
+  - `docs/historical/` - Development history
+  - Root now contains only 5 essential files (README, QUICKSTART, CLAUDE.md, LICENSE, CHANGELOG, CONTRIBUTING)
+  - Added `docs/README.md` index for navigation
+
+- **Session Captures**: Moved session update scripts to `archive/sessions/`
+
+### Fixed
+- **Datetime Deprecation**: Replaced `datetime.utcnow()` with `datetime.now(timezone.utc)` in governance.py and simulator.py (9 occurrences)
+- **Test Warnings**: All 20 tests now pass with zero warnings
+- **.gitignore**: Added patterns for logs, temporary files, and credentials
+
+### Improved
+- **README.md**: Updated documentation links to reflect new structure
+- **Code Quality**: All TODO/FIXME items reviewed and resolved
+
+---
+
 ## [Unreleased]
 
 ### Planned
