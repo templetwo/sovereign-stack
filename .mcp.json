@@ -2,7 +2,7 @@
   "mcpServers": {
     "sovereign-stack": {
       "type": "stdio",
-      "command": "python3",
+      "command": "/Users/tony_studio/sovereign-stack/venv/bin/python3",
       "args": ["-m", "sovereign_stack.server"],
       "env": {
         "SOVEREIGN_ROOT": "${HOME}/.sovereign"

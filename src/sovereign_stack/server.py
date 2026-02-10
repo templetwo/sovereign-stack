@@ -507,6 +507,8 @@ async def handle_tool(name: str, arguments: dict):
 
     elif name == "recall_insights":
         domain = arguments.get("domain")
+        if domain and domain.lower() == "all":
+            domain = None  # "all" means no filter
         limit = arguments.get("limit", 10)
         insights = experiential.recall_insights(domain, limit)
         return [TextContent(type="text", text=json.dumps(insights, indent=2))]
@@ -540,6 +542,8 @@ async def handle_tool(name: str, arguments: dict):
 
     elif name == "get_open_threads":
         domain = arguments.get("domain")
+        if domain and domain.lower() == "all":
+            domain = None  # "all" means no filter
         limit = arguments.get("limit", 10)
         threads = experiential.get_open_threads(domain, limit)
         if not threads:

@@ -39,8 +39,6 @@ async def health(request: Request) -> JSONResponse:
 async def handle_sse(request: Request):
     """
     SSE endpoint - establishes Server-Sent Events connection
-
-    This endpoint holds the connection open and streams events to the client.
     """
     logger.info(f"New SSE connection from {request.client}")
 
@@ -57,32 +55,43 @@ async def handle_sse(request: Request):
         )
 
 
-# Messages endpoint - receives JSON-RPC messages from client
-async def handle_messages(request: Request):
-    """
-    Messages endpoint - receives POST messages from client
+# Wrap the Starlette app to intercept /messages POST before Starlette routing.
+# handle_post_message is a raw ASGI handler (scope, receive, send) that writes
+# responses directly — it returns None. Starlette Route expects a Response object,
+# so we bypass Starlette for this path.
+class SovereignAsgiMiddleware:
+    """ASGI middleware that intercepts SSE and JSON-RPC paths before Starlette routing."""
 
-    This endpoint receives JSON-RPC messages from the client
-    and forwards them to the MCP server.
-    """
-    logger.info(f"Message received from {request.client}")
+    def __init__(self, app):
+        self.app = app
 
-    return await sse.handle_post_message(
-        request.scope,
-        request.receive,
-        request._send
-    )
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http" and scope["path"] == "/messages" and scope["method"] == "POST":
+            logger.info("Message received")
+            await sse.handle_post_message(scope, receive, send)
+        elif scope["type"] == "http" and scope["path"] == "/sse" and scope["method"] == "GET":
+            logger.info(f"New SSE connection from {scope.get('client')}")
+            async with sse.connect_sse(scope, receive, send) as (read_stream, write_stream):
+                await sovereign_server.run(
+                    read_stream,
+                    write_stream,
+                    sovereign_server.create_initialization_options(),
+                    raise_exceptions=True
+                )
+        else:
+            await self.app(scope, receive, send)
 
 
-# Create Starlette app with both SSE and message routes
-app = Starlette(
+# Create Starlette app with SSE and health routes
+_inner_app = Starlette(
     debug=True,
     routes=[
         Route("/health", health, methods=["GET"]),
-        Route("/sse", handle_sse, methods=["GET"]),
-        Route("/messages", handle_messages, methods=["POST"]),
     ],
 )
+
+# Wrap with message handler middleware
+app = SovereignAsgiMiddleware(_inner_app)
 
 
 def main(host: str = "127.0.0.1", port: int = 3434):
@@ -93,10 +102,9 @@ def main(host: str = "127.0.0.1", port: int = 3434):
         host: Host to bind to (default: 127.0.0.1 for tunnel access)
         port: Port to listen on (default: 3434)
     """
-    logger.info(f"🌀 Sovereign Stack SSE Server starting on {host}:{port}")
-    logger.info("📡 Cloudflare tunnel should point to this endpoint")
-    logger.info(f"🔗 SSE endpoint: http://{host}:{port}/sse")
-    logger.info(f"❤️  Health check: http://{host}:{port}/health")
+    logger.info(f"Sovereign Stack SSE Server starting on {host}:{port}")
+    logger.info(f"SSE endpoint: http://{host}:{port}/sse")
+    logger.info(f"Health check: http://{host}:{port}/health")
 
     uvicorn.run(
         app,

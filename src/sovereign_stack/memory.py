@@ -532,9 +532,14 @@ class ExperientialMemory:
         insights = []
 
         if domain:
-            search_dirs = [self.insights_dir / domain]
+            domain_path = self.insights_dir / domain
+            # If specified domain doesn't exist, search all domains
+            if not domain_path.exists():
+                search_dirs = [d for d in self.insights_dir.iterdir() if d.is_dir() and not d.name.startswith('.')]
+            else:
+                search_dirs = [domain_path]
         else:
-            search_dirs = [d for d in self.insights_dir.iterdir() if d.is_dir()]
+            search_dirs = [d for d in self.insights_dir.iterdir() if d.is_dir() and not d.name.startswith('.')]
 
         for domain_dir in search_dirs:
             for jsonl_file in domain_dir.glob("*.jsonl"):
