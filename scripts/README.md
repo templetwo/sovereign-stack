@@ -2,6 +2,33 @@
 
 Utility scripts for working with sovereign-stack.
 
+## Management Scripts
+
+### manage (Service Manager)
+**Manage SSE server and Cloudflare tunnel**
+
+```bash
+./scripts/manage status    # Show service status (default)
+./scripts/manage start      # Start all services
+./scripts/manage stop       # Stop all services
+./scripts/manage restart    # Restart all services
+./scripts/manage health     # Run detailed health checks
+./scripts/manage logs sse   # Tail SSE server logs
+./scripts/manage logs tunnel # Tail tunnel logs
+```
+
+### monitor (Auto-restart)
+**Monitor services and auto-restart on failure**
+
+```bash
+./scripts/monitor           # Check every 30s (default)
+./scripts/monitor 60        # Check every 60s
+```
+
+Press Ctrl+C to stop monitoring. Runs in foreground.
+
+---
+
 ## Session Capture Scripts
 
 ### quick_capture.py (Recommended)

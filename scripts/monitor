@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+#
+# Sovereign Stack Monitor
+# Watches SSE server and tunnel, auto-restarts on failure
+#
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+INTERVAL="${1:-30}"  # Check interval in seconds
+
+GREEN='\033[0;32m'
+RED='\033[0;31m'
+YELLOW='\033[1;33m'
+NC='\033[0m'
+
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1"; }
+
+check_sse() {
+    ps aux | grep sovereign-sse | grep -v grep | awk '{print $2}'
+}
+
+check_tunnel() {
+    ps aux | grep "cloudflared tunnel run" | grep -v grep | awk '{print $2}'
+}
+
+health_check() {
+    curl -s -m 2 http://localhost:3434/health 2>/dev/null | grep -q "healthy"
+}
+
+log "Starting sovereign-stack monitor (interval: ${INTERVAL}s)"
+log "Press Ctrl+C to stop"
+echo ""
+
+while true; do
+    SSE_PID=$(check_sse)
+    TUNNEL_PID=$(check_tunnel)
+
+    # Check SSE server
+    if [[ -z "$SSE_PID" ]]; then
+        log "❌ SSE server down - restarting..."
+        "$SCRIPT_DIR/manage" start > /dev/null 2>&1
+        sleep 3
+        if [[ -n "$(check_sse)" ]]; then
+            log "✅ SSE server restarted (PID: $(check_sse))"
+        else
+            log "❌ SSE server restart failed"
+        fi
+    elif ! health_check; then
+        log "⚠️  SSE server unhealthy - restarting..."
+        "$SCRIPT_DIR/manage" restart > /dev/null 2>&1
+        sleep 3
+        if health_check; then
+            log "✅ SSE server healthy again"
+        else
+            log "❌ SSE server still unhealthy"
+        fi
+    fi
+
+    # Check tunnel
+    if [[ -z "$TUNNEL_PID" ]]; then
+        log "❌ Tunnel down - restarting..."
+        nohup cloudflared tunnel run sovereign-stack > ~/.sovereign/tunnel.log 2>&1 &
+        sleep 3
+        if [[ -n "$(check_tunnel)" ]]; then
+            log "✅ Tunnel restarted (PID: $(check_tunnel))"
+        else
+            log "❌ Tunnel restart failed"
+        fi
+    fi
+
+    # Status update
+    if [[ -n "$SSE_PID" ]] && [[ -n "$TUNNEL_PID" ]]; then
+        echo -ne "\r[$(date '+%H:%M:%S')] ✓ SSE: $SSE_PID | Tunnel: $TUNNEL_PID | Next check in ${INTERVAL}s"
+    fi
+
+    sleep "$INTERVAL"
+done
