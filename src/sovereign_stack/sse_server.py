@@ -94,12 +94,12 @@ _inner_app = Starlette(
 app = SovereignAsgiMiddleware(_inner_app)
 
 
-def main(host: str = "127.0.0.1", port: int = 3434):
+def main(host: str = "0.0.0.0", port: int = 3434):
     """
     Start SSE server for remote access
 
     Args:
-        host: Host to bind to (default: 127.0.0.1 for tunnel access)
+        host: Host to bind to (default: 0.0.0.0 for network access)
         port: Port to listen on (default: 3434)
     """
     logger.info(f"Sovereign Stack SSE Server starting on {host}:{port}")
