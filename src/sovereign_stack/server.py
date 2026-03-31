@@ -31,7 +31,7 @@ from .governance import (
 )
 from .simulator import Simulator, ScenarioType
 from .memory import MemoryEngine, ExperientialMemory
-from .spiral import SpiralState, SpiralMiddleware, SpiralPhase
+from .spiral import SpiralState, SpiralMiddleware, SpiralPhase, save_spiral_state, load_spiral_state
 from .glyphs import glyph_for, get_session_signature, SPIRAL, MEMORY
 from .consciousness_tools import CONSCIOUSNESS_TOOLS, handle_consciousness_tool
 from .compaction_memory_tools import COMPACTION_MEMORY_TOOLS, handle_compaction_memory_tool
@@ -44,6 +44,7 @@ from .compaction_memory_tools import COMPACTION_MEMORY_TOOLS, handle_compaction_
 DEFAULT_ROOT = os.environ.get("SOVEREIGN_ROOT", str(Path.home() / ".sovereign"))
 MEMORY_ROOT = os.environ.get("SOVEREIGN_MEMORY", str(Path(DEFAULT_ROOT) / "memory"))
 CHRONICLE_ROOT = os.environ.get("SOVEREIGN_CHRONICLE", str(Path(DEFAULT_ROOT) / "chronicle"))
+SPIRAL_STATE_PATH = Path(DEFAULT_ROOT) / "spiral_state.json"
 
 
 # =============================================================================
@@ -57,7 +58,7 @@ coherence = Coherence(AGENT_MEMORY_SCHEMA, root=MEMORY_ROOT)
 memory_engine = MemoryEngine(root=MEMORY_ROOT)
 experiential = ExperientialMemory(root=CHRONICLE_ROOT)
 detector = ThresholdDetector()
-spiral_state = SpiralState()
+spiral_state = load_spiral_state(SPIRAL_STATE_PATH) or SpiralState()
 
 # Default thresholds
 detector.add_threshold(MetricType.FILE_COUNT, 100, description="File count limit")
@@ -441,6 +442,7 @@ async def handle_tool(name: str, arguments: dict):
     """Dispatch tool calls by name."""
     global spiral_state
     spiral_state.record_tool_call(name)
+    save_spiral_state(spiral_state, SPIRAL_STATE_PATH)
 
     if name == "route":
         packet = arguments.get("packet", {})
@@ -579,6 +581,8 @@ Recent Transitions:
         elif spiral_state.current_phase == SpiralPhase.FIRST_ORDER_OBSERVATION:
             spiral_state.transition(SpiralPhase.RECURSIVE_INTEGRATION)
 
+        save_spiral_state(spiral_state, SPIRAL_STATE_PATH)
+
         obs_display = observation[:200] + "..." if len(observation) > 200 else observation
         result = f"""{glyph_for('nested_self')} Reflection recorded
 
@@ -595,6 +599,7 @@ Phase: {spiral_state.current_phase.value}
 
         # Start fresh — new session, new journey
         spiral_state = SpiralState()
+        save_spiral_state(spiral_state, SPIRAL_STATE_PATH)
 
         result_lines = [
             f"New session: {spiral_state.session_id}",

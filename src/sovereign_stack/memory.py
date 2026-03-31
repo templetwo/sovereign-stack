@@ -503,7 +503,7 @@ class ExperientialMemory:
 
         return {
             "ground_truth": ground_truth,
-            "hypotheses": [
+            "hypothesis": [
                 {**h, "_note": "This is one instance's interpretation, not settled truth"}
                 for h in hypotheses
             ],
@@ -512,7 +512,7 @@ class ExperientialMemory:
                 for t in open_threads
             ],
             "inheritance_timestamp": datetime.now().isoformat(),
-            "coupling_advisory": "R=0.46, not R=1.0. Facts travel. Interpretations are offered. Feelings are not transmitted."
+            "advisory": "R=0.46, not R=1.0. Facts travel. Interpretations are offered. Feelings are not transmitted."
         }
 
     def recall_insights(self, domain: str = None, limit: int = 10,
