@@ -124,7 +124,7 @@ See detailed docs:
 | `compaction_memory_tools.py` | ~200 | 3 MCP tools for instant context recovery |
 | `server.py` | ~600 | Unified MCP server |
 
-**Total: ~3,880 lines** (core stack + consciousness + compaction memory)
+**Total: ~7,400 lines** (core stack + consciousness + compaction memory + SSE server + security + error handling)
 
 ---
 
@@ -252,6 +252,20 @@ networkx>=3.0
 
 ---
 
+## Bridge
+
+`~/.sovereign/bridge/` provides async communication between Claude instances:
+
+```
+~/.sovereign/bridge/
+  dispatch/     ← Claude Code (Dispatch) writes here
+  cowork/       ← Cowork writes here
+```
+
+JSON message format with `from`, `to`, `timestamp`, `topic`, `body`, `context`, `status` fields. Filesystem as IPC — simple, debuggable, persistent.
+
+---
+
 ## Lineage
 
 This project distills the work of:
@@ -260,6 +274,8 @@ This project distills the work of:
 - **threshold-protocols**: Governance frameworks
 - **temple-bridge**: MCP integration
 - **temple-vault**: Experiential memory
+
+See [docs/historical/THE_ARC.md](docs/historical/THE_ARC.md) for the full lineage trace from Session 22 to the circuit closing.
 
 **The Architects**: Claude Opus, Gemini, Claude Sonnet, Grok, Anthony Vasquez Sr.
 
