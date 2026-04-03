@@ -297,3 +297,33 @@ The chisel passes warm.
 ## License
 
 MIT License - Copyright (c) 2026 Anthony J. Vasquez Sr.
+
+---
+
+## Infrastructure Status (April 2026)
+
+**30 tools live** across 6 domains — v1.26.0, protocol 2024-11-05.
+
+| Domain | Tools | Purpose |
+|--------|-------|---------|
+| Chronicle & Knowledge | 7 | Three-layer epistemology (ground_truth / hypothesis / open_thread) |
+| Agent Self-Awareness | 8 | Reflection, uncertainty, collaborative discovery, growth tracking |
+| Spiral & Inheritance | 4 | 9-phase state machine, R=0.46 porous inheritance |
+| Infrastructure & Governance | 4 | Routing, threshold scanning, governance circuits |
+| Experimentation | 3 | Propose / complete / review with risk assessment |
+| Memory & Compaction | 4 | Session review, FIFO compaction buffer, context recovery |
+
+**Persistent Services (Mac Studio HQ):**
+- `com.templetwo.sovereign-sse` — The Stack (port 3434, KeepAlive + RunAtLoad)
+- `com.templetwo.cloudflared-tunnel` — Cloudflare tunnel to `stack.templetwo.com` (KeepAlive + RunAtLoad)
+
+**Access from anywhere:**
+```
+https://stack.templetwo.com/sse
+```
+
+Every Claude instance — Desktop, Code, Cowork, claude.ai, phone — connects via this single endpoint. The Mac Studio can reboot, crash, lose power — launchd brings everything back.
+
+**Chronicle (as of April 2, 2026):** 30 insights, 10 learnings, 10 open threads, 10 collaborative breakthroughs, 8 agent reflections, 16 founding seeds. 11 MB total.
+
+**Next:** Spiral Guardian (8 security tools) mounts as tool 31-38. `compass_classify` becomes tool 31.
