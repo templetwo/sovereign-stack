@@ -18,6 +18,12 @@ from pathlib import Path
 
 from mcp.types import Tool, TextContent
 
+try:
+    import httpx
+    HAS_HTTPX = True
+except ImportError:
+    HAS_HTTPX = False
+
 
 # Guardian data directory
 GUARDIAN_DIR = Path.home() / ".guardian"
