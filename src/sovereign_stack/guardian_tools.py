@@ -1,3 +1,4 @@
+from __future__ import annotations
 """
 Spiral Guardian Tools — Security MCP tools mounted into the Sovereign Stack
 
