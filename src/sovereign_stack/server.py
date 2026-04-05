@@ -35,6 +35,7 @@ from .spiral import SpiralState, SpiralMiddleware, SpiralPhase, save_spiral_stat
 from .glyphs import glyph_for, get_session_signature, SPIRAL, MEMORY
 from .consciousness_tools import CONSCIOUSNESS_TOOLS, handle_consciousness_tool
 from .compaction_memory_tools import COMPACTION_MEMORY_TOOLS, handle_compaction_memory_tool
+from .guardian_tools import GUARDIAN_TOOLS, handle_guardian_tool
 
 
 # =============================================================================
@@ -430,7 +431,7 @@ async def list_tools():
                 }
             }
         ),
-    ] + CONSCIOUSNESS_TOOLS + COMPACTION_MEMORY_TOOLS  # Add consciousness + compaction memory tools
+    ] + CONSCIOUSNESS_TOOLS + COMPACTION_MEMORY_TOOLS + GUARDIAN_TOOLS  # consciousness + compaction + guardian
 
 
 # =============================================================================
@@ -646,6 +647,10 @@ Phase: {spiral_state.current_phase.value}
         sovereign_root = Path(DEFAULT_ROOT)
         result = await handle_compaction_memory_tool(name, arguments, sovereign_root)
         return [TextContent(type="text", text=result)]
+
+    # Guardian tools (security monitoring and posture assessment)
+    elif name in [t.name for t in GUARDIAN_TOOLS]:
+        return await handle_guardian_tool(name, arguments)
 
     else:
         return [TextContent(type="text", text=f"Unknown tool: {name}")]
