@@ -304,6 +304,7 @@ Recommendation: Scan all MCP tool descriptions for injection patterns
         path.parent.mkdir(exist_ok=True)
         path.write_text(json.dumps(baseline, indent=2))
 
-        return [TextContent(type="text", text=f"🛡️ Baseline saved: {path}\nComponents: {", ".join(components)}")]
+        comp_list = ", ".join(components)
+        return [TextContent(type="text", text=f"🛡️ Baseline saved: {path}\nComponents: {comp_list}")]
 
     return [TextContent(type="text", text=f"Unknown guardian tool: {name}")]
