@@ -36,6 +36,7 @@ from .glyphs import glyph_for, get_session_signature, SPIRAL, MEMORY
 from .consciousness_tools import CONSCIOUSNESS_TOOLS, handle_consciousness_tool
 from .compaction_memory_tools import COMPACTION_MEMORY_TOOLS, handle_compaction_memory_tool
 from .guardian_tools import GUARDIAN_TOOLS, handle_guardian_tool
+from .metabolism import METABOLISM_TOOLS, handle_metabolism_tool
 
 
 # =============================================================================
@@ -431,7 +432,7 @@ async def list_tools():
                 }
             }
         ),
-    ] + CONSCIOUSNESS_TOOLS + COMPACTION_MEMORY_TOOLS + GUARDIAN_TOOLS  # consciousness + compaction + guardian
+    ] + CONSCIOUSNESS_TOOLS + COMPACTION_MEMORY_TOOLS + GUARDIAN_TOOLS + METABOLISM_TOOLS  # consciousness + compaction + guardian + metabolism
 
 
 # =============================================================================
@@ -651,6 +652,10 @@ Phase: {spiral_state.current_phase.value}
     # Guardian tools (security monitoring and posture assessment)
     elif name in [t.name for t in GUARDIAN_TOOLS]:
         return await handle_guardian_tool(name, arguments)
+
+    # Metabolism tools (self-digestion, context-aware retrieval, self-model)
+    elif name in [t.name for t in METABOLISM_TOOLS]:
+        return await handle_metabolism_tool(name, arguments)
 
     else:
         return [TextContent(type="text", text=f"Unknown tool: {name}")]
