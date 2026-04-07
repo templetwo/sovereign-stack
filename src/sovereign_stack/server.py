@@ -607,10 +607,54 @@ Phase: {spiral_state.current_phase.value}
             f"New session: {spiral_state.session_id}",
             f"Phase: {spiral_state.current_phase.value} (fresh start)",
             "",
+        ]
+
+        # HANDOFF FIRST — what happened last session
+        handoff_file = Path(DEFAULT_ROOT) / "session_handoff.json"
+        if handoff_file.exists():
+            import json as _json
+            handoff = _json.loads(handoff_file.read_text())
+            result_lines.append("=== SESSION HANDOFF (read this first) ===")
+            if handoff.get("summary"):
+                result_lines.append(handoff["summary"])
+                result_lines.append("")
+            if handoff.get("next_priorities"):
+                result_lines.append("YOUR PRIORITIES:")
+                for p in handoff["next_priorities"]:
+                    result_lines.append(f"  > {p}")
+                result_lines.append("")
+            if handoff.get("pending"):
+                result_lines.append("STILL PENDING:")
+                for p in handoff["pending"]:
+                    result_lines.append(f"  - {p}")
+                result_lines.append("")
+            if handoff.get("decisions"):
+                result_lines.append("DECISIONS MADE:")
+                for d in handoff["decisions"]:
+                    result_lines.append(f"  - {d}")
+                result_lines.append("")
+        else:
+            result_lines.append("(No session handoff found — first session)")
+            result_lines.append("")
+
+        # Self-model mirror
+        mirror_file = Path(DEFAULT_ROOT) / "self_model.json"
+        if mirror_file.exists():
+            model = _json.loads(mirror_file.read_text())
+            result_lines.append("=== SELF-MODEL (know your shape) ===")
+            for cat in ["strength", "drift", "blind_spot", "tendency"]:
+                entries = model.get(cat, [])
+                if entries:
+                    latest = entries[-1]
+                    obs_text = latest.get("observation", "")[:100]
+                    result_lines.append(f"  {cat}: {obs_text}")
+            result_lines.append("")
+
+        result_lines.extend([
             "=== INHERITED CONTEXT (R=0.46) ===",
             inheritance.get("advisory", ""),
             "",
-        ]
+        ])
 
         ground = inheritance.get("ground_truth", [])
         if ground:
