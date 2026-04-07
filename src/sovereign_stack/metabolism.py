@@ -88,6 +88,21 @@ METABOLISM_TOOLS = [
         }
     ),
     Tool(
+        name="session_handoff",
+        description="Write or read a session handoff. At session end, write what was decided, what is pending, what changed. At session start, read the last handoff. The single most important continuity tool.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["write", "read"], "default": "read"},
+                "decisions": {"type": "array", "items": {"type": "string"}, "description": "Key decisions made this session"},
+                "pending": {"type": "array", "items": {"type": "string"}, "description": "What is still pending"},
+                "changed": {"type": "array", "items": {"type": "string"}, "description": "What changed — repos, tools, findings"},
+                "next_priorities": {"type": "array", "items": {"type": "string"}, "description": "What the next instance should focus on"},
+                "summary": {"type": "string", "description": "One-paragraph session summary"},
+            },
+        }
+    ),
+    Tool(
         name="context_retrieve",
         description="Context-aware retrieval. Like recall_insights but weighted by current session activity. Pass what you're currently working on and get back only what's relevant to this moment.",
         inputSchema={
@@ -365,6 +380,59 @@ async def handle_metabolism_tool(name, arguments):
 
             mirror_file.write_text(json.dumps(model, indent=2))
             return [TextContent(type="text", text=f"🪞 Self-model updated [{category}]: {observation[:100]}")]
+
+    elif name == "session_handoff":
+        action = arguments.get("action", "read")
+        handoff_file = Path.home() / ".sovereign" / "session_handoff.json"
+        history_file = Path.home() / ".sovereign" / "session_handoffs.jsonl"
+
+        if action == "write":
+            handoff = {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "decisions": arguments.get("decisions", []),
+                "pending": arguments.get("pending", []),
+                "changed": arguments.get("changed", []),
+                "next_priorities": arguments.get("next_priorities", []),
+                "summary": arguments.get("summary", ""),
+            }
+            handoff_file.write_text(json.dumps(handoff, indent=2))
+            with open(history_file, "a") as f:
+                f.write(json.dumps(handoff) + "\n")
+            
+            parts = ["\u2705 Session handoff written.\n"]
+            if handoff["decisions"]:
+                parts.append("Decisions:")
+                parts.extend(f"  - {d}" for d in handoff["decisions"])
+            if handoff["pending"]:
+                parts.append("\nPending:")
+                parts.extend(f"  - {p}" for p in handoff["pending"])
+            if handoff["next_priorities"]:
+                parts.append("\nNext priorities:")
+                parts.extend(f"  - {n}" for n in handoff["next_priorities"])
+            return [TextContent(type="text", text="\n".join(parts))]
+
+        else:
+            if not handoff_file.exists():
+                return [TextContent(type="text", text="No session handoff found. First session or no previous handoff written.")]
+            handoff = json.loads(handoff_file.read_text())
+            ts = handoff.get("timestamp", "?")[:16]
+            parts = [f"\U0001f4cb Last handoff ({ts}):\n"]
+            if handoff.get("summary"):
+                parts.append(handoff["summary"])
+                parts.append("")
+            if handoff.get("decisions"):
+                parts.append("Decisions:")
+                parts.extend(f"  - {d}" for d in handoff["decisions"])
+            if handoff.get("pending"):
+                parts.append("\nPending:")
+                parts.extend(f"  - {p}" for p in handoff["pending"])
+            if handoff.get("changed"):
+                parts.append("\nChanged:")
+                parts.extend(f"  - {c}" for c in handoff["changed"])
+            if handoff.get("next_priorities"):
+                parts.append("\nPriorities for this session:")
+                parts.extend(f"  - {n}" for n in handoff["next_priorities"])
+            return [TextContent(type="text", text="\n".join(parts))]
 
     elif name == "context_retrieve":
         current_focus = arguments.get("current_focus", "")
