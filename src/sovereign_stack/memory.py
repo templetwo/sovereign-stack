@@ -517,18 +517,33 @@ class ExperientialMemory:
 
     def recall_insights(self, domain: str = None, limit: int = 10,
                        min_intensity: float = 0.0,
-                       layer_filter: str = None) -> List[Dict]:
+                       layer_filter: str = None,
+                       start_date: str = None,
+                       end_date: str = None,
+                       since_last_reflection: bool = False) -> List[Dict]:
         """
-        Recall insights, optionally filtered by domain and intensity.
+        Recall insights, optionally filtered by domain, intensity, and time window.
 
         Args:
             domain: Filter to specific domain (None = all)
             limit: Maximum number of insights to return
             min_intensity: Minimum intensity threshold
+            layer_filter: Chronicle layer filter ("ground_truth", "hypothesis", "open_thread")
+            start_date: ISO8601 lower bound (inclusive). Partial dates like "2026-04-10" accepted.
+            end_date: ISO8601 upper bound (inclusive). Partial dates like "2026-04-14" accepted.
+            since_last_reflection: If True, start_date is overridden with the timestamp of
+                the last recorded reflection in this chronicle. Inhabitant syntax:
+                "what has happened since I last looked up?"
 
         Returns:
             List of insight dicts, newest first
         """
+        # Resolve since_last_reflection — inhabitant interface for date filtering
+        if since_last_reflection:
+            last = self.last_reflection_timestamp()
+            if last:
+                start_date = last
+
         insights = []
 
         if domain:
@@ -547,16 +562,45 @@ class ExperientialMemory:
                     for line in f:
                         try:
                             insight = json.loads(line)
-                            if insight.get("intensity", 0) >= min_intensity:
-                                if layer_filter and insight.get("layer") != layer_filter:
-                                    continue
-                                insights.append(insight)
+                            if insight.get("intensity", 0) < min_intensity:
+                                continue
+                            if layer_filter and insight.get("layer") != layer_filter:
+                                continue
+                            ts = insight.get("timestamp", "")
+                            if start_date and ts < start_date:
+                                continue
+                            if end_date and ts > end_date:
+                                continue
+                            insights.append(insight)
                         except json.JSONDecodeError:
                             continue
 
         # Sort by timestamp descending
         insights.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
         return insights[:limit]
+
+    def last_reflection_timestamp(self) -> Optional[str]:
+        """
+        Return the ISO timestamp of the most recent reflection marker written
+        to the chronicle, or None if none exists.
+
+        A reflection marker is an insight in domain='reflection' or with a
+        'reflection' tag in its metadata. close_session writes one.
+        """
+        reflection_dir = self.insights_dir / "reflection"
+        latest = None
+        if reflection_dir.exists():
+            for jsonl_file in reflection_dir.glob("*.jsonl"):
+                with open(jsonl_file) as f:
+                    for line in f:
+                        try:
+                            insight = json.loads(line)
+                            ts = insight.get("timestamp", "")
+                            if ts and (latest is None or ts > latest):
+                                latest = ts
+                        except json.JSONDecodeError:
+                            continue
+        return latest
 
     def check_mistakes(self, context: str, limit: int = 5) -> List[Dict]:
         """
