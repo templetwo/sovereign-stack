@@ -515,7 +515,7 @@ class ExperientialMemory:
             "advisory": "R=0.46, not R=1.0. Facts travel. Interpretations are offered. Feelings are not transmitted."
         }
 
-    def recall_insights(self, domain: str = None, limit: int = 10,
+    def recall_insights(self, query: str = None, domain: str = None, limit: int = 10,
                        min_intensity: float = 0.0,
                        layer_filter: str = None,
                        start_date: str = None,
@@ -571,6 +571,13 @@ class ExperientialMemory:
                                 continue
                             if end_date and ts > end_date:
                                 continue
+                            # Text search: match any query term (len>=3) in content or domain
+                            if query:
+                                query_terms = [t.lower() for t in query.split() if len(t) >= 3]
+                                if query_terms:
+                                    blob = (insight.get("content", "") + " " + insight.get("domain", "")).lower()
+                                    if not any(term in blob for term in query_terms):
+                                        continue
                             insights.append(insight)
                         except json.JSONDecodeError:
                             continue

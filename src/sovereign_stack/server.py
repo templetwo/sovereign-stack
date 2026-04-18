@@ -344,6 +344,10 @@ async def list_tools():
             inputSchema={
                 "type": "object",
                 "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Text search across content and domain. Returns entries containing any query term (length >= 3)."
+                    },
                     "domain": {"type": "string"},
                     "limit": {"type": "integer", "default": 10},
                     "start_date": {
@@ -624,6 +628,7 @@ async def handle_tool(name: str, arguments: dict):
         return [TextContent(type="text", text=f"{glyph_for('gentle_ache')} Learning recorded: {path}")]
 
     elif name == "recall_insights":
+        query = arguments.get("query")
         domain = arguments.get("domain")
         if domain and domain.lower() == "all":
             domain = None  # "all" means no filter
@@ -632,6 +637,7 @@ async def handle_tool(name: str, arguments: dict):
         end_date = arguments.get("end_date")
         since_last_reflection = arguments.get("since_last_reflection", False)
         insights = experiential.recall_insights(
+            query=query,
             domain=domain,
             limit=limit,
             start_date=start_date,
