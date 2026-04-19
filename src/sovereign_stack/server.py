@@ -394,7 +394,7 @@ async def list_tools():
         ),
         Tool(
             name="resolve_thread",
-            description="Resolve an open thread with a finding. The resolution becomes ground truth.",
+            description="Resolve an open thread with a finding. The resolution becomes ground truth and back-references the thread by thread_id.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -403,6 +403,18 @@ async def list_tools():
                     "resolution": {"type": "string", "description": "What was discovered"}
                 },
                 "required": ["domain", "question_fragment", "resolution"]
+            }
+        ),
+        Tool(
+            name="resolve_thread_by_id",
+            description="Resolve an open thread by its stable thread_id. Preferred when the thread_id is known — avoids ambiguity when multiple threads share keywords.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "thread_id": {"type": "string", "description": "The stable thread id (from get_open_threads output)"},
+                    "resolution": {"type": "string", "description": "What was discovered"}
+                },
+                "required": ["thread_id", "resolution"]
             }
         ),
         Tool(
@@ -672,6 +684,14 @@ async def handle_tool(name: str, arguments: dict):
         resolution = arguments.get("resolution", "")
         path = experiential.resolve_thread(domain, question_fragment, resolution, spiral_state.session_id)
         return [TextContent(type="text", text=f"Thread resolved → ground_truth insight: {path}")]
+
+    elif name == "resolve_thread_by_id":
+        thread_id = arguments.get("thread_id", "")
+        resolution = arguments.get("resolution", "")
+        path = experiential.resolve_thread_by_id(thread_id, resolution, spiral_state.session_id)
+        if not path:
+            return [TextContent(type="text", text=f"No open thread found with id: {thread_id}")]
+        return [TextContent(type="text", text=f"Thread {thread_id} resolved → ground_truth insight: {path}")]
 
     elif name == "get_open_threads":
         domain = arguments.get("domain")
@@ -970,7 +990,7 @@ Phase: {spiral_state.current_phase.value}
 
         result_lines.extend([
             "=== INHERITED CONTEXT (R=0.46) ===",
-            inheritance.get("advisory", ""),
+            inheritance.get("coupling_advisory", ""),
             "",
         ])
 
@@ -981,7 +1001,7 @@ Phase: {spiral_state.current_phase.value}
                 result_lines.append(f"  - [{g.get('domain', '?')}] {g.get('insight', '')[:120]}")
             result_lines.append("")
 
-        hypotheses = inheritance.get("hypothesis", [])
+        hypotheses = inheritance.get("hypotheses", [])
         if hypotheses:
             result_lines.append(f"Hypotheses offered ({len(hypotheses)}) — not imposed:")
             for h in hypotheses[:10]:

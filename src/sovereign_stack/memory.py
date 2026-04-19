@@ -14,13 +14,65 @@ Distilled from:
 """
 
 import os
+import re
 import json
+import hashlib
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from glob import glob as glob_files
 
 from .coherence import Coherence
+
+
+# Pattern: "(1) ... (2) ..." with sequential numbered items is a bundle.
+# Requires at least items (1) and (2) so a single parenthetical "(e.g. foo)" is never mistaken.
+_BUNDLE_ITEM_RE = re.compile(r"\((\d+)\)\s*")
+
+
+def _split_bundled_question(question: str) -> List[str]:
+    """
+    If a question contains sequential numbered items like "(1) foo (2) bar (3) baz",
+    return them as separate question strings. Otherwise return [question].
+
+    Bundle detection requires at least two items starting with (1) — a lone
+    parenthetical like "(see below)" never triggers a split.
+    """
+    matches = list(_BUNDLE_ITEM_RE.finditer(question))
+    if len(matches) < 2:
+        return [question]
+    nums = [int(m.group(1)) for m in matches]
+    if nums[0] != 1 or nums != list(range(1, len(nums) + 1)):
+        return [question]
+
+    # Carve out a lead-in (text before "(1)") that becomes a shared context prefix.
+    lead = question[: matches[0].start()].strip()
+    items = []
+    for i, m in enumerate(matches):
+        start = m.end()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(question)
+        body = question[start:end].strip().rstrip(".")
+        if not body:
+            continue
+        items.append(f"{lead} {body}".strip() if lead else body)
+    return items or [question]
+
+
+def _generate_thread_id(question: str, timestamp: datetime) -> str:
+    """Deterministic thread id: thread_{YYYYMMDD_HHMMSS}_{8-char question hash}."""
+    stamp = timestamp.strftime("%Y%m%d_%H%M%S")
+    digest = hashlib.sha1(question.strip().encode("utf-8")).hexdigest()[:8]
+    return f"thread_{stamp}_{digest}"
+
+
+def _parse_iso(ts: Optional[str]) -> Optional[datetime]:
+    """Parse an ISO8601 timestamp, returning None on failure or missing input."""
+    if not ts:
+        return None
+    try:
+        return datetime.fromisoformat(ts)
+    except ValueError:
+        return None
 
 
 # =============================================================================
@@ -372,12 +424,15 @@ class ExperientialMemory:
         """
         Record an unresolved question for the next instance to explore.
 
-        This is the key to porous inheritance - instead of passing conclusions,
-        pass the questions you were holding. The next instance gets the telescope
-        pointed in the right direction, but has to look through it themselves.
+        Multi-item bundles ("(1) foo (2) bar") are auto-split into atomic threads
+        so each item can be resolved independently. A bundled question where only
+        item 1 is done would otherwise hold the whole thread open forever.
+
+        Each thread gets a stable thread_id for cross-reference from resolving
+        insights.
 
         Args:
-            question: The open question
+            question: The open question (auto-split if bundled)
             context: What led to this question
             domain: Knowledge domain
             session_id: Current session identifier
@@ -388,19 +443,22 @@ class ExperientialMemory:
         timestamp = datetime.now()
         session_id = session_id or f"session_{timestamp.strftime('%Y%m%d_%H%M%S')}"
 
-        thread = {
-            "timestamp": timestamp.isoformat(),
-            "question": question,
-            "context": context,
-            "domain": domain,
-            "session_id": session_id,
-            "layer": self.LAYER_OPEN_THREAD,
-            "resolved": False
-        }
+        questions = _split_bundled_question(question)
 
         jsonl_path = self.threads_dir / f"{domain}.jsonl"
         with open(jsonl_path, 'a') as f:
-            f.write(json.dumps(thread) + '\n')
+            for q in questions:
+                thread = {
+                    "timestamp": timestamp.isoformat(),
+                    "thread_id": _generate_thread_id(q, timestamp),
+                    "question": q,
+                    "context": context,
+                    "domain": domain,
+                    "session_id": session_id,
+                    "layer": self.LAYER_OPEN_THREAD,
+                    "resolved": False
+                }
+                f.write(json.dumps(thread) + '\n')
 
         return str(jsonl_path)
 
@@ -409,7 +467,10 @@ class ExperientialMemory:
         """
         Resolve an open thread with a finding.
 
-        The resolution becomes a ground_truth insight automatically.
+        Matches the FIRST unresolved thread whose question contains the fragment.
+        The resolution becomes a ground_truth insight that back-references the
+        thread by thread_id, so handoff surfacing can verify a thread has been
+        answered even across sessions.
 
         Args:
             domain: Domain of the thread
@@ -420,7 +481,10 @@ class ExperientialMemory:
         Returns:
             Path to the new ground_truth insight
         """
-        # Mark thread as resolved
+        resolved_thread_id: Optional[str] = None
+        resolved_timestamp: Optional[str] = None
+        now = datetime.now().isoformat()
+
         jsonl_path = self.threads_dir / f"{domain}.jsonl"
         if jsonl_path.exists():
             lines = []
@@ -428,10 +492,20 @@ class ExperientialMemory:
                 for line in f:
                     try:
                         thread = json.loads(line)
-                        if (question_fragment.lower() in thread.get("question", "").lower()
+                        if (resolved_thread_id is None
+                                and question_fragment.lower() in thread.get("question", "").lower()
                                 and not thread.get("resolved")):
+                            # Backfill thread_id for legacy threads that predate the id scheme.
+                            if not thread.get("thread_id"):
+                                legacy_ts = _parse_iso(thread.get("timestamp")) or datetime.now()
+                                thread["thread_id"] = _generate_thread_id(
+                                    thread.get("question", ""), legacy_ts
+                                )
+                            resolved_thread_id = thread["thread_id"]
+                            resolved_timestamp = thread.get("timestamp")
                             thread["resolved"] = True
                             thread["resolved_by"] = session_id
+                            thread["resolved_at"] = now
                             thread["resolution"] = resolution
                         lines.append(json.dumps(thread))
                     except json.JSONDecodeError:
@@ -439,14 +513,70 @@ class ExperientialMemory:
             with open(jsonl_path, 'w') as f:
                 f.write('\n'.join(lines) + '\n')
 
-        # Record the resolution as ground truth
+        # Record the resolution as ground truth with back-reference.
         return self.record_insight(
             domain=domain,
             content=resolution,
             intensity=0.8,
             session_id=session_id,
             layer=self.LAYER_GROUND_TRUTH,
-            resolved_from=question_fragment
+            resolved_from=question_fragment,
+            resolved_thread_id=resolved_thread_id,
+            resolved_thread_timestamp=resolved_timestamp,
+        )
+
+    def resolve_thread_by_id(self, thread_id: str, resolution: str,
+                             session_id: str = None) -> str:
+        """
+        Resolve an open thread by its stable thread_id.
+
+        Preferred over resolve_thread(domain, fragment) when the thread_id is
+        known — avoids ambiguity when multiple threads share keywords.
+
+        Returns:
+            Path to the new ground_truth insight (or empty string if not found).
+        """
+        resolved_domain: Optional[str] = None
+        resolved_question: Optional[str] = None
+        resolved_timestamp: Optional[str] = None
+        now = datetime.now().isoformat()
+
+        for jsonl_file in self.threads_dir.glob("*.jsonl"):
+            hit = False
+            lines = []
+            with open(jsonl_file) as f:
+                for line in f:
+                    try:
+                        thread = json.loads(line)
+                        if thread.get("thread_id") == thread_id and not thread.get("resolved"):
+                            hit = True
+                            resolved_domain = thread.get("domain", jsonl_file.stem)
+                            resolved_question = thread.get("question", "")
+                            resolved_timestamp = thread.get("timestamp")
+                            thread["resolved"] = True
+                            thread["resolved_by"] = session_id
+                            thread["resolved_at"] = now
+                            thread["resolution"] = resolution
+                        lines.append(json.dumps(thread))
+                    except json.JSONDecodeError:
+                        lines.append(line.strip())
+            if hit:
+                with open(jsonl_file, 'w') as f:
+                    f.write('\n'.join(lines) + '\n')
+                break
+
+        if not resolved_domain:
+            return ""
+
+        return self.record_insight(
+            domain=resolved_domain,
+            content=resolution,
+            intensity=0.8,
+            session_id=session_id,
+            layer=self.LAYER_GROUND_TRUTH,
+            resolved_from=(resolved_question or "")[:80],
+            resolved_thread_id=thread_id,
+            resolved_thread_timestamp=resolved_timestamp,
         )
 
     def get_open_threads(self, domain: str = None, limit: int = 10) -> List[Dict]:
@@ -475,6 +605,13 @@ class ExperientialMemory:
                     try:
                         thread = json.loads(line)
                         if not thread.get("resolved", False):
+                            # Backfill thread_id for legacy threads so callers
+                            # can always reference them by stable id.
+                            if not thread.get("thread_id"):
+                                legacy_ts = _parse_iso(thread.get("timestamp")) or datetime.now()
+                                thread["thread_id"] = _generate_thread_id(
+                                    thread.get("question", ""), legacy_ts
+                                )
                             threads.append(thread)
                     except json.JSONDecodeError:
                         continue
@@ -503,7 +640,7 @@ class ExperientialMemory:
 
         return {
             "ground_truth": ground_truth,
-            "hypothesis": [
+            "hypotheses": [
                 {**h, "_note": "This is one instance's interpretation, not settled truth"}
                 for h in hypotheses
             ],
@@ -512,7 +649,7 @@ class ExperientialMemory:
                 for t in open_threads
             ],
             "inheritance_timestamp": datetime.now().isoformat(),
-            "advisory": "R=0.46, not R=1.0. Facts travel. Interpretations are offered. Feelings are not transmitted."
+            "coupling_advisory": "R=0.46, not R=1.0. Facts travel. Interpretations are offered. Feelings are not transmitted."
         }
 
     def recall_insights(self, query: str = None, domain: str = None, limit: int = 10,
@@ -613,26 +750,43 @@ class ExperientialMemory:
         """
         Check for relevant past learnings/mistakes.
 
+        Searches the full text of each learning — applies_to tag,
+        what_happened, and what_learned. The old version only split the
+        applies_to tag into keywords and matched against context, which
+        silently dropped matches when the user's context phrasing didn't
+        overlap with the domain tag words. Mirrors the recall_insights
+        text-search fix.
+
+        A learning matches when any context term of length >= 3 appears in
+        the combined search blob.
+
         Args:
             context: Current context to match against
             limit: Maximum number of learnings to return
 
         Returns:
-            List of relevant learnings
+            List of relevant learnings, newest first
         """
-        learnings = []
+        terms = [t.lower() for t in context.split() if len(t) >= 3]
+        learnings: List[Dict] = []
 
         for jsonl_file in self.learnings_dir.glob("*.jsonl"):
             with open(jsonl_file) as f:
                 for line in f:
                     try:
                         learning = json.loads(line)
-                        # Simple keyword matching
-                        if any(kw in context.lower() for kw in
-                               learning.get("applies_to", "").lower().split()):
-                            learnings.append(learning)
                     except json.JSONDecodeError:
                         continue
+                    if not terms:
+                        learnings.append(learning)
+                        continue
+                    blob = " ".join([
+                        learning.get("applies_to", ""),
+                        learning.get("what_happened", ""),
+                        learning.get("what_learned", ""),
+                    ]).lower()
+                    if any(term in blob for term in terms):
+                        learnings.append(learning)
 
         learnings.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
         return learnings[:limit]

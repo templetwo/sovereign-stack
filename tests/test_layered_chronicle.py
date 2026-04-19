@@ -283,3 +283,208 @@ class TestLayeredChronicle:
         open_threads = self.chronicle.get_open_threads(domain="partial")
         assert len(open_threads) == 1
         assert "Y" in open_threads[0]["question"]
+
+    # ── Atomic Threads + Back-Reference (Coherence Foundation) ──
+
+    def test_record_open_thread_atomizes_bundled_question(self):
+        """A bundled "(1) foo (2) bar (3) baz" question splits into 3 atomic threads."""
+        self.chronicle.record_open_thread(
+            question="Remaining items: (1) Revoke token. (2) Rotate SSH key. (3) Install gitleaks.",
+            domain="atom_test",
+            session_id="t"
+        )
+        threads = self.chronicle.get_open_threads(domain="atom_test")
+        assert len(threads) == 3
+        questions = [t["question"] for t in threads]
+        assert any("Revoke token" in q for q in questions)
+        assert any("Rotate SSH key" in q for q in questions)
+        assert any("Install gitleaks" in q for q in questions)
+
+    def test_single_parenthetical_does_not_atomize(self):
+        """A question with a single "(1)" or parenthetical should not split."""
+        self.chronicle.record_open_thread(
+            question="What does (1) mean in this context (see spec)?",
+            domain="no_split",
+            session_id="t"
+        )
+        threads = self.chronicle.get_open_threads(domain="no_split")
+        assert len(threads) == 1
+
+    def test_non_sequential_numbers_do_not_atomize(self):
+        """'(1) foo (3) baz' is not a bundle — sequence must start at 1 and be dense."""
+        self.chronicle.record_open_thread(
+            question="See (1) foo and (3) baz for details.",
+            domain="no_split2",
+            session_id="t"
+        )
+        threads = self.chronicle.get_open_threads(domain="no_split2")
+        assert len(threads) == 1
+
+    def test_every_thread_gets_thread_id(self):
+        """New threads have a stable thread_id field from record time."""
+        self.chronicle.record_open_thread(
+            question="What is the ID of this thread?",
+            domain="id_test",
+            session_id="t"
+        )
+        threads = self.chronicle.get_open_threads(domain="id_test")
+        assert len(threads) == 1
+        assert threads[0].get("thread_id", "").startswith("thread_")
+
+    def test_thread_id_is_deterministic_per_question(self):
+        """Same question text yields a stable hash suffix (differs only by timestamp)."""
+        from sovereign_stack.memory import _generate_thread_id
+        from datetime import datetime
+        t = datetime(2026, 4, 19, 12, 0, 0)
+        a = _generate_thread_id("Revoke the token", t)
+        b = _generate_thread_id("Revoke the token", t)
+        c = _generate_thread_id("Rotate the key", t)
+        assert a == b
+        assert a != c
+        assert a.startswith("thread_20260419_120000_")
+
+    def test_resolve_thread_writes_back_reference_insight(self):
+        """resolve_thread's ground_truth insight carries resolved_thread_id."""
+        self.chronicle.record_open_thread(
+            question="What port does SSE use?",
+            domain="bref",
+            session_id="s1"
+        )
+        threads = self.chronicle.get_open_threads(domain="bref")
+        thread_id = threads[0]["thread_id"]
+
+        self.chronicle.resolve_thread(
+            domain="bref",
+            question_fragment="port does SSE",
+            resolution="SSE uses port 3434",
+            session_id="s2"
+        )
+        gt_insights = self.chronicle.recall_insights(
+            domain="bref", layer_filter="ground_truth"
+        )
+        assert len(gt_insights) == 1
+        assert gt_insights[0].get("resolved_thread_id") == thread_id
+
+    def test_resolve_thread_sets_resolved_at_and_resolved_by(self):
+        """Resolution writes resolved_at timestamp and resolved_by session to the thread."""
+        self.chronicle.record_open_thread(
+            question="When was this resolved?",
+            domain="resolved_at_test",
+            session_id="s1"
+        )
+        self.chronicle.resolve_thread(
+            domain="resolved_at_test",
+            question_fragment="resolved",
+            resolution="Just now",
+            session_id="s2"
+        )
+        # Read raw thread file
+        path = self.chronicle.threads_dir / "resolved_at_test.jsonl"
+        with open(path) as f:
+            entry = json.loads(f.readline())
+        assert entry["resolved"] is True
+        assert entry["resolved_by"] == "s2"
+        assert "resolved_at" in entry
+
+    def test_resolve_thread_by_id_happy_path(self):
+        """resolve_thread_by_id targets the exact thread and marks it resolved."""
+        self.chronicle.record_open_thread(
+            question="First question",
+            domain="byid",
+            session_id="s1"
+        )
+        self.chronicle.record_open_thread(
+            question="Second question",
+            domain="byid",
+            session_id="s1"
+        )
+        threads = self.chronicle.get_open_threads(domain="byid")
+        target_id = [t["thread_id"] for t in threads if "First" in t["question"]][0]
+
+        path = self.chronicle.resolve_thread_by_id(
+            thread_id=target_id,
+            resolution="First answered",
+            session_id="s2"
+        )
+        assert path  # non-empty path means resolution wrote an insight
+        remaining = self.chronicle.get_open_threads(domain="byid")
+        assert len(remaining) == 1
+        assert "Second" in remaining[0]["question"]
+
+    def test_resolve_thread_by_id_missing_returns_empty(self):
+        """Unknown thread_id returns an empty string rather than crashing."""
+        path = self.chronicle.resolve_thread_by_id(
+            thread_id="thread_19700101_000000_deadbeef",
+            resolution="nope",
+            session_id="s1"
+        )
+        assert path == ""
+
+    def test_legacy_thread_gets_thread_id_on_read(self):
+        """A thread file written before thread_id existed should backfill on read."""
+        # Simulate a legacy JSONL entry without thread_id
+        legacy_path = self.chronicle.threads_dir / "legacy.jsonl"
+        legacy_path.parent.mkdir(parents=True, exist_ok=True)
+        legacy_entry = {
+            "timestamp": "2026-02-01T12:00:00",
+            "question": "Legacy question with no id",
+            "context": "",
+            "domain": "legacy",
+            "session_id": "old",
+            "layer": "open_thread",
+            "resolved": False,
+        }
+        with open(legacy_path, 'w') as f:
+            f.write(json.dumps(legacy_entry) + '\n')
+
+        threads = self.chronicle.get_open_threads(domain="legacy")
+        assert len(threads) == 1
+        assert threads[0]["thread_id"].startswith("thread_20260201_120000_")
+
+    # ── check_mistakes Text Search (Same Class as recall_insights) ──
+
+    def test_check_mistakes_matches_what_happened_content(self):
+        """Context terms that appear only in what_happened still match."""
+        self.chronicle.record_learning(
+            what_happened="The GitHub token leaked via crontab",
+            what_learned="Never put secrets in plaintext scheduled scripts",
+            applies_to="security,operations",
+            session_id="t"
+        )
+        # Context does NOT overlap with applies_to keywords
+        hits = self.chronicle.check_mistakes("crontab leak review")
+        assert len(hits) == 1
+
+    def test_check_mistakes_matches_what_learned_content(self):
+        """Context terms that appear only in what_learned still match."""
+        self.chronicle.record_learning(
+            what_happened="A thing happened",
+            what_learned="Avoid plaintext credentials in scheduled jobs",
+            applies_to="ops",
+            session_id="t"
+        )
+        hits = self.chronicle.check_mistakes("credential audit")
+        assert len(hits) == 1
+
+    def test_check_mistakes_short_terms_ignored(self):
+        """Terms shorter than 3 chars don't cause false positives."""
+        self.chronicle.record_learning(
+            what_happened="Something irrelevant",
+            what_learned="Nothing relevant",
+            applies_to="misc",
+            session_id="t"
+        )
+        # 'a' and 'of' are < 3 chars; 'xyz' is not in any field
+        hits = self.chronicle.check_mistakes("a of xyz")
+        assert len(hits) == 0
+
+    def test_check_mistakes_still_matches_on_applies_to(self):
+        """Backward-compat: matches on applies_to tag still work."""
+        self.chronicle.record_learning(
+            what_happened="X",
+            what_learned="Y",
+            applies_to="security,guardian",
+            session_id="t"
+        )
+        hits = self.chronicle.check_mistakes("guardian review")
+        assert len(hits) == 1
