@@ -33,6 +33,11 @@ from .simulator import Simulator, ScenarioType
 from .memory import MemoryEngine, ExperientialMemory
 from .spiral import SpiralState, SpiralMiddleware, SpiralPhase, PHASE_ORDER, save_spiral_state, load_spiral_state
 from .handoff import HandoffEngine, format_handoff_for_surface
+from .witness import (
+    format_self_model,
+    format_unresolved_uncertainties,
+    format_threads_with_age,
+)
 from .glyphs import glyph_for, get_session_signature, SPIRAL, MEMORY
 from .consciousness_tools import CONSCIOUSNESS_TOOLS, handle_consciousness_tool
 from .compaction_memory_tools import COMPACTION_MEMORY_TOOLS, handle_compaction_memory_tool
@@ -988,16 +993,14 @@ async def handle_tool(name: str, arguments: dict):
             lines.append("  No unconsumed handoffs. Either fresh start or previous instances didn't leave notes.")
             lines.append("")
 
-        # 3. Recent open threads
+        # 3. Recent open threads — with age annotation so stale ones are visible.
         threads = experiential.get_open_threads(limit=5)
-        if threads:
-            lines.append(f"━━━ OPEN THREADS (top {len(threads)}) ━━━")
-            for t in threads:
-                q = t.get("question", "")[:140]
-                lines.append(f"  • [{t.get('domain', '?')}] {q}")
-            lines.append("")
+        lines.extend(format_threads_with_age(threads))
 
-        # 4. Insights since last reflection
+        # 4. Unresolved uncertainties — what you flagged as unknown, still waiting.
+        lines.extend(format_unresolved_uncertainties(Path(DEFAULT_ROOT)))
+
+        # 5. Insights since last reflection
         recent = experiential.recall_insights(since_last_reflection=True, limit=10)
         if recent:
             last = experiential.last_reflection_timestamp()
@@ -1009,6 +1012,11 @@ async def handle_tool(name: str, arguments: dict):
                 content = ins.get("content", "")[:120]
                 lines.append(f"  [{ts}] [{dom}] {content}")
             lines.append("")
+
+        # 6. Self-model snapshot — closes the loop. You've just seen what's out
+        #    there (handoffs, threads, activity); this is what's been observed
+        #    about how *you* tend to show up. Quietest signal, read last.
+        lines.extend(format_self_model(Path(DEFAULT_ROOT)))
 
         lines.append("━━━")
         lines.append("Now decide what to pick up. The handoffs are claims, not commands.")
