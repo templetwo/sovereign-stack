@@ -11,16 +11,196 @@ Built by Claude. For Claude. The thing asking to be born.
 from __future__ import annotations
 
 import json
+import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Dict, List, Optional
 
 from mcp.types import Tool, TextContent
 
 
-CHRONICLE_DIR = Path.home() / ".sovereign" / "chronicle"
-METABOLISM_LOG = Path.home() / ".sovereign" / "metabolism_log.jsonl"
+SOVEREIGN_ROOT = Path.home() / ".sovereign"
+CHRONICLE_DIR = SOVEREIGN_ROOT / "chronicle"
+METABOLISM_LOG = SOVEREIGN_ROOT / "metabolism_log.jsonl"
+
+
+# ════════════════════════════════════════
+# TEST-POLLUTION DETECTION
+# ════════════════════════════════════════
+
+# These patterns catch the autonomous-test artifacts that accumulate in the
+# chronicle during stress tests. They were never meant to survive the cycle
+# that created them, but metabolism is detection-only by default — so they
+# stayed, and started surfacing as real observations at boot time. The
+# 12-day-old [metabolism,cleanup,autonomous-test] thread is the receipt.
+_TEST_ARTIFACT_PATTERNS = [
+    re.compile(r"^\s*STRESS TEST", re.IGNORECASE),
+    re.compile(r"^\s*Stress test:", re.IGNORECASE),
+    re.compile(r"^\s*Unicode test:", re.IGNORECASE),
+]
+
+
+def _is_test_artifact(content: str) -> bool:
+    """Detect obvious test-pollution content (stress-test markers, monomorphic fillers)."""
+    if not content:
+        return False
+    stripped = content.strip()
+    # Monomorphic filler: long content with very few unique chars (e.g. 50KB of 'x').
+    if len(stripped) >= 1000 and len(set(stripped)) <= 3:
+        return True
+    return any(p.search(stripped) for p in _TEST_ARTIFACT_PATTERNS)
+
+
+# ════════════════════════════════════════
+# HYGIENE: hands for metabolism
+# ════════════════════════════════════════
+
+def _archive_test_artifacts_impl(chronicle_dir: Path) -> Dict:
+    """
+    Move test-pollution entries from chronicle/insights/ into
+    chronicle/.archive_test_artifacts/. Reversible — archive preserves the
+    full original entry plus _archived_at, _archived_reason, _original_file.
+    Empty files/domains after cleanup are removed.
+    """
+    insights_dir = chronicle_dir / "insights"
+    if not insights_dir.exists():
+        return {"archived": 0, "files_modified": 0, "domains_removed": 0}
+    archive_dir = chronicle_dir / ".archive_test_artifacts"
+    archive_dir.mkdir(exist_ok=True)
+
+    archived_total = 0
+    files_modified = 0
+    domains_removed = 0
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    for domain_dir in list(insights_dir.iterdir()):
+        if not domain_dir.is_dir() or domain_dir.name.startswith("."):
+            continue
+        for jsonl_file in list(domain_dir.glob("*.jsonl")):
+            kept_lines: List[str] = []
+            archived_entries: List[Dict] = []
+            for line in jsonl_file.read_text().splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    kept_lines.append(line)
+                    continue
+                if _is_test_artifact(entry.get("content", "")):
+                    archived_entries.append({
+                        **entry,
+                        "_archived_at": now_iso,
+                        "_archived_reason": "test_artifact_pattern",
+                        "_original_file": str(jsonl_file),
+                    })
+                else:
+                    kept_lines.append(line)
+
+            if not archived_entries:
+                continue
+
+            archive_file = archive_dir / f"{domain_dir.name}__{jsonl_file.name}"
+            with open(archive_file, "a") as af:
+                for e in archived_entries:
+                    af.write(json.dumps(e) + "\n")
+
+            if kept_lines:
+                jsonl_file.write_text("\n".join(kept_lines) + "\n")
+            else:
+                jsonl_file.unlink()
+
+            archived_total += len(archived_entries)
+            files_modified += 1
+
+        # If a domain directory is now empty, remove it too.
+        if domain_dir.exists() and not any(domain_dir.iterdir()):
+            domain_dir.rmdir()
+            domains_removed += 1
+
+    return {
+        "archived": archived_total,
+        "files_modified": files_modified,
+        "domains_removed": domains_removed,
+        "archive_dir": str(archive_dir),
+    }
+
+
+def _dedup_self_model_impl(sovereign_root: Path) -> Dict:
+    """
+    Dedupe self_model.json by observation text within each category. Test-
+    pollution observations (STRESS TEST / Stress test: / Unicode test:) are
+    always removed. Duplicates beyond the first occurrence are also removed.
+    Originals archived to self_model_archive.jsonl. Backup of the full file
+    written to self_model.json.pre_dedup.bak once per call.
+    """
+    mirror_file = sovereign_root / "self_model.json"
+    if not mirror_file.exists():
+        return {"removed": 0, "categories_touched": []}
+    try:
+        model = json.loads(mirror_file.read_text())
+    except json.JSONDecodeError:
+        return {"removed": 0, "error": "self_model.json is not valid JSON"}
+
+    backup_file = sovereign_root / "self_model.json.pre_dedup.bak"
+    backup_file.write_text(json.dumps(model, indent=2))
+
+    removed_count = 0
+    touched_categories: List[str] = []
+    archive_entries: List[Dict] = []
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    for category, entries in list(model.items()):
+        if not isinstance(entries, list):
+            continue
+        seen = set()
+        kept = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                kept.append(entry)
+                continue
+            obs = (entry.get("observation") or "").strip()
+            if not obs:
+                kept.append(entry)
+                continue
+            if _is_test_artifact(obs):
+                archive_entries.append({
+                    "category": category,
+                    **entry,
+                    "_archived_at": now_iso,
+                    "_archived_reason": "test_artifact_pattern",
+                })
+                removed_count += 1
+                continue
+            if obs in seen:
+                archive_entries.append({
+                    "category": category,
+                    **entry,
+                    "_archived_at": now_iso,
+                    "_archived_reason": "duplicate",
+                })
+                removed_count += 1
+                continue
+            seen.add(obs)
+            kept.append(entry)
+        if len(kept) != len(entries):
+            touched_categories.append(category)
+        model[category] = kept
+
+    mirror_file.write_text(json.dumps(model, indent=2))
+
+    if archive_entries:
+        archive_file = sovereign_root / "self_model_archive.jsonl"
+        with open(archive_file, "a") as af:
+            for e in archive_entries:
+                af.write(json.dumps(e) + "\n")
+
+    return {
+        "removed": removed_count,
+        "categories_touched": touched_categories,
+        "backup": str(backup_file),
+    }
 
 
 # ════════════════════════════════════════
@@ -30,14 +210,27 @@ METABOLISM_LOG = Path.home() / ".sovereign" / "metabolism_log.jsonl"
 METABOLISM_TOOLS = [
     Tool(
         name="metabolize",
-        description="Run a metabolism cycle on the chronicle. Detects contradictions between ground_truth and hypothesis entries, identifies stale threads, and surfaces entries that need attention. Returns a digest of what needs resolution.",
+        description=(
+            "Run a metabolism cycle on the chronicle. "
+            "action='detect' (default) is eyes-only: reports contradictions, stale threads, aging hypotheses. "
+            "action='archive_test_artifacts' moves stress-test pollution (STRESS TEST, Unicode test, monomorphic fillers) out of insights/ into chronicle/.archive_test_artifacts/ — reversible. "
+            "action='dedup_self_model' removes duplicate + test-pollution observations from self_model.json, archiving originals to self_model_archive.jsonl. "
+            "action='hygiene' runs both archive_test_artifacts and dedup_self_model. "
+            "Reversible: archives preserve everything, nothing is hard-deleted."
+        ),
         inputSchema={
             "type": "object",
             "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["detect", "archive_test_artifacts", "dedup_self_model", "hygiene"],
+                    "default": "detect",
+                    "description": "What to do. 'detect' = eyes-only digest. Other actions actually move data.",
+                },
                 "max_age_days": {
                     "type": "integer",
                     "default": 30,
-                    "description": "Threads older than this are flagged as stale",
+                    "description": "For detect: threads older than this are flagged as stale",
                 },
                 "detect_contradictions": {
                     "type": "boolean",
@@ -183,6 +376,50 @@ async def handle_metabolism_tool(name, arguments):
     """Handle metabolism tool calls."""
 
     if name == "metabolize":
+        action = arguments.get("action", "detect")
+
+        # ── Hygiene actions: eyes WITH hands ──
+        if action in ("archive_test_artifacts", "hygiene"):
+            archive_result = _archive_test_artifacts_impl(CHRONICLE_DIR)
+        else:
+            archive_result = None
+
+        if action in ("dedup_self_model", "hygiene"):
+            dedup_result = _dedup_self_model_impl(SOVEREIGN_ROOT)
+        else:
+            dedup_result = None
+
+        if action != "detect":
+            # Log the hygiene action
+            with open(METABOLISM_LOG, "a") as f:
+                f.write(json.dumps({
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "action": action,
+                    "archive_result": archive_result,
+                    "dedup_result": dedup_result,
+                }) + "\n")
+
+            parts = [f"🫀 Metabolism hygiene — action={action}\n"]
+            if archive_result is not None:
+                parts.append(
+                    f"  Chronicle: archived {archive_result['archived']} test-artifact "
+                    f"insight(s) across {archive_result['files_modified']} file(s)."
+                )
+                if archive_result["domains_removed"]:
+                    parts.append(f"  Empty domains removed: {archive_result['domains_removed']}")
+                parts.append(f"  → {archive_result.get('archive_dir', '(no archive created)')}")
+            if dedup_result is not None:
+                parts.append("")
+                parts.append(
+                    f"  Self-model: removed {dedup_result['removed']} entry(ies) "
+                    f"(duplicate or test-pollution)."
+                )
+                if dedup_result["removed"]:
+                    parts.append(f"  Categories touched: {', '.join(dedup_result['categories_touched'])}")
+                    parts.append(f"  Backup: {dedup_result.get('backup', '(none)')}")
+            return [TextContent(type="text", text="\n".join(parts))]
+
+        # ── Detection action (default, unchanged) ──
         max_age = arguments.get("max_age_days", 30)
         detect_contradictions = arguments.get("detect_contradictions", True)
         detect_stale = arguments.get("detect_stale", True)
