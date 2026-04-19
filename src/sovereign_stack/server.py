@@ -18,7 +18,7 @@ import os
 import json
 from pathlib import Path
 from datetime import datetime
-from typing import Optional
+from typing import Dict, List, Optional
 
 from mcp.server import Server
 from mcp.types import Tool, TextContent, Resource
@@ -562,7 +562,129 @@ async def list_tools():
                 }
             }
         ),
+        Tool(
+            name="my_toolkit",
+            description=(
+                "Returns the full current toolkit from live tool registrations. "
+                "Call this at boot to see what you have — drift-proof because it "
+                "reads the registered tools directly, not documentation. "
+                "Use this instead of trusting CLAUDE.md for tool availability."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "category": {
+                        "type": "string",
+                        "description": (
+                            "Optional filter: routing | governance | memory | threads | "
+                            "witness | spiral | consciousness | compaction | guardian | "
+                            "metabolism | session"
+                        ),
+                    },
+                    "include_schema": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Include input JSON schemas instead of just name + description.",
+                    },
+                },
+            },
+        ),
     ] + CONSCIOUSNESS_TOOLS + COMPACTION_MEMORY_TOOLS + GUARDIAN_TOOLS + METABOLISM_TOOLS  # consciousness + compaction + guardian + metabolism
+
+
+# Category mapping for my_toolkit. Source of truth for how tools are grouped
+# when an instance asks "what do I have?". Tools not listed here fall into
+# "uncategorized" — that's a signal this map needs updating, not that the tool
+# is hidden.
+TOOL_CATEGORIES: Dict[str, str] = {
+    # Routing
+    "route": "routing",
+    "derive": "routing",
+    # Governance
+    "scan_thresholds": "governance",
+    "govern": "governance",
+    # Memory
+    "record_insight": "memory",
+    "record_learning": "memory",
+    "recall_insights": "memory",
+    "check_mistakes": "memory",
+    "get_inheritable_context": "memory",
+    # Threads
+    "record_open_thread": "threads",
+    "resolve_thread": "threads",
+    "resolve_thread_by_id": "threads",
+    "get_open_threads": "threads",
+    # Witness / handoff
+    "handoff": "witness",
+    "close_session": "witness",
+    "where_did_i_leave_off": "witness",
+    # Spiral
+    "spiral_status": "spiral",
+    "spiral_reflect": "spiral",
+    "spiral_inherit": "spiral",
+    # Session protocol
+    "session_start": "session",
+    "before_action": "session",
+    "session_end": "session",
+    # Self-describing
+    "my_toolkit": "meta",
+}
+
+
+def _category_for(tool_name: str) -> str:
+    """Map a tool name to its category. Sub-module tools are grouped by their source module."""
+    if tool_name in TOOL_CATEGORIES:
+        return TOOL_CATEGORIES[tool_name]
+    if any(tool_name == t.name for t in CONSCIOUSNESS_TOOLS):
+        return "consciousness"
+    if any(tool_name == t.name for t in COMPACTION_MEMORY_TOOLS):
+        return "compaction"
+    if any(tool_name == t.name for t in GUARDIAN_TOOLS):
+        return "guardian"
+    if any(tool_name == t.name for t in METABOLISM_TOOLS):
+        return "metabolism"
+    return "uncategorized"
+
+
+def _format_toolkit(tools, category_filter: Optional[str] = None,
+                    include_schema: bool = False) -> str:
+    """Format a list of Tool objects grouped by category for human reading."""
+    grouped: Dict[str, List] = {}
+    for tool in tools:
+        cat = _category_for(tool.name)
+        if category_filter and cat != category_filter.lower():
+            continue
+        grouped.setdefault(cat, []).append(tool)
+
+    if not grouped:
+        return f"No tools matched category filter: {category_filter}"
+
+    # Stable category order — puts the boot-critical ones first.
+    category_order = [
+        "meta", "witness", "memory", "threads", "spiral", "session",
+        "routing", "governance", "consciousness", "compaction",
+        "metabolism", "guardian", "uncategorized",
+    ]
+    lines = []
+    total = sum(len(v) for v in grouped.values())
+    lines.append(f"━━━ MY TOOLKIT ({total} tool{'s' if total != 1 else ''}) ━━━")
+    lines.append("")
+    for cat in category_order:
+        if cat not in grouped:
+            continue
+        tools_in_cat = sorted(grouped[cat], key=lambda t: t.name)
+        lines.append(f"## {cat} ({len(tools_in_cat)})")
+        for tool in tools_in_cat:
+            desc = (tool.description or "").strip()
+            first_line = desc.split("\n")[0]
+            lines.append(f"  • {tool.name} — {first_line}")
+            if include_schema:
+                schema = json.dumps(tool.inputSchema, indent=4)
+                # Indent each line of the schema for readability.
+                indented = "\n".join("      " + s for s in schema.split("\n"))
+                lines.append(indented)
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
 
 
 # =============================================================================
@@ -1020,6 +1142,13 @@ Phase: {spiral_state.current_phase.value}
             result_lines.append(f"(Requested context from session: {previous_id})")
 
         return [TextContent(type="text", text="\n".join(result_lines))]
+
+    elif name == "my_toolkit":
+        category_filter = arguments.get("category")
+        include_schema = arguments.get("include_schema", False)
+        # Drift-proof: read from live registrations, not from a parallel list.
+        tools = await list_tools()
+        return [TextContent(type="text", text=_format_toolkit(tools, category_filter, include_schema))]
 
     # Consciousness tools (for Claude's self-awareness)
     elif name in [t.name for t in CONSCIOUSNESS_TOOLS]:

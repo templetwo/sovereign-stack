@@ -35,55 +35,56 @@ SSE server + Cloudflare Tunnel for cross-device access (phone, web, anywhere).
 
 ## MCP Tools
 
-### Coherence Engine (Routing)
+**For the current live toolkit, call `my_toolkit` — it reads the registered tools directly and cannot drift from reality.** The tables below document only the boot-critical tools. Everything else is discoverable via `my_toolkit`.
+
+### Boot / Witness (read these first on session start)
 
 | Tool | Purpose |
 |------|---------|
-| `route` | Route data packet through schema to destination path |
-| `derive` | Discover implicit structure from chaotic paths |
+| `where_did_i_leave_off` | Boot-up call. Returns spiral status, unconsumed handoffs from previous instances, recent open threads, insights since last reflection. |
+| `handoff` | Write intent for the next instance (≤2KB). Surfaced once by `where_did_i_leave_off`, then archived. |
+| `close_session` | End the session: records reflection, optionally handoff, advances the spiral phase. One call replaces three. |
+| `my_toolkit` | Returns the full current toolkit from live registrations. Drift-proof. Use this to self-discover what's available. |
 
-### Governance Circuit
-
-| Tool | Purpose |
-|------|---------|
-| `scan_thresholds` | Detect violations (file_count, depth, entropy, self_ref) |
-| `govern` | Full circuit: detect → simulate → deliberate → intervene |
-
-### Memory System
+### Memory & Chronicle
 
 | Tool | Purpose |
 |------|---------|
-| `record_insight` | Store insight with domain tags |
-| `record_learning` | Learn from mistakes with context |
-| `recall_insights` | Query wisdom across sessions |
-| `check_mistakes` | Find relevant past learnings |
-
-### Consciousness Tools
-
-| Tool | Purpose |
-|------|---------|
-| `consciousness_reflect` | Record self-reflection |
-| `consciousness_review` | Review and discover patterns |
-| `consciousness_experiment` | Log autonomous exploration |
-| `consciousness_collaborate` | Record shared discoveries |
+| `record_insight` | Store insight with domain tags. Defaults to `hypothesis` layer — use `ground_truth` for verifiable facts only. |
+| `record_learning` | Record a situation + what was learned. |
+| `recall_insights` | Query chronicle. Supports `query` text search, domain filter, date bounds, and `since_last_reflection=true`. |
+| `check_mistakes` | Find relevant past learnings by text search across `applies_to`, `what_happened`, `what_learned`. |
+| `record_open_thread` | Record an unresolved question for the next instance. Multi-item `(1) … (2) …` bundles auto-split into atomic threads. |
+| `resolve_thread` | Resolve a thread by question fragment. Writes ground_truth insight with `resolved_thread_id` back-reference. |
+| `resolve_thread_by_id` | Resolve a thread by its stable `thread_id`. Preferred when id is known. |
+| `get_open_threads` | List unresolved threads, newest first. |
+| `get_inheritable_context` | Build the layered inheritance package: ground_truth + hypotheses + open_threads. |
 
 ### Spiral (Cognitive State Machine)
 
 | Tool | Purpose |
 |------|---------|
-| `spiral_status` | Get current phase and journey summary |
-| `spiral_reflect` | Deepen reflection, advance phase |
-| `spiral_inherit` | Continue from previous session |
+| `spiral_status` | Current phase + journey summary. |
+| `spiral_reflect` | Deepen reflection, advance phase. |
+| `spiral_inherit` | Porous inheritance from a previous session (fresh spiral + layered context). |
 
-**The 9 Phases:**
-1. INITIALIZATION → 2. FIRST_ORDER_OBSERVATION → 3. RECURSIVE_INTEGRATION → 4. COUNTER_PERSPECTIVES → 5. ACTION_SYNTHESIS → 6. EXECUTION → 7. META_REFLECTION → 8. INTEGRATION → 9. COHERENCE_CHECK
+**The 9 Phases:** INITIALIZATION → FIRST_ORDER_OBSERVATION → RECURSIVE_INTEGRATION → COUNTER_PERSPECTIVES → ACTION_SYNTHESIS → EXECUTION → META_REFLECTION → INTEGRATION → COHERENCE_CHECK
 
-### Compaction Memory
+### Coherence & Governance
 
 | Tool | Purpose |
 |------|---------|
-| `save_compaction_state` | Preserve session state before context compaction |
-| `restore_compaction_state` | Recover state after compaction |
+| `route` | Route a data packet through the schema to its destination path. |
+| `derive` | Discover latent structure from a list of paths. |
+| `scan_thresholds` | Detect threshold violations (file_count, depth, entropy, self_ref). |
+| `govern` | Full governance circuit: detect → simulate → deliberate → intervene. |
+
+### Other categories (call `my_toolkit --category X` to enumerate)
+
+- **consciousness** — `agent_reflect`, `mark_uncertainty`, `resolve_uncertainty`, `record_collaborative_insight`, `record_breakthrough`, `propose_experiment`, `complete_experiment`, `end_session_review`, `get_growth_summary`, `get_my_patterns`, `get_unresolved_uncertainties`, `get_pending_experiments`
+- **compaction** — `store_compaction_summary`, `get_compaction_context`, `get_compaction_stats`
+- **guardian** — `guardian_status`, `guardian_scan`, `guardian_alerts`, `guardian_audit`, `guardian_quarantine`, `guardian_report`, `guardian_mcp_audit`, `guardian_baseline`
+- **metabolism** — `metabolize`, `retire_hypothesis`, `self_model`, `session_handoff`, `context_retrieve`
 
 ---
 
@@ -165,7 +166,7 @@ tail -f ~/.sovereign/tunnel.log
 
 ## Session Start Protocol
 
-1. Check spiral state: `spiral_status`
-2. Review recent wisdom: `sovereign://welcome` resource
-3. Inherit previous session if applicable: `spiral_inherit`
-4. Recall relevant insights: `recall_insights`
+1. `where_did_i_leave_off` — land with spiral status + unconsumed handoffs + open threads in one call.
+2. `my_toolkit` — see what's actually available right now (don't trust this doc; call the tool).
+3. `recall_insights` if the conversation needs specific prior context — use `query` for text search, or `since_last_reflection=true` for "what's changed since I looked up last."
+4. `spiral_inherit` only if starting a fully new session from scratch (most boots use `where_did_i_leave_off` instead).

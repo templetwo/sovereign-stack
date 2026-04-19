@@ -66,7 +66,18 @@ class HandoffEngine:
             "consumed_by": None,
         }
 
-        fname = f"{ts.strftime('%Y%m%dT%H%M%S')}_{_slug(source_instance or 'unknown')}_{_slug(thread)}.json"
+        # Microsecond precision + short content hash: prevents filename
+        # collisions when multiple handoffs are written from the same
+        # instance/thread within the same second (which used to silently
+        # overwrite the earlier handoff — losing intent).
+        import hashlib
+        note_hash = hashlib.sha1(note.encode("utf-8")).hexdigest()[:6]
+        fname = (
+            f"{ts.strftime('%Y%m%dT%H%M%S_%f')}"
+            f"_{_slug(source_instance or 'unknown')}"
+            f"_{_slug(thread)}"
+            f"_{note_hash}.json"
+        )
         path = self.root / fname
         path.write_text(json.dumps(record, indent=2))
         record["_path"] = str(path)
