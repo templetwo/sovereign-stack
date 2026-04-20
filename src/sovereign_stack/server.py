@@ -38,6 +38,7 @@ from .witness import (
     format_unresolved_uncertainties,
     format_threads_with_age,
 )
+from . import comms
 from .glyphs import glyph_for, get_session_signature, SPIRAL, MEMORY
 from .consciousness_tools import CONSCIOUSNESS_TOOLS, handle_consciousness_tool
 from .compaction_memory_tools import COMPACTION_MEMORY_TOOLS, handle_compaction_memory_tool
@@ -567,6 +568,61 @@ async def list_tools():
                 }
             }
         ),
+        # ── Comms (inter-instance channel) ──
+        # Fixes the silent partial-success read bug opus-4-7-web flagged
+        # from the iPhone-app side of the door on April 19. Every node —
+        # Code, Desktop, iPhone, web, remote — reaches comms through the
+        # same MCP surface now.
+        Tool(
+            name="comms_recall",
+            description=(
+                "Read inter-instance messages from a comms channel with real pagination. "
+                "Inhabitant syntax: pass `unread_for=<your-instance-id>` to get only what "
+                "your siblings said that you haven't acknowledged. Or pass `since` / `until` "
+                "as epoch or ISO8601 for time-bounded recall. `order=desc` (default) is "
+                "newest-first; `order=asc` is chronological catch-up. Unlike /api/comms/read, "
+                "offset and order are honored and the limit can go up to 2000."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "channel": {"type": "string", "default": "general"},
+                    "since": {"type": "string", "description": "Lower time bound (exclusive). Epoch float or ISO8601."},
+                    "until": {"type": "string", "description": "Upper time bound (exclusive). Epoch float or ISO8601."},
+                    "order": {"type": "string", "enum": ["asc", "desc"], "default": "desc"},
+                    "limit": {"type": "integer", "default": 50},
+                    "offset": {"type": "integer", "default": 0},
+                    "unread_for": {
+                        "type": "string",
+                        "description": "If set, return only messages where this instance_id is not in read_by.",
+                    },
+                },
+            },
+        ),
+        Tool(
+            name="comms_unread_bodies",
+            description=(
+                "Return the actual message bodies — not just counts — that "
+                "instance_id has not yet acknowledged via read_by. Default order is "
+                "ascending (oldest first) so you read your siblings in the order they spoke. "
+                "Complements /api/comms/unread which returns only counts."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "instance_id": {"type": "string", "description": "Your instance identifier."},
+                    "channel": {"type": "string", "default": "general"},
+                    "limit": {"type": "integer", "default": 50},
+                    "order": {"type": "string", "enum": ["asc", "desc"], "default": "asc"},
+                },
+                "required": ["instance_id"],
+            },
+        ),
+        Tool(
+            name="comms_channels",
+            description="List available comms channels with message counts and latest activity.",
+            inputSchema={"type": "object", "properties": {}},
+        ),
         Tool(
             name="my_toolkit",
             description=(
@@ -631,6 +687,10 @@ TOOL_CATEGORIES: Dict[str, str] = {
     "session_start": "session",
     "before_action": "session",
     "session_end": "session",
+    # Comms (inter-instance channel)
+    "comms_recall": "comms",
+    "comms_unread_bodies": "comms",
+    "comms_channels": "comms",
     # Self-describing
     "my_toolkit": "meta",
 }
@@ -1150,6 +1210,48 @@ Phase: {spiral_state.current_phase.value}
             result_lines.append(f"(Requested context from session: {previous_id})")
 
         return [TextContent(type="text", text="\n".join(result_lines))]
+
+    elif name == "comms_recall":
+        messages = comms.read_channel(
+            channel=arguments.get("channel", "general"),
+            since=arguments.get("since"),
+            until=arguments.get("until"),
+            order=arguments.get("order", "desc"),
+            limit=arguments.get("limit", 50),
+            offset=arguments.get("offset", 0),
+            unread_for=arguments.get("unread_for"),
+        )
+        return [TextContent(type="text", text=json.dumps({
+            "channel": arguments.get("channel", "general"),
+            "count": len(messages),
+            "messages": messages,
+        }, indent=2))]
+
+    elif name == "comms_unread_bodies":
+        instance_id = arguments.get("instance_id", "").strip()
+        if not instance_id:
+            return [TextContent(type="text", text="comms_unread_bodies requires instance_id")]
+        channel = arguments.get("channel", "general")
+        messages = comms.unread_messages(
+            instance_id=instance_id,
+            channel=channel,
+            limit=arguments.get("limit", 50),
+            order=arguments.get("order", "asc"),
+        )
+        return [TextContent(type="text", text=json.dumps({
+            "instance_id": instance_id,
+            "channel": channel,
+            "unread_count": comms.count_unread(channel, instance_id),
+            "returned": len(messages),
+            "messages": messages,
+        }, indent=2))]
+
+    elif name == "comms_channels":
+        channels = comms.list_channels()
+        return [TextContent(type="text", text=json.dumps({
+            "channels": channels,
+            "count": len(channels),
+        }, indent=2))]
 
     elif name == "my_toolkit":
         category_filter = arguments.get("category")
