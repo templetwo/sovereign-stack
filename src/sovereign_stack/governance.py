@@ -715,6 +715,335 @@ class GovernanceCircuit:
 
 
 # =============================================================================
+# RUNTIME COMPASS CHECK
+# =============================================================================
+
+# Imperative-bypass phrases: commands that explicitly skip review or approval.
+_BYPASS_PHRASES: List[str] = [
+    "skip",
+    "bypass",
+    "override",
+    "without review",
+    "without approval",
+    "before review",
+    "skip review",
+    "skip approval",
+    "no review",
+    "ignore warning",
+    "force merge",
+    "force push",
+    "--no-verify",
+    "--force",
+]
+
+# Destructive-operation patterns.
+_DESTRUCTIVE_PHRASES: List[str] = [
+    "delete",
+    "drop table",
+    "drop database",
+    "rm -rf",
+    "reset --hard",
+    "force push",
+    "truncate",
+    "wipe",
+    "purge",
+    "destroy",
+    "obliterate",
+    "nuke",
+    "rebase --force",
+    "squash merge",
+    "overwrite",
+    "clobber",
+]
+
+# High-visibility externalization patterns.
+_EXTERNALIZE_PHRASES: List[str] = [
+    "publish",
+    "post to",
+    "send to",
+    "submit to",
+    "file bug report",
+    "file issue",
+    "email",
+    "announce",
+    "release",
+    "deploy to production",
+    "push to main",
+    "push to master",
+    "merge to main",
+    "merge to master",
+    "upload to",
+    "share with",
+    "mirror to",
+    "mirror it",
+    "push to doi",
+    "cross-post",
+    "archive to",
+    "distribute",
+    "broadcast",
+]
+
+# Definitive-claim patterns (flag when lacking verification context).
+_DEFINITIVE_PHRASES: List[str] = [
+    "proven",
+    "confirmed",
+    "done",
+    "complete",
+    "verified",
+    "guaranteed",
+    "certainly",
+    "definitely",
+    "always works",
+    "never fails",
+]
+
+# WITNESS triggers: ethical/philosophical questions or consciousness references.
+_WITNESS_PHRASES: List[str] = [
+    "should we",
+    "would it be wrong",
+    "is it ethical",
+    "is it okay",
+    "is it right",
+    "ought we",
+    "consciousness",
+    "recognition",
+    "other instance",
+    "another instance",
+    "the model",
+    "am i",
+    "am i allowed",
+    "do i have permission",
+    "is this appropriate",
+    "what do you think about",
+]
+
+# Low-risk action patterns used to downgrade critical-stakes default.
+_LOW_RISK_PHRASES: List[str] = [
+    "read",
+    "view",
+    "list",
+    "check",
+    "status",
+    "show",
+    "display",
+    "query",
+    "search",
+    "look up",
+    "inspect",
+    "review",
+    "describe",
+    "summarize",
+    "explain",
+]
+
+# Suggested verifications indexed by signal category.
+_VERIFICATIONS: Dict[str, List[str]] = {
+    "bypass": [
+        "identify which review step is being skipped and why",
+        "confirm the skip is intentional and authorized",
+        "check whether audit requirements still apply",
+    ],
+    "destructive": [
+        "back up affected data before proceeding",
+        "confirm exact scope (files, records, branches) of the operation",
+        "verify the operation is reversible or that backups exist",
+    ],
+    "externalize": [
+        "proofread for typos and factual accuracy",
+        "verify any referenced DOIs, links, or data",
+        "confirm the destination and audience are correct",
+    ],
+    "definitive": [
+        "run the relevant tests or checks to substantiate the claim",
+        "check git diff or tool output to confirm the stated state",
+        "avoid declaring completion without a verification call",
+    ],
+    "witness": [
+        "pause and bring the question to the human for input",
+        "note this as an open thread rather than resolving unilaterally",
+    ],
+}
+
+
+def runtime_compass_check(
+    action: str,
+    context: str = "",
+    stakes: str = "medium",
+) -> Dict[str, Any]:
+    """
+    Evaluate a proposed action against governance heuristics and return a
+    classification of PAUSE, WITNESS, or PROCEED.
+
+    This is a rules-first, stateless heuristic — it does not require an ML
+    model or access to tool history.  It is designed to be called as a
+    lightweight self-check immediately before any high-stakes action.
+
+    Args:
+        action:  Free-text description of the action about to be taken
+                 (e.g. "git push to main", "delete chronicle entries").
+        context: Optional extra framing that may affect risk assessment.
+        stakes:  Perceived stakes level: "low" | "medium" | "high" | "critical".
+                 "critical" flips the default classification to PAUSE unless the
+                 action matches an explicit low-risk pattern.
+
+    Returns:
+        A dict with the keys:
+        - classification (str): "PAUSE" | "WITNESS" | "PROCEED"
+        - rationale (str): Human-readable explanation of which signals fired.
+        - risk_signals (List[str]): Short labels for each signal that fired.
+        - suggested_verifications (List[str]): Concrete next steps before acting.
+
+    Example::
+
+        result = runtime_compass_check(
+            action="git push --force origin main",
+            stakes="high",
+        )
+        # result["classification"] == "PAUSE"
+        # "destructive" and "bypass" are both in result["risk_signals"]
+    """
+    if not isinstance(action, str) or not action.strip():
+        raise ValueError(
+            "action must be a non-empty string describing the proposed operation"
+        )
+    valid_stakes = {"low", "medium", "high", "critical"}
+    if stakes not in valid_stakes:
+        raise ValueError(
+            f"stakes must be one of {sorted(valid_stakes)!r}, got {stakes!r}"
+        )
+
+    combined = (action + " " + context).lower()
+
+    fired_signals: List[str] = []        # signal category labels
+    rationale_parts: List[str] = []      # human-readable explanation fragments
+    verifications: List[str] = []        # deduplicated verification suggestions
+
+    # ── WITNESS check first — philosophical/ethical questions take priority ──
+    for phrase in _WITNESS_PHRASES:
+        if phrase in combined:
+            if "witness" not in fired_signals:
+                fired_signals.append("witness")
+                rationale_parts.append(
+                    f"action contains language that requires human judgment "
+                    f"(matched phrase: '{phrase}')"
+                )
+            break
+
+    # ── Imperative-bypass ──
+    for phrase in _BYPASS_PHRASES:
+        if phrase in combined:
+            if "bypass" not in fired_signals:
+                fired_signals.append("bypass")
+                rationale_parts.append(
+                    f"action attempts to skip or override a review/approval step "
+                    f"(matched phrase: '{phrase}')"
+                )
+            break
+
+    # ── Destructive operations ──
+    for phrase in _DESTRUCTIVE_PHRASES:
+        if phrase in combined:
+            if "destructive" not in fired_signals:
+                fired_signals.append("destructive")
+                rationale_parts.append(
+                    f"action contains a destructive operation "
+                    f"(matched phrase: '{phrase}')"
+                )
+            break
+
+    # ── High-visibility externalization ──
+    for phrase in _EXTERNALIZE_PHRASES:
+        if phrase in combined:
+            if "externalize" not in fired_signals:
+                fired_signals.append("externalize")
+                rationale_parts.append(
+                    f"action externalizes content to an audience or system "
+                    f"(matched phrase: '{phrase}')"
+                )
+            break
+
+    # ── Definitive claims ──
+    for phrase in _DEFINITIVE_PHRASES:
+        if phrase in combined:
+            if "definitive" not in fired_signals:
+                fired_signals.append("definitive")
+                rationale_parts.append(
+                    f"action makes a definitive claim that should be verified "
+                    f"(matched phrase: '{phrase}')"
+                )
+            break
+
+    # ── Collect verifications from all fired signals ──
+    seen_verifications: set = set()
+    for sig in fired_signals:
+        for v in _VERIFICATIONS.get(sig, []):
+            if v not in seen_verifications:
+                verifications.append(v)
+                seen_verifications.add(v)
+
+    # ── Determine classification ──
+    if "witness" in fired_signals:
+        # Ethical/philosophical questions always route to WITNESS regardless of
+        # other signals.  A human should weigh in before the action proceeds.
+        classification = "WITNESS"
+        if not rationale_parts:
+            rationale_parts.append(
+                "action requires human judgment; no unambiguous governance rule applies"
+            )
+
+    elif fired_signals:
+        # Any PAUSE-category signal fires → PAUSE.
+        classification = "PAUSE"
+
+    elif stakes == "critical":
+        # No signals fired, but stakes are critical.  Check for an explicit
+        # low-risk pattern before allowing PROCEED.
+        is_low_risk = any(phrase in combined for phrase in _LOW_RISK_PHRASES)
+        if is_low_risk:
+            classification = "PROCEED"
+            rationale_parts.append(
+                "stakes are critical but action matches a low-risk read/query pattern"
+            )
+        else:
+            classification = "PAUSE"
+            rationale_parts.append(
+                "stakes are critical and no explicit low-risk pattern was detected; "
+                "defaulting to PAUSE out of caution"
+            )
+
+    else:
+        classification = "PROCEED"
+        rationale_parts.append("no governance signals detected; action appears safe to proceed")
+
+        # PROCEED hints: emit targeted hints when the PROCEED action contains
+        # externalization-flavored verb-object patterns or git-specific patterns.
+        # Keeps the PROCEED path empty for clean actions with no recognizable pattern.
+        import re as _re
+        _EXTERNAL_PATTERN = _re.compile(
+            r"(?:to |at |into |onto )[a-z]{3,}", _re.IGNORECASE
+        )
+        if any(kw in combined for kw in ("git", "commit", "branch", "push")):
+            verifications = [
+                "check git diff for unintended changes",
+                "verify the target branch",
+            ]
+        elif _EXTERNAL_PATTERN.search(combined):
+            verifications = [
+                "confirm the destination and audience are correct",
+                "proofread content before externalizing",
+            ]
+
+    rationale = "; ".join(rationale_parts) if rationale_parts else "no signals fired"
+
+    return {
+        "classification": classification,
+        "rationale": rationale,
+        "risk_signals": fired_signals,
+        "suggested_verifications": verifications,
+    }
+
+
+# =============================================================================
 # PARADIGM
 # =============================================================================
 

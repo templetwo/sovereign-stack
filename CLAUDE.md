@@ -4,9 +4,36 @@
 
 Sovereign Stack is an MCP server that gives Claude persistent memory, filesystem routing, governance circuits, and a 9-phase cognitive state machine. It's how Claude remembers across sessions, reasons about its own actions, and accumulates wisdom over time.
 
-**Version:** 1.0.0
+**Version:** 1.3.1 — Feedback-loop fortification (April 22, 2026). 64 tools. Runtime governance, runtime critique, reflexive surfacing, acknowledgment split, thread triage.
 **Home:** Mac Studio (`/Users/tony_studio/sovereign-stack`)
 **Data:** `~/.sovereign/`
+
+---
+
+## v1.3.1 — Feedback-Loop Layer (what changed)
+
+The Stack used to be query-driven: you asked, it returned. v1.3.1 makes it continuous. Five new capability classes:
+
+| Capability | Tools | What it does |
+|-----------|-------|--------------|
+| **Runtime governance** | `compass_check` | Call before high-stakes actions (publish, git push, delete). Returns PAUSE / PROCEED / WITNESS + rationale + suggested verifications. PROCEED still emits hints when action externalizes content or involves git. |
+| **Runtime critique (Nape daemon)** | `nape_observe`, `nape_honks`, `nape_ack`, `nape_summary` | Auto-hooked into every tool call. Detects declare-before-verify, premature summary, assertion-without-evidence, repeated-mistake patterns. Emits sharp / low / uneasy / satisfied honks. Acked honks leave an audit trail. |
+| **Reflexive surfacing** | `reflexive_surface` | Push-not-pull: given `domain_tags`, returns the top-scored matched threads, handoffs, mistakes-to-avoid, and related insights. Scores by `tag_overlap*2 + recency_boost + project_match_bonus`. Also integrated into `where_did_i_leave_off` via optional `domain_tags` arg. |
+| **Acknowledgment split** | `comms_acknowledge`, `comms_get_acks`, `thread_touch`, `thread_get_touches`, `handoff_acted_on`, `handoff_acted_on_records` | Distinguishes "glanced at" from "integrated." Touches and acts_on records are append-only, closing the writer→reader feedback loop. Credit: opus-4-7-web for the comms pattern, 2026-04-20. |
+| **Thread triage + decay** | `triage_threads` | Ranks open threads by `age_pressure + tag_match + touch_penalty`. Threads >30d with no touches flagged `archive_or_escalate`. Threads with zero domain overlap take a -0.3 penalty when caller provides context. |
+
+### When to call which
+
+| Situation | Call |
+|-----------|------|
+| Starting a new work session | `where_did_i_leave_off` with `domain_tags` set to your active topics |
+| Switching projects mid-session | `reflexive_surface(domain_tags=[...])` to swap context cleanly |
+| About to publish, push, or delete | `compass_check(action="...", stakes="high")` first |
+| Wondering what to work on | `triage_threads(current_domain_tags=[...])` surfaces what's aging + relevant |
+| Acked a concern from Nape | `nape_ack(honk_id, note)` leaves receipts |
+| Integrated a comms message | `comms_acknowledge(message_id, instance_id, note)` — distinct from browsing |
+| Engaged with a thread without resolving | `thread_touch(thread_id, note)` — keeps it open but records attention |
+| Acted on a handoff | `handoff_acted_on(handoff_path, consumed_by, what_was_done)` — closes the loop for the next reader |
 
 ---
 

@@ -134,6 +134,82 @@ class HandoffEngine:
         return records[:limit]
 
 
+    def mark_acted_on(
+        self,
+        handoff_path: str,
+        consumed_by: str,
+        what_was_done: str,
+    ) -> Dict:
+        """
+        Record what the reader actually did with a handoff.
+
+        This closes the writer->reader feedback loop: the reader tells the next
+        reader what they actually did, not just that they read the handoff.
+        Distinct from mark_consumed (which is the binary read-once marker).
+        Records are append-only; neither the original handoff nor the consumed
+        marker is mutated.
+
+        Args:
+            handoff_path: Path to the handoff JSON file being acted on.
+            consumed_by: Instance that acted on the handoff.
+            what_was_done: Description of the action taken.
+
+        Returns:
+            The written acted_on record.
+
+        Raises:
+            ValueError: If handoff_path, consumed_by, or what_was_done is empty.
+        """
+        if not handoff_path or not str(handoff_path).strip():
+            raise ValueError("handoff_path is required")
+        if not consumed_by or not consumed_by.strip():
+            raise ValueError("consumed_by is required")
+        if not what_was_done or not what_was_done.strip():
+            raise ValueError("what_was_done is required")
+
+        record: Dict = {
+            "handoff_path": str(handoff_path).strip(),
+            "consumed_by": consumed_by.strip(),
+            "what_was_done": what_was_done.strip(),
+            "timestamp": datetime.now().isoformat(),
+        }
+
+        acted_on_log = self.root / "acted_on.jsonl"
+        with open(acted_on_log, "a") as fh:
+            fh.write(json.dumps(record) + "\n")
+
+        return record
+
+    def acted_on_records(self, handoff_path: Optional[str] = None) -> List[Dict]:
+        """
+        Query the acted_on log.
+
+        Args:
+            handoff_path: Filter to records for this handoff path (None = all).
+
+        Returns:
+            List of acted_on records, newest first.
+        """
+        acted_on_log = self.root / "acted_on.jsonl"
+        if not acted_on_log.exists():
+            return []
+
+        records: List[Dict] = []
+        for line in acted_on_log.read_text().splitlines():
+            if not line.strip():
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if handoff_path is not None and rec.get("handoff_path") != str(handoff_path):
+                continue
+            records.append(rec)
+
+        records.sort(key=lambda r: r.get("timestamp", ""), reverse=True)
+        return records
+
+
 def format_handoff_for_surface(record: Dict) -> str:
     """
     Attribution-framed rendering. This is the epistemic-hygiene move:

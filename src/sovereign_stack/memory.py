@@ -306,6 +306,7 @@ class ExperientialMemory:
         self.learnings_dir = self.root / "learnings"
         self.transformations_dir = self.root / "transformations"
         self.threads_dir = self.root / "open_threads"
+        self.thread_touches_file = self.root / "thread_touches.jsonl"
 
         # Create directories
         for d in [self.insights_dir, self.learnings_dir,
@@ -583,12 +584,17 @@ class ExperientialMemory:
         """
         Get unresolved open threads - questions waiting for answers.
 
+        Each returned thread is annotated with touch_count (total touches recorded
+        in thread_touches.jsonl for this thread_id) and last_touched_at (ISO
+        timestamp of the most recent touch, or None if never touched).
+
         Args:
             domain: Filter to specific domain (None = all)
             limit: Maximum number of threads
 
         Returns:
-            List of unresolved thread dicts, newest first
+            List of unresolved thread dicts, newest first. Each dict includes
+            touch_count (int) and last_touched_at (str or None).
         """
         threads = []
 
@@ -617,7 +623,207 @@ class ExperientialMemory:
                         continue
 
         threads.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
-        return threads[:limit]
+        threads = threads[:limit]
+
+        # Annotate with touch counts.  Load all touches once (avoids N+1 reads)
+        # then group by thread_id for O(T) annotation instead of O(N*T).
+        all_touches = self.get_thread_touches()
+        # Build: thread_id -> list of touch timestamps (newest first already from get_thread_touches)
+        touches_by_thread: Dict[str, List[str]] = {}
+        for touch in all_touches:
+            tid = touch.get("thread_id", "")
+            if tid:
+                touches_by_thread.setdefault(tid, []).append(touch.get("timestamp", ""))
+
+        for thread in threads:
+            tid = thread.get("thread_id", "")
+            touch_timestamps = touches_by_thread.get(tid, [])
+            thread["touch_count"] = len(touch_timestamps)
+            if touch_timestamps:
+                # get_thread_touches returns newest-first, so index 0 is most recent.
+                thread["last_touched_at"] = touch_timestamps[0]
+            else:
+                thread["last_touched_at"] = None
+
+        return threads
+
+    def touch_thread(self, thread_id: str, note: str, instance_id: str = "") -> Dict:
+        """
+        Record that an instance has engaged with a thread without resolving it.
+
+        A touch is "I have seen this thread and thought about it" — distinct from
+        resolve_thread_by_id (which marks resolved=True and closes the thread).
+        Touching does not remove the thread from get_open_threads. The touch log is
+        append-only; individual touches are never deleted or mutated.
+
+        Args:
+            thread_id: The stable thread_id of the thread being touched.
+            note: What the instance observed or considered.
+            instance_id: Which instance is touching the thread.
+
+        Returns:
+            The written touch record.
+
+        Raises:
+            ValueError: If thread_id or note is empty.
+        """
+        if not thread_id or not thread_id.strip():
+            raise ValueError("thread_id is required")
+        if not note or not note.strip():
+            raise ValueError("note is required")
+
+        record: Dict = {
+            "thread_id": thread_id.strip(),
+            "note": note.strip(),
+            "instance_id": (instance_id or "").strip(),
+            "timestamp": datetime.now().isoformat(),
+        }
+
+        with open(self.thread_touches_file, "a") as fh:
+            fh.write(json.dumps(record) + "\n")
+
+        return record
+
+    def get_thread_touches(self, thread_id: Optional[str] = None) -> List[Dict]:
+        """
+        Query the thread touches log.
+
+        Args:
+            thread_id: Filter to touches for this thread (None = all touches).
+
+        Returns:
+            List of touch records, newest first.
+        """
+        if not self.thread_touches_file.exists():
+            return []
+
+        touches: List[Dict] = []
+        with open(self.thread_touches_file) as fh:
+            for line in fh:
+                if not line.strip():
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if thread_id is not None and record.get("thread_id") != thread_id:
+                    continue
+                touches.append(record)
+
+        touches.sort(key=lambda r: r.get("timestamp", ""), reverse=True)
+        return touches
+
+    def triage_threads(
+        self,
+        current_domain_tags: Optional[List[str]] = None,
+        limit: int = 15,
+    ) -> List[Dict]:
+        """
+        Return open threads ranked by urgency using a composite triage score.
+
+        Triage score = age_pressure + tag_match + touch_penalty:
+          - age_pressure  = min(1.5, days_old / 14.0)  (stale threads rise)
+          - tag_match     = 0.8 * overlap_fraction  (domain relevance bonus)
+          - touch_penalty = -0.3 * recent_touch_count  (touched threads settle)
+
+        Each returned record includes triage_score and triage_reason.
+        Threads older than 30 days with zero touches gain a
+        recommendation: "archive_or_escalate" field. No auto-archiving occurs.
+
+        Args:
+            current_domain_tags: Caller's active domains for relevance scoring.
+                                  None means no tag_match contribution.
+            limit: Maximum threads to return.
+
+        Returns:
+            List of thread dicts with triage_score and triage_reason, highest score first.
+        """
+        from .witness import days_old as _days_old
+
+        all_threads = self.get_open_threads(limit=9999)
+
+        # Build touch counts per thread from the full touches log.
+        # "Recent" is within the last 7 days.
+        all_touches = self.get_thread_touches()
+        now_str = datetime.now().isoformat()
+        recent_touch_counts: Dict[str, int] = {}
+        for touch in all_touches:
+            tid = touch.get("thread_id", "")
+            if not tid:
+                continue
+            touch_ts = touch.get("timestamp", "")
+            age = _days_old(touch_ts)
+            if age <= 7:
+                recent_touch_counts[tid] = recent_touch_counts.get(tid, 0) + 1
+
+        # Normalize caller tags once.
+        caller_tags: List[str] = []
+        if current_domain_tags:
+            caller_tags = [t.strip().lower() for t in current_domain_tags if t.strip()]
+
+        result: List[Dict] = []
+        for thread in all_threads:
+            age = _days_old(thread.get("timestamp"))
+            thread_id = thread.get("thread_id", "")
+
+            # age_pressure: rises linearly, caps at 1.5 at 21+ days
+            age_pressure = min(1.5, age / 14.0)
+
+            # tag_match: fraction of caller tags that appear in thread domain.
+            # When caller has a context and the thread has zero overlap, apply a
+            # penalty of -0.3 to actively de-prioritize off-context threads.
+            tag_match = 0.0
+            if caller_tags:
+                thread_domain_raw = thread.get("domain", "")
+                thread_tags = [
+                    t.strip().lower()
+                    for t in re.split(r"[,\s]+", thread_domain_raw)
+                    if t.strip()
+                ]
+                if thread_tags or caller_tags:
+                    overlap = len(set(caller_tags) & set(thread_tags))
+                    union = len(set(caller_tags) | set(thread_tags))
+                    overlap_fraction = overlap / max(1, union)
+                    if overlap_fraction == 0.0:
+                        tag_match = -0.3  # actively de-prioritize no-overlap threads
+                    else:
+                        tag_match = 0.8 * overlap_fraction
+
+            # touch_penalty: recent touches dampen urgency
+            recent_touches = recent_touch_counts.get(thread_id, 0)
+            touch_penalty = -0.3 * recent_touches
+
+            triage_score = round(age_pressure + tag_match + touch_penalty, 4)
+
+            # Build human-readable reason string
+            reason_parts = [f"{age} days old"]
+            if recent_touches > 0:
+                reason_parts.append(f"{recent_touches} recent touch(es)")
+            else:
+                reason_parts.append("no recent touches")
+            if caller_tags and tag_match > 0:
+                overlap_pct = round(tag_match / 0.8 * 100)
+                reason_parts.append(
+                    f"domain-match {overlap_pct}% with {caller_tags}"
+                )
+            elif caller_tags:
+                reason_parts.append("no domain overlap")
+            triage_reason = ", ".join(reason_parts)
+
+            enriched = {**thread, "triage_score": triage_score, "triage_reason": triage_reason}
+
+            # Flag severely stale untouched threads
+            if age > 30 and recent_touches == 0:
+                enriched["recommendation"] = "archive_or_escalate"
+
+            result.append(enriched)
+
+        # Primary sort: triage_score desc. Tiebreaker: timestamp desc (newest first).
+        result.sort(
+            key=lambda r: (r["triage_score"], r.get("timestamp", "")),
+            reverse=True,
+        )
+        return result[:limit]
 
     def get_inheritable_context(self, limit: int = 20) -> Dict:
         """

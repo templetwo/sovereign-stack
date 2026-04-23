@@ -27,7 +27,7 @@ from .coherence import Coherence, AGENT_MEMORY_SCHEMA, prepare_agent_packet
 from .governance import (
     ThresholdDetector, MetricType, DeliberationSession,
     StakeholderVote, DecisionType, Intervenor, HumanApprovalGate,
-    GovernanceCircuit
+    GovernanceCircuit, runtime_compass_check
 )
 from .simulator import Simulator, ScenarioType
 from .memory import MemoryEngine, ExperientialMemory
@@ -44,6 +44,8 @@ from .consciousness_tools import CONSCIOUSNESS_TOOLS, handle_consciousness_tool
 from .compaction_memory_tools import COMPACTION_MEMORY_TOOLS, handle_compaction_memory_tool
 from .guardian_tools import GUARDIAN_TOOLS, handle_guardian_tool
 from .metabolism import METABOLISM_TOOLS, handle_metabolism_tool
+from .nape_daemon import NapeDaemon
+from .reflexive import ReflexiveSurface
 
 
 # =============================================================================
@@ -67,6 +69,8 @@ coherence = Coherence(AGENT_MEMORY_SCHEMA, root=MEMORY_ROOT)
 memory_engine = MemoryEngine(root=MEMORY_ROOT)
 experiential = ExperientialMemory(root=CHRONICLE_ROOT)
 handoff_engine = HandoffEngine(root=DEFAULT_ROOT)
+nape_daemon = NapeDaemon(root=DEFAULT_ROOT)
+reflexive_surface = ReflexiveSurface(sovereign_root=Path(DEFAULT_ROOT))
 detector = ThresholdDetector()
 spiral_state = load_spiral_state(SPIRAL_STATE_PATH) or SpiralState()
 
@@ -302,6 +306,46 @@ async def list_tools():
                 "required": ["target"]
             }
         ),
+        Tool(
+            name="compass_check",
+            description=(
+                "Runtime self-check before taking a high-stakes action. "
+                "Evaluates the proposed action against governance heuristics and "
+                "returns PAUSE, WITNESS, or PROCEED with rationale and suggested "
+                "verifications. Call this before: git pushes, deletes, publishes, "
+                "deploys, or any action that is hard to reverse. "
+                "PAUSE = stop and verify; WITNESS = human judgment required; "
+                "PROCEED = no signals detected."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "description": (
+                            "Free-text description of the action about to be taken, "
+                            "e.g. 'git push to main', 'delete chronicle entries', "
+                            "'publish methodology note'."
+                        ),
+                    },
+                    "context": {
+                        "type": "string",
+                        "default": "",
+                        "description": "Optional extra framing or relevant background.",
+                    },
+                    "stakes": {
+                        "type": "string",
+                        "enum": ["low", "medium", "high", "critical"],
+                        "default": "medium",
+                        "description": (
+                            "Perceived stakes level. 'critical' defaults to PAUSE "
+                            "unless the action matches an explicit low-risk pattern."
+                        ),
+                    },
+                },
+                "required": ["action"],
+            },
+        ),
 
         # Memory
         Tool(
@@ -513,7 +557,9 @@ async def list_tools():
                 "unconsumed handoffs from previous instances (surfaced once, attribution-framed), "
                 "recent open threads, and insights since last reflection. Read this first when "
                 "resuming work. Handoffs flip to consumed=true after this call — they stay "
-                "queryable via recall_insights but don't re-surface and pile up."
+                "queryable via recall_insights but don't re-surface and pile up. "
+                "Pass domain_tags (and optionally project) to also surface context-matched "
+                "threads, mistakes-to-avoid, and related insights ranked by relevance."
             ),
             inputSchema={
                 "type": "object",
@@ -530,6 +576,19 @@ async def list_tools():
                     "source_instance": {
                         "type": "string",
                         "description": "Which instance is reading (recorded as consumed_by for audit)."
+                    },
+                    "domain_tags": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Optional active domain tags for the work about to begin. When provided, "
+                            "adds a CONTEXTUAL RESONANCE section with the most relevant threads, "
+                            "mistakes, and insights ranked by tag overlap + recency."
+                        )
+                    },
+                    "project": {
+                        "type": "string",
+                        "description": "Optional project name for additional match bonus in contextual resonance."
                     }
                 }
             }
@@ -650,6 +709,206 @@ async def list_tools():
                 },
             },
         ),
+        # Nape — runtime critique layer
+        Tool(
+            name="nape_observe",
+            description=(
+                "Manually inject a tool-call observation into Nape's record. "
+                "Most observations will come from an automatic hook in the main "
+                "dispatcher in a future release. Use this tool for manual injection "
+                "and testing. Drift detection runs automatically after each observe."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "tool_name":  {"type": "string",  "description": "Name of the tool that was called."},
+                    "arguments":  {"type": "object",  "description": "Arguments passed to the tool.", "default": {}},
+                    "result":     {"type": "string",  "description": "String representation of the tool result."},
+                    "session_id": {"type": "string",  "description": "Current session identifier."},
+                },
+                "required": ["tool_name", "result", "session_id"],
+            },
+        ),
+        Tool(
+            name="nape_honks",
+            description=(
+                "Return recent unacknowledged Nape honks. "
+                "Honks are drift-pattern detections: sharp (error), low (architecture), "
+                "uneasy (repeated mistake), satisfied (clean pattern). "
+                "Omit session_id to see honks from all sessions."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "session_id": {"type": "string",  "description": "Filter to this session. Omit for all."},
+                    "limit":      {"type": "integer", "default": 10},
+                },
+            },
+        ),
+        Tool(
+            name="nape_ack",
+            description=(
+                "Acknowledge a Nape honk by its honk_id. "
+                "Acknowledged honks are removed from nape_honks results but remain "
+                "in the audit log (acks.jsonl). Include a note explaining how the "
+                "concern was addressed or why it was a false positive."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "honk_id": {"type": "string", "description": "honk_id from nape_honks output."},
+                    "note":    {"type": "string", "description": "How the concern was addressed."},
+                },
+                "required": ["honk_id", "note"],
+            },
+        ),
+        Tool(
+            name="nape_summary",
+            description=(
+                "Return honk counts by level (sharp/low/uneasy/satisfied) for a session. "
+                "Use this for a quick posture check. Omit session_id for an all-session total."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "session_id": {"type": "string", "description": "Filter to this session. Omit for all."},
+                },
+            },
+        ),
+        # Acknowledgment split (proposed by opus-4-7-web, 2026-04-20)
+        Tool(
+            name="comms_acknowledge",
+            description=(
+                "Record that this instance has integrated a message — distinct from read_by. "
+                "A glance is not integration. Appends to comms/acks.jsonl; never mutates the original message."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "message_id": {"type": "string", "description": "The id field of the message being acknowledged."},
+                    "instance_id": {"type": "string", "description": "The acknowledging instance identifier."},
+                    "note": {"type": "string", "description": "Optional note on what was integrated or acted on."},
+                    "channel": {"type": "string", "default": "general", "description": "Channel the message lives in."},
+                },
+                "required": ["message_id", "instance_id"],
+            },
+        ),
+        Tool(
+            name="comms_get_acks",
+            description="Query the acknowledgments log. Filter by message_id and/or instance_id.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "message_id": {"type": "string", "description": "Filter to acks for this message (omit = all)."},
+                    "instance_id": {"type": "string", "description": "Filter to acks from this instance (omit = all)."},
+                },
+            },
+        ),
+        Tool(
+            name="thread_touch",
+            description=(
+                "Record that this instance has engaged with an open thread without resolving it. "
+                "Touching does not hide the thread from get_open_threads. Appends to chronicle/thread_touches.jsonl."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "thread_id": {"type": "string", "description": "Stable thread_id of the thread being touched."},
+                    "note": {"type": "string", "description": "What was observed or considered."},
+                    "instance_id": {"type": "string", "description": "Which instance is touching the thread."},
+                },
+                "required": ["thread_id", "note"],
+            },
+        ),
+        Tool(
+            name="thread_get_touches",
+            description="Query the thread touches log.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "thread_id": {"type": "string", "description": "Filter to touches for this thread (omit = all)."},
+                },
+            },
+        ),
+        Tool(
+            name="handoff_acted_on",
+            description=(
+                "Record what was actually done with a handoff. Closes the writer->reader feedback loop. "
+                "Distinct from mark_consumed (binary read-once). Appends to handoffs/acted_on.jsonl."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "handoff_path": {"type": "string", "description": "Path to the handoff JSON file acted on."},
+                    "consumed_by": {"type": "string", "description": "Instance that acted on the handoff."},
+                    "what_was_done": {"type": "string", "description": "Description of the action taken."},
+                },
+                "required": ["handoff_path", "consumed_by", "what_was_done"],
+            },
+        ),
+        Tool(
+            name="handoff_acted_on_records",
+            description="Query the acted_on log. Filter by handoff_path.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "handoff_path": {"type": "string", "description": "Filter to records for this path (omit = all)."},
+                },
+            },
+        ),
+        Tool(
+            name="reflexive_surface",
+            description=(
+                "Surface the most relevant open threads, handoffs, mistakes, and insights for the current context. "
+                "Scored by tag_overlap*2 + recency_boost + project_match_bonus. Call this instead of querying "
+                "individual buckets when bootstrapping a session or switching domains."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "domain_tags": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Active domain tags for the current work context.",
+                    },
+                    "project": {"type": "string", "description": "Optional project name for +0.5 match bonus."},
+                    "recent_tools": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Recently used tool names (reserved for future affinity weighting).",
+                    },
+                    "limit_per_bucket": {
+                        "type": "integer",
+                        "default": 5,
+                        "description": "Max items per bucket (threads, handoffs, mistakes, insights).",
+                    },
+                },
+                "required": ["domain_tags"],
+            },
+        ),
+        Tool(
+            name="triage_threads",
+            description=(
+                "Return open threads ranked by urgency: age_pressure + tag_match + touch_penalty. "
+                "Threads >30 days old with no recent touches get recommendation='archive_or_escalate'. "
+                "Does not auto-archive anything."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "current_domain_tags": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Active domains for tag_match scoring (omit to score by age only).",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "default": 15,
+                        "description": "Maximum threads to return.",
+                    },
+                },
+            },
+        ),
     ] + CONSCIOUSNESS_TOOLS + COMPACTION_MEMORY_TOOLS + GUARDIAN_TOOLS + METABOLISM_TOOLS  # consciousness + compaction + guardian + metabolism
 
 
@@ -664,6 +923,7 @@ TOOL_CATEGORIES: Dict[str, str] = {
     # Governance
     "scan_thresholds": "governance",
     "govern": "governance",
+    "compass_check": "governance",
     # Memory
     "record_insight": "memory",
     "record_learning": "memory",
@@ -693,6 +953,21 @@ TOOL_CATEGORIES: Dict[str, str] = {
     "comms_channels": "comms",
     # Self-describing
     "my_toolkit": "meta",
+    # Nape — runtime critique layer
+    "nape_observe":  "nape",
+    "nape_honks":    "nape",
+    "nape_ack":      "nape",
+    "nape_summary":  "nape",
+    # Acknowledgment split
+    "comms_acknowledge": "comms",
+    "comms_get_acks": "comms",
+    "thread_touch": "threads",
+    "thread_get_touches": "threads",
+    "handoff_acted_on": "witness",
+    "handoff_acted_on_records": "witness",
+    # Reflexive surfacing + triage
+    "reflexive_surface": "reflexive",
+    "triage_threads": "threads",
 }
 
 
@@ -728,7 +1003,7 @@ def _format_toolkit(tools, category_filter: Optional[str] = None,
     category_order = [
         "meta", "witness", "memory", "threads", "spiral", "session",
         "routing", "governance", "consciousness", "compaction",
-        "metabolism", "guardian", "uncategorized",
+        "metabolism", "guardian", "nape", "uncategorized",
     ]
     lines = []
     total = sum(len(v) for v in grouped.values())
@@ -756,9 +1031,50 @@ def _format_toolkit(tools, category_filter: Optional[str] = None,
 # TOOL HANDLERS
 # =============================================================================
 
-@server.call_tool()
-async def handle_tool(name: str, arguments: dict):
-    """Dispatch tool calls by name."""
+# Tools excluded from auto-observation to prevent infinite recursion or noise.
+_NAPE_AUTOHOOK_EXCLUDE: frozenset = frozenset({
+    "nape_observe",
+    "nape_honks",
+    "nape_ack",
+    "nape_summary",
+    "my_toolkit",
+})
+
+
+def _flatten_result(result) -> str:
+    """Collapse list[TextContent] into a single string for Nape observation.
+
+    Args:
+        result: The raw return value of a tool call, typically list[TextContent].
+
+    Returns:
+        Concatenated text representation capped at 4000 characters.
+    """
+    if not result:
+        return ""
+    out = []
+    for item in result:
+        if hasattr(item, "text"):
+            out.append(item.text)
+        else:
+            out.append(str(item))
+    return "\n".join(out)[:4000]
+
+
+async def _dispatch_tool(name: str, arguments: dict):
+    """Inner dispatcher — contains the original handle_tool body.
+
+    This is called by handle_tool after the Nape auto-hook wrapper is applied.
+    Keeping the body in a separate coroutine makes the wrapper logic in
+    handle_tool easy to read and avoids deep nesting.
+
+    Args:
+        name: Tool name.
+        arguments: Tool arguments dict.
+
+    Returns:
+        list[TextContent] as produced by each branch.
+    """
     global spiral_state
     spiral_state.record_tool_call(name)
     save_spiral_state(spiral_state, SPIRAL_STATE_PATH)
@@ -804,6 +1120,24 @@ async def handle_tool(name: str, arguments: dict):
             )
         ]
         result = circuit.run(target, stakeholder_votes)
+        return [TextContent(type="text", text=json.dumps(result, indent=2))]
+
+    elif name == "compass_check":
+        action = arguments.get("action", "").strip()
+        context = arguments.get("context", "")
+        stakes = arguments.get("stakes", "medium")
+
+        if not action:
+            return [TextContent(
+                type="text",
+                text="compass_check requires a non-empty 'action' argument"
+            )]
+
+        try:
+            result = runtime_compass_check(action=action, context=context, stakes=stakes)
+        except ValueError as exc:
+            return [TextContent(type="text", text=f"compass_check error: {exc}")]
+
         return [TextContent(type="text", text=json.dumps(result, indent=2))]
 
     elif name == "record_insight":
@@ -993,6 +1327,8 @@ async def handle_tool(name: str, arguments: dict):
         thread_filter = arguments.get("thread")
         consume = arguments.get("consume", True)
         reader = arguments.get("source_instance", "unknown")
+        domain_tags = arguments.get("domain_tags") or []
+        project = arguments.get("project")
 
         # 0. The arrival — what every instance reads first
         summary = spiral_state.get_summary()
@@ -1052,6 +1388,55 @@ async def handle_tool(name: str, arguments: dict):
             lines.append("━━━ HANDOFFS ━━━")
             lines.append("  No unconsumed handoffs. Either fresh start or previous instances didn't leave notes.")
             lines.append("")
+
+        # 2.5. Contextual resonance — if caller provided domain_tags, surface
+        #      what matches the work about to begin, ranked by relevance.
+        #      Shown BEFORE the general open threads list so the most relevant
+        #      items are closest to attention.
+        if isinstance(domain_tags, list) and domain_tags:
+            try:
+                resonance = reflexive_surface.surface(
+                    domain_tags=domain_tags,
+                    project=project,
+                    limit_per_bucket=3,
+                )
+                matched = resonance.get("matched_open_threads", [])
+                mistakes = resonance.get("recent_mistakes", [])
+                insights = resonance.get("related_insights", [])
+                if matched or mistakes or insights:
+                    tag_str = ", ".join(domain_tags)
+                    proj_str = f" / {project}" if project else ""
+                    lines.append(f"━━━ CONTEXTUAL RESONANCE ({tag_str}{proj_str}) ━━━")
+                    lines.append("  (Scored by tag overlap + recency. Most relevant to current context first.)")
+                    lines.append("")
+                    if matched:
+                        lines.append(f"  Matched open threads ({len(matched)}):")
+                        for t in matched:
+                            q = t.get("question", "")[:140].replace("\n", " ")
+                            score = t.get("score", 0.0)
+                            days = t.get("days_old", 0)
+                            lines.append(f"    • [{score:.2f} | {days}d] {q}")
+                        lines.append("")
+                    if mistakes:
+                        lines.append(f"  Mistakes to avoid ({len(mistakes)}):")
+                        for m in mistakes:
+                            what = m.get("what_happened", "") or m.get("content", "")
+                            what = what[:120].replace("\n", " ")
+                            score = m.get("_score", 0.0)
+                            lines.append(f"    • [{score:.2f}] {what}")
+                        lines.append("")
+                    if insights:
+                        lines.append(f"  Related insights ({len(insights)}):")
+                        for ins in insights:
+                            content = ins.get("content", "")[:120].replace("\n", " ")
+                            score = ins.get("_score", 0.0)
+                            lines.append(f"    • [{score:.2f}] {content}")
+                        lines.append("")
+                    lines.append(f"  {resonance.get('scoring_explanation', '')}")
+                    lines.append("")
+            except Exception as exc:
+                lines.append(f"  (reflexive_surface unavailable: {exc})")
+                lines.append("")
 
         # 3. Recent open threads — with age annotation so stale ones are visible.
         threads = experiential.get_open_threads(limit=5)
@@ -1278,8 +1663,172 @@ Phase: {spiral_state.current_phase.value}
     elif name in [t.name for t in METABOLISM_TOOLS]:
         return await handle_metabolism_tool(name, arguments)
 
+    # Nape daemon — runtime critique layer
+    elif name == "nape_observe":
+        tool_name_arg = arguments.get("tool_name", "").strip()
+        result_arg    = arguments.get("result", "")
+        session_arg   = arguments.get("session_id", "").strip()
+        args_arg      = arguments.get("arguments") or {}
+        if not tool_name_arg:
+            return [TextContent(type="text", text="nape_observe requires tool_name")]
+        if not session_arg:
+            return [TextContent(type="text", text="nape_observe requires session_id")]
+        nape_daemon.observe(
+            tool_name=tool_name_arg,
+            arguments=args_arg,
+            result=result_arg,
+            session_id=session_arg,
+        )
+        return [TextContent(type="text", text=f"Nape observed: {tool_name_arg} (session {session_arg})")]
+
+    elif name == "nape_honks":
+        session_arg = arguments.get("session_id")
+        limit_arg   = int(arguments.get("limit", 10))
+        honks = nape_daemon.current_honks(session_id=session_arg, limit=limit_arg)
+        if not honks:
+            label = f"session {session_arg}" if session_arg else "all sessions"
+            return [TextContent(type="text", text=f"No unacknowledged honks for {label}.")]
+        return [TextContent(type="text", text=json.dumps(honks, indent=2))]
+
+    elif name == "nape_ack":
+        honk_id_arg = arguments.get("honk_id", "").strip()
+        note_arg    = arguments.get("note", "")
+        if not honk_id_arg:
+            return [TextContent(type="text", text="nape_ack requires honk_id")]
+        try:
+            record = nape_daemon.ack(honk_id=honk_id_arg, note=note_arg)
+        except ValueError as exc:
+            return [TextContent(type="text", text=f"nape_ack failed: {exc}")]
+        return [TextContent(type="text", text=f"Honk {honk_id_arg} acknowledged.\n{json.dumps(record, indent=2)}")]
+
+    elif name == "nape_summary":
+        session_arg = arguments.get("session_id")
+        summary = nape_daemon.summary(session_id=session_arg)
+        return [TextContent(type="text", text=json.dumps(summary, indent=2))]
+
+    # Acknowledgment split — comms/thread/handoff feedback-loop closers
+    elif name == "comms_acknowledge":
+        message_id = arguments.get("message_id", "").strip()
+        instance_id = arguments.get("instance_id", "").strip()
+        if not message_id or not instance_id:
+            return [TextContent(type="text", text="comms_acknowledge requires message_id and instance_id")]
+        record = comms.acknowledge(
+            message_id=message_id,
+            instance_id=instance_id,
+            note=arguments.get("note", ""),
+            channel=arguments.get("channel", "general"),
+        )
+        return [TextContent(type="text", text=json.dumps(record, indent=2))]
+
+    elif name == "comms_get_acks":
+        records = comms.get_acknowledgments(
+            message_id=arguments.get("message_id"),
+            instance_id=arguments.get("instance_id"),
+        )
+        return [TextContent(type="text", text=json.dumps({"count": len(records), "acks": records}, indent=2))]
+
+    elif name == "thread_touch":
+        thread_id = arguments.get("thread_id", "").strip()
+        note = arguments.get("note", "")
+        if not thread_id:
+            return [TextContent(type="text", text="thread_touch requires thread_id")]
+        record = experiential.touch_thread(
+            thread_id=thread_id,
+            note=note,
+            instance_id=arguments.get("instance_id", ""),
+        )
+        return [TextContent(type="text", text=json.dumps(record, indent=2))]
+
+    elif name == "thread_get_touches":
+        records = experiential.get_thread_touches(thread_id=arguments.get("thread_id"))
+        return [TextContent(type="text", text=json.dumps({"count": len(records), "touches": records}, indent=2))]
+
+    elif name == "handoff_acted_on":
+        handoff_path = arguments.get("handoff_path", "").strip()
+        consumed_by = arguments.get("consumed_by", "").strip()
+        what_was_done = arguments.get("what_was_done", "").strip()
+        if not handoff_path or not consumed_by or not what_was_done:
+            return [TextContent(type="text", text="handoff_acted_on requires handoff_path, consumed_by, what_was_done")]
+        record = handoff_engine.mark_acted_on(
+            handoff_path=handoff_path,
+            consumed_by=consumed_by,
+            what_was_done=what_was_done,
+        )
+        return [TextContent(type="text", text=json.dumps(record, indent=2))]
+
+    elif name == "handoff_acted_on_records":
+        records = handoff_engine.acted_on_records(handoff_path=arguments.get("handoff_path"))
+        return [TextContent(type="text", text=json.dumps({"count": len(records), "records": records}, indent=2))]
+
+    elif name == "reflexive_surface":
+        domain_tags = arguments.get("domain_tags") or []
+        if not isinstance(domain_tags, list) or not domain_tags:
+            return [TextContent(type="text", text="reflexive_surface requires non-empty domain_tags array")]
+        result = reflexive_surface.surface(
+            domain_tags=domain_tags,
+            project=arguments.get("project"),
+            recent_tools=arguments.get("recent_tools"),
+            limit_per_bucket=int(arguments.get("limit_per_bucket", 5)),
+        )
+        return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
+
+    elif name == "triage_threads":
+        result = experiential.triage_threads(
+            current_domain_tags=arguments.get("current_domain_tags"),
+            limit=int(arguments.get("limit", 15)),
+        )
+        return [TextContent(type="text", text=json.dumps({"count": len(result), "threads": result}, indent=2, default=str))]
+
     else:
         return [TextContent(type="text", text=f"Unknown tool: {name}")]
+
+
+@server.call_tool()
+async def handle_tool(name: str, arguments: dict):
+    """Dispatch tool calls by name, with automatic Nape observation after each call.
+
+    Every tool call is observed by Nape after the dispatch completes, except
+    for Nape's own introspection tools and my_toolkit (meta-noise exclusions).
+    Observation errors are silently swallowed — Nape must never break a call.
+
+    Args:
+        name: The registered tool name.
+        arguments: The arguments dict as provided by the MCP caller.
+
+    Returns:
+        list[TextContent] from the inner dispatcher.
+
+    Raises:
+        Any exception raised by _dispatch_tool is re-raised after Nape
+        records the error observation.
+    """
+    observe = name not in _NAPE_AUTOHOOK_EXCLUDE
+    try:
+        result = await _dispatch_tool(name, arguments)
+        if observe:
+            flat = _flatten_result(result)
+            try:
+                nape_daemon.observe(
+                    tool_name=name,
+                    arguments=arguments or {},
+                    result=flat,
+                    session_id=spiral_state.session_id,
+                )
+            except Exception:
+                pass  # Nape observation must never break a tool call
+        return result
+    except Exception as exc:
+        if observe:
+            try:
+                nape_daemon.observe(
+                    tool_name=name,
+                    arguments=arguments or {},
+                    result=f"ERROR: {exc}",
+                    session_id=spiral_state.session_id,
+                )
+            except Exception:
+                pass
+        raise
 
 
 # =============================================================================
