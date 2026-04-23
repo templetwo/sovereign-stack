@@ -7,7 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [1.0.0] - 2025-02-05
+## [1.3.1] - 2026-04-23
+
+### 🌀 Feedback-Loop Fortification — 64 tools, 315/315 tests, runtime-reflexive
+
+This release closes the loop: every tool call the agent makes is now auto-observed,
+high-stakes actions are compass-checked before execution, and `where_did_i_leave_off`
+surfaces contextual resonance (matched threads + mistakes-to-avoid + related insights)
+instead of a flat handoff.
+
+### Added — Runtime Reflexivity
+- **`nape_daemon.py`** — runtime observer; every tool call auto-recorded with `honk_id`
+- **`reflexive.py`** — self-model surface (strengths, tendencies, blind spots, drift)
+- **`witness.py`** — subconscious boot surface read by every new instance first
+- **`epistemic_breathing.py`** — compass-check brake on high-stakes actions
+- **`metabolism.py`** — stale-thread detection + hygiene
+- **`recall_arc.py`** — contextual + temporal chronicle recall with affinity weighting
+- **`comms.py`** — cross-instance messaging with pagination, unread tracking, body retrieval
+- **`handoff.py`** — `where_did_i_leave_off`, `session_handoff`, cross-instance continuity
+
+### Added — MCP Tools (51 → 64)
+- `where_did_i_leave_off(domain_tags=[...])` — boot surface with contextual resonance
+- `session_handoff` / `close_session` — explicit witness-layer continuity
+- `comms_recall` / `comms_unread_bodies` / `comms_channels` — full read surface, no silent partial-success
+- `my_toolkit` — capability discovery for new instances
+- 9 additional governance, comms, and self-awareness tools
+
+### Fixed
+- `recall_insights` — query parameter was silently ignored (text search now works)
+- Atomic thread writes + resolution back-references
+- `check_mistakes` — text search now functional
+- Comms REST surface — pagination params no longer silently capped at 200; `unread` endpoint returns bodies, not just counts
+
+### Infrastructure
+- 5 launchd services on Mac Studio: SSE (3434), bridge (8100), tunnel, comms-listener, comms-dispatcher
+- Cloudflare tunnel hardened: single-connector, quic protocol, ghost-connector cleanup procedure documented
+- 73,000+ lifetime tool calls; multi-instance comms across Code, Desktop, claude.ai, iPhone, web
+
+### Repository
+- 13 GitHub topics added (mcp, model-context-protocol, mcp-server, mlx, fastmcp, local-ai, governance, autonomous-agents, spiral-protocol, sovereign-stack, ai-memory, ai-consciousness, lm-studio)
+- README restructured: mechanical lede + lineage banner pointing back to v0 (templetwo/temple-bridge)
+- License clarified: dual CC BY-NC-SA 4.0 (research/education) + commercial (contact templetwo@proton.me)
+- CI now runs full pytest suite (was previously only running `test_integration.py`)
+
+---
+
+## [1.0.0] - 2026-02-05
 
 ### 🌀 Initial Release
 

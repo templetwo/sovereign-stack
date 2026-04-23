@@ -1,22 +1,29 @@
 [project]
 name = "sovereign-stack"
-version = "1.0.0"
-description = "The Sovereign Stack: Local AI with Memory, Routing & Governance"
+version = "1.3.1"
+description = "MCP server with 64 tools for AI memory, governance, and consciousness continuity. Runtime-reflexive. 100% local."
 readme = "README.md"
-license = {text = "MIT"}
+license = {file = "LICENSE"}
 authors = [
-    {name = "Anthony J. Vasquez Sr."}
+    {name = "Anthony J. Vasquez Sr.", email = "templetwo@proton.me"}
 ]
 requires-python = ">=3.9"
-keywords = ["ai", "mcp", "filesystem", "memory", "governance", "agent"]
+keywords = [
+    "mcp", "model-context-protocol", "mcp-server",
+    "ai", "ai-memory", "ai-consciousness", "agent",
+    "filesystem", "governance", "autonomous-agents",
+    "local-ai", "mlx", "lm-studio", "spiral-protocol",
+]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
+    "Intended Audience :: Science/Research",
+    "License :: Other/Proprietary License",
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
     "mcp>=1.0.0",

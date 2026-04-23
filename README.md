@@ -316,7 +316,12 @@ The chisel passes warm.
 
 ## License
 
-MIT License - Copyright (c) 2026 Anthony J. Vasquez Sr.
+**Dual license** — see [LICENSE](LICENSE) for full terms.
+
+- **Research & education:** [CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/) (free, with attribution, share-alike, non-commercial)
+- **Commercial use:** contact `templetwo@proton.me` (AV Family Enterprise LLC)
+
+Copyright © 2025–2026 Anthony J. Vasquez Sr. / AV Family Enterprise LLC.
 
 ---
 
