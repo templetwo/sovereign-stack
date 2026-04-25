@@ -85,7 +85,7 @@ class PathValidator:
             raise SecurityError(
                 f"Invalid path: {path}",
                 details={"error": str(e)}
-            )
+            ) from e
 
     def validate_filename(self, filename: str, max_length: int = 255) -> str:
         """

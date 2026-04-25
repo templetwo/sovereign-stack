@@ -90,7 +90,7 @@ def _resolve_targets(target: str) -> list[Endpoint]:
         return [get_endpoint(target)]
     except KeyError:
         names = ", ".join(e.name for e in ENDPOINTS)
-        raise SystemExit(f"unknown endpoint: {target!r}. known: {names}")
+        raise SystemExit(f"unknown endpoint: {target!r}. known: {names}") from None
 
 
 def _do_action(action: str, target: str, *, as_json: bool) -> int:

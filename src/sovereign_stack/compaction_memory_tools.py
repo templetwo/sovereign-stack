@@ -207,11 +207,7 @@ def should_auto_store_compaction() -> bool:
     In production, this would detect compaction events.
     For now, we rely on explicit calls.
     """
-    # TODO: Detect compaction events automatically
-    # This could check:
-    # - Context window usage
-    # - Message history length
-    # - Compaction markers in conversation
+    # Auto-detection deferred — see chronicle open_thread `compaction-auto-detection` for design considerations.
     return False
 
 

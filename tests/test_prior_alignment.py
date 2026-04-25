@@ -106,7 +106,7 @@ class TestRecordPriorAlignment:
         # Check file was written.
         log_path = tmp_path / "reflexive" / "alignment_log.jsonl"
         assert log_path.exists()
-        lines = [l for l in log_path.read_text().splitlines() if l.strip()]
+        lines = [ln for ln in log_path.read_text().splitlines() if ln.strip()]
         assert len(lines) == 1
         persisted = json.loads(lines[0])
         assert persisted["turn_id"] == tid
@@ -158,7 +158,7 @@ class TestRecordPriorAlignment:
             )
 
         log_path = tmp_path / "reflexive" / "alignment_log.jsonl"
-        lines = [l for l in log_path.read_text().splitlines() if l.strip()]
+        lines = [ln for ln in log_path.read_text().splitlines() if ln.strip()]
         assert len(lines) == 2
 
 

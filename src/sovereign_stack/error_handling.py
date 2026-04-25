@@ -228,7 +228,7 @@ class TimeoutHandler:
                     recovery_suggestion="Increase timeout or optimize async operation"
                 ),
                 cause=e
-            )
+            ) from e
 
 
 # =============================================================================
@@ -528,7 +528,7 @@ def safe_operation(
                     f"Operation '{operation_name}' failed",
                     context=context,
                     cause=e
-                )
+                ) from e
 
 
 # =============================================================================

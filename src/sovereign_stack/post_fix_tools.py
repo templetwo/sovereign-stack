@@ -343,10 +343,9 @@ def _diff_probe(
             reason = "stdout_missing_required_substring"
         elif regex is not None and not re.search(regex, current.get("stdout") or ""):
             reason = "stdout_regex_not_matched"
-        elif contains is None and regex is None:
+        elif contains is None and regex is None and (current.get("stdout") or "").strip() != (baseline.get("stdout") or "").strip():
             # No explicit stdout matcher — fall back to baseline stdout compare.
-            if (current.get("stdout") or "").strip() != (baseline.get("stdout") or "").strip():
-                reason = "output_differs_from_baseline"
+            reason = "output_differs_from_baseline"
         if reason:
             return {
                 "probe": name,

@@ -27,8 +27,7 @@ import json
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
-
+from typing import Any
 
 # =============================================================================
 # CONSTANTS
@@ -165,7 +164,7 @@ ERROR_WORDS: frozenset = frozenset({
 })
 
 # Pattern name → honk level mapping. Source of truth for the gesture vocabulary.
-PATTERN_LEVELS: Dict[str, str] = {
+PATTERN_LEVELS: dict[str, str] = {
     "declare_before_verify":    "sharp",
     "premature_summary":        "sharp",
     "assertion_without_evidence": "low",
@@ -220,10 +219,10 @@ class NapeDaemon:
     def observe(
         self,
         tool_name: str,
-        arguments: Dict[str, Any],
+        arguments: dict[str, Any],
         result: Any,
         session_id: str,
-        timestamp: Optional[str] = None,
+        timestamp: str | None = None,
     ) -> None:
         """
         Record a tool call observation and run drift detection.
@@ -260,7 +259,7 @@ class NapeDaemon:
 
         ts = timestamp or _now_iso()
 
-        record: Dict[str, Any] = {
+        record: dict[str, Any] = {
             "obs_id":     str(uuid.uuid4()),
             "session_id": session_id,
             "timestamp":  ts,
@@ -281,10 +280,10 @@ class NapeDaemon:
 
     def current_honks(
         self,
-        session_id: Optional[str],
+        session_id: str | None,
         limit: int = 10,
         include_satisfied: bool = True,
-    ) -> List[Dict]:
+    ) -> list[dict]:
         """
         Return recent unacknowledged honks for a session.
 
@@ -327,7 +326,7 @@ class NapeDaemon:
         filtered.sort(key=lambda h: h.get("timestamp", ""), reverse=True)
         return filtered[:limit]
 
-    def _check_drift(self, recent_obs: List[Dict]) -> List[Dict]:
+    def _check_drift(self, recent_obs: list[dict]) -> list[dict]:
         """
         Run all pattern detectors over a sliding window of recent observations.
 
@@ -349,7 +348,7 @@ class NapeDaemon:
         if not recent_obs:
             return []
 
-        honks: List[Dict] = []
+        honks: list[dict] = []
 
         # The latest observation is the "trigger" — the one we're evaluating.
         latest = recent_obs[-1]
@@ -368,8 +367,8 @@ class NapeDaemon:
         pattern: str,
         trigger_tool: str,
         observation: str,
-        timestamp: Optional[str] = None,
-    ) -> Dict:
+        timestamp: str | None = None,
+    ) -> dict:
         """
         Persist a honk that was detected by an external subsystem (not by
         Nape's own sliding-window detectors).
@@ -397,7 +396,7 @@ class NapeDaemon:
         _append_jsonl(self._honks_path, honk)
         return honk
 
-    def ack(self, honk_id: str, note: str) -> Dict:
+    def ack(self, honk_id: str, note: str) -> dict:
         """
         Acknowledge a honk, marking it as addressed.
 
@@ -447,7 +446,7 @@ class NapeDaemon:
         _append_jsonl(self._acks_path, ack_record)
         return ack_record
 
-    def summary(self, session_id: Optional[str]) -> Dict:
+    def summary(self, session_id: str | None) -> dict:
         """
         Return honk counts broken down by level for a session.
 
@@ -468,7 +467,7 @@ class NapeDaemon:
         if session_id is not None:
             honks = [h for h in honks if h.get("session_id") == session_id]
 
-        counts: Dict[str, int] = {"sharp": 0, "low": 0, "uneasy": 0, "satisfied": 0}
+        counts: dict[str, int] = {"sharp": 0, "low": 0, "uneasy": 0, "satisfied": 0}
         unacked = 0
 
         for honk in honks:
@@ -492,11 +491,11 @@ class NapeDaemon:
     def honks_with_history(
         self,
         *,
-        session_id: Optional[str] = None,
-        priors_log_path: Optional[Path] = None,
+        session_id: str | None = None,
+        priors_log_path: Path | None = None,
         freshness_window: int = 3,
-        limit: Optional[int] = None,
-    ) -> Dict[str, Any]:
+        limit: int | None = None,
+    ) -> dict[str, Any]:
         """
         Read-side observability for the v1.3.2 Nape-honk-persistence question.
 
@@ -532,7 +531,7 @@ class NapeDaemon:
             }
         """
         # ── Load honks (no acks inline; that's the bug fix from earlier) ──
-        all_honks: List[Dict] = []
+        all_honks: list[dict] = []
         for line in _read_jsonl(self._honks_path):
             if "honk_id" not in line:
                 continue
@@ -543,7 +542,7 @@ class NapeDaemon:
             all_honks.append(line)
 
         # ── Load acks (canonical sibling file) ──
-        acks_by_honk: Dict[str, Dict] = {}
+        acks_by_honk: dict[str, dict] = {}
         for line in _read_jsonl(self._acks_path):
             hid = line.get("honk_id")
             if hid and "ack_id" in line:
@@ -554,7 +553,7 @@ class NapeDaemon:
         log_path = priors_log_path or (
             self._root / "reflexive" / "priors_log.jsonl"
         )
-        recent_priors: List[Dict] = []
+        recent_priors: list[dict] = []
         if log_path.exists():
             try:
                 lines = log_path.read_text(encoding="utf-8").splitlines()
@@ -571,7 +570,7 @@ class NapeDaemon:
 
         # Build the set of honk_ids surfaced in the recent window, plus a
         # count of how many entries included each honk_id.
-        priors_count: Dict[str, int] = {}
+        priors_count: dict[str, int] = {}
         for entry in recent_priors:
             included = entry.get("included_items", []) or []
             seen_in_this_entry: set = set()
@@ -586,7 +585,7 @@ class NapeDaemon:
 
         # ── Build per-honk records ──
         now_ts = datetime.now(timezone.utc).timestamp()
-        out_honks: List[Dict] = []
+        out_honks: list[dict] = []
         for h in all_honks:
             hid = h.get("honk_id", "")
             ack_record = acks_by_honk.get(hid)
@@ -653,8 +652,8 @@ class NapeDaemon:
         }
 
     def _detect_declare_before_verify(
-        self, latest: Dict, recent_obs: List[Dict]
-    ) -> List[Dict]:
+        self, latest: dict, recent_obs: list[dict]
+    ) -> list[dict]:
         """
         Detect when a tool result contains completion language but no verify call
         appears in the preceding WINDOW_DECLARE_VERIFY observations.
@@ -713,8 +712,8 @@ class NapeDaemon:
         )]
 
     def _detect_premature_summary(
-        self, latest: Dict, recent_obs: List[Dict]
-    ) -> List[Dict]:
+        self, latest: dict, recent_obs: list[dict]
+    ) -> list[dict]:
         """
         Detect when a session-summary tool is called but recent history contains
         unresolved error indicators.
@@ -755,8 +754,8 @@ class NapeDaemon:
         )]
 
     def _detect_assertion_without_evidence(
-        self, latest: Dict, recent_obs: List[Dict]
-    ) -> List[Dict]:
+        self, latest: dict, recent_obs: list[dict]
+    ) -> list[dict]:
         """
         Detect when record_insight is called with high confidence but no
         verify call appears in the preceding WINDOW_ASSERTION observations.
@@ -794,8 +793,8 @@ class NapeDaemon:
         )]
 
     def _detect_repeated_mistake(
-        self, latest: Dict, recent_obs: List[Dict]
-    ) -> List[Dict]:
+        self, latest: dict, recent_obs: list[dict]
+    ) -> list[dict]:
         """
         Detect when a tool call yields an error and the same error class has
         appeared before in the window without a record_learning call in between.
@@ -863,7 +862,7 @@ class NapeDaemon:
     # Internal helpers
     # -------------------------------------------------------------------------
 
-    def _recent_observations(self, session_id: str, limit: int) -> List[Dict]:
+    def _recent_observations(self, session_id: str, limit: int) -> list[dict]:
         """
         Read the last `limit` observations for a session, in chronological order
         (oldest first, newest last). This ordering matches the sliding-window
@@ -893,7 +892,7 @@ class NapeDaemon:
         trigger_tool: str,
         observation: str,
         timestamp: str,
-    ) -> Dict:
+    ) -> dict:
         """
         Construct a honk record dict.
 
@@ -931,7 +930,7 @@ class NapeDaemon:
 # STORAGE UTILITIES (module-private)
 # =============================================================================
 
-def _append_jsonl(path: Path, record: Dict) -> None:
+def _append_jsonl(path: Path, record: dict) -> None:
     """
     Append a single JSON record as a newline to the JSONL file at `path`.
 
@@ -949,7 +948,7 @@ def _append_jsonl(path: Path, record: Dict) -> None:
         fh.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
-def _read_jsonl(path: Path) -> List[Dict]:
+def _read_jsonl(path: Path) -> list[dict]:
     """
     Read all records from a JSONL file. Returns an empty list if the file
     does not exist or is empty. Silently skips malformed lines (preserves
@@ -1019,7 +1018,7 @@ def _result_to_str(result: Any) -> str:
     return text[:4096]
 
 
-def _safe_truncate(arguments: Dict) -> Dict:
+def _safe_truncate(arguments: dict) -> dict:
     """
     Return a copy of the arguments dict with long string values truncated.
 

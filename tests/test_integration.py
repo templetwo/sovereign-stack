@@ -49,7 +49,7 @@ print(f"  Temp root: {tmp_root}\n")
 # 1. GLYPHS MODULE
 # =============================================================================
 print("━━━ 1. GLYPHS ━━━")
-from sovereign_stack.glyphs import (
+from sovereign_stack.glyphs import (  # noqa: E402
     GLYPHS,
     MEMORY,
     SPIRAL,
@@ -78,7 +78,12 @@ run_check("get_glyph returns full entry", lambda: "unicode" in get_glyph("the_vo
 # 2. SPIRAL MODULE
 # =============================================================================
 print("\n━━━ 2. SPIRAL STATE MACHINE ━━━")
-from sovereign_stack.spiral import PHASE_ORDER, SpiralMiddleware, SpiralPhase, SpiralState
+from sovereign_stack.spiral import (  # noqa: E402
+    PHASE_ORDER,
+    SpiralMiddleware,
+    SpiralPhase,
+    SpiralState,
+)
 
 run_check("9 phases defined", lambda: len(SpiralPhase) == 9)
 run_check("Phase order has 9 entries", lambda: len(PHASE_ORDER) == 9)
@@ -117,7 +122,7 @@ run_check("Middleware instantiates", lambda: mw is not None)
 # 3. COHERENCE MODULE
 # =============================================================================
 print("\n━━━ 3. COHERENCE (Path as Model) ━━━")
-from sovereign_stack.coherence import (
+from sovereign_stack.coherence import (  # noqa: E402
     AGENT_MEMORY_SCHEMA,
     Coherence,
     compute_episode_group,
@@ -164,7 +169,7 @@ run_check("derive() finds patterns", lambda: len(derived) > 0)
 # 4. GOVERNANCE MODULE
 # =============================================================================
 print("\n━━━ 4. GOVERNANCE ━━━")
-from sovereign_stack.governance import (
+from sovereign_stack.governance import (  # noqa: E402
     DecisionType,
     DeliberationSession,
     GovernanceCircuit,
@@ -219,7 +224,7 @@ run_check("Governance circuit runs end-to-end", lambda: isinstance(result, dict)
 # 5. SIMULATOR MODULE
 # =============================================================================
 print("\n━━━ 5. SIMULATOR ━━━")
-from sovereign_stack.simulator import Prediction, ScenarioType, Simulator
+from sovereign_stack.simulator import Prediction, ScenarioType, Simulator  # noqa: E402
 
 run_check("5 scenario types defined", lambda: len(ScenarioType) == 5)
 run_check("REORGANIZE scenario exists", lambda: ScenarioType.REORGANIZE.value == "reorganize")
@@ -249,7 +254,7 @@ run_check("Outcomes have reversibility", lambda: all(0 <= o.reversibility <= 1 f
 # 6. MEMORY MODULE
 # =============================================================================
 print("\n━━━ 6. MEMORY (Experiential Chronicle) ━━━")
-from sovereign_stack.memory import ExperientialMemory, MemoryEngine
+from sovereign_stack.memory import ExperientialMemory, MemoryEngine  # noqa: E402
 
 # Memory Engine
 me = MemoryEngine(root=tmp_memory)
@@ -305,7 +310,7 @@ run_check("Digest has recent_insights", lambda: "recent_insights" in digest)
 # =============================================================================
 print("\n━━━ 7. SERVER (Import Check) ━━━")
 try:
-    from sovereign_stack.server import list_prompts, list_resources, list_tools, server
+    from sovereign_stack.server import server
     run_check("Server object exists", lambda: server is not None)
     run_check("Server name is 'sovereign-stack'", lambda: server.name == "sovereign-stack")
 except ImportError as e:

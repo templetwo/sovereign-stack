@@ -1703,7 +1703,6 @@ async def _dispatch_tool(name: str, arguments: dict):
             domain, content, intensity, spiral_state.session_id,
             layer=layer, confidence=confidence
         )
-        layer_glyph = {"ground_truth": "factual", "hypothesis": "interpretive", "open_thread": "questioning"}
         return [TextContent(type="text", text=f"{glyph_for('memory_sigil')} Insight recorded [{layer}]: {path}")]
 
     elif name == "record_learning":
@@ -1740,9 +1739,9 @@ async def _dispatch_tool(name: str, arguments: dict):
             return [TextContent(type="text", text="No relevant past learnings found")]
 
         result = f"{glyph_for('resonant_balance')} Relevant learnings:\n\n"
-        for l in learnings:
-            result += f"- {l.get('what_learned', 'unknown')}\n"
-            result += f"  (from: {l.get('what_happened', 'unknown')[:50]}...)\n\n"
+        for lr in learnings:
+            result += f"- {lr.get('what_learned', 'unknown')}\n"
+            result += f"  (from: {lr.get('what_happened', 'unknown')[:50]}...)\n\n"
         return [TextContent(type="text", text=result)]
 
     elif name == "record_open_thread":

@@ -414,7 +414,7 @@ class TestEventLog:
         pfx.cancel_watch(watch["watch_id"], reason="done")
         events_path = pfx._events_path()
         assert events_path.exists()
-        lines = [json.loads(l) for l in events_path.read_text().splitlines() if l.strip()]
+        lines = [json.loads(ln) for ln in events_path.read_text().splitlines() if ln.strip()]
         event_types = [e["event"] for e in lines]
         assert "watch_created" in event_types
         assert "sample_taken" in event_types

@@ -201,7 +201,7 @@ def stack_write_check(
 
     if cleanup:
         # Strip the marker line we just added.
-        kept = [l for l in readback.splitlines() if l.strip() != line]
+        kept = [ln for ln in readback.splitlines() if ln.strip() != line]
         if kept:
             marker_path.write_text("\n".join(kept) + "\n",
                                    encoding="utf-8")

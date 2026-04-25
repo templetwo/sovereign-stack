@@ -11,13 +11,11 @@ one class per functional area.
 import json
 import shutil
 import tempfile
-import time
 from pathlib import Path
 
 import pytest
 
 from sovereign_stack.nape_daemon import NapeDaemon, _result_to_str, _safe_truncate
-
 
 SESSION = "test-session-001"
 OTHER   = "test-session-002"

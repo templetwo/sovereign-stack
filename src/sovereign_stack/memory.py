@@ -744,7 +744,6 @@ class ExperientialMemory:
         # Build touch counts per thread from the full touches log.
         # "Recent" is within the last 7 days.
         all_touches = self.get_thread_touches()
-        now_str = datetime.now(timezone.utc).isoformat()
         recent_touch_counts: dict[str, int] = {}
         for touch in all_touches:
             tid = touch.get("thread_id", "")
@@ -783,10 +782,7 @@ class ExperientialMemory:
                     overlap = len(set(caller_tags) & set(thread_tags))
                     union = len(set(caller_tags) | set(thread_tags))
                     overlap_fraction = overlap / max(1, union)
-                    if overlap_fraction == 0.0:
-                        tag_match = -0.3  # actively de-prioritize no-overlap threads
-                    else:
-                        tag_match = 0.8 * overlap_fraction
+                    tag_match = -0.3 if overlap_fraction == 0.0 else 0.8 * overlap_fraction  # de-prioritize no-overlap threads
 
             # touch_penalty: recent touches dampen urgency
             recent_touches = recent_touch_counts.get(thread_id, 0)

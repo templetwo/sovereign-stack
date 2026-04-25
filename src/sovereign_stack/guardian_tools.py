@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """
 Spiral Guardian Tools — Security MCP tools mounted into the Sovereign Stack.
 
@@ -17,6 +15,8 @@ Architecture (post-2026-04-25 expansion):
     instead of a module-level Path.home() side effect on import. Tests
     set the env var to a tempdir; production gets ~/.guardian.
 """
+
+from __future__ import annotations
 
 import asyncio
 import contextlib
@@ -287,7 +287,7 @@ def _evaluate_status(listener_lines: list[str], service_present: dict[str, bool]
     inputs (listener output + service-presence map) and returns the
     structured posture dict. Subprocess calls live in the async wrapper.
     """
-    listeners = len([l for l in listener_lines if l.strip()])
+    listeners = len([ln for ln in listener_lines if ln.strip()])
     full_text = "\n".join(listener_lines)
     ollama_safe = not (
         "0.0.0.0:11434" in full_text or "*:11434" in full_text
@@ -327,8 +327,8 @@ async def _status_async() -> dict:
 def _filter_exposed_listeners(listener_lines: list[str]) -> list[str]:
     """Lines representing non-localhost listeners (exposed to network)."""
     return [
-        l for l in listener_lines
-        if "*:" in l and "127.0.0.1" not in l and "[::1]" not in l
+        ln for ln in listener_lines
+        if "*:" in ln and "127.0.0.1" not in ln and "[::1]" not in ln
     ]
 
 
@@ -420,10 +420,8 @@ def isolate_file(file_path: str) -> dict:
 
     size = src.stat().st_size
     shutil.copy2(src, dest)
-    try:
+    with contextlib.suppress(Exception):
         os.chmod(dest, 0o600)  # best effort — restrict access to owner
-    except Exception:
-        pass
     meta_path.write_text(json.dumps({
         "file_hash": digest,
         "original_path": str(src),
@@ -728,8 +726,8 @@ async def handle_guardian_tool(name: str, arguments: dict):
             )
             exposed = _filter_exposed_listeners((stdout or "").splitlines())
             text = f"🔍 Quick Scan\n\nExposed listeners: {len(exposed)}\n"
-            for l in exposed[:10]:
-                text += f"  {l}\n"
+            for ln in exposed[:10]:
+                text += f"  {ln}\n"
             return [TextContent(type="text", text=text)]
 
         return [TextContent(
@@ -823,7 +821,7 @@ async def handle_guardian_tool(name: str, arguments: dict):
             ["lsof", "-iTCP", "-sTCP:LISTEN", "-n", "-P"]
         )
         listener_lines = (stdout or "").splitlines()
-        listeners = len([l for l in listener_lines if l.strip()])
+        listeners = len([ln for ln in listener_lines if ln.strip()])
         exposed = len(_filter_exposed_listeners(listener_lines))
         # Bug fix (2026-04-25): the previous version referenced an
         # undefined bareword `quarantine` here, causing a NameError

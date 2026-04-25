@@ -350,7 +350,7 @@ class TestDryRun:
         log_path = sovereign_root / "reflexive" / "priors_log.jsonl"
         priors.inject(domain_tags=["topic"], dry_run=False)
         assert log_path.exists()
-        lines = [l for l in log_path.read_text().splitlines() if l.strip()]
+        lines = [ln for ln in log_path.read_text().splitlines() if ln.strip()]
         assert len(lines) == 1
         rec = json.loads(lines[0])
         assert "timestamp" in rec and "included_items" in rec

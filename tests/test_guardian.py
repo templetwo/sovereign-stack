@@ -195,7 +195,7 @@ class TestQuarantine:
 
         manifest = gt._quarantine_manifest_path()
         assert manifest.exists()
-        records = [json.loads(l) for l in manifest.read_text().splitlines() if l]
+        records = [json.loads(ln) for ln in manifest.read_text().splitlines() if ln]
         assert len(records) == 1
         assert records[0]["action"] == "isolate"
         assert records[0]["original_path"] == str(target.resolve())

@@ -7,12 +7,12 @@ Runs alongside stdio server for local Claude Code access.
 
 import logging
 
+import uvicorn
 from mcp.server.sse import SseServerTransport
 from starlette.applications import Starlette
-from starlette.routing import Route
 from starlette.requests import Request
 from starlette.responses import JSONResponse
-import uvicorn
+from starlette.routing import Route
 
 # Import the existing sovereign-stack server
 from .server import server as sovereign_server

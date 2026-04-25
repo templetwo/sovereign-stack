@@ -80,7 +80,7 @@ class TestStackWriteCheck:
             / "connectivity-test,write-path-verify"
         )
         marker = marker_dir / "instance-a.jsonl"
-        lines = [l for l in marker.read_text().splitlines() if l.strip()]
+        lines = [ln for ln in marker.read_text().splitlines() if ln.strip()]
         assert len(lines) == 2
 
     def test_two_instances_get_separate_files(self, tmp_root):

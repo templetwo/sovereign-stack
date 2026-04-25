@@ -139,7 +139,7 @@ class TestAutoHookObserveTrigger:
             obs_path = Path(tmpdir) / "nape" / "observations.jsonl"
             assert obs_path.exists()
             import json
-            records = [json.loads(l) for l in obs_path.read_text().splitlines() if l.strip()]
+            records = [json.loads(ln) for ln in obs_path.read_text().splitlines() if ln.strip()]
             assert any(r["session_id"] == test_session for r in records)
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
@@ -248,7 +248,7 @@ class TestErrorObservation:
             # The error should be in observations.jsonl
             obs_path = Path(tmpdir) / "nape" / "observations.jsonl"
             assert obs_path.exists()
-            records = [json.loads(l) for l in obs_path.read_text().splitlines() if l.strip()]
+            records = [json.loads(ln) for ln in obs_path.read_text().splitlines() if ln.strip()]
             error_obs = [r for r in records if "ERROR" in r.get("result_str", "")]
             assert len(error_obs) >= 1, "Error observation must be recorded"
             assert error_obs[0]["tool_name"] == "record_insight"

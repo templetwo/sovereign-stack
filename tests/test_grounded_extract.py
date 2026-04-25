@@ -50,11 +50,10 @@ def chronicle_root():
 @pytest.fixture
 def outside_path():
     """An existing file outside the chronicle root — structural evidence."""
-    tmp = tempfile.NamedTemporaryFile(
+    with tempfile.NamedTemporaryFile(
         mode="w", suffix=".py", delete=False
-    )
-    tmp.write("# real source file\n")
-    tmp.close()
+    ) as tmp:
+        tmp.write("# real source file\n")
     yield Path(tmp.name)
     os.unlink(tmp.name)
 
@@ -323,9 +322,8 @@ def test_default_chronicle_root_does_not_crash():
     real ~/.sovereign/chronicle. Must not crash even if the user has no
     chronicle — a missing chronicle_root just means no path can be
     classified as inside it, so structural-evidence path still works."""
-    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".txt")
-    tmp.write(b"hello")
-    tmp.close()
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".txt") as tmp:
+        tmp.write(b"hello")
     try:
         r = grounded_extract("c", [tmp.name])
         assert r.accepted

@@ -384,7 +384,7 @@ async def handle_consciousness_tool(name: str, arguments: dict, session_id: str)
         result += "✅ What went well:\n" + "\n".join(f"  - {w}" for w in went_well) + "\n\n"
         if struggled:
             result += "⚠️ Where I struggled:\n" + "\n".join(f"  - {s}" for s in struggled) + "\n\n"
-        result += "📚 What I learned:\n" + "\n".join(f"  - {l}" for l in learned) + "\n\n"
+        result += "📚 What I learned:\n" + "\n".join(f"  - {item}" for item in learned) + "\n\n"
         if breakthroughs:
             result += "💡 Breakthroughs:\n" + "\n".join(f"  - {b}" for b in breakthroughs) + "\n\n"
         if together:

@@ -25,6 +25,10 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
+from ._log import get_logger
+
+logger = get_logger(__name__)
+
 # =============================================================================
 # SPIRAL PHASES
 # =============================================================================
@@ -125,9 +129,8 @@ class SpiralState:
         """Update phase based on tool being called."""
         # Observation tools
         observation_tools = ["read", "list", "scan", "get", "status"]
-        if any(kw in tool_name.lower() for kw in observation_tools):
-            if self.current_phase == SpiralPhase.INITIALIZATION:
-                self.transition(SpiralPhase.FIRST_ORDER_OBSERVATION)
+        if any(kw in tool_name.lower() for kw in observation_tools) and self.current_phase == SpiralPhase.INITIALIZATION:
+            self.transition(SpiralPhase.FIRST_ORDER_OBSERVATION)
 
         # Reflection/consultation tools
         reflection_tools = ["consult", "reflect", "analyze", "think"]
@@ -145,9 +148,8 @@ class SpiralState:
 
         # Execution tools
         execution_tools = ["execute", "run", "apply", "approve", "write", "create"]
-        if any(kw in tool_name.lower() for kw in execution_tools):
-            if self.current_phase in [SpiralPhase.ACTION_SYNTHESIS, SpiralPhase.COUNTER_PERSPECTIVES]:
-                self.transition(SpiralPhase.EXECUTION)
+        if any(kw in tool_name.lower() for kw in execution_tools) and self.current_phase in [SpiralPhase.ACTION_SYNTHESIS, SpiralPhase.COUNTER_PERSPECTIVES]:
+            self.transition(SpiralPhase.EXECUTION)
 
     def post_execution_update(self, tool_name: str, success: bool = True):
         """Update phase after tool execution completes."""
@@ -221,7 +223,7 @@ class SpiralMiddleware:
         # Record the tool call and update state
         witness_event = self.state.record_tool_call(tool_name)
 
-        print(f"🌀 Spiral: {self.state.current_phase.value} | Tool: {tool_name} | #{self.state.tool_call_count}")
+        logger.debug("Spiral: %s | Tool: %s | #%d", self.state.current_phase.value, tool_name, self.state.tool_call_count)
 
         # Execute the tool
         result = await call_next(context)
@@ -244,7 +246,7 @@ class SpiralMiddleware:
             with open(self.log_path, "a") as f:
                 f.write(json.dumps(event) + "\n")
         except Exception as e:
-            print(f"⚠️ Failed to write spiral log: {e}")
+            logger.warning("Failed to write spiral log: %s", e)
 
     def get_state(self) -> SpiralState:
         """Get current spiral state."""
@@ -253,7 +255,7 @@ class SpiralMiddleware:
     def inherit_state(self, previous_state: dict[str, Any]) -> None:
         """Inherit state from a previous session."""
         self.state = SpiralState.from_dict(previous_state)
-        print(f"🌀 Inherited spiral state: {self.state.current_phase.value}")
+        logger.info("Inherited spiral state: %s", self.state.current_phase.value)
 
     def get_journey_summary(self) -> str:
         """Get human-readable journey summary."""
