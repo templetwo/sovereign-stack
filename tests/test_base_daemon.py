@@ -65,11 +65,13 @@ class CommsStore:
         return rec
 
     def acknowledge(self, message_id, instance_id, note=""):
-        self.acks.setdefault(message_id, []).append({
-            "message_id": message_id,
-            "instance_id": instance_id,
-            "note": note,
-        })
+        self.acks.setdefault(message_id, []).append(
+            {
+                "message_id": message_id,
+                "instance_id": instance_id,
+                "note": note,
+            }
+        )
 
     def get_acks(self, message_id):
         return list(self.acks.get(message_id, []))
@@ -94,9 +96,13 @@ class StubDaemon(BaseDaemon):
         return ["- Nothing real; this is a test scaffold."]
 
 
-def make_stub(root: Path, *, comms: CommsStore | None = None,
-              now: datetime | None = None,
-              unacked_threshold: int = CONSECUTIVE_UNACKED_THRESHOLD):
+def make_stub(
+    root: Path,
+    *,
+    comms: CommsStore | None = None,
+    now: datetime | None = None,
+    unacked_threshold: int = CONSECUTIVE_UNACKED_THRESHOLD,
+):
     comms = comms or CommsStore()
     now = now or datetime(2026, 4, 25, 12, 0, 0, tzinfo=timezone.utc)
     counter = {"n": 0}
@@ -131,8 +137,7 @@ class TestStateSchema:
     def test_save_then_load_roundtrip(self, tmp_root):
         daemon, _ = make_stub(tmp_root)
         state = DaemonState(
-            posted_digests=[{"message_id": "m1", "posted_at": "t1",
-                             "content_snippet": "x"}],
+            posted_digests=[{"message_id": "m1", "posted_at": "t1", "content_snippet": "x"}],
             halted_at="2026-04-25T00:00:00+00:00",
             halt_reason="test",
         )
@@ -146,23 +151,31 @@ class TestStateSchema:
     def test_unversioned_legacy_loads_as_v1(self, tmp_root):
         daemon, _ = make_stub(tmp_root)
         daemon.state_path.parent.mkdir(parents=True, exist_ok=True)
-        daemon.state_path.write_text(json.dumps({
-            "posted_digests": [],
-            "halted_at": None,
-            "halt_reason": None,
-        }))
+        daemon.state_path.write_text(
+            json.dumps(
+                {
+                    "posted_digests": [],
+                    "halted_at": None,
+                    "halt_reason": None,
+                }
+            )
+        )
         state = daemon._load_state()
         assert state.schema_version == STATE_SCHEMA_VERSION
 
     def test_future_version_refuses_to_load(self, tmp_root):
         daemon, _ = make_stub(tmp_root)
         daemon.state_path.parent.mkdir(parents=True, exist_ok=True)
-        daemon.state_path.write_text(json.dumps({
-            "schema_version": STATE_SCHEMA_VERSION + 1,
-            "posted_digests": [],
-            "halted_at": None,
-            "halt_reason": None,
-        }))
+        daemon.state_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": STATE_SCHEMA_VERSION + 1,
+                    "posted_digests": [],
+                    "halted_at": None,
+                    "halt_reason": None,
+                }
+            )
+        )
         with pytest.raises(ValueError):
             daemon._load_state()
 
@@ -183,28 +196,34 @@ class TestAckCounting:
         """If fewer than threshold-many posts have been made, the circuit
         breaker cannot fire — _count_recent_unacked returns 0."""
         daemon, _ = make_stub(tmp_root)
-        state = DaemonState(posted_digests=[
-            {"message_id": "m1", "posted_at": "t1", "content_snippet": "x"},
-            {"message_id": "m2", "posted_at": "t2", "content_snippet": "x"},
-        ])
+        state = DaemonState(
+            posted_digests=[
+                {"message_id": "m1", "posted_at": "t1", "content_snippet": "x"},
+                {"message_id": "m2", "posted_at": "t2", "content_snippet": "x"},
+            ]
+        )
         # Only 2 posts; threshold is 3.
         assert daemon._count_recent_unacked(state) == 0
 
     def test_full_count_when_all_unacked(self, tmp_root):
         daemon, _ = make_stub(tmp_root)
-        state = DaemonState(posted_digests=[
-            {"message_id": f"m{i}", "posted_at": "t", "content_snippet": "x"}
-            for i in range(CONSECUTIVE_UNACKED_THRESHOLD)
-        ])
+        state = DaemonState(
+            posted_digests=[
+                {"message_id": f"m{i}", "posted_at": "t", "content_snippet": "x"}
+                for i in range(CONSECUTIVE_UNACKED_THRESHOLD)
+            ]
+        )
         assert daemon._count_recent_unacked(state) == CONSECUTIVE_UNACKED_THRESHOLD
 
     def test_acked_post_reduces_count(self, tmp_root):
         comms = CommsStore()
         daemon, _ = make_stub(tmp_root, comms=comms)
-        state = DaemonState(posted_digests=[
-            {"message_id": f"m{i}", "posted_at": "t", "content_snippet": "x"}
-            for i in range(CONSECUTIVE_UNACKED_THRESHOLD)
-        ])
+        state = DaemonState(
+            posted_digests=[
+                {"message_id": f"m{i}", "posted_at": "t", "content_snippet": "x"}
+                for i in range(CONSECUTIVE_UNACKED_THRESHOLD)
+            ]
+        )
         comms.acknowledge("m1", "claude-test", "integrated")
         assert daemon._count_recent_unacked(state) == CONSECUTIVE_UNACKED_THRESHOLD - 1
 
@@ -213,10 +232,11 @@ class TestAckCounting:
         comms = CommsStore()
         daemon, _ = make_stub(tmp_root, comms=comms)
         # 5 posts; ack only the last threshold-many.
-        state = DaemonState(posted_digests=[
-            {"message_id": f"m{i}", "posted_at": "t", "content_snippet": "x"}
-            for i in range(5)
-        ])
+        state = DaemonState(
+            posted_digests=[
+                {"message_id": f"m{i}", "posted_at": "t", "content_snippet": "x"} for i in range(5)
+            ]
+        )
         for i in range(5 - CONSECUTIVE_UNACKED_THRESHOLD, 5):
             comms.acknowledge(f"m{i}", "claude-test", "ack")
         # All in the window are acked → 0 unacked.
@@ -232,7 +252,10 @@ class TestRecordPost:
         state = DaemonState()
         now = datetime(2026, 4, 25, tzinfo=timezone.utc)
         daemon._record_post(
-            state, message_id="msg-1", content="hello world", now=now,
+            state,
+            message_id="msg-1",
+            content="hello world",
+            now=now,
         )
         assert len(state.posted_digests) == 1
         assert state.posted_digests[0]["message_id"] == "msg-1"
@@ -277,11 +300,13 @@ class TestRecordPost:
 class TestPerformHalt:
     def test_writes_halt_note_with_four_fields(self, tmp_root):
         daemon, _ = make_stub(tmp_root)
-        state = DaemonState(posted_digests=[
-            {"message_id": "m1", "posted_at": "t1", "content_snippet": "snip 1"},
-            {"message_id": "m2", "posted_at": "t2", "content_snippet": "snip 2"},
-            {"message_id": "m3", "posted_at": "t3", "content_snippet": "snip 3"},
-        ])
+        state = DaemonState(
+            posted_digests=[
+                {"message_id": "m1", "posted_at": "t1", "content_snippet": "snip 1"},
+                {"message_id": "m2", "posted_at": "t2", "content_snippet": "snip 2"},
+                {"message_id": "m3", "posted_at": "t3", "content_snippet": "snip 3"},
+            ]
+        )
         halt_path = daemon._perform_halt(
             state,
             reason="test_halt_reason",
@@ -307,10 +332,11 @@ class TestPerformHalt:
 
     def test_marks_state_halted_and_persists(self, tmp_root):
         daemon, _ = make_stub(tmp_root)
-        state = DaemonState(posted_digests=[
-            {"message_id": f"m{i}", "posted_at": "t", "content_snippet": "x"}
-            for i in range(3)
-        ])
+        state = DaemonState(
+            posted_digests=[
+                {"message_id": f"m{i}", "posted_at": "t", "content_snippet": "x"} for i in range(3)
+            ]
+        )
         daemon._perform_halt(state, reason="r", evidence_note="e")
         assert state.halted_at is not None
         assert state.halt_reason == "r"
@@ -321,10 +347,11 @@ class TestPerformHalt:
     def test_posts_halt_alert_to_comms(self, tmp_root):
         comms = CommsStore()
         daemon, _ = make_stub(tmp_root, comms=comms)
-        state = DaemonState(posted_digests=[
-            {"message_id": f"m{i}", "posted_at": "t", "content_snippet": "x"}
-            for i in range(3)
-        ])
+        state = DaemonState(
+            posted_digests=[
+                {"message_id": f"m{i}", "posted_at": "t", "content_snippet": "x"} for i in range(3)
+            ]
+        )
         daemon._perform_halt(state, reason="r", evidence_note="e")
 
         alerts = [p for p in comms.posts if p["sender"] == SENDER_HALT_ALERT]
@@ -336,12 +363,15 @@ class TestPerformHalt:
 
     def test_halt_filename_uses_subclass_tag(self, tmp_root):
         daemon, _ = make_stub(tmp_root)
-        state = DaemonState(posted_digests=[
-            {"message_id": f"m{i}", "posted_at": "t", "content_snippet": "x"}
-            for i in range(3)
-        ])
+        state = DaemonState(
+            posted_digests=[
+                {"message_id": f"m{i}", "posted_at": "t", "content_snippet": "x"} for i in range(3)
+            ]
+        )
         halt_path = daemon._perform_halt(
-            state, reason="myreason", evidence_note="e",
+            state,
+            reason="myreason",
+            evidence_note="e",
         )
         assert "stub_myreason" in halt_path.name
 
@@ -353,6 +383,7 @@ class TestHaltAlertBestEffort:
     def test_comms_failure_does_not_propagate(self, tmp_root):
         """If comms post fails, _post_halt_alert swallows — the durable
         record is the halt note on disk."""
+
         def failing_post(**kwargs):
             raise RuntimeError("comms is down")
 
@@ -364,10 +395,11 @@ class TestHaltAlertBestEffort:
             comms_get_acks_fn=lambda mid: [],
             now_fn=lambda: datetime(2026, 4, 25, tzinfo=timezone.utc),
         )
-        state = DaemonState(posted_digests=[
-            {"message_id": f"m{i}", "posted_at": "t", "content_snippet": "x"}
-            for i in range(3)
-        ])
+        state = DaemonState(
+            posted_digests=[
+                {"message_id": f"m{i}", "posted_at": "t", "content_snippet": "x"} for i in range(3)
+            ]
+        )
         # Should NOT raise; halt note still on disk.
         halt_path = daemon._perform_halt(state, reason="r", evidence_note="e")
         assert halt_path.exists()

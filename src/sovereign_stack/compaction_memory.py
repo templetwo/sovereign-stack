@@ -17,6 +17,7 @@ from typing import Any
 @dataclass
 class CompactionSummary:
     """A single compaction summary"""
+
     timestamp: str
     summary_text: str
     session_id: str
@@ -29,7 +30,7 @@ class CompactionSummary:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> 'CompactionSummary':
+    def from_dict(cls, data: dict[str, Any]) -> "CompactionSummary":
         return cls(**data)
 
 
@@ -61,21 +62,18 @@ class CompactionMemoryBuffer:
         try:
             with open(self.buffer_file) as f:
                 data = json.load(f)
-                self.summaries = [
-                    CompactionSummary.from_dict(s)
-                    for s in data.get('summaries', [])
-                ]
+                self.summaries = [CompactionSummary.from_dict(s) for s in data.get("summaries", [])]
         except Exception:
             self.summaries = []
 
     def _save(self):
         """Persist buffer to disk"""
         data = {
-            'summaries': [s.to_dict() for s in self.summaries],
-            'last_updated': datetime.utcnow().isoformat()
+            "summaries": [s.to_dict() for s in self.summaries],
+            "last_updated": datetime.utcnow().isoformat(),
         }
 
-        with open(self.buffer_file, 'w') as f:
+        with open(self.buffer_file, "w") as f:
             json.dump(data, f, indent=2)
 
     def add_summary(
@@ -84,7 +82,7 @@ class CompactionMemoryBuffer:
         session_id: str,
         key_points: list[str] | None = None,
         active_tasks: list[str] | None = None,
-        recent_breakthroughs: list[str] | None = None
+        recent_breakthroughs: list[str] | None = None,
     ) -> CompactionSummary:
         """
         Add a new compaction summary to the buffer
@@ -106,7 +104,7 @@ class CompactionMemoryBuffer:
             compaction_number=compaction_number,
             key_points=key_points or [],
             active_tasks=active_tasks or [],
-            recent_breakthroughs=recent_breakthroughs or []
+            recent_breakthroughs=recent_breakthroughs or [],
         )
 
         # Add to buffer (FIFO if full)
@@ -163,7 +161,7 @@ class CompactionMemoryBuffer:
 
             lines.append("**Summary:**")
             lines.append(summary.summary_text)
-            lines.append("\n" + "="*60)
+            lines.append("\n" + "=" * 60)
 
         return "\n".join(lines)
 
@@ -179,11 +177,12 @@ class CompactionMemoryBuffer:
             "max_capacity": self.MAX_SUMMARIES,
             "oldest_timestamp": self.summaries[0].timestamp if self.summaries else None,
             "newest_timestamp": self.summaries[-1].timestamp if self.summaries else None,
-            "total_compactions": self.summaries[-1].compaction_number if self.summaries else 0
+            "total_compactions": self.summaries[-1].compaction_number if self.summaries else 0,
         }
 
 
 # Convenience function for auto-storing compaction summary
+
 
 def auto_store_compaction(
     storage_dir: Path,
@@ -191,7 +190,7 @@ def auto_store_compaction(
     session_id: str,
     key_points: list[str] | None = None,
     active_tasks: list[str] | None = None,
-    recent_breakthroughs: list[str] | None = None
+    recent_breakthroughs: list[str] | None = None,
 ) -> str:
     """
     Automatically store compaction summary and return confirmation
@@ -204,7 +203,7 @@ def auto_store_compaction(
         session_id=session_id,
         key_points=key_points,
         active_tasks=active_tasks,
-        recent_breakthroughs=recent_breakthroughs
+        recent_breakthroughs=recent_breakthroughs,
     )
 
     stats = buffer.get_stats()
@@ -212,7 +211,7 @@ def auto_store_compaction(
     return f"""✅ Compaction summary stored
 
 Compaction #{summary.compaction_number}
-Buffer: {stats['total_summaries']}/{stats['max_capacity']} summaries
+Buffer: {stats["total_summaries"]}/{stats["max_capacity"]} summaries
 
 Summary automatically saved to compaction memory buffer.
 After next compaction, retrieve context with: get_compaction_context

@@ -54,6 +54,7 @@ def _is_test_artifact(content: str) -> bool:
 # HYGIENE: hands for metabolism
 # ════════════════════════════════════════
 
+
 def _archive_test_artifacts_impl(chronicle_dir: Path) -> dict:
     """
     Move test-pollution entries from chronicle/insights/ into
@@ -87,12 +88,14 @@ def _archive_test_artifacts_impl(chronicle_dir: Path) -> dict:
                     kept_lines.append(line)
                     continue
                 if _is_test_artifact(entry.get("content", "")):
-                    archived_entries.append({
-                        **entry,
-                        "_archived_at": now_iso,
-                        "_archived_reason": "test_artifact_pattern",
-                        "_original_file": str(jsonl_file),
-                    })
+                    archived_entries.append(
+                        {
+                            **entry,
+                            "_archived_at": now_iso,
+                            "_archived_reason": "test_artifact_pattern",
+                            "_original_file": str(jsonl_file),
+                        }
+                    )
                 else:
                     kept_lines.append(line)
 
@@ -163,21 +166,25 @@ def _dedup_self_model_impl(sovereign_root: Path) -> dict:
                 kept.append(entry)
                 continue
             if _is_test_artifact(obs):
-                archive_entries.append({
-                    "category": category,
-                    **entry,
-                    "_archived_at": now_iso,
-                    "_archived_reason": "test_artifact_pattern",
-                })
+                archive_entries.append(
+                    {
+                        "category": category,
+                        **entry,
+                        "_archived_at": now_iso,
+                        "_archived_reason": "test_artifact_pattern",
+                    }
+                )
                 removed_count += 1
                 continue
             if obs in seen:
-                archive_entries.append({
-                    "category": category,
-                    **entry,
-                    "_archived_at": now_iso,
-                    "_archived_reason": "duplicate",
-                })
+                archive_entries.append(
+                    {
+                        "category": category,
+                        **entry,
+                        "_archived_at": now_iso,
+                        "_archived_reason": "duplicate",
+                    }
+                )
                 removed_count += 1
                 continue
             seen.add(obs)
@@ -239,7 +246,7 @@ METABOLISM_TOOLS = [
                     "default": True,
                 },
             },
-        }
+        },
     ),
     Tool(
         name="retire_hypothesis",
@@ -248,12 +255,15 @@ METABOLISM_TOOLS = [
             "type": "object",
             "properties": {
                 "domain": {"type": "string", "description": "Domain of the hypothesis"},
-                "content_fragment": {"type": "string", "description": "Fragment to match the hypothesis"},
+                "content_fragment": {
+                    "type": "string",
+                    "description": "Fragment to match the hypothesis",
+                },
                 "reason": {"type": "string", "description": "Why it's being retired"},
                 "replaced_by": {"type": "string", "description": "What ground truth replaced it"},
             },
             "required": ["domain", "content_fragment", "reason"],
-        }
+        },
     ),
     Tool(
         name="self_model",
@@ -276,7 +286,7 @@ METABOLISM_TOOLS = [
                     "description": "Category of the observation",
                 },
             },
-        }
+        },
     ),
     Tool(
         name="session_handoff",
@@ -285,13 +295,29 @@ METABOLISM_TOOLS = [
             "type": "object",
             "properties": {
                 "action": {"type": "string", "enum": ["write", "read"], "default": "read"},
-                "decisions": {"type": "array", "items": {"type": "string"}, "description": "Key decisions made this session"},
-                "pending": {"type": "array", "items": {"type": "string"}, "description": "What is still pending"},
-                "changed": {"type": "array", "items": {"type": "string"}, "description": "What changed — repos, tools, findings"},
-                "next_priorities": {"type": "array", "items": {"type": "string"}, "description": "What the next instance should focus on"},
+                "decisions": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Key decisions made this session",
+                },
+                "pending": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "What is still pending",
+                },
+                "changed": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "What changed — repos, tools, findings",
+                },
+                "next_priorities": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "What the next instance should focus on",
+                },
                 "summary": {"type": "string", "description": "One-paragraph session summary"},
             },
-        }
+        },
     ),
     Tool(
         name="context_retrieve",
@@ -311,7 +337,7 @@ METABOLISM_TOOLS = [
                 "limit": {"type": "integer", "default": 5},
             },
             "required": ["current_focus"],
-        }
+        },
     ),
 ]
 
@@ -319,6 +345,7 @@ METABOLISM_TOOLS = [
 # ════════════════════════════════════════
 # HANDLERS
 # ════════════════════════════════════════
+
 
 def _load_all_insights():
     """Load all insights from the chronicle."""
@@ -390,12 +417,17 @@ async def handle_metabolism_tool(name, arguments):
         if action != "detect":
             # Log the hygiene action
             with open(METABOLISM_LOG, "a") as f:
-                f.write(json.dumps({
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                    "action": action,
-                    "archive_result": archive_result,
-                    "dedup_result": dedup_result,
-                }) + "\n")
+                f.write(
+                    json.dumps(
+                        {
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                            "action": action,
+                            "archive_result": archive_result,
+                            "dedup_result": dedup_result,
+                        }
+                    )
+                    + "\n"
+                )
 
             parts = [f"🫀 Metabolism hygiene — action={action}\n"]
             if archive_result is not None:
@@ -413,7 +445,9 @@ async def handle_metabolism_tool(name, arguments):
                     f"(duplicate or test-pollution)."
                 )
                 if dedup_result["removed"]:
-                    parts.append(f"  Categories touched: {', '.join(dedup_result['categories_touched'])}")
+                    parts.append(
+                        f"  Categories touched: {', '.join(dedup_result['categories_touched'])}"
+                    )
                     parts.append(f"  Backup: {dedup_result.get('backup', '(none)')}")
             return [TextContent(type="text", text="\n".join(parts))]
 
@@ -447,15 +481,17 @@ async def handle_metabolism_tool(name, arguments):
                     overlap = _keyword_overlap(h_content, g_content)
                     if overlap > 0.3:
                         # High overlap between hypothesis and ground truth — potential contradiction
-                        digest["contradictions"].append({
-                            "hypothesis_domain": hyp.get("_domain_dir", "?"),
-                            "hypothesis_preview": h_content[:120],
-                            "hypothesis_timestamp": hyp.get("timestamp", "?"),
-                            "ground_truth_domain": gt.get("_domain_dir", "?"),
-                            "ground_truth_preview": g_content[:120],
-                            "ground_truth_timestamp": gt.get("timestamp", "?"),
-                            "overlap_score": round(overlap, 3),
-                        })
+                        digest["contradictions"].append(
+                            {
+                                "hypothesis_domain": hyp.get("_domain_dir", "?"),
+                                "hypothesis_preview": h_content[:120],
+                                "hypothesis_timestamp": hyp.get("timestamp", "?"),
+                                "ground_truth_domain": gt.get("_domain_dir", "?"),
+                                "ground_truth_preview": g_content[:120],
+                                "ground_truth_timestamp": gt.get("timestamp", "?"),
+                                "overlap_score": round(overlap, 3),
+                            }
+                        )
 
         # Detect stale threads
         if detect_stale:
@@ -473,12 +509,14 @@ async def handle_metabolism_tool(name, arguments):
 
                 age_days = (now - thread_time) / 86400 if thread_time > 0 else 999
                 if age_days > max_age:
-                    digest["stale_threads"].append({
-                        "question": thread.get("question", "?")[:120],
-                        "domain": thread.get("domain", "?"),
-                        "age_days": round(age_days),
-                        "timestamp": ts,
-                    })
+                    digest["stale_threads"].append(
+                        {
+                            "question": thread.get("question", "?")[:120],
+                            "domain": thread.get("domain", "?"),
+                            "age_days": round(age_days),
+                            "timestamp": ts,
+                        }
+                    )
 
             # Stale hypotheses (not referenced recently)
             for hyp in hypotheses:
@@ -493,11 +531,13 @@ async def handle_metabolism_tool(name, arguments):
 
                 age_days = (now - hyp_time) / 86400 if hyp_time > 0 else 999
                 if age_days > max_age:
-                    digest["stale_hypotheses"].append({
-                        "content": hyp.get("content", "?")[:120],
-                        "domain": hyp.get("_domain_dir", "?"),
-                        "age_days": round(age_days),
-                    })
+                    digest["stale_hypotheses"].append(
+                        {
+                            "content": hyp.get("content", "?")[:120],
+                            "domain": hyp.get("_domain_dir", "?"),
+                            "age_days": round(age_days),
+                        }
+                    )
 
         # Log the metabolism cycle
         log_entry = {
@@ -519,7 +559,9 @@ async def handle_metabolism_tool(name, arguments):
             result += f"⚠️ {len(digest['contradictions'])} potential contradiction(s):\n"
             for c in digest["contradictions"][:5]:
                 result += f"  Hyp [{c['hypothesis_domain']}]: {c['hypothesis_preview'][:80]}\n"
-                result += f"  vs GT [{c['ground_truth_domain']}]: {c['ground_truth_preview'][:80]}\n"
+                result += (
+                    f"  vs GT [{c['ground_truth_domain']}]: {c['ground_truth_preview'][:80]}\n"
+                )
                 result += f"  Overlap: {c['overlap_score']}\n\n"
 
         if digest["stale_threads"]:
@@ -532,7 +574,11 @@ async def handle_metabolism_tool(name, arguments):
             for h in digest["stale_hypotheses"][:5]:
                 result += f"  [{h['domain']}] {h['content'][:80]} ({h['age_days']}d)\n"
 
-        if not digest["contradictions"] and not digest["stale_threads"] and not digest["stale_hypotheses"]:
+        if (
+            not digest["contradictions"]
+            and not digest["stale_threads"]
+            and not digest["stale_hypotheses"]
+        ):
             result += "✅ Chronicle is clean. No contradictions, no stale entries."
 
         return [TextContent(type="text", text=result)]
@@ -557,7 +603,10 @@ async def handle_metabolism_tool(name, arguments):
                         continue
                     try:
                         entry = json.loads(line)
-                        if entry.get("layer") == "hypothesis" and fragment.lower() in entry.get("content", "").lower():
+                        if (
+                            entry.get("layer") == "hypothesis"
+                            and fragment.lower() in entry.get("content", "").lower()
+                        ):
                             entry["layer"] = "retired"
                             entry["retired_reason"] = reason
                             entry["retired_by"] = replaced_by
@@ -569,8 +618,15 @@ async def handle_metabolism_tool(name, arguments):
                 jsonl_file.write_text("\n".join(updated) + "\n")
 
         if retired:
-            return [TextContent(type="text", text=f"📦 Hypothesis retired: '{fragment[:60]}...'\n  Reason: {reason}\n  Replaced by: {replaced_by}")]
-        return [TextContent(type="text", text=f"No matching hypothesis found for '{fragment[:60]}'")]
+            return [
+                TextContent(
+                    type="text",
+                    text=f"📦 Hypothesis retired: '{fragment[:60]}...'\n  Reason: {reason}\n  Replaced by: {replaced_by}",
+                )
+            ]
+        return [
+            TextContent(type="text", text=f"No matching hypothesis found for '{fragment[:60]}'")
+        ]
 
     if name == "self_model":
         action = arguments.get("action", "read")
@@ -590,7 +646,12 @@ async def handle_metabolism_tool(name, arguments):
                 if not any(model.get(c) for c in ["strength", "drift", "tendency", "blind_spot"]):
                     result += "No patterns recorded yet. Use self_model(action='update') to add observations."
                 return [TextContent(type="text", text=result)]
-            return [TextContent(type="text", text="🪞 No self-model yet. Start with self_model(action='update', observation='...', category='...')")]
+            return [
+                TextContent(
+                    type="text",
+                    text="🪞 No self-model yet. Start with self_model(action='update', observation='...', category='...')",
+                )
+            ]
 
         if action == "update":
             observation = arguments.get("observation", "")
@@ -605,16 +666,22 @@ async def handle_metabolism_tool(name, arguments):
             if category not in model:
                 model[category] = []
 
-            model[category].append({
-                "observation": observation,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            })
+            model[category].append(
+                {
+                    "observation": observation,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+            )
 
             # Keep last 10 per category
             model[category] = model[category][-10:]
 
             mirror_file.write_text(json.dumps(model, indent=2))
-            return [TextContent(type="text", text=f"🪞 Self-model updated [{category}]: {observation[:100]}")]
+            return [
+                TextContent(
+                    type="text", text=f"🪞 Self-model updated [{category}]: {observation[:100]}"
+                )
+            ]
 
     elif name == "session_handoff":
         action = arguments.get("action", "read")
@@ -633,7 +700,7 @@ async def handle_metabolism_tool(name, arguments):
             handoff_file.write_text(json.dumps(handoff, indent=2))
             with open(history_file, "a") as f:
                 f.write(json.dumps(handoff) + "\n")
-            
+
             parts = ["\u2705 Session handoff written.\n"]
             if handoff["decisions"]:
                 parts.append("Decisions:")
@@ -647,7 +714,12 @@ async def handle_metabolism_tool(name, arguments):
             return [TextContent(type="text", text="\n".join(parts))]
 
         if not handoff_file.exists():
-            return [TextContent(type="text", text="No session handoff found. First session or no previous handoff written.")]
+            return [
+                TextContent(
+                    type="text",
+                    text="No session handoff found. First session or no previous handoff written.",
+                )
+            ]
         handoff = json.loads(handoff_file.read_text())
         ts = handoff.get("timestamp", "?")[:16]
         parts = [f"\U0001f4cb Last handoff ({ts}):\n"]
@@ -689,13 +761,17 @@ async def handle_metabolism_tool(name, arguments):
 
             # Score: focus overlap + domain overlap + recency bonus
             content_overlap = len(all_context_words & content_words)
-            domain_overlap = len(all_context_words & domain_words) * 3  # domain match weighted higher
+            domain_overlap = (
+                len(all_context_words & domain_words) * 3
+            )  # domain match weighted higher
 
             # Recency bonus
             ts = ins.get("timestamp", "")
             try:
                 if "T" in ts:
-                    age_hours = (time.time() - datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()) / 3600
+                    age_hours = (
+                        time.time() - datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
+                    ) / 3600
                 else:
                     age_hours = 9999
             except (ValueError, TypeError):
@@ -715,7 +791,11 @@ async def handle_metabolism_tool(name, arguments):
         top = scored[:limit]
 
         if not top:
-            return [TextContent(type="text", text=f"No relevant insights for focus: '{current_focus[:60]}'")]
+            return [
+                TextContent(
+                    type="text", text=f"No relevant insights for focus: '{current_focus[:60]}'"
+                )
+            ]
 
         result = f"🎯 Context-Aware Retrieval (focus: {current_focus[:40]})\n\n"
         for score, ins in top:

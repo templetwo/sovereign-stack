@@ -9,6 +9,7 @@ Usage:
     export STACK_TOKEN=<bearer token>
     python3 recall_arc.py "compass drift entropy"
 """
+
 import json
 import os
 import subprocess
@@ -26,11 +27,22 @@ def stack_call(tool, args, timeout=30, retries=2):
     for _ in range(retries + 1):
         try:
             result = subprocess.run(
-                ["curl", "-s", "-X", "POST", BASE_URL,
-                 "-H", f"Authorization: Bearer {TOKEN}",
-                 "-H", "Content-Type: application/json",
-                 "-d", payload],
-                capture_output=True, text=True, timeout=timeout,
+                [
+                    "curl",
+                    "-s",
+                    "-X",
+                    "POST",
+                    BASE_URL,
+                    "-H",
+                    f"Authorization: Bearer {TOKEN}",
+                    "-H",
+                    "Content-Type: application/json",
+                    "-d",
+                    payload,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=timeout,
             )
             if not result.stdout.strip():
                 continue
@@ -43,8 +55,15 @@ def stack_call(tool, args, timeout=30, retries=2):
     return None
 
 
-def recall_arc(topic, temporal_window_hours=72, max_entries=30, max_domain_seeds=4,
-               direct_limit=12, temporal_limit=15, require_term_match=True):
+def recall_arc(
+    topic,
+    temporal_window_hours=72,
+    max_entries=30,
+    max_domain_seeds=4,
+    direct_limit=12,
+    temporal_limit=15,
+    require_term_match=True,
+):
     """
     Reconstruct the arc of a topic through the chronicle.
 
@@ -74,12 +93,15 @@ def recall_arc(topic, temporal_window_hours=72, max_entries=30, max_domain_seeds
             continue
         start = (ts - window).isoformat()
         end = (ts + window).isoformat()
-        neighbors = stack_call("recall_insights", {
-            "query": "",
-            "limit": temporal_limit,
-            "start_date": start,
-            "end_date": end,
-        })
+        neighbors = stack_call(
+            "recall_insights",
+            {
+                "query": "",
+                "limit": temporal_limit,
+                "start_date": start,
+                "end_date": end,
+            },
+        )
         if neighbors and isinstance(neighbors, list):
             for n in neighbors:
                 if n["timestamp"] not in seen:
@@ -144,7 +166,12 @@ def recall_arc(topic, temporal_window_hours=72, max_entries=30, max_domain_seeds
         domain = entry.get("domain", "").lower()
         content = entry.get("content", "").lower()[:200]
 
-        if "mistake" in domain or "learning" in domain or "failure" in content or "wrong" in content[:60]:
+        if (
+            "mistake" in domain
+            or "learning" in domain
+            or "failure" in content
+            or "wrong" in content[:60]
+        ):
             entry["_type"] = "failure"
         elif layer == "open_thread":
             entry["_type"] = "open"
@@ -195,6 +222,7 @@ def format_arc(arc, compact=True):
 
 if __name__ == "__main__":
     import sys
+
     topic = " ".join(sys.argv[1:]) if len(sys.argv) > 1 else "compass drift entropy"
     print(f"querying arc for: {topic!r}\n")
     arc = recall_arc(topic)

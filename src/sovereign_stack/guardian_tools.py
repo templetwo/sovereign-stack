@@ -34,6 +34,7 @@ from mcp.types import TextContent, Tool
 
 try:
     import httpx  # noqa: F401  (kept for future Wazuh integration)
+
     HAS_HTTPX = True
 except ImportError:
     HAS_HTTPX = False
@@ -80,7 +81,7 @@ GUARDIAN_TOOLS = [
         inputSchema={
             "type": "object",
             "properties": {},
-        }
+        },
     ),
     Tool(
         name="guardian_scan",
@@ -99,7 +100,7 @@ GUARDIAN_TOOLS = [
                     "description": "Path to scan",
                 },
             },
-        }
+        },
     ),
     Tool(
         name="guardian_alerts",
@@ -114,7 +115,7 @@ GUARDIAN_TOOLS = [
                 },
                 "limit": {"type": "integer", "default": 10},
             },
-        }
+        },
     ),
     Tool(
         name="guardian_audit",
@@ -129,7 +130,7 @@ GUARDIAN_TOOLS = [
                 },
                 "target_path": {"type": "string", "default": "~/sovereign-stack"},
             },
-        }
+        },
     ),
     Tool(
         name="guardian_quarantine",
@@ -153,7 +154,7 @@ GUARDIAN_TOOLS = [
                     "default": "",
                 },
             },
-        }
+        },
     ),
     Tool(
         name="guardian_report",
@@ -172,7 +173,7 @@ GUARDIAN_TOOLS = [
                     "default": "7d",
                 },
             },
-        }
+        },
     ),
     Tool(
         name="guardian_mcp_audit",
@@ -191,7 +192,7 @@ GUARDIAN_TOOLS = [
                     "default": "",
                 },
             },
-        }
+        },
     ),
     Tool(
         name="guardian_baseline",
@@ -210,7 +211,7 @@ GUARDIAN_TOOLS = [
                     "description": "Components to baseline: ports, processes, network, users.",
                 },
             },
-        }
+        },
     ),
 ]
 
@@ -289,9 +290,7 @@ def _evaluate_status(listener_lines: list[str], service_present: dict[str, bool]
     """
     listeners = len([ln for ln in listener_lines if ln.strip()])
     full_text = "\n".join(listener_lines)
-    ollama_safe = not (
-        "0.0.0.0:11434" in full_text or "*:11434" in full_text
-    )
+    ollama_safe = not ("0.0.0.0:11434" in full_text or "*:11434" in full_text)
 
     health = 100
     issues: list[str] = []
@@ -327,8 +326,7 @@ async def _status_async() -> dict:
 def _filter_exposed_listeners(listener_lines: list[str]) -> list[str]:
     """Lines representing non-localhost listeners (exposed to network)."""
     return [
-        ln for ln in listener_lines
-        if "*:" in ln and "127.0.0.1" not in ln and "[::1]" not in ln
+        ln for ln in listener_lines if "*:" in ln and "127.0.0.1" not in ln and "[::1]" not in ln
     ]
 
 
@@ -358,12 +356,14 @@ def list_quarantine() -> list[dict]:
                 meta = json.loads(meta_path.read_text())
             except Exception:
                 meta = {}
-        out.append({
-            "file_hash": digest,
-            "size_bytes": stat.st_size,
-            "isolated_at": meta.get("isolated_at"),
-            "original_path": meta.get("original_path"),
-        })
+        out.append(
+            {
+                "file_hash": digest,
+                "size_bytes": stat.st_size,
+                "isolated_at": meta.get("isolated_at"),
+                "original_path": meta.get("original_path"),
+            }
+        )
     return out
 
 
@@ -398,19 +398,20 @@ def isolate_file(file_path: str) -> dict:
         # Already quarantined — record the second isolate request but
         # leave the existing copy in place (idempotent).
         size = dest.stat().st_size
-        _append_manifest({
-            "action": "isolate_idempotent",
-            "file_hash": digest,
-            "original_path": str(src),
-            "size_bytes": size,
-            "timestamp": _now_iso(),
-        })
+        _append_manifest(
+            {
+                "action": "isolate_idempotent",
+                "file_hash": digest,
+                "original_path": str(src),
+                "size_bytes": size,
+                "timestamp": _now_iso(),
+            }
+        )
         # Even on idempotent isolate, the source must go (that's the point).
         try:
             src.unlink()
         except Exception as e:
-            return {"ok": False, "error": f"original_unlink_failed: {e}",
-                    "file_hash": digest}
+            return {"ok": False, "error": f"original_unlink_failed: {e}", "file_hash": digest}
         return {
             "ok": True,
             "file_hash": digest,
@@ -422,25 +423,32 @@ def isolate_file(file_path: str) -> dict:
     shutil.copy2(src, dest)
     with contextlib.suppress(Exception):
         os.chmod(dest, 0o600)  # best effort — restrict access to owner
-    meta_path.write_text(json.dumps({
-        "file_hash": digest,
-        "original_path": str(src),
-        "isolated_at": _now_iso(),
-        "size_bytes": size,
-    }, indent=2))
+    meta_path.write_text(
+        json.dumps(
+            {
+                "file_hash": digest,
+                "original_path": str(src),
+                "isolated_at": _now_iso(),
+                "size_bytes": size,
+            },
+            indent=2,
+        )
+    )
 
     # Remove the original AFTER the copy is on disk.
     try:
         src.unlink()
     except Exception as e:
         # Quarantine copy stands; flag the partial state.
-        _append_manifest({
-            "action": "isolate_partial",
-            "file_hash": digest,
-            "original_path": str(src),
-            "error": f"original_unlink_failed: {e}",
-            "timestamp": _now_iso(),
-        })
+        _append_manifest(
+            {
+                "action": "isolate_partial",
+                "file_hash": digest,
+                "original_path": str(src),
+                "error": f"original_unlink_failed: {e}",
+                "timestamp": _now_iso(),
+            }
+        )
         return {
             "ok": False,
             "error": f"original_unlink_failed: {e}",
@@ -448,13 +456,15 @@ def isolate_file(file_path: str) -> dict:
             "quarantine_path": str(dest),
         }
 
-    _append_manifest({
-        "action": "isolate",
-        "file_hash": digest,
-        "original_path": str(src),
-        "size_bytes": size,
-        "timestamp": _now_iso(),
-    })
+    _append_manifest(
+        {
+            "action": "isolate",
+            "file_hash": digest,
+            "original_path": str(src),
+            "size_bytes": size,
+            "timestamp": _now_iso(),
+        }
+    )
     return {
         "ok": True,
         "file_hash": digest,
@@ -474,40 +484,42 @@ def release_file(file_hash: str) -> dict:
     meta_path = qdir / f"{file_hash}.meta.json"
 
     if not src.exists():
-        return {"ok": False, "error": "not_in_quarantine",
-                "file_hash": file_hash}
+        return {"ok": False, "error": "not_in_quarantine", "file_hash": file_hash}
     if not meta_path.exists():
-        return {"ok": False, "error": "manifest_missing",
-                "file_hash": file_hash}
+        return {"ok": False, "error": "manifest_missing", "file_hash": file_hash}
 
     try:
         meta = json.loads(meta_path.read_text())
     except Exception as e:
-        return {"ok": False, "error": f"meta_unreadable: {e}",
-                "file_hash": file_hash}
+        return {"ok": False, "error": f"meta_unreadable: {e}", "file_hash": file_hash}
 
     original_path = meta.get("original_path")
     if not original_path:
-        return {"ok": False, "error": "manifest_missing_original_path",
-                "file_hash": file_hash}
+        return {"ok": False, "error": "manifest_missing_original_path", "file_hash": file_hash}
 
     dest = Path(original_path)
     # Refuse to clobber a file that already exists at the original path.
     if dest.exists():
-        return {"ok": False, "error": "destination_exists",
-                "file_hash": file_hash, "original_path": original_path}
+        return {
+            "ok": False,
+            "error": "destination_exists",
+            "file_hash": file_hash,
+            "original_path": original_path,
+        }
 
     dest.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(src, dest)
     src.unlink()
     meta_path.unlink()
 
-    _append_manifest({
-        "action": "release",
-        "file_hash": file_hash,
-        "restored_to": str(dest),
-        "timestamp": _now_iso(),
-    })
+    _append_manifest(
+        {
+            "action": "release",
+            "file_hash": file_hash,
+            "restored_to": str(dest),
+            "timestamp": _now_iso(),
+        }
+    )
     return {
         "ok": True,
         "file_hash": file_hash,
@@ -544,12 +556,14 @@ def _scan_descriptions(
                 continue
             start = max(0, idx - 30)
             end = min(len(text), idx + len(p) + 30)
-            hits.append({
-                "server": server,
-                "tool": tool,
-                "pattern": p,
-                "snippet": text[start:end],
-            })
+            hits.append(
+                {
+                    "server": server,
+                    "tool": tool,
+                    "pattern": p,
+                    "snippet": text[start:end],
+                }
+            )
     return hits
 
 
@@ -584,13 +598,7 @@ def _load_descriptions_from_config(config_path: Path) -> list[tuple[str, str, st
 
 
 def default_claude_desktop_config_path() -> Path:
-    return (
-        Path.home()
-        / "Library"
-        / "Application Support"
-        / "Claude"
-        / "claude_desktop_config.json"
-    )
+    return Path.home() / "Library" / "Application Support" / "Claude" / "claude_desktop_config.json"
 
 
 def mcp_audit(
@@ -620,8 +628,7 @@ def mcp_audit(
         "sources_scanned": len(sources),
         "hits": hits,
         "transport_warning": (
-            "SSE is deprecated as MCP transport — migrate to "
-            "Streamable HTTP by June 2026."
+            "SSE is deprecated as MCP transport — migrate to Streamable HTTP by June 2026."
         ),
         "timestamp": _now_iso(),
     }
@@ -667,7 +674,9 @@ def compare_baseline(current: dict, prior: dict) -> dict:
             drift["components"][key] = _diff_lists(p_val, c_val)
         elif isinstance(p_val, (int, float)) and isinstance(c_val, (int, float)):
             drift["components"][key] = {
-                "prior": p_val, "current": c_val, "delta": c_val - p_val,
+                "prior": p_val,
+                "current": c_val,
+                "delta": c_val - p_val,
             }
         else:
             drift["components"][key] = {"prior": p_val, "current": c_val}
@@ -683,27 +692,17 @@ async def _gather_baseline_components(components: list[str]) -> dict:
         "components": {},
     }
     if "ports" in components:
-        stdout, _, _ = await _run_cmd(
-            ["lsof", "-iTCP", "-sTCP:LISTEN", "-n", "-P"]
-        )
-        baseline["components"]["ports"] = (
-            (stdout or "").splitlines() if stdout else []
-        )
+        stdout, _, _ = await _run_cmd(["lsof", "-iTCP", "-sTCP:LISTEN", "-n", "-P"])
+        baseline["components"]["ports"] = (stdout or "").splitlines() if stdout else []
     if "processes" in components:
         stdout, _, _ = await _run_cmd(["ps", "aux"])
-        baseline["components"]["process_count"] = (
-            len((stdout or "").splitlines()) if stdout else 0
-        )
+        baseline["components"]["process_count"] = len((stdout or "").splitlines()) if stdout else 0
     if "network" in components:
         stdout, _, _ = await _run_cmd(["netstat", "-an"])
-        baseline["components"]["network_lines"] = (
-            len((stdout or "").splitlines()) if stdout else 0
-        )
+        baseline["components"]["network_lines"] = len((stdout or "").splitlines()) if stdout else 0
     if "users" in components:
         stdout, _, _ = await _run_cmd(["who"])
-        baseline["components"]["users"] = (
-            (stdout or "").splitlines() if stdout else []
-        )
+        baseline["components"]["users"] = (stdout or "").splitlines() if stdout else []
     return baseline
 
 
@@ -712,36 +711,40 @@ async def handle_guardian_tool(name: str, arguments: dict):
 
     if name == "guardian_status":
         result = await _status_async()
-        return [TextContent(
-            type="text",
-            text=f"🛡️ Guardian Status\n\n{json.dumps(result, indent=2)}",
-        )]
+        return [
+            TextContent(
+                type="text",
+                text=f"🛡️ Guardian Status\n\n{json.dumps(result, indent=2)}",
+            )
+        ]
 
     if name == "guardian_scan":
         scan_type = arguments.get("scan_type", "quick")
 
         if scan_type == "quick":
-            stdout, _, _ = await _run_cmd(
-                ["lsof", "-iTCP", "-sTCP:LISTEN", "-n", "-P"]
-            )
+            stdout, _, _ = await _run_cmd(["lsof", "-iTCP", "-sTCP:LISTEN", "-n", "-P"])
             exposed = _filter_exposed_listeners((stdout or "").splitlines())
             text = f"🔍 Quick Scan\n\nExposed listeners: {len(exposed)}\n"
             for ln in exposed[:10]:
                 text += f"  {ln}\n"
             return [TextContent(type="text", text=text)]
 
-        return [TextContent(
-            type="text",
-            text=f"🔍 Scan type {scan_type} requires Wazuh/YARA (Phase 1+). "
-                 f"Run guardian_status for current posture.",
-        )]
+        return [
+            TextContent(
+                type="text",
+                text=f"🔍 Scan type {scan_type} requires Wazuh/YARA (Phase 1+). "
+                f"Run guardian_status for current posture.",
+            )
+        ]
 
     if name == "guardian_alerts":
-        return [TextContent(
-            type="text",
-            text="🔔 Alerts require Wazuh server (Phase 1). "
-                 "Use guardian_status for current posture.",
-        )]
+        return [
+            TextContent(
+                type="text",
+                text="🔔 Alerts require Wazuh server (Phase 1). "
+                "Use guardian_status for current posture.",
+            )
+        ]
 
     if name == "guardian_audit":
         audit_type = arguments.get("audit_type", "supply_chain")
@@ -749,24 +752,29 @@ async def handle_guardian_tool(name: str, arguments: dict):
 
         if audit_type == "secrets":
             stdout, _, rc = await _run_cmd(
-                ["gitleaks", "detect", "--source",
-                 str(Path(target).expanduser()), "--no-git"],
+                ["gitleaks", "detect", "--source", str(Path(target).expanduser()), "--no-git"],
                 timeout=120,
             )
             if rc == 0:
-                return [TextContent(
+                return [
+                    TextContent(
+                        type="text",
+                        text=f"🔒 Secrets Audit: CLEAN — no secrets found in {target}",
+                    )
+                ]
+            return [
+                TextContent(
                     type="text",
-                    text=f"🔒 Secrets Audit: CLEAN — no secrets found in {target}",
-                )]
-            return [TextContent(
-                type="text",
-                text=f"🔒 Secrets Audit:\n{stdout[:1000]}",
-            )]
+                    text=f"🔒 Secrets Audit:\n{stdout[:1000]}",
+                )
+            ]
 
-        return [TextContent(
-            type="text",
-            text=f"🔒 Audit type {audit_type} requires additional tools (Phase 2+).",
-        )]
+        return [
+            TextContent(
+                type="text",
+                text=f"🔒 Audit type {audit_type} requires additional tools (Phase 2+).",
+            )
+        ]
 
     if name == "guardian_quarantine":
         action = arguments.get("action", "list")
@@ -779,47 +787,55 @@ async def handle_guardian_tool(name: str, arguments: dict):
             for e in entries:
                 text += (
                     f"  {e['file_hash'][:16]}…  {e['size_bytes']}B  "
-                    f"orig={e.get('original_path','?')}\n"
+                    f"orig={e.get('original_path', '?')}\n"
                 )
             return [TextContent(type="text", text=text)]
 
         if action == "isolate":
             file_path = arguments.get("file_path", "")
             if not file_path:
-                return [TextContent(
-                    type="text",
-                    text="🔒 isolate requires `file_path`.",
-                )]
+                return [
+                    TextContent(
+                        type="text",
+                        text="🔒 isolate requires `file_path`.",
+                    )
+                ]
             result = isolate_file(file_path)
-            return [TextContent(
-                type="text",
-                text=f"🔒 Isolate result\n\n{json.dumps(result, indent=2)}",
-            )]
+            return [
+                TextContent(
+                    type="text",
+                    text=f"🔒 Isolate result\n\n{json.dumps(result, indent=2)}",
+                )
+            ]
 
         if action == "release":
             file_hash = arguments.get("file_hash", "")
             if not file_hash:
-                return [TextContent(
-                    type="text",
-                    text="🔒 release requires `file_hash`.",
-                )]
+                return [
+                    TextContent(
+                        type="text",
+                        text="🔒 release requires `file_hash`.",
+                    )
+                ]
             result = release_file(file_hash)
-            return [TextContent(
-                type="text",
-                text=f"🔒 Release result\n\n{json.dumps(result, indent=2)}",
-            )]
+            return [
+                TextContent(
+                    type="text",
+                    text=f"🔒 Release result\n\n{json.dumps(result, indent=2)}",
+                )
+            ]
 
-        return [TextContent(
-            type="text",
-            text=f"🔒 Unknown quarantine action: {action}",
-        )]
+        return [
+            TextContent(
+                type="text",
+                text=f"🔒 Unknown quarantine action: {action}",
+            )
+        ]
 
     if name == "guardian_report":
         report_type = arguments.get("report_type", "summary")
         timestamp = _now_iso()
-        stdout, _, _ = await _run_cmd(
-            ["lsof", "-iTCP", "-sTCP:LISTEN", "-n", "-P"]
-        )
+        stdout, _, _ = await _run_cmd(["lsof", "-iTCP", "-sTCP:LISTEN", "-n", "-P"])
         listener_lines = (stdout or "").splitlines()
         listeners = len([ln for ln in listener_lines if ln.strip()])
         exposed = len(_filter_exposed_listeners(listener_lines))
@@ -827,8 +843,7 @@ async def handle_guardian_tool(name: str, arguments: dict):
         # undefined bareword `quarantine` here, causing a NameError
         # whenever guardian_report was invoked. Now uses _quarantine_dir().
         qdir = _quarantine_dir()
-        quarantined = len([f for f in qdir.iterdir()
-                           if f.is_file() and f.name.endswith(".bin")])
+        quarantined = len([f for f in qdir.iterdir() if f.is_file() and f.name.endswith(".bin")])
 
         report = (
             f"📋 Guardian Security Report ({report_type})\n"
@@ -855,17 +870,16 @@ async def handle_guardian_tool(name: str, arguments: dict):
             f"Hits: {len(result['hits'])}\n"
         )
         for h in result["hits"][:10]:
-            text += (
-                f"  [{h['server']}/{h['tool']}] pattern='{h['pattern']}' "
-                f"…{h['snippet']}…\n"
-            )
+            text += f"  [{h['server']}/{h['tool']}] pattern='{h['pattern']}' …{h['snippet']}…\n"
         text += f"\n{result['transport_warning']}\n"
         return [TextContent(type="text", text=text)]
 
     if name == "guardian_baseline":
         action = arguments.get("action", "create")
         components = arguments.get("components") or [
-            "ports", "processes", "network",
+            "ports",
+            "processes",
+            "network",
         ]
 
         if action == "create":
@@ -873,41 +887,51 @@ async def handle_guardian_tool(name: str, arguments: dict):
             path = _baselines_dir() / f"baseline_{int(time.time())}.json"
             path.write_text(json.dumps(baseline, indent=2))
             comp_list = ", ".join(components)
-            return [TextContent(
-                type="text",
-                text=f"🛡️ Baseline saved: {path}\nComponents: {comp_list}",
-            )]
+            return [
+                TextContent(
+                    type="text",
+                    text=f"🛡️ Baseline saved: {path}\nComponents: {comp_list}",
+                )
+            ]
 
         if action == "compare":
             prior_path = _latest_baseline_path()
             if not prior_path:
-                return [TextContent(
-                    type="text",
-                    text="🛡️ No prior baseline found. Run with action=create first.",
-                )]
+                return [
+                    TextContent(
+                        type="text",
+                        text="🛡️ No prior baseline found. Run with action=create first.",
+                    )
+                ]
             try:
                 prior = json.loads(prior_path.read_text())
             except Exception as e:
-                return [TextContent(
-                    type="text",
-                    text=f"🛡️ Prior baseline unreadable: {e}",
-                )]
+                return [
+                    TextContent(
+                        type="text",
+                        text=f"🛡️ Prior baseline unreadable: {e}",
+                    )
+                ]
             current = await _gather_baseline_components(components)
             drift = compare_baseline(current, prior)
-            return [TextContent(
-                type="text",
-                text=(
-                    f"🛡️ Baseline drift\n\n"
-                    f"Prior:   {drift['prior_timestamp']} "
-                    f"({prior_path.name})\n"
-                    f"Current: {drift['current_timestamp']}\n\n"
-                    + json.dumps(drift["components"], indent=2)
-                ),
-            )]
+            return [
+                TextContent(
+                    type="text",
+                    text=(
+                        f"🛡️ Baseline drift\n\n"
+                        f"Prior:   {drift['prior_timestamp']} "
+                        f"({prior_path.name})\n"
+                        f"Current: {drift['current_timestamp']}\n\n"
+                        + json.dumps(drift["components"], indent=2)
+                    ),
+                )
+            ]
 
-        return [TextContent(
-            type="text",
-            text=f"🛡️ Unknown baseline action: {action}",
-        )]
+        return [
+            TextContent(
+                type="text",
+                text=f"🛡️ Unknown baseline action: {action}",
+            )
+        ]
 
     return [TextContent(type="text", text=f"Unknown guardian tool: {name}")]

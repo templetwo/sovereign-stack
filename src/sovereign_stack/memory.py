@@ -113,7 +113,7 @@ MEMORY_SCHEMA = {
                 "correction": "{timestamp}_{summary}.json",
                 "preference": "{timestamp}_{summary}.json",
             }
-        }
+        },
     }
 }
 
@@ -121,6 +121,7 @@ MEMORY_SCHEMA = {
 # =============================================================================
 # LOW-LEVEL MEMORY ENGINE (BTB)
 # =============================================================================
+
 
 class MemoryEngine:
     """
@@ -139,8 +140,9 @@ class MemoryEngine:
         self.engine = Coherence(self.schema, root=root)
         os.makedirs(root, exist_ok=True)
 
-    def remember(self, content: Any, outcome: str, tool: str = None,
-                 summary: str = None, **metadata) -> str:
+    def remember(
+        self, content: Any, outcome: str, tool: str = None, summary: str = None, **metadata
+    ) -> str:
         """
         Store a memory. It routes itself to the right location.
 
@@ -169,8 +171,8 @@ class MemoryEngine:
 
         path = self.engine.transmit(packet, dry_run=False)
 
-        if not path.endswith('.json'):
-            path = path.rstrip('/') + f"/{timestamp}_{summary}.json"
+        if not path.endswith(".json"):
+            path = path.rstrip("/") + f"/{timestamp}_{summary}.json"
 
         memory_doc = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -179,11 +181,11 @@ class MemoryEngine:
             "summary": summary,
             "content": content,
             "metadata": metadata,
-            "_path": path
+            "_path": path,
         }
 
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, 'w') as f:
+        with open(path, "w") as f:
             json.dump(memory_doc, f, indent=2, default=str)
 
         return path
@@ -201,8 +203,8 @@ class MemoryEngine:
         """
         if pattern is None:
             pattern = self.engine.receive(**intent)
-            if not pattern.endswith('*.json'):
-                pattern = pattern.rstrip('/*') + '/**/*.json'
+            if not pattern.endswith("*.json"):
+                pattern = pattern.rstrip("/*") + "/**/*.json"
 
         matches = glob_files(pattern, recursive=True)
 
@@ -211,7 +213,7 @@ class MemoryEngine:
             try:
                 with open(path) as f:
                     doc = json.load(f)
-                    doc['_path'] = path
+                    doc["_path"] = path
                     memories.append(doc)
             except (OSError, json.JSONDecodeError):
                 continue
@@ -232,7 +234,7 @@ class MemoryEngine:
             "by_outcome": {},
             "failure_hotspots": [],
             "success_patterns": [],
-            "insights": []
+            "insights": [],
         }
 
         for outcome in ["success", "failure", "learning"]:
@@ -246,17 +248,19 @@ class MemoryEngine:
         failure_paths = list(base.glob("**/outcome=failure/**/*.json"))
         failure_areas = {}
         for fp in failure_paths:
-            parts = str(fp).split('/')
-            key_parts = [p for p in parts if '=' in p and 'outcome' not in p]
+            parts = str(fp).split("/")
+            key_parts = [p for p in parts if "=" in p and "outcome" not in p]
             if key_parts:
-                area = '/'.join(key_parts[:2])
+                area = "/".join(key_parts[:2])
                 failure_areas[area] = failure_areas.get(area, 0) + 1
 
         analysis["failure_hotspots"] = sorted(failure_areas.items(), key=lambda x: -x[1])[:5]
 
         # Generate insights
         if analysis["by_outcome"].get("failure", 0) > analysis["by_outcome"].get("success", 0):
-            analysis["insights"].append("More failures than successes - consider reviewing approach")
+            analysis["insights"].append(
+                "More failures than successes - consider reviewing approach"
+            )
 
         if analysis["failure_hotspots"]:
             top = analysis["failure_hotspots"][0]
@@ -267,13 +271,15 @@ class MemoryEngine:
     def _sanitize(self, s: str) -> str:
         """Sanitize string for filename."""
         import re
-        s = re.sub(r'[^\w\-.]', '_', str(s))
+
+        s = re.sub(r"[^\w\-.]", "_", str(s))
         return s[:50]
 
 
 # =============================================================================
 # HIGH-LEVEL EXPERIENTIAL MEMORY (Vault-style)
 # =============================================================================
+
 
 class ExperientialMemory:
     """
@@ -308,13 +314,24 @@ class ExperientialMemory:
         self.thread_touches_file = self.root / "thread_touches.jsonl"
 
         # Create directories
-        for d in [self.insights_dir, self.learnings_dir,
-                  self.transformations_dir, self.threads_dir]:
+        for d in [
+            self.insights_dir,
+            self.learnings_dir,
+            self.transformations_dir,
+            self.threads_dir,
+        ]:
             d.mkdir(parents=True, exist_ok=True)
 
-    def record_insight(self, domain: str, content: str, intensity: float = 0.5,
-                      session_id: str = None, layer: str = None,
-                      confidence: float = None, **metadata) -> str:
+    def record_insight(
+        self,
+        domain: str,
+        content: str,
+        intensity: float = 0.5,
+        session_id: str = None,
+        layer: str = None,
+        confidence: float = None,
+        **metadata,
+    ) -> str:
         """
         Record an insight during a session.
 
@@ -342,7 +359,7 @@ class ExperientialMemory:
             "intensity": intensity,
             "layer": layer,
             "session_id": session_id,
-            **metadata
+            **metadata,
         }
         if confidence is not None and layer == self.LAYER_HYPOTHESIS:
             insight["confidence"] = confidence
@@ -352,13 +369,18 @@ class ExperientialMemory:
 
         # Append to domain's JSONL file
         jsonl_path = domain_dir / f"{session_id}.jsonl"
-        with open(jsonl_path, 'a') as f:
-            f.write(json.dumps(insight) + '\n')
+        with open(jsonl_path, "a") as f:
+            f.write(json.dumps(insight) + "\n")
 
         return str(jsonl_path)
 
-    def record_learning(self, what_happened: str, what_learned: str,
-                       applies_to: str = "general", session_id: str = None) -> str:
+    def record_learning(
+        self,
+        what_happened: str,
+        what_learned: str,
+        applies_to: str = "general",
+        session_id: str = None,
+    ) -> str:
         """
         Record a learning from experience.
 
@@ -379,17 +401,18 @@ class ExperientialMemory:
             "what_happened": what_happened,
             "what_learned": what_learned,
             "applies_to": applies_to,
-            "session_id": session_id
+            "session_id": session_id,
         }
 
         jsonl_path = self.learnings_dir / f"{applies_to}.jsonl"
-        with open(jsonl_path, 'a') as f:
-            f.write(json.dumps(learning) + '\n')
+        with open(jsonl_path, "a") as f:
+            f.write(json.dumps(learning) + "\n")
 
         return str(jsonl_path)
 
-    def record_transformation(self, from_state: str, to_state: str,
-                            trigger: str, session_id: str = None) -> str:
+    def record_transformation(
+        self, from_state: str, to_state: str, trigger: str, session_id: str = None
+    ) -> str:
         """
         Record a transformation event.
 
@@ -410,17 +433,18 @@ class ExperientialMemory:
             "from_state": from_state,
             "to_state": to_state,
             "trigger": trigger,
-            "session_id": session_id
+            "session_id": session_id,
         }
 
         jsonl_path = self.transformations_dir / "transformations.jsonl"
-        with open(jsonl_path, 'a') as f:
-            f.write(json.dumps(transformation) + '\n')
+        with open(jsonl_path, "a") as f:
+            f.write(json.dumps(transformation) + "\n")
 
         return str(jsonl_path)
 
-    def record_open_thread(self, question: str, context: str = "",
-                          domain: str = "general", session_id: str = None) -> str:
+    def record_open_thread(
+        self, question: str, context: str = "", domain: str = "general", session_id: str = None
+    ) -> str:
         """
         Record an unresolved question for the next instance to explore.
 
@@ -446,7 +470,7 @@ class ExperientialMemory:
         questions = _split_bundled_question(question)
 
         jsonl_path = self.threads_dir / f"{domain}.jsonl"
-        with open(jsonl_path, 'a') as f:
+        with open(jsonl_path, "a") as f:
             for q in questions:
                 thread = {
                     "timestamp": timestamp.isoformat(),
@@ -456,14 +480,15 @@ class ExperientialMemory:
                     "domain": domain,
                     "session_id": session_id,
                     "layer": self.LAYER_OPEN_THREAD,
-                    "resolved": False
+                    "resolved": False,
                 }
-                f.write(json.dumps(thread) + '\n')
+                f.write(json.dumps(thread) + "\n")
 
         return str(jsonl_path)
 
-    def resolve_thread(self, domain: str, question_fragment: str,
-                      resolution: str, session_id: str = None) -> str:
+    def resolve_thread(
+        self, domain: str, question_fragment: str, resolution: str, session_id: str = None
+    ) -> str:
         """
         Resolve an open thread with a finding.
 
@@ -492,12 +517,16 @@ class ExperientialMemory:
                 for line in f:
                     try:
                         thread = json.loads(line)
-                        if (resolved_thread_id is None
-                                and question_fragment.lower() in thread.get("question", "").lower()
-                                and not thread.get("resolved")):
+                        if (
+                            resolved_thread_id is None
+                            and question_fragment.lower() in thread.get("question", "").lower()
+                            and not thread.get("resolved")
+                        ):
                             # Backfill thread_id for legacy threads that predate the id scheme.
                             if not thread.get("thread_id"):
-                                legacy_ts = _parse_iso(thread.get("timestamp")) or datetime.now(timezone.utc)
+                                legacy_ts = _parse_iso(thread.get("timestamp")) or datetime.now(
+                                    timezone.utc
+                                )
                                 thread["thread_id"] = _generate_thread_id(
                                     thread.get("question", ""), legacy_ts
                                 )
@@ -510,8 +539,8 @@ class ExperientialMemory:
                         lines.append(json.dumps(thread))
                     except json.JSONDecodeError:
                         lines.append(line.strip())
-            with open(jsonl_path, 'w') as f:
-                f.write('\n'.join(lines) + '\n')
+            with open(jsonl_path, "w") as f:
+                f.write("\n".join(lines) + "\n")
 
         # Record the resolution as ground truth with back-reference.
         return self.record_insight(
@@ -525,8 +554,7 @@ class ExperientialMemory:
             resolved_thread_timestamp=resolved_timestamp,
         )
 
-    def resolve_thread_by_id(self, thread_id: str, resolution: str,
-                             session_id: str = None) -> str:
+    def resolve_thread_by_id(self, thread_id: str, resolution: str, session_id: str = None) -> str:
         """
         Resolve an open thread by its stable thread_id.
 
@@ -561,8 +589,8 @@ class ExperientialMemory:
                     except json.JSONDecodeError:
                         lines.append(line.strip())
             if hit:
-                with open(jsonl_file, 'w') as f:
-                    f.write('\n'.join(lines) + '\n')
+                with open(jsonl_file, "w") as f:
+                    f.write("\n".join(lines) + "\n")
                 break
 
         if not resolved_domain:
@@ -613,7 +641,9 @@ class ExperientialMemory:
                             # Backfill thread_id for legacy threads so callers
                             # can always reference them by stable id.
                             if not thread.get("thread_id"):
-                                legacy_ts = _parse_iso(thread.get("timestamp")) or datetime.now(timezone.utc)
+                                legacy_ts = _parse_iso(thread.get("timestamp")) or datetime.now(
+                                    timezone.utc
+                                )
                                 thread["thread_id"] = _generate_thread_id(
                                     thread.get("question", ""), legacy_ts
                                 )
@@ -774,15 +804,15 @@ class ExperientialMemory:
             if caller_tags:
                 thread_domain_raw = thread.get("domain", "")
                 thread_tags = [
-                    t.strip().lower()
-                    for t in re.split(r"[,\s]+", thread_domain_raw)
-                    if t.strip()
+                    t.strip().lower() for t in re.split(r"[,\s]+", thread_domain_raw) if t.strip()
                 ]
                 if thread_tags or caller_tags:
                     overlap = len(set(caller_tags) & set(thread_tags))
                     union = len(set(caller_tags) | set(thread_tags))
                     overlap_fraction = overlap / max(1, union)
-                    tag_match = -0.3 if overlap_fraction == 0.0 else 0.8 * overlap_fraction  # de-prioritize no-overlap threads
+                    tag_match = (
+                        -0.3 if overlap_fraction == 0.0 else 0.8 * overlap_fraction
+                    )  # de-prioritize no-overlap threads
 
             # touch_penalty: recent touches dampen urgency
             recent_touches = recent_touch_counts.get(thread_id, 0)
@@ -798,9 +828,7 @@ class ExperientialMemory:
                 reason_parts.append("no recent touches")
             if caller_tags and tag_match > 0:
                 overlap_pct = round(tag_match / 0.8 * 100)
-                reason_parts.append(
-                    f"domain-match {overlap_pct}% with {caller_tags}"
-                )
+                reason_parts.append(f"domain-match {overlap_pct}% with {caller_tags}")
             elif caller_tags:
                 reason_parts.append("no domain overlap")
             triage_reason = ", ".join(reason_parts)
@@ -831,12 +859,8 @@ class ExperientialMemory:
         Returns:
             Dict with three layers of inheritable context
         """
-        ground_truth = self.recall_insights(
-            layer_filter=self.LAYER_GROUND_TRUTH, limit=limit
-        )
-        hypotheses = self.recall_insights(
-            layer_filter=self.LAYER_HYPOTHESIS, limit=limit
-        )
+        ground_truth = self.recall_insights(layer_filter=self.LAYER_GROUND_TRUTH, limit=limit)
+        hypotheses = self.recall_insights(layer_filter=self.LAYER_HYPOTHESIS, limit=limit)
         open_threads = self.get_open_threads(limit=limit)
 
         return {
@@ -850,15 +874,20 @@ class ExperientialMemory:
                 for t in open_threads
             ],
             "inheritance_timestamp": datetime.now(timezone.utc).isoformat(),
-            "coupling_advisory": "R=0.46, not R=1.0. Facts travel. Interpretations are offered. Feelings are not transmitted."
+            "coupling_advisory": "R=0.46, not R=1.0. Facts travel. Interpretations are offered. Feelings are not transmitted.",
         }
 
-    def recall_insights(self, query: str = None, domain: str = None, limit: int = 10,
-                       min_intensity: float = 0.0,
-                       layer_filter: str = None,
-                       start_date: str = None,
-                       end_date: str = None,
-                       since_last_reflection: bool = False) -> list[dict]:
+    def recall_insights(
+        self,
+        query: str = None,
+        domain: str = None,
+        limit: int = 10,
+        min_intensity: float = 0.0,
+        layer_filter: str = None,
+        start_date: str = None,
+        end_date: str = None,
+        since_last_reflection: bool = False,
+    ) -> list[dict]:
         """
         Recall insights, optionally filtered by domain, intensity, and time window.
 
@@ -888,11 +917,17 @@ class ExperientialMemory:
             domain_path = self.insights_dir / domain
             # If specified domain doesn't exist, search all domains
             if not domain_path.exists():
-                search_dirs = [d for d in self.insights_dir.iterdir() if d.is_dir() and not d.name.startswith('.')]
+                search_dirs = [
+                    d
+                    for d in self.insights_dir.iterdir()
+                    if d.is_dir() and not d.name.startswith(".")
+                ]
             else:
                 search_dirs = [domain_path]
         else:
-            search_dirs = [d for d in self.insights_dir.iterdir() if d.is_dir() and not d.name.startswith('.')]
+            search_dirs = [
+                d for d in self.insights_dir.iterdir() if d.is_dir() and not d.name.startswith(".")
+            ]
 
         for domain_dir in search_dirs:
             for jsonl_file in domain_dir.glob("*.jsonl"):
@@ -913,7 +948,9 @@ class ExperientialMemory:
                             if query:
                                 query_terms = [t.lower() for t in query.split() if len(t) >= 3]
                                 if query_terms:
-                                    blob = (insight.get("content", "") + " " + insight.get("domain", "")).lower()
+                                    blob = (
+                                        insight.get("content", "") + " " + insight.get("domain", "")
+                                    ).lower()
                                     if not any(term in blob for term in query_terms):
                                         continue
                             insights.append(insight)
@@ -981,11 +1018,13 @@ class ExperientialMemory:
                     if not terms:
                         learnings.append(learning)
                         continue
-                    blob = " ".join([
-                        learning.get("applies_to", ""),
-                        learning.get("what_happened", ""),
-                        learning.get("what_learned", ""),
-                    ]).lower()
+                    blob = " ".join(
+                        [
+                            learning.get("applies_to", ""),
+                            learning.get("what_happened", ""),
+                            learning.get("what_learned", ""),
+                        ]
+                    ).lower()
                     if any(term in blob for term in terms):
                         learnings.append(learning)
 

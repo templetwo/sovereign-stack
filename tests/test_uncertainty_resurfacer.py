@@ -70,6 +70,7 @@ class CommsStore:
     separately so tests can assert the distinction between browse-read
     (which a bridge would add to read_by) and deliberate acknowledgment.
     """
+
     def __init__(self):
         self.posts: list[dict] = []
         self.acks: dict[str, list[dict]] = {}
@@ -81,7 +82,7 @@ class CommsStore:
             "sender": sender,
             "content": content,
             "channel": channel,
-            "read_by": [],          # bridge populates this on glance
+            "read_by": [],  # bridge populates this on glance
             **(extra_fields or {}),
         }
         self.posts.append(rec)
@@ -96,11 +97,13 @@ class CommsStore:
                 break
 
     def acknowledge(self, message_id, instance_id, note=""):
-        self.acks.setdefault(message_id, []).append({
-            "message_id": message_id,
-            "instance_id": instance_id,
-            "note": note,
-        })
+        self.acks.setdefault(message_id, []).append(
+            {
+                "message_id": message_id,
+                "instance_id": instance_id,
+                "note": note,
+            }
+        )
 
     def get_acks(self, message_id):
         return list(self.acks.get(message_id, []))
@@ -118,16 +121,20 @@ def make_daemon(
 ):
     comms = comms or CommsStore()
     now = now or datetime(2026, 4, 25, 12, 0, 0, tzinfo=timezone.utc)
-    uncertainties = uncertainties if uncertainties is not None else [
-        {
-            "marker_id": "u1",
-            "what": "Test uncertainty one",
-            "why": "Because testing",
-            "timestamp": (now - timedelta(days=10)).isoformat(),
-            "confidence": 0.3,
-            "what_would_help": ["ask Anthony", "run an experiment"],
-        },
-    ]
+    uncertainties = (
+        uncertainties
+        if uncertainties is not None
+        else [
+            {
+                "marker_id": "u1",
+                "what": "Test uncertainty one",
+                "why": "Because testing",
+                "timestamp": (now - timedelta(days=10)).isoformat(),
+                "confidence": 0.3,
+                "what_would_help": ["ask Anthony", "run an experiment"],
+            },
+        ]
+    )
 
     def grounding_fn(claim, evidence_paths, **kw):
         if grounding_accept:
@@ -154,8 +161,7 @@ def make_daemon(
         state_path=root / "daemons" / "uncertainty_state.json",
         halt_dir=root / "daemons" / "halts",
         uncertainty_log_path=root / "consciousness" / "uncertainty_log.json",
-        compass_fn=lambda action, stakes: {
-            "decision": compass_decision, "rationale": "test"},
+        compass_fn=lambda action, stakes: {"decision": compass_decision, "rationale": "test"},
         uncertainty_fn=lambda: uncertainties,
         comms_post_fn=comms.post,
         comms_get_acks_fn=comms.get_acks,
@@ -223,7 +229,8 @@ class TestAckDistinctFromReadBy:
 class TestCompassGating:
     def test_compass_pause_skips_post(self, tmp_sovereign):
         daemon, comms = make_daemon(
-            tmp_sovereign, compass_decision=COMPASS_PAUSE,
+            tmp_sovereign,
+            compass_decision=COMPASS_PAUSE,
         )
         r = daemon.run()
         assert r.outcome == OUTCOME_PAUSED
@@ -232,7 +239,8 @@ class TestCompassGating:
 
     def test_compass_proceed_allows_post(self, tmp_sovereign):
         daemon, comms = make_daemon(
-            tmp_sovereign, compass_decision=COMPASS_PROCEED,
+            tmp_sovereign,
+            compass_decision=COMPASS_PROCEED,
         )
         r = daemon.run()
         assert r.outcome == OUTCOME_POSTED
@@ -248,7 +256,8 @@ class TestGroundingGate:
         the unacked threshold — the circuit breaker only counts posts
         that were actually posted and not acked."""
         daemon, comms = make_daemon(
-            tmp_sovereign, grounding_accept=False,
+            tmp_sovereign,
+            grounding_accept=False,
         )
         r = daemon.run()
         assert r.outcome == OUTCOME_GROUNDING_FAILED
@@ -309,9 +318,7 @@ class TestHalt:
         body = Path(r.halt_path).read_text()
 
         # Filter to uncertainty digests; halt-alert posts are separate.
-        digest_ids = [
-            p["id"] for p in comms.posts if p["sender"] == SENDER_UNCERTAINTY
-        ]
+        digest_ids = [p["id"] for p in comms.posts if p["sender"] == SENDER_UNCERTAINTY]
         assert len(digest_ids) == CONSECUTIVE_UNACKED_THRESHOLD
         # Each of the three digest ids must appear in the halt note.
         for mid in digest_ids:
@@ -338,8 +345,7 @@ class TestHalt:
 
         r = daemon.run()
         assert r.outcome == OUTCOME_POSTED, (
-            "An ack within the window must reset the unacked count and "
-            "allow further posts."
+            "An ack within the window must reset the unacked count and allow further posts."
         )
 
     def test_halt_persists_across_runs(self, tmp_sovereign):
@@ -422,12 +428,16 @@ class TestDigestShape:
     def test_oldest_uncertainties_surface_first(self, tmp_sovereign):
         now = datetime(2026, 4, 25, 12, 0, 0, tzinfo=timezone.utc)
         unc = [
-            {"marker_id": "young",
-             "what": "YOUNG",
-             "timestamp": (now - timedelta(days=1)).isoformat()},
-            {"marker_id": "old",
-             "what": "OLD",
-             "timestamp": (now - timedelta(days=100)).isoformat()},
+            {
+                "marker_id": "young",
+                "what": "YOUNG",
+                "timestamp": (now - timedelta(days=1)).isoformat(),
+            },
+            {
+                "marker_id": "old",
+                "what": "OLD",
+                "timestamp": (now - timedelta(days=100)).isoformat(),
+            },
         ]
         daemon, comms = make_daemon(tmp_sovereign, uncertainties=unc, now=now)
         daemon.run()
@@ -455,16 +465,23 @@ class TestDryRun:
         # Seed a state with three unacked digests.
         state_path = tmp_sovereign / "daemons" / "uncertainty_state.json"
         state_path.parent.mkdir(parents=True, exist_ok=True)
-        state_path.write_text(json.dumps({
-            "schema_version": STATE_SCHEMA_VERSION,
-            "posted_digests": [
-                {"message_id": f"m{i}", "posted_at": "2026-04-20T00:00:00+00:00",
-                 "content_snippet": "x"}
-                for i in range(CONSECUTIVE_UNACKED_THRESHOLD)
-            ],
-            "halted_at": None,
-            "halt_reason": None,
-        }))
+        state_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": STATE_SCHEMA_VERSION,
+                    "posted_digests": [
+                        {
+                            "message_id": f"m{i}",
+                            "posted_at": "2026-04-20T00:00:00+00:00",
+                            "content_snippet": "x",
+                        }
+                        for i in range(CONSECUTIVE_UNACKED_THRESHOLD)
+                    ],
+                    "halted_at": None,
+                    "halt_reason": None,
+                }
+            )
+        )
         r = daemon.run(dry_run=True)
         assert r.outcome == OUTCOME_HALTED
         # No halt file written, no state mutation.
@@ -487,11 +504,15 @@ class TestStateSchema:
         """State files written before schema_version existed must still load."""
         state_path = tmp_sovereign / "daemons" / "uncertainty_state.json"
         state_path.parent.mkdir(parents=True, exist_ok=True)
-        state_path.write_text(json.dumps({
-            "posted_digests": [],
-            "halted_at": None,
-            "halt_reason": None,
-        }))
+        state_path.write_text(
+            json.dumps(
+                {
+                    "posted_digests": [],
+                    "halted_at": None,
+                    "halt_reason": None,
+                }
+            )
+        )
         daemon, _ = make_daemon(tmp_sovereign)
         r = daemon.run()
         assert r.outcome in (OUTCOME_POSTED, OUTCOME_NO_UNCERTAINTIES)
@@ -501,12 +522,16 @@ class TestStateSchema:
         corrupt data on a silent downgrade."""
         state_path = tmp_sovereign / "daemons" / "uncertainty_state.json"
         state_path.parent.mkdir(parents=True, exist_ok=True)
-        state_path.write_text(json.dumps({
-            "schema_version": STATE_SCHEMA_VERSION + 1,
-            "posted_digests": [],
-            "halted_at": None,
-            "halt_reason": None,
-        }))
+        state_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": STATE_SCHEMA_VERSION + 1,
+                    "posted_digests": [],
+                    "halted_at": None,
+                    "halt_reason": None,
+                }
+            )
+        )
         daemon, _ = make_daemon(tmp_sovereign)
         with pytest.raises(ValueError):
             daemon.run()
@@ -545,8 +570,7 @@ class TestSenderTaxonomy:
         daemon.run()  # halt
         for post in comms.posts:
             assert post["sender"].startswith("daemon."), (
-                f"All daemon posts must use the daemon.* prefix. "
-                f"Got: {post['sender']}"
+                f"All daemon posts must use the daemon.* prefix. Got: {post['sender']}"
             )
 
 

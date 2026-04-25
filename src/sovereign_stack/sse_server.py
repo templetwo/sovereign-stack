@@ -28,11 +28,7 @@ sse = SseServerTransport("/messages")
 # Health check endpoint
 async def health(request: Request) -> JSONResponse:
     """Health check for monitoring"""
-    return JSONResponse({
-        "status": "healthy",
-        "service": "sovereign-stack-sse",
-        "version": "1.0.0"
-    })
+    return JSONResponse({"status": "healthy", "service": "sovereign-stack-sse", "version": "1.0.0"})
 
 
 # SSE endpoint - holds connection open for server-sent events
@@ -42,16 +38,15 @@ async def handle_sse(request: Request):
     """
     logger.info(f"New SSE connection from {request.client}")
 
-    async with sse.connect_sse(
-        request.scope,
-        request.receive,
-        request._send
-    ) as (read_stream, write_stream):
+    async with sse.connect_sse(request.scope, request.receive, request._send) as (
+        read_stream,
+        write_stream,
+    ):
         await sovereign_server.run(
             read_stream,
             write_stream,
             sovereign_server.create_initialization_options(),
-            raise_exceptions=True
+            raise_exceptions=True,
         )
 
 
@@ -76,7 +71,7 @@ class SovereignAsgiMiddleware:
                     read_stream,
                     write_stream,
                     sovereign_server.create_initialization_options(),
-                    raise_exceptions=True
+                    raise_exceptions=True,
                 )
         else:
             await self.app(scope, receive, send)
@@ -106,13 +101,7 @@ def main(host: str = "127.0.0.1", port: int = 3434):
     logger.info(f"SSE endpoint: http://{host}:{port}/sse")
     logger.info(f"Health check: http://{host}:{port}/health")
 
-    uvicorn.run(
-        app,
-        host=host,
-        port=port,
-        log_level="info",
-        access_log=True
-    )
+    uvicorn.run(app, host=host, port=port, log_level="info", access_log=True)
 
 
 if __name__ == "__main__":

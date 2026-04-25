@@ -41,12 +41,12 @@ from pathlib import Path
 # ── Status constants ────────────────────────────────────────────────────────
 
 # Aggregate status codes — stable strings, callers branch on them.
-STATUS_OK = "ok"                    # service is in expected state
-STATUS_DEGRADED = "degraded"        # running but health probe failed / stale
-STATUS_DOWN = "down"                # expected running, not running
-STATUS_STALE = "stale"              # periodic, ran but >2x cadence ago
-STATUS_UNKNOWN = "unknown"          # launchctl reports unknown / parse failed
-STATUS_DISABLED = "disabled"        # plist marked disabled — informational
+STATUS_OK = "ok"  # service is in expected state
+STATUS_DEGRADED = "degraded"  # running but health probe failed / stale
+STATUS_DOWN = "down"  # expected running, not running
+STATUS_STALE = "stale"  # periodic, ran but >2x cadence ago
+STATUS_UNKNOWN = "unknown"  # launchctl reports unknown / parse failed
+STATUS_DISABLED = "disabled"  # plist marked disabled — informational
 
 # Endpoint kinds
 KIND_ALWAYS_ON = "always_on"
@@ -74,6 +74,7 @@ class Endpoint:
         log_path: For periodic kinds: file whose mtime is used as the
             "last run" indicator (stdout/stderr file from launchd).
     """
+
     name: str
     label: str | None
     kind: str
@@ -147,8 +148,8 @@ class EndpointStatus:
     name: str
     label: str | None
     kind: str
-    status: str                                # one of STATUS_*
-    launchctl_state: str | None = None      # "running" | "not running" | None
+    status: str  # one of STATUS_*
+    launchctl_state: str | None = None  # "running" | "not running" | None
     pid: int | None = None
     last_exit_code: int | None = None
     http_status: int | None = None
@@ -311,9 +312,7 @@ def check_status(
             status.status = STATUS_DOWN
         else:
             status.status = STATUS_UNKNOWN
-            status.notes.append(
-                f"unrecognized launchctl state: {status.launchctl_state!r}"
-            )
+            status.notes.append(f"unrecognized launchctl state: {status.launchctl_state!r}")
     elif endpoint.kind == KIND_PERIODIC:
         if endpoint.log_path:
             age = _log_age_seconds(endpoint.log_path, now)
@@ -327,9 +326,7 @@ def check_status(
                 status.status = STATUS_OK
             else:
                 status.status = STATUS_STALE
-                status.notes.append(
-                    f"last run {age:.0f}s ago > {tolerance:.0f}s tolerance"
-                )
+                status.notes.append(f"last run {age:.0f}s ago > {tolerance:.0f}s tolerance")
         else:
             # Periodic without a log_path — best we can do is launchctl state.
             # Periodic services frequently report state=not running between
@@ -349,9 +346,7 @@ def check_status(
             if endpoint.health_match:
                 status.http_ok = endpoint.health_match in probe["body"]
                 if not status.http_ok:
-                    status.notes.append(
-                        f"health body missing match {endpoint.health_match!r}"
-                    )
+                    status.notes.append(f"health body missing match {endpoint.health_match!r}")
             else:
                 status.http_ok = True
         else:
@@ -406,14 +401,17 @@ def restart(endpoint: Endpoint) -> ActionResult:
     """
     if not endpoint.label:
         return ActionResult(
-            name=endpoint.name, action="restart",
-            ok=False, stderr="endpoint has no launchctl label",
+            name=endpoint.name,
+            action="restart",
+            ok=False,
+            stderr="endpoint has no launchctl label",
         )
     target = f"gui/{os.getuid()}/{endpoint.label}"
     return _action(
         endpoint.label,
         ["launchctl", "kickstart", "-k", target],
-        "restart", endpoint.name,
+        "restart",
+        endpoint.name,
     )
 
 
@@ -424,14 +422,17 @@ def start(endpoint: Endpoint) -> ActionResult:
     """
     if not endpoint.label:
         return ActionResult(
-            name=endpoint.name, action="start",
-            ok=False, stderr="endpoint has no launchctl label",
+            name=endpoint.name,
+            action="start",
+            ok=False,
+            stderr="endpoint has no launchctl label",
         )
     target = f"gui/{os.getuid()}/{endpoint.label}"
     return _action(
         endpoint.label,
         ["launchctl", "kickstart", target],
-        "start", endpoint.name,
+        "start",
+        endpoint.name,
     )
 
 
@@ -443,14 +444,17 @@ def stop(endpoint: Endpoint) -> ActionResult:
     """
     if not endpoint.label:
         return ActionResult(
-            name=endpoint.name, action="stop",
-            ok=False, stderr="endpoint has no launchctl label",
+            name=endpoint.name,
+            action="stop",
+            ok=False,
+            stderr="endpoint has no launchctl label",
         )
     target = f"gui/{os.getuid()}/{endpoint.label}"
     return _action(
         endpoint.label,
         ["launchctl", "kill", "SIGTERM", target],
-        "stop", endpoint.name,
+        "stop",
+        endpoint.name,
     )
 
 

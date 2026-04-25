@@ -71,6 +71,7 @@ def _make_priors(surface, root, uncertainty=None, honks=None):
 
 # ── Case 1: token budget ─────────────────────────────────────────────────────
 
+
 class TestTokenBudget:
     def test_block_never_exceeds_max_tokens(self, surface, sovereign_root, memory):
         """A reasonable max_tokens ceiling must be respected even with many candidates."""
@@ -102,6 +103,7 @@ class TestTokenBudget:
 
 # ── Case 2: k=1 default ──────────────────────────────────────────────────────
 
+
 class TestKDefaults:
     def test_k_default_is_1_per_bucket(self, surface, sovereign_root, memory):
         """With many matching threads, k=1 returns exactly one thread section."""
@@ -109,9 +111,7 @@ class TestKDefaults:
             memory.record_open_thread(f"Thread {i}", domain="topic")
         priors = _make_priors(surface, sovereign_root)
         result = priors.inject(domain_tags=["topic"], dry_run=True)
-        thread_count = sum(
-            1 for sig in result["included_items"] if sig.startswith("thread:")
-        )
+        thread_count = sum(1 for sig in result["included_items"] if sig.startswith("thread:"))
         assert thread_count == 1, (
             f"Default k=1 should return exactly one thread, got {thread_count}"
         )
@@ -121,21 +121,16 @@ class TestKDefaults:
         for i in range(10):
             memory.record_open_thread(f"Thread {i}", domain="topic")
         priors = _make_priors(surface, sovereign_root)
-        result = priors.inject(
-            domain_tags=["topic"], k=99, max_tokens=4000, dry_run=True
-        )
-        thread_count = sum(
-            1 for sig in result["included_items"] if sig.startswith("thread:")
-        )
+        result = priors.inject(domain_tags=["topic"], k=99, max_tokens=4000, dry_run=True)
+        thread_count = sum(1 for sig in result["included_items"] if sig.startswith("thread:"))
         assert thread_count <= 3
 
 
 # ── Case 3: freshness penalty ────────────────────────────────────────────────
 
+
 class TestFreshnessPenalty:
-    def test_repeated_item_drops_out_on_second_call(
-        self, surface, sovereign_root, memory
-    ):
+    def test_repeated_item_drops_out_on_second_call(self, surface, sovereign_root, memory):
         """The same thread surfaced twice in a row hits the freshness penalty
         on the second call and lands in skipped_stale."""
         memory.record_open_thread("Only thread", domain="solo")
@@ -150,9 +145,7 @@ class TestFreshnessPenalty:
             "Second call should demote the thread into skipped_stale"
         )
 
-    def test_dry_run_does_not_affect_freshness(
-        self, surface, sovereign_root, memory
-    ):
+    def test_dry_run_does_not_affect_freshness(self, surface, sovereign_root, memory):
         """dry_run=True must not write to the freshness log, so subsequent
         real calls still see the item as fresh."""
         memory.record_open_thread("Only thread", domain="solo")
@@ -162,16 +155,10 @@ class TestFreshnessPenalty:
         priors.inject(domain_tags=["solo"], dry_run=True)
 
         real = priors.inject(domain_tags=["solo"], dry_run=False)
-        assert real["included_items"], (
-            "dry_run calls must not pollute the freshness log"
-        )
-        assert not real["skipped_stale"], (
-            "No items should be demoted after only dry_run priors"
-        )
+        assert real["included_items"], "dry_run calls must not pollute the freshness log"
+        assert not real["skipped_stale"], "No items should be demoted after only dry_run priors"
 
-    def test_freshness_window_is_bounded(
-        self, surface, sovereign_root, memory
-    ):
+    def test_freshness_window_is_bounded(self, surface, sovereign_root, memory):
         """After FRESHNESS_WINDOW+1 calls that surface nothing, the item
         becomes fresh again because the sliding window moved past it.
 
@@ -195,6 +182,7 @@ class TestFreshnessPenalty:
 
 # ── Case 4: empty input ──────────────────────────────────────────────────────
 
+
 class TestEmptyPath:
     def test_empty_tags_no_signals_returns_empty(self, surface, sovereign_root):
         """No tags, no uncertainty, no honks → empty:True with zero tokens."""
@@ -205,17 +193,17 @@ class TestEmptyPath:
         assert result["token_estimate"] == 0
         assert result["included_items"] == []
 
-    def test_empty_tags_with_honk_still_surfaces_drift(
-        self, surface, sovereign_root
-    ):
+    def test_empty_tags_with_honk_still_surfaces_drift(self, surface, sovereign_root):
         """Drift is tag-independent — an uneasy honk surfaces even with no tags."""
-        honks = [{
-            "honk_id": "h1",
-            "level": "uneasy",
-            "pattern": "repeated_mistake",
-            "trigger_tool": "record_insight",
-            "timestamp": _now_iso(),
-        }]
+        honks = [
+            {
+                "honk_id": "h1",
+                "level": "uneasy",
+                "pattern": "repeated_mistake",
+                "trigger_tool": "record_insight",
+                "timestamp": _now_iso(),
+            }
+        ]
         priors = _make_priors(surface, sovereign_root, honks=honks)
         result = priors.inject(domain_tags=[], dry_run=True)
         assert not result["empty"]
@@ -224,15 +212,18 @@ class TestEmptyPath:
 
 # ── Case 5: drift surfacing ──────────────────────────────────────────────────
 
+
 class TestDriftSurfacing:
     def test_recent_uneasy_honk_surfaces(self, surface, sovereign_root):
-        honks = [{
-            "honk_id": "h1",
-            "level": "uneasy",
-            "pattern": "repeated_mistake",
-            "trigger_tool": "record_insight",
-            "timestamp": _now_iso(),
-        }]
+        honks = [
+            {
+                "honk_id": "h1",
+                "level": "uneasy",
+                "pattern": "repeated_mistake",
+                "trigger_tool": "record_insight",
+                "timestamp": _now_iso(),
+            }
+        ]
         priors = _make_priors(surface, sovereign_root, honks=honks)
         result = priors.inject(domain_tags=["anything"], dry_run=True)
         assert "drift" in result["sources"]
@@ -240,26 +231,30 @@ class TestDriftSurfacing:
 
     def test_old_honk_does_not_surface(self, surface, sovereign_root):
         """A honk older than HONK_WINDOW_SECONDS is ignored."""
-        honks = [{
-            "honk_id": "h_old",
-            "level": "uneasy",
-            "pattern": "declare_before_verify",
-            "trigger_tool": "record_insight",
-            "timestamp": _now_iso(offset_seconds=-3600),  # 1h ago
-        }]
+        honks = [
+            {
+                "honk_id": "h_old",
+                "level": "uneasy",
+                "pattern": "declare_before_verify",
+                "trigger_tool": "record_insight",
+                "timestamp": _now_iso(offset_seconds=-3600),  # 1h ago
+            }
+        ]
         priors = _make_priors(surface, sovereign_root, honks=honks)
         result = priors.inject(domain_tags=["x"], dry_run=True)
         assert "drift" not in result["sources"]
 
     def test_satisfied_honk_is_not_drift(self, surface, sovereign_root):
         """Satisfied honks are positive, not drift — never surface as priors."""
-        honks = [{
-            "honk_id": "h_sat",
-            "level": "satisfied",
-            "pattern": "clean_pattern",
-            "trigger_tool": "record_insight",
-            "timestamp": _now_iso(),
-        }]
+        honks = [
+            {
+                "honk_id": "h_sat",
+                "level": "satisfied",
+                "pattern": "clean_pattern",
+                "trigger_tool": "record_insight",
+                "timestamp": _now_iso(),
+            }
+        ]
         priors = _make_priors(surface, sovereign_root, honks=honks)
         result = priors.inject(domain_tags=["x"], dry_run=True)
         assert "drift" not in result["sources"]
@@ -267,13 +262,17 @@ class TestDriftSurfacing:
 
 # ── Case 6: uncertainty surfacing ────────────────────────────────────────────
 
+
 class TestUncertaintySurfacing:
     def test_oldest_uncertainty_surfaces_first(self, surface, sovereign_root):
         """Oldest-first ordering — the nag function."""
         uncertainties = [
             {"marker_id": "u1", "what": "Young question", "timestamp": _now_iso()},
-            {"marker_id": "u2", "what": "Old question",
-             "timestamp": _now_iso(offset_seconds=-86400 * 10)},
+            {
+                "marker_id": "u2",
+                "what": "Old question",
+                "timestamp": _now_iso(offset_seconds=-86400 * 10),
+            },
         ]
         priors = _make_priors(surface, sovereign_root, uncertainty=uncertainties)
         result = priors.inject(domain_tags=[], dry_run=True)
@@ -288,53 +287,51 @@ class TestUncertaintySurfacing:
 
 # ── Case 7: priority order ───────────────────────────────────────────────────
 
+
 class TestPriorityOrder:
-    def test_drift_precedes_thread_in_block(
-        self, surface, sovereign_root, memory
-    ):
+    def test_drift_precedes_thread_in_block(self, surface, sovereign_root, memory):
         """Drift line appears before thread line — priority 0 before priority 2."""
         memory.record_open_thread("A thread", domain="topic")
-        honks = [{
-            "honk_id": "h1",
-            "level": "sharp",
-            "pattern": "premature_summary",
-            "trigger_tool": "record_insight",
-            "timestamp": _now_iso(),
-        }]
+        honks = [
+            {
+                "honk_id": "h1",
+                "level": "sharp",
+                "pattern": "premature_summary",
+                "trigger_tool": "record_insight",
+                "timestamp": _now_iso(),
+            }
+        ]
         priors = _make_priors(surface, sovereign_root, honks=honks)
-        result = priors.inject(
-            domain_tags=["topic"], k=1, max_tokens=400, dry_run=True
-        )
+        result = priors.inject(domain_tags=["topic"], k=1, max_tokens=400, dry_run=True)
         block = result["block"]
         drift_pos = block.find("drift:")
         thread_pos = block.find("thread:")
         assert drift_pos >= 0 and thread_pos > drift_pos
 
-    def test_low_priority_dropped_first_under_tight_budget(
-        self, surface, sovereign_root, memory
-    ):
+    def test_low_priority_dropped_first_under_tight_budget(self, surface, sovereign_root, memory):
         """Under a tight budget, insight (priority 3) drops before drift (0)."""
         memory.record_insight(
             content="Some insight " + ("filler " * 10),
             domain="topic",
         )
         memory.record_open_thread("A thread", domain="topic")
-        honks = [{
-            "honk_id": "h1",
-            "level": "uneasy",
-            "pattern": "declare_before_verify",
-            "trigger_tool": "x",
-            "timestamp": _now_iso(),
-        }]
+        honks = [
+            {
+                "honk_id": "h1",
+                "level": "uneasy",
+                "pattern": "declare_before_verify",
+                "trigger_tool": "x",
+                "timestamp": _now_iso(),
+            }
+        ]
         priors = _make_priors(surface, sovereign_root, honks=honks)
-        result = priors.inject(
-            domain_tags=["topic"], k=1, max_tokens=60, dry_run=True
-        )
+        result = priors.inject(domain_tags=["topic"], k=1, max_tokens=60, dry_run=True)
         # Drift must survive the budget.
         assert "drift" in result["sources"]
 
 
 # ── Case 8: dry_run ──────────────────────────────────────────────────────────
+
 
 class TestDryRun:
     def test_dry_run_does_not_create_log(self, surface, sovereign_root, memory):
@@ -358,25 +355,32 @@ class TestDryRun:
 
 # ── Case 9: output schema ────────────────────────────────────────────────────
 
+
 class TestOutputSchema:
     def test_all_fields_present_when_empty(self, surface, sovereign_root):
         priors = _make_priors(surface, sovereign_root)
         result = priors.inject(domain_tags=[], dry_run=True)
         for field in (
-            "block", "included_items", "skipped_stale", "empty",
-            "token_estimate", "sources",
+            "block",
+            "included_items",
+            "skipped_stale",
+            "empty",
+            "token_estimate",
+            "sources",
         ):
             assert field in result
 
-    def test_all_fields_present_when_populated(
-        self, surface, sovereign_root, memory
-    ):
+    def test_all_fields_present_when_populated(self, surface, sovereign_root, memory):
         memory.record_open_thread("A thread", domain="topic")
         priors = _make_priors(surface, sovereign_root)
         result = priors.inject(domain_tags=["topic"], dry_run=True)
         for field in (
-            "block", "included_items", "skipped_stale", "empty",
-            "token_estimate", "sources",
+            "block",
+            "included_items",
+            "skipped_stale",
+            "empty",
+            "token_estimate",
+            "sources",
         ):
             assert field in result
         assert isinstance(result["block"], str)
@@ -389,10 +393,9 @@ class TestOutputSchema:
 
 # ── Case 10: idempotency under dry_run ───────────────────────────────────────
 
+
 class TestIdempotency:
-    def test_repeat_dry_run_returns_equivalent_block(
-        self, surface, sovereign_root, memory
-    ):
+    def test_repeat_dry_run_returns_equivalent_block(self, surface, sovereign_root, memory):
         """Two consecutive dry_run calls see the same state, so the block text
         should be identical (timestamps on output are not included)."""
         memory.record_open_thread("A thread", domain="topic")
@@ -404,6 +407,7 @@ class TestIdempotency:
 
 
 # ── Sanity: helpers ──────────────────────────────────────────────────────────
+
 
 class TestHelpers:
     def test_item_signature_uses_thread_id(self):

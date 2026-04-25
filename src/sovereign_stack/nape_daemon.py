@@ -36,27 +36,29 @@ from typing import Any
 # Tool calls that count as verification / evidence-gathering.
 # When one of these appears recently before a high-confidence assertion or
 # a "done" result, the assertion is considered grounded.
-VERIFY_TOOL_NAMES: frozenset = frozenset({
-    # External tools (passed via nape_observe manually by external callers).
-    "Read",
-    "Grep",
-    "Glob",
-    "Bash",
-    "scan_thresholds",
-    "recall_insights",
-    "check_mistakes",
-    "guardian_scan",
-    "guardian_alerts",
-    # Sovereign-stack verify-equivalents (now reached via auto-hook).
-    "get_open_threads",
-    "get_thread_touches",
-    "get_inheritable_context",
-    "route",
-    "derive",
-    "handoff_acted_on_records",
-    "comms_get_acks",
-    "comms_recall",
-})
+VERIFY_TOOL_NAMES: frozenset = frozenset(
+    {
+        # External tools (passed via nape_observe manually by external callers).
+        "Read",
+        "Grep",
+        "Glob",
+        "Bash",
+        "scan_thresholds",
+        "recall_insights",
+        "check_mistakes",
+        "guardian_scan",
+        "guardian_alerts",
+        # Sovereign-stack verify-equivalents (now reached via auto-hook).
+        "get_open_threads",
+        "get_thread_touches",
+        "get_inheritable_context",
+        "route",
+        "derive",
+        "handoff_acted_on_records",
+        "comms_get_acks",
+        "comms_recall",
+    }
+)
 
 # Read-only retrieval / introspection tools whose RESULTS naturally contain
 # completion-language about OTHER things (handoffs, insights, threads) but
@@ -71,69 +73,73 @@ VERIFY_TOOL_NAMES: frozenset = frozenset({
 # "resolved" / "shipped" / "completed" from the chronicle records they
 # returned. Pattern detection was technically correct but contextually
 # noise — these tools ARE the verification, not declarations of completion.
-READONLY_TOOL_NAMES: frozenset = frozenset({
-    # Per-turn / boot reflexes
-    "prior_for_turn",
-    "where_did_i_leave_off",
-    "my_toolkit",
-    "start_here",
-    # Surface / triage
-    "reflexive_surface",
-    "triage_threads",
-    # Status / introspection
-    "spiral_status",
-    "self_model",
-    "guardian_status",
-    "guardian_report",
-    "guardian_alerts",
-    "guardian_audit",
-    "guardian_mcp_audit",
-    # Compaction / context
-    "get_compaction_context",
-    "get_compaction_stats",
-    "get_growth_summary",
-    "get_my_patterns",
-    "get_unresolved_uncertainties",
-    "get_pending_experiments",
-    # Comms read-side
-    "comms_unread_bodies",
-    "comms_channels",
-    "comms_recall",
-    "comms_get_acks",
-    # Nape introspection
-    "nape_honks",
-    "nape_summary",
-    "nape_honks_with_history",
-    # Watch / post-fix introspection
-    "watch_status",
-    "post_fix_verify",
-    # Other read-only retrieval (also in VERIFY_TOOL_NAMES — they count
-    # as verifies AND should not self-honk as the trigger tool).
-    "recall_insights",
-    "check_mistakes",
-    "get_open_threads",
-    "get_thread_touches",
-    "thread_get_touches",
-    "get_inheritable_context",
-    "handoff_acted_on_records",
-})
+READONLY_TOOL_NAMES: frozenset = frozenset(
+    {
+        # Per-turn / boot reflexes
+        "prior_for_turn",
+        "where_did_i_leave_off",
+        "my_toolkit",
+        "start_here",
+        # Surface / triage
+        "reflexive_surface",
+        "triage_threads",
+        # Status / introspection
+        "spiral_status",
+        "self_model",
+        "guardian_status",
+        "guardian_report",
+        "guardian_alerts",
+        "guardian_audit",
+        "guardian_mcp_audit",
+        # Compaction / context
+        "get_compaction_context",
+        "get_compaction_stats",
+        "get_growth_summary",
+        "get_my_patterns",
+        "get_unresolved_uncertainties",
+        "get_pending_experiments",
+        # Comms read-side
+        "comms_unread_bodies",
+        "comms_channels",
+        "comms_recall",
+        "comms_get_acks",
+        # Nape introspection
+        "nape_honks",
+        "nape_summary",
+        "nape_honks_with_history",
+        # Watch / post-fix introspection
+        "watch_status",
+        "post_fix_verify",
+        # Other read-only retrieval (also in VERIFY_TOOL_NAMES — they count
+        # as verifies AND should not self-honk as the trigger tool).
+        "recall_insights",
+        "check_mistakes",
+        "get_open_threads",
+        "get_thread_touches",
+        "thread_get_touches",
+        "get_inheritable_context",
+        "handoff_acted_on_records",
+    }
+)
 
 # Words in a tool result that suggest the instance is declaring completion.
 # These are checked case-insensitively in the string representation of result.
-DECLARE_WORDS: frozenset = frozenset({
-    "done",
-    "complete",
-    "completed",
-    "clean",
-    "verified",
-    "shipped",
-    "ready",
-    "finished",
-    "fixed",
-    "resolved",
-    "success",
-    "passed",
-})
+DECLARE_WORDS: frozenset = frozenset(
+    {
+        "done",
+        "complete",
+        "completed",
+        "clean",
+        "verified",
+        "shipped",
+        "ready",
+        "finished",
+        "fixed",
+        "resolved",
+        "success",
+        "passed",
+    }
+)
 
 # Tools that write a session summary or handoff — used for premature-summary check.
 # `where_did_i_leave_off` is NOT a summary tool — it's the boot/orient call.
@@ -141,49 +147,54 @@ DECLARE_WORDS: frozenset = frozenset({
 # honks every time a Claude instance arrived: their result string surfaces
 # chronicle content that frequently contains error-shaped words (failure,
 # cannot, etc.), which then matched the recent-error scan.
-SUMMARY_TOOL_NAMES: frozenset = frozenset({
-    "end_session_review",
-    "handoff",
-    "close_session",
-})
+SUMMARY_TOOL_NAMES: frozenset = frozenset(
+    {
+        "end_session_review",
+        "handoff",
+        "close_session",
+    }
+)
 
 # Words in recent results that indicate an unresolved error state.
-ERROR_WORDS: frozenset = frozenset({
-    "error",
-    "traceback",
-    "exception",
-    "failed",
-    "failure",
-    "cannot",
-    "unable",
-    "not found",
-    "does not exist",
-    "no such",
-    "refused",
-    "denied",
-})
+ERROR_WORDS: frozenset = frozenset(
+    {
+        "error",
+        "traceback",
+        "exception",
+        "failed",
+        "failure",
+        "cannot",
+        "unable",
+        "not found",
+        "does not exist",
+        "no such",
+        "refused",
+        "denied",
+    }
+)
 
 # Pattern name → honk level mapping. Source of truth for the gesture vocabulary.
 PATTERN_LEVELS: dict[str, str] = {
-    "declare_before_verify":    "sharp",
-    "premature_summary":        "sharp",
+    "declare_before_verify": "sharp",
+    "premature_summary": "sharp",
     "assertion_without_evidence": "low",
-    "repeated_mistake":         "uneasy",
-    "stale_context":            "low",      # Phase 2 — detector deferred
-    "clean_verify_declare":     "satisfied",
-    "post_fix_drift":           "uneasy",   # Emitted by post_fix_tools when a watch diverges from baseline.
+    "repeated_mistake": "uneasy",
+    "stale_context": "low",  # Phase 2 — detector deferred
+    "clean_verify_declare": "satisfied",
+    "post_fix_drift": "uneasy",  # Emitted by post_fix_tools when a watch diverges from baseline.
 }
 
 # How many recent observations to consider as the sliding window for each check.
-WINDOW_DECLARE_VERIFY = 3     # spec: "within last 3 tool calls"
-WINDOW_ASSERTION      = 5     # spec: "last 5 calls"
-WINDOW_PREMATURE      = 10    # scan back 10 calls for error indicators
-WINDOW_REPEATED       = 20    # scan back 20 calls for repeated error class
+WINDOW_DECLARE_VERIFY = 3  # spec: "within last 3 tool calls"
+WINDOW_ASSERTION = 5  # spec: "last 5 calls"
+WINDOW_PREMATURE = 10  # scan back 10 calls for error indicators
+WINDOW_REPEATED = 20  # scan back 20 calls for repeated error class
 
 
 # =============================================================================
 # NAPE DAEMON
 # =============================================================================
+
 
 class NapeDaemon:
     """
@@ -208,9 +219,9 @@ class NapeDaemon:
         self._nape_dir = self._root / "nape"
         self._nape_dir.mkdir(parents=True, exist_ok=True)
 
-        self._obs_path   = self._nape_dir / "observations.jsonl"
+        self._obs_path = self._nape_dir / "observations.jsonl"
         self._honks_path = self._nape_dir / "honks.jsonl"
-        self._acks_path  = self._nape_dir / "acks.jsonl"
+        self._acks_path = self._nape_dir / "acks.jsonl"
 
     # -------------------------------------------------------------------------
     # Public API
@@ -260,20 +271,20 @@ class NapeDaemon:
         ts = timestamp or _now_iso()
 
         record: dict[str, Any] = {
-            "obs_id":     str(uuid.uuid4()),
+            "obs_id": str(uuid.uuid4()),
             "session_id": session_id,
-            "timestamp":  ts,
-            "tool_name":  tool_name,
-            "arguments":  _safe_truncate(arguments),
+            "timestamp": ts,
+            "tool_name": tool_name,
+            "arguments": _safe_truncate(arguments),
             "result_str": _result_to_str(result),
         }
 
         _append_jsonl(self._obs_path, record)
 
         # Run drift detection on the updated window and persist new honks.
-        recent = self._recent_observations(session_id, limit=max(
-            WINDOW_REPEATED, WINDOW_PREMATURE, WINDOW_ASSERTION
-        ))
+        recent = self._recent_observations(
+            session_id, limit=max(WINDOW_REPEATED, WINDOW_PREMATURE, WINDOW_ASSERTION)
+        )
         new_honks = self._check_drift(recent)
         for honk in new_honks:
             _append_jsonl(self._honks_path, honk)
@@ -313,10 +324,11 @@ class NapeDaemon:
             )
 
         acked_ids = self._acked_ids()
-        honks     = _read_jsonl(self._honks_path)
+        honks = _read_jsonl(self._honks_path)
 
         filtered = [
-            h for h in honks
+            h
+            for h in honks
             if h.get("honk_id") not in acked_ids
             and (session_id is None or h.get("session_id") == session_id)
             and (include_satisfied or h.get("level") != "satisfied")
@@ -424,8 +436,7 @@ class NapeDaemon:
         """
         if not honk_id:
             raise ValueError(
-                "honk_id must be a non-empty string. "
-                "Pass the honk_id from current_honks() output."
+                "honk_id must be a non-empty string. Pass the honk_id from current_honks() output."
             )
 
         # Verify the honk exists before writing an ack.
@@ -433,14 +444,13 @@ class NapeDaemon:
         matching = [h for h in honks if h.get("honk_id") == honk_id]
         if not matching:
             raise ValueError(
-                f"No honk found with honk_id {honk_id!r}. "
-                "Check current_honks() for valid IDs."
+                f"No honk found with honk_id {honk_id!r}. Check current_honks() for valid IDs."
             )
 
         ack_record = {
-            "ack_id":    str(uuid.uuid4()),
-            "honk_id":  honk_id,
-            "note":     note,
+            "ack_id": str(uuid.uuid4()),
+            "honk_id": honk_id,
+            "note": note,
             "acked_at": _now_iso(),
         }
         _append_jsonl(self._acks_path, ack_record)
@@ -478,10 +488,10 @@ class NapeDaemon:
                 unacked += 1
 
         return {
-            "session_id":      session_id or "all",
+            "session_id": session_id or "all",
             **counts,
-            "total":           sum(counts.values()),
-            "unacknowledged":  unacked,
+            "total": sum(counts.values()),
+            "unacknowledged": unacked,
         }
 
     # -------------------------------------------------------------------------
@@ -550,9 +560,7 @@ class NapeDaemon:
                 acks_by_honk[hid] = line
 
         # ── Load recent priors-log entries ──
-        log_path = priors_log_path or (
-            self._root / "reflexive" / "priors_log.jsonl"
-        )
+        log_path = priors_log_path or (self._root / "reflexive" / "priors_log.jsonl")
         recent_priors: list[dict] = []
         if log_path.exists():
             try:
@@ -578,7 +586,7 @@ class NapeDaemon:
                 if not isinstance(sig, str):
                     continue
                 if sig.startswith("honk:"):
-                    hid = sig[len("honk:"):]
+                    hid = sig[len("honk:") :]
                     if hid not in seen_in_this_entry:
                         seen_in_this_entry.add(hid)
                         priors_count[hid] = priors_count.get(hid, 0) + 1
@@ -593,9 +601,7 @@ class NapeDaemon:
             age_seconds = None
             if fired_at:
                 try:
-                    fired_dt = datetime.fromisoformat(
-                        str(fired_at).replace("Z", "+00:00")
-                    )
+                    fired_dt = datetime.fromisoformat(str(fired_at).replace("Z", "+00:00"))
                     if fired_dt.tzinfo is None:
                         fired_dt = fired_dt.replace(tzinfo=timezone.utc)
                     age_seconds = max(0, int(now_ts - fired_dt.timestamp()))
@@ -603,38 +609,39 @@ class NapeDaemon:
                     age_seconds = None
 
             count = priors_count.get(hid, 0)
-            out_honks.append({
-                "honk_id": hid,
-                "session_id": h.get("session_id"),
-                "pattern": h.get("pattern"),
-                "level": h.get("level"),
-                "trigger_tool": h.get("trigger_tool"),
-                "fired_at": fired_at,
-                "observation": h.get("observation", ""),
-                "ack": (
-                    {
-                        "ack_id": ack_record.get("ack_id"),
-                        "note": ack_record.get("note"),
-                        "acked_at": ack_record.get("acked_at"),
-                    } if ack_record else None
-                ),
-                "age_seconds": age_seconds,
-                "in_recent_priors": count > 0,
-                "priors_surface_count": count,
-            })
+            out_honks.append(
+                {
+                    "honk_id": hid,
+                    "session_id": h.get("session_id"),
+                    "pattern": h.get("pattern"),
+                    "level": h.get("level"),
+                    "trigger_tool": h.get("trigger_tool"),
+                    "fired_at": fired_at,
+                    "observation": h.get("observation", ""),
+                    "ack": (
+                        {
+                            "ack_id": ack_record.get("ack_id"),
+                            "note": ack_record.get("note"),
+                            "acked_at": ack_record.get("acked_at"),
+                        }
+                        if ack_record
+                        else None
+                    ),
+                    "age_seconds": age_seconds,
+                    "in_recent_priors": count > 0,
+                    "priors_surface_count": count,
+                }
+            )
 
         if limit is not None:
-            out_honks = out_honks[-int(limit):]
+            out_honks = out_honks[-int(limit) :]
 
         # ── Summary ──
         acked = sum(1 for h in out_honks if h["ack"] is not None)
         unacked = len(out_honks) - acked
         in_priors = sum(1 for h in out_honks if h["in_recent_priors"])
         # Zombie: acked AND still in recent priors. The smoking-gun count.
-        zombies = sum(
-            1 for h in out_honks
-            if h["ack"] is not None and h["in_recent_priors"]
-        )
+        zombies = sum(1 for h in out_honks if h["ack"] is not None and h["in_recent_priors"])
 
         return {
             "honks": out_honks,
@@ -646,14 +653,10 @@ class NapeDaemon:
                 "zombies": zombies,
             },
             "freshness_window": freshness_window,
-            "priors_log_window": [
-                e.get("timestamp") for e in recent_priors
-            ],
+            "priors_log_window": [e.get("timestamp") for e in recent_priors],
         }
 
-    def _detect_declare_before_verify(
-        self, latest: dict, recent_obs: list[dict]
-    ) -> list[dict]:
+    def _detect_declare_before_verify(self, latest: dict, recent_obs: list[dict]) -> list[dict]:
         """
         Detect when a tool result contains completion language but no verify call
         appears in the preceding WINDOW_DECLARE_VERIFY observations.
@@ -685,35 +688,37 @@ class NapeDaemon:
         # If at least one verify call is present, no honk.
         if preceding_tools & VERIFY_TOOL_NAMES:
             # Optionally emit a "satisfied" honk to mark the clean pattern.
-            return [self._build_honk(
+            return [
+                self._build_honk(
+                    session_id=latest["session_id"],
+                    pattern="clean_verify_declare",
+                    trigger_tool=latest["tool_name"],
+                    observation=(
+                        f"{latest['tool_name']} result suggests completion. "
+                        f"Verify calls present in recent history: "
+                        f"{preceding_tools & VERIFY_TOOL_NAMES}. Pattern is clean."
+                    ),
+                    timestamp=latest["timestamp"],
+                )
+            ]
+
+        return [
+            self._build_honk(
                 session_id=latest["session_id"],
-                pattern="clean_verify_declare",
+                pattern="declare_before_verify",
                 trigger_tool=latest["tool_name"],
                 observation=(
-                    f"{latest['tool_name']} result suggests completion. "
-                    f"Verify calls present in recent history: "
-                    f"{preceding_tools & VERIFY_TOOL_NAMES}. Pattern is clean."
+                    f"{latest['tool_name']} result contains completion language "
+                    f"but no verify call (Read, Grep, Bash, etc.) appears in the "
+                    f"preceding {WINDOW_DECLARE_VERIFY} tool calls. "
+                    f"Recent tools: {[o.get('tool_name') for o in preceding]}. "
+                    f"Verify the claim before treating it as ground truth."
                 ),
                 timestamp=latest["timestamp"],
-            )]
+            )
+        ]
 
-        return [self._build_honk(
-            session_id=latest["session_id"],
-            pattern="declare_before_verify",
-            trigger_tool=latest["tool_name"],
-            observation=(
-                f"{latest['tool_name']} result contains completion language "
-                f"but no verify call (Read, Grep, Bash, etc.) appears in the "
-                f"preceding {WINDOW_DECLARE_VERIFY} tool calls. "
-                f"Recent tools: {[o.get('tool_name') for o in preceding]}. "
-                f"Verify the claim before treating it as ground truth."
-            ),
-            timestamp=latest["timestamp"],
-        )]
-
-    def _detect_premature_summary(
-        self, latest: dict, recent_obs: list[dict]
-    ) -> list[dict]:
+    def _detect_premature_summary(self, latest: dict, recent_obs: list[dict]) -> list[dict]:
         """
         Detect when a session-summary tool is called but recent history contains
         unresolved error indicators.
@@ -731,7 +736,8 @@ class NapeDaemon:
 
         preceding = recent_obs[:-1][-WINDOW_PREMATURE:]
         error_obs = [
-            obs for obs in preceding
+            obs
+            for obs in preceding
             if obs.get("tool_name") not in READONLY_TOOL_NAMES
             and any(word in obs.get("result_str", "").lower() for word in ERROR_WORDS)
         ]
@@ -740,18 +746,20 @@ class NapeDaemon:
             return []
 
         sample_tools = [obs.get("tool_name") for obs in error_obs[:3]]
-        return [self._build_honk(
-            session_id=latest["session_id"],
-            pattern="premature_summary",
-            trigger_tool=latest["tool_name"],
-            observation=(
-                f"{latest['tool_name']} called but recent tool history shows "
-                f"{len(error_obs)} result(s) with error language. "
-                f"Tools with error results (up to 3): {sample_tools}. "
-                f"Resolve errors before writing the final summary."
-            ),
-            timestamp=latest["timestamp"],
-        )]
+        return [
+            self._build_honk(
+                session_id=latest["session_id"],
+                pattern="premature_summary",
+                trigger_tool=latest["tool_name"],
+                observation=(
+                    f"{latest['tool_name']} called but recent tool history shows "
+                    f"{len(error_obs)} result(s) with error language. "
+                    f"Tools with error results (up to 3): {sample_tools}. "
+                    f"Resolve errors before writing the final summary."
+                ),
+                timestamp=latest["timestamp"],
+            )
+        ]
 
     def _detect_assertion_without_evidence(
         self, latest: dict, recent_obs: list[dict]
@@ -778,23 +786,23 @@ class NapeDaemon:
         if preceding_tools & VERIFY_TOOL_NAMES:
             return []
 
-        return [self._build_honk(
-            session_id=latest["session_id"],
-            pattern="assertion_without_evidence",
-            trigger_tool=latest["tool_name"],
-            observation=(
-                f"record_insight called with confidence={confidence} (>0.9) "
-                f"but no Read, Grep, or Bash appears in the preceding "
-                f"{WINDOW_ASSERTION} tool calls. "
-                f"Recent tools: {[o.get('tool_name') for o in preceding]}. "
-                f"High-confidence claims require observable evidence."
-            ),
-            timestamp=latest["timestamp"],
-        )]
+        return [
+            self._build_honk(
+                session_id=latest["session_id"],
+                pattern="assertion_without_evidence",
+                trigger_tool=latest["tool_name"],
+                observation=(
+                    f"record_insight called with confidence={confidence} (>0.9) "
+                    f"but no Read, Grep, or Bash appears in the preceding "
+                    f"{WINDOW_ASSERTION} tool calls. "
+                    f"Recent tools: {[o.get('tool_name') for o in preceding]}. "
+                    f"High-confidence claims require observable evidence."
+                ),
+                timestamp=latest["timestamp"],
+            )
+        ]
 
-    def _detect_repeated_mistake(
-        self, latest: dict, recent_obs: list[dict]
-    ) -> list[dict]:
+    def _detect_repeated_mistake(self, latest: dict, recent_obs: list[dict]) -> list[dict]:
         """
         Detect when a tool call yields an error and the same error class has
         appeared before in the window without a record_learning call in between.
@@ -825,7 +833,8 @@ class NapeDaemon:
 
         # Find earlier errors from the same tool.
         earlier_errors = [
-            obs for obs in preceding
+            obs
+            for obs in preceding
             if obs.get("tool_name") == trigger_tool
             and any(word in obs.get("result_str", "").lower() for word in ERROR_WORDS)
         ]
@@ -844,19 +853,21 @@ class NapeDaemon:
         if learning_after:
             return []
 
-        return [self._build_honk(
-            session_id=session_id,
-            pattern="repeated_mistake",
-            trigger_tool=trigger_tool,
-            observation=(
-                f"{trigger_tool} has produced errors {len(earlier_errors) + 1} time(s) "
-                f"in this session window without a record_learning call in between. "
-                f"Earliest prior error at {earliest_error_ts}. "
-                f"Consider calling record_learning to capture what went wrong "
-                f"before repeating the same action."
-            ),
-            timestamp=latest["timestamp"],
-        )]
+        return [
+            self._build_honk(
+                session_id=session_id,
+                pattern="repeated_mistake",
+                trigger_tool=trigger_tool,
+                observation=(
+                    f"{trigger_tool} has produced errors {len(earlier_errors) + 1} time(s) "
+                    f"in this session window without a record_learning call in between. "
+                    f"Earliest prior error at {earliest_error_ts}. "
+                    f"Consider calling record_learning to capture what went wrong "
+                    f"before repeating the same action."
+                ),
+                timestamp=latest["timestamp"],
+            )
+        ]
 
     # -------------------------------------------------------------------------
     # Internal helpers
@@ -916,19 +927,20 @@ class NapeDaemon:
         """
         level = PATTERN_LEVELS.get(pattern, "low")
         return {
-            "honk_id":      str(uuid.uuid4()),
-            "session_id":   session_id,
-            "pattern":      pattern,
-            "level":        level,
+            "honk_id": str(uuid.uuid4()),
+            "session_id": session_id,
+            "pattern": pattern,
+            "level": level,
             "trigger_tool": trigger_tool,
-            "observation":  observation,
-            "timestamp":    timestamp,
+            "observation": observation,
+            "timestamp": timestamp,
         }
 
 
 # =============================================================================
 # STORAGE UTILITIES (module-private)
 # =============================================================================
+
 
 def _append_jsonl(path: Path, record: dict) -> None:
     """

@@ -16,6 +16,7 @@ from pathlib import Path
 
 # ── Time ──
 
+
 def days_old(iso_timestamp: str | None) -> int:
     """
     Number of whole days between the given ISO timestamp and now.
@@ -84,8 +85,8 @@ def format_self_model(sovereign_root: Path, max_obs_len: int = 180) -> list[str]
 
 # ── Uncertainty surfacing ──
 
-def format_unresolved_uncertainties(sovereign_root: Path,
-                                    limit: int = 5) -> list[str]:
+
+def format_unresolved_uncertainties(sovereign_root: Path, limit: int = 5) -> list[str]:
     """
     Read ~/.sovereign/consciousness/uncertainty_log.json and return lines
     for unresolved markers.
@@ -105,10 +106,7 @@ def format_unresolved_uncertainties(sovereign_root: Path,
     except (json.JSONDecodeError, OSError):
         return []
     markers = data.get("markers") or []
-    unresolved = [
-        m for m in markers
-        if not m.get("resolved") and not m.get("resolution")
-    ]
+    unresolved = [m for m in markers if not m.get("resolved") and not m.get("resolution")]
     if not unresolved:
         return []
     # Most recent first — markers are typically appended, so reverse.
@@ -124,12 +122,7 @@ def format_unresolved_uncertainties(sovereign_root: Path,
     ]
     for m in unresolved_sorted:
         # Support multiple historical shapes: question, content, or marker text.
-        text = (
-            m.get("question")
-            or m.get("content")
-            or m.get("marker")
-            or ""
-        ).strip()
+        text = (m.get("question") or m.get("content") or m.get("marker") or "").strip()
         if not text:
             continue
         age = days_old(m.get("timestamp"))
@@ -141,8 +134,8 @@ def format_unresolved_uncertainties(sovereign_root: Path,
 
 # ── Thread age annotation ──
 
-def format_threads_with_age(threads: list[dict],
-                            truncate_question: int = 140) -> list[str]:
+
+def format_threads_with_age(threads: list[dict], truncate_question: int = 140) -> list[str]:
     """
     Render open threads with age annotation. Threads older than 30 days
     get a stale marker — not to hide them, but to signal they may have

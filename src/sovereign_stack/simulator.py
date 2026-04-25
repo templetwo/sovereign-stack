@@ -24,6 +24,7 @@ from typing import Any
 
 try:
     import networkx as nx
+
     NETWORKX_AVAILABLE = True
 except ImportError:
     NETWORKX_AVAILABLE = False
@@ -37,8 +38,10 @@ logger = logging.getLogger("simulation")
 # DATA STRUCTURES
 # =============================================================================
 
+
 class ScenarioType(Enum):
     """Types of scenarios to simulate."""
+
     REORGANIZE = "reorganize"
     PARTIAL_REORGANIZE = "partial"
     DEFER = "defer"
@@ -49,6 +52,7 @@ class ScenarioType(Enum):
 @dataclass
 class Outcome:
     """A single simulated outcome."""
+
     scenario: ScenarioType
     name: str
     probability: float
@@ -67,6 +71,7 @@ class Outcome:
 @dataclass
 class Prediction:
     """Complete prediction from simulation."""
+
     event_hash: str
     model: str
     outcomes: list[Outcome]
@@ -77,13 +82,16 @@ class Prediction:
 
     def __post_init__(self):
         if not self.prediction_hash:
-            content = json.dumps({
-                "event_hash": self.event_hash,
-                "model": self.model,
-                "outcome_count": len(self.outcomes),
-                "seed": self.seed,
-                "timestamp": self.timestamp,
-            }, sort_keys=True)
+            content = json.dumps(
+                {
+                    "event_hash": self.event_hash,
+                    "model": self.model,
+                    "outcome_count": len(self.outcomes),
+                    "seed": self.seed,
+                    "timestamp": self.timestamp,
+                },
+                sort_keys=True,
+            )
             self.prediction_hash = hashlib.sha256(content.encode()).hexdigest()[:16]
 
     def to_dict(self) -> dict[str, Any]:
@@ -116,6 +124,7 @@ class Prediction:
 @dataclass
 class SimulationConfig:
     """Configuration for simulation runs."""
+
     monte_carlo_runs: int = 100
     seed: int = 42
 
@@ -123,6 +132,7 @@ class SimulationConfig:
 # =============================================================================
 # SIMULATOR
 # =============================================================================
+
 
 class Simulator:
     """
@@ -132,8 +142,9 @@ class Simulator:
     then simulates scenarios by applying transformations.
     """
 
-    def __init__(self, model: str = "generic", seed: int = 42,
-                 config: SimulationConfig | None = None):
+    def __init__(
+        self, model: str = "generic", seed: int = 42, config: SimulationConfig | None = None
+    ):
         if not NETWORKX_AVAILABLE:
             raise ImportError("NetworkX required: pip install networkx")
 
@@ -217,11 +228,13 @@ class Simulator:
             run_seed = self.seed + run
             final_state, effects = self._apply_scenario(scenario, run_seed)
             reversibility = self._calculate_reversibility(final_state)
-            results.append({
-                "reversibility": reversibility,
-                "effects": effects,
-                "state_hash": self._hash_state(final_state),
-            })
+            results.append(
+                {
+                    "reversibility": reversibility,
+                    "effects": effects,
+                    "state_hash": self._hash_state(final_state),
+                }
+            )
 
         avg_reversibility = sum(r["reversibility"] for r in results) / len(results)
         all_effects = list({e for r in results for e in r["effects"]})
@@ -243,7 +256,9 @@ class Simulator:
             details={"monte_carlo_runs": self.config.monte_carlo_runs},
         )
 
-    def _apply_scenario(self, scenario: ScenarioType, run_seed: int) -> tuple[nx.DiGraph, list[str]]:
+    def _apply_scenario(
+        self, scenario: ScenarioType, run_seed: int
+    ) -> tuple[nx.DiGraph, list[str]]:
         """Apply scenario transformation to graph."""
         rng = random.Random(run_seed)
         effects: list[str] = []
@@ -252,7 +267,7 @@ class Simulator:
         if scenario == ScenarioType.REORGANIZE:
             nodes = list(state.nodes())
             if len(nodes) > 2:
-                edges_to_remove = list(state.edges())[:len(state.edges()) // 3]
+                edges_to_remove = list(state.edges())[: len(state.edges()) // 3]
                 state.remove_edges_from(edges_to_remove)
 
                 for _ in range(len(edges_to_remove)):
@@ -318,7 +333,9 @@ class Simulator:
         edges_removed = len(initial_edges - final_edges)
 
         total_operations = nodes_added + nodes_removed + edges_added + edges_removed
-        max_operations = len(initial_nodes) + len(final_nodes) + len(initial_edges) + len(final_edges)
+        max_operations = (
+            len(initial_nodes) + len(final_nodes) + len(initial_edges) + len(final_edges)
+        )
 
         if max_operations == 0:
             return 1.0
@@ -326,8 +343,9 @@ class Simulator:
         edit_distance_normalized = total_operations / max_operations
         return 1.0 - min(edit_distance_normalized, 1.0)
 
-    def _estimate_probability(self, scenario: ScenarioType,
-                            reversibility: float, event: dict[str, Any]) -> float:
+    def _estimate_probability(
+        self, scenario: ScenarioType, reversibility: float, event: dict[str, Any]
+    ) -> float:
         """Estimate scenario probability."""
         base_probs = {
             ScenarioType.REORGANIZE: 0.3,

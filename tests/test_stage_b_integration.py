@@ -5,6 +5,7 @@ record_prior_alignment() into prior_alignment_summary(), end-to-end.
 Unit tests in test_prior_alignment.py and test_per_turn_priors.py cover each
 function in isolation.  This file proves the plumbing actually connects.
 """
+
 from __future__ import annotations
 
 import shutil
@@ -14,13 +15,11 @@ from pathlib import Path
 
 import pytest
 
-from sovereign_stack.memory import ExperientialMemory
 from sovereign_stack.prior_alignment import (
     prior_alignment_summary,
     record_prior_alignment,
 )
 from sovereign_stack.reflexive import PerTurnPriors, ReflexiveSurface
-
 
 # ── Shared helpers ────────────────────────────────────────────────────────────
 
@@ -107,11 +106,7 @@ class TestStageBRoundTrip:
         assert totals["ignored"] == 1
 
         # All three ratio components must sum to 1.0 (within float rounding).
-        ratio_sum = (
-            ratios["alignment_rate"]
-            + ratios["contradiction_rate"]
-            + ratios["ignore_rate"]
-        )
+        ratio_sum = ratios["alignment_rate"] + ratios["contradiction_rate"] + ratios["ignore_rate"]
         assert abs(ratio_sum - 1.0) < 1e-4, f"Ratios don't sum to 1.0: {ratio_sum}"
 
     def test_fabricated_turn_id_rejected(self, root: Path) -> None:
@@ -160,13 +155,16 @@ class TestStageBRoundTrip:
         align_path.parent.mkdir(parents=True, exist_ok=True)
         for tid, ts, sig in [(t1, ts_old, s1), (t2, ts_new, s2)]:
             align_path.open("a", encoding="utf-8").write(
-                json.dumps({
-                    "turn_id": tid,
-                    "timestamp": ts,
-                    "aligned_with": [sig],
-                    "contradicted": [],
-                    "ignored": [],
-                }) + "\n"
+                json.dumps(
+                    {
+                        "turn_id": tid,
+                        "timestamp": ts,
+                        "aligned_with": [sig],
+                        "contradicted": [],
+                        "ignored": [],
+                    }
+                )
+                + "\n"
             )
 
         # Without a window: both records visible.

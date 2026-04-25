@@ -24,6 +24,7 @@ from sovereign_stack.memory import ExperientialMemory
 
 # ── Fixtures ──
 
+
 @pytest.fixture
 def fake_comms_dir(monkeypatch):
     """Redirect COMMS_DIR to a fresh temp directory."""
@@ -51,6 +52,7 @@ def handoff_root():
 
 # ── Helper ──
 
+
 def _write_message(tmpdir: Path, channel: str, msg: dict):
     path = tmpdir / f"{channel}.jsonl"
     with open(path, "a") as fh:
@@ -69,6 +71,7 @@ def _make_msg(ts: float, mid: str = "msg-1", content: str = "", read_by=None):
 
 
 # ── Case 1: acknowledge writes ack without mutating read_by ──
+
 
 class TestAcknowledge:
     def test_acknowledge_writes_ack_record(self, fake_comms_dir):
@@ -126,6 +129,7 @@ class TestAcknowledge:
 
 # ── Case 2: read_channel(mark_seen=False) does not write read_by ──
 
+
 class TestReadChannelMarkSeen:
     def test_mark_seen_false_tags_messages(self, fake_comms_dir):
         """When mark_seen=False, returned messages get _mark_seen=False tag."""
@@ -158,6 +162,7 @@ class TestReadChannelMarkSeen:
 
 
 # ── Case 3: touch_thread records a touch; get_open_threads still includes thread ──
+
 
 class TestTouchThread:
     def test_touch_thread_records_touch(self, memory_root):
@@ -217,6 +222,7 @@ class TestTouchThread:
 
 # ── Case 4: resolve_thread_by_id after touch_thread works correctly ──
 
+
 class TestResolveAfterTouch:
     def test_resolve_thread_by_id_after_touch(self, memory_root):
         """Touching a thread must not interfere with subsequent resolution by id."""
@@ -243,6 +249,7 @@ class TestResolveAfterTouch:
 
 
 # ── Case 5: mark_acted_on writes record, mark_consumed independent ──
+
 
 class TestMarkActedOn:
     def test_mark_acted_on_writes_record(self, handoff_root):
@@ -319,6 +326,7 @@ class TestMarkActedOn:
 
 # ── Case 6: Credit string for opus-4-7-web present in comms.py ──
 
+
 class TestCreditString:
     def test_opus_credit_in_comms_module_docstring(self):
         """The module docstring must credit opus-4-7-web for the ack split proposal."""
@@ -332,6 +340,7 @@ class TestCreditString:
 
 
 # ── Edit 5: get_open_threads touch annotations ──
+
 
 class TestOpenThreadsTouchAnnotations:
     """get_open_threads annotates each thread with touch_count and last_touched_at."""

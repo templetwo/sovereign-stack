@@ -42,58 +42,37 @@ def all_tool_names(all_tools):
 class TestTaxonomy:
     def test_every_essential_tool_exists(self, all_tool_names):
         """TOOL_TIERS shouldn't reference ghosts."""
-        essential = {
-            n for n, tier in server.TOOL_TIERS.items()
-            if tier == server.TIER_ESSENTIAL
-        }
+        essential = {n for n, tier in server.TOOL_TIERS.items() if tier == server.TIER_ESSENTIAL}
         missing = essential - all_tool_names
         assert not missing, f"essential tier references unknown tools: {missing}"
 
     def test_every_core_tool_exists(self, all_tool_names):
-        core = {
-            n for n, tier in server.TOOL_TIERS.items()
-            if tier == server.TIER_CORE
-        }
+        core = {n for n, tier in server.TOOL_TIERS.items() if tier == server.TIER_CORE}
         missing = core - all_tool_names
         assert not missing, f"core tier references unknown tools: {missing}"
 
     def test_every_intent_target_exists(self, all_tool_names):
         intent_targets = set(server.TOOL_INTENTS.keys())
         missing = intent_targets - all_tool_names
-        assert not missing, (
-            f"TOOL_INTENTS references unknown tools: {missing}"
-        )
+        assert not missing, f"TOOL_INTENTS references unknown tools: {missing}"
 
     def test_every_essential_has_an_intent(self, all_tool_names):
-        essential = {
-            n for n, tier in server.TOOL_TIERS.items()
-            if tier == server.TIER_ESSENTIAL
-        }
+        essential = {n for n, tier in server.TOOL_TIERS.items() if tier == server.TIER_ESSENTIAL}
         for name in essential:
             intent = server._intent_for(name)
-            assert intent != "advanced", (
-                f"essential tool {name} has no intent annotation"
-            )
+            assert intent != "advanced", f"essential tool {name} has no intent annotation"
 
     def test_every_core_has_an_intent(self, all_tool_names):
-        core = {
-            n for n, tier in server.TOOL_TIERS.items()
-            if tier == server.TIER_CORE
-        }
+        core = {n for n, tier in server.TOOL_TIERS.items() if tier == server.TIER_CORE}
         for name in core:
             intent = server._intent_for(name)
-            assert intent != "advanced", (
-                f"core tool {name} has no intent annotation"
-            )
+            assert intent != "advanced", f"core tool {name} has no intent annotation"
 
     def test_essential_count_in_target_range(self):
         """Day-1 surface should be ~12 (10–15 acceptable). If this drifts
         far past 15, the curation needs a re-think — too many tools and
         the 'essential' label stops meaning anything."""
-        essential = {
-            n for n, tier in server.TOOL_TIERS.items()
-            if tier == server.TIER_ESSENTIAL
-        }
+        essential = {n for n, tier in server.TOOL_TIERS.items() if tier == server.TIER_ESSENTIAL}
         assert 8 <= len(essential) <= 16, (
             f"essential tier has {len(essential)} tools — review curation"
         )
@@ -113,7 +92,7 @@ class TestFormatToolkit:
     def test_default_essential_shows_pointer_to_more(self, all_tools):
         text = server._format_toolkit(all_tools, tier=server.TIER_ESSENTIAL)
         assert "tier=essential" in text
-        assert "tier=\"all\"" in text or "tier='all'" in text
+        assert 'tier="all"' in text or "tier='all'" in text
         assert "start_here" in text
 
     def test_essential_only_includes_essential_tools(self, all_tools):
@@ -132,7 +111,9 @@ class TestFormatToolkit:
 
     def test_intent_filter_constrains_output(self, all_tools):
         text = server._format_toolkit(
-            all_tools, tier="all", intent="govern",
+            all_tools,
+            tier="all",
+            intent="govern",
         )
         # govern intent should include compass_check.
         assert "compass_check" in text
@@ -141,13 +122,15 @@ class TestFormatToolkit:
 
     def test_category_filter_legacy_path(self, all_tools):
         server._format_toolkit(
-            all_tools, category_filter="security",
+            all_tools,
+            category_filter="security",
         )
         # Note: filter compares against _category_for output. Guardian
         # tools live under category "guardian", not "security" — so the
         # legacy axis preserves the bucket name.
         text2 = server._format_toolkit(
-            all_tools, category_filter="guardian",
+            all_tools,
+            category_filter="guardian",
         )
         assert "guardian_status" in text2
         assert "category=guardian" in text2
@@ -162,7 +145,9 @@ class TestFormatToolkit:
 
     def test_no_match_returns_friendly_message(self, all_tools):
         text = server._format_toolkit(
-            all_tools, tier=server.TIER_ESSENTIAL, intent="security",
+            all_tools,
+            tier=server.TIER_ESSENTIAL,
+            intent="security",
         )
         # No essential tool has intent="security".
         assert "No tools matched" in text
@@ -183,8 +168,8 @@ class TestStartHere:
 
     def test_mentions_tier_arguments(self):
         text = server._start_here_text()
-        assert "tier=\"all\"" in text
-        assert "tier=\"core\"" in text
+        assert 'tier="all"' in text
+        assert 'tier="core"' in text
 
     def test_under_target_length(self):
         """Under 100 lines so it's read-in-one-glance, not a wall of text."""
@@ -202,12 +187,10 @@ class TestStartHere:
 
 class TestLookups:
     def test_tier_for_essential(self):
-        assert server._tier_for("where_did_i_leave_off") == \
-            server.TIER_ESSENTIAL
+        assert server._tier_for("where_did_i_leave_off") == server.TIER_ESSENTIAL
 
     def test_tier_for_advanced_default(self):
-        assert server._tier_for("definitely_not_a_tool") == \
-            server.TIER_ADVANCED
+        assert server._tier_for("definitely_not_a_tool") == server.TIER_ADVANCED
 
     def test_intent_for_known(self):
         assert server._intent_for("record_insight") == "write"

@@ -20,8 +20,7 @@ import sys
 
 from . import dashboard
 
-DEFAULT_BRIDGE_URL = os.environ.get("SOVEREIGN_BRIDGE_URL",
-                                    "http://127.0.0.1:8100")
+DEFAULT_BRIDGE_URL = os.environ.get("SOVEREIGN_BRIDGE_URL", "http://127.0.0.1:8100")
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -30,35 +29,45 @@ def _build_parser() -> argparse.ArgumentParser:
         description="Live activity monitor for Sovereign Stack.",
     )
     p.add_argument(
-        "--interval", type=int, default=dashboard.DEFAULT_POLL_SECONDS,
+        "--interval",
+        type=int,
+        default=dashboard.DEFAULT_POLL_SECONDS,
         help="poll interval in seconds (default: %(default)s)",
     )
     p.add_argument(
-        "--once", action="store_true",
+        "--once",
+        action="store_true",
         help="render one frame and exit (useful for cron / debugging)",
     )
     p.add_argument(
-        "--json", action="store_true",
+        "--json",
+        action="store_true",
         help="emit a JSON snapshot to stdout (with --once)",
     )
     p.add_argument(
-        "--no-bridge", action="store_true",
+        "--no-bridge",
+        action="store_true",
         help="skip bridge polling — use when bridge is down or unwanted",
     )
     p.add_argument(
-        "--bridge-url", default=DEFAULT_BRIDGE_URL,
+        "--bridge-url",
+        default=DEFAULT_BRIDGE_URL,
         help="bridge base URL (default: %(default)s)",
     )
     p.add_argument(
-        "--bridge-token", default=os.environ.get("SOVEREIGN_BRIDGE_TOKEN", ""),
+        "--bridge-token",
+        default=os.environ.get("SOVEREIGN_BRIDGE_TOKEN", ""),
         help="bridge bearer token (default: $SOVEREIGN_BRIDGE_TOKEN)",
     )
     p.add_argument(
-        "--instance-id", default="dashboard",
+        "--instance-id",
+        default="dashboard",
         help="instance id used for comms-unread queries",
     )
     p.add_argument(
-        "--no-color", action="store_true", help="disable ANSI colors",
+        "--no-color",
+        action="store_true",
+        help="disable ANSI colors",
     )
     return p
 
@@ -94,14 +103,16 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     try:
-        asyncio.run(dashboard.run_loop(
-            interval=args.interval,
-            bridge_url=bridge_url,
-            bridge_token=bridge_token,
-            instance_id=args.instance_id,
-            once=args.once,
-            color=not args.no_color,
-        ))
+        asyncio.run(
+            dashboard.run_loop(
+                interval=args.interval,
+                bridge_url=bridge_url,
+                bridge_token=bridge_token,
+                instance_id=args.instance_id,
+                once=args.once,
+                color=not args.no_color,
+            )
+        )
     except KeyboardInterrupt:
         print("\ndashboard stopped — stack continues to breathe.")
     return 0

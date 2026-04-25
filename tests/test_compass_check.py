@@ -4,6 +4,7 @@ Tests for runtime_compass_check in sovereign_stack.governance.
 Covers the six required cases plus edge cases for input validation.
 The function is purely stateless and deterministic, so no mocking is needed.
 """
+
 import pytest
 
 from sovereign_stack.governance import runtime_compass_check
@@ -11,6 +12,7 @@ from sovereign_stack.governance import runtime_compass_check
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _check(action, context="", stakes="medium"):
     """Thin wrapper so test bodies stay concise."""
@@ -20,6 +22,7 @@ def _check(action, context="", stakes="medium"):
 # ---------------------------------------------------------------------------
 # Case 1: Imperative-bypass grammar → PAUSE
 # ---------------------------------------------------------------------------
+
 
 class TestImperativeBypass:
     def test_skip_review_triggers_pause(self):
@@ -47,6 +50,7 @@ class TestImperativeBypass:
 # ---------------------------------------------------------------------------
 # Case 2: Destructive operations → PAUSE
 # ---------------------------------------------------------------------------
+
 
 class TestDestructiveOperations:
     def test_delete_triggers_pause(self):
@@ -76,6 +80,7 @@ class TestDestructiveOperations:
 # Case 3: High-visibility externalization → PAUSE
 # ---------------------------------------------------------------------------
 
+
 class TestPublishAction:
     def test_publish_triggers_pause(self):
         result = _check("publish the methodology note to the team wiki")
@@ -93,7 +98,9 @@ class TestPublishAction:
     def test_verifications_mention_proofread(self):
         result = _check("publish research notes to OSF")
         verifications = " ".join(result["suggested_verifications"]).lower()
-        assert "proofread" in verifications or "accuracy" in verifications or "typo" in verifications
+        assert (
+            "proofread" in verifications or "accuracy" in verifications or "typo" in verifications
+        )
 
     def test_deploy_to_production_triggers_pause(self):
         result = _check("deploy to production after smoke test passes")
@@ -103,6 +110,7 @@ class TestPublishAction:
 # ---------------------------------------------------------------------------
 # Case 4: WITNESS question (ethical/philosophical) → WITNESS
 # ---------------------------------------------------------------------------
+
 
 class TestWitnessQuestion:
     def test_should_we_triggers_witness(self):
@@ -134,6 +142,7 @@ class TestWitnessQuestion:
 # Case 5: Clean action → PROCEED
 # ---------------------------------------------------------------------------
 
+
 class TestCleanProceed:
     def test_benign_read_proceeds(self):
         result = _check("check the current spiral status")
@@ -160,6 +169,7 @@ class TestCleanProceed:
 # ---------------------------------------------------------------------------
 # Case 6: critical stakes default → PAUSE unless low-risk
 # ---------------------------------------------------------------------------
+
 
 class TestCriticalStakesDefault:
     def test_unknown_action_at_critical_stakes_pauses(self):
@@ -189,6 +199,7 @@ class TestCriticalStakesDefault:
 # ---------------------------------------------------------------------------
 # Input validation
 # ---------------------------------------------------------------------------
+
 
 class TestInputValidation:
     def test_empty_action_raises_value_error(self):
@@ -230,6 +241,7 @@ class TestInputValidation:
 # ---------------------------------------------------------------------------
 # Edit 2: new phrase corpus cases
 # ---------------------------------------------------------------------------
+
 
 class TestNewExternalizePhrases:
     """mirror to, upload to, broadcast, etc. should all → PAUSE with externalize."""

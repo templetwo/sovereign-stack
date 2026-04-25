@@ -36,6 +36,7 @@ ACKS_FILE = "acks.jsonl"  # relative to COMMS_DIR
 
 # ── Path helpers ──
 
+
 def _channel_path(channel: str) -> Path:
     """Sanitize channel name to safe filename. Matches bridge.py convention."""
     safe = "".join(c for c in channel if c.isalnum() or c in "-_")
@@ -63,6 +64,7 @@ def _parse_timestamp(value) -> float | None:
 
 
 # ── Core read ──
+
 
 def _load_all(channel: str) -> list[dict]:
     """Read the full channel file (chronological order preserved)."""
@@ -134,11 +136,10 @@ def read_channel(
         filtered.append(msg)
 
     # Order.
-    filtered.sort(key=lambda m: m.get("timestamp", 0),
-                  reverse=(order == "desc"))
+    filtered.sort(key=lambda m: m.get("timestamp", 0), reverse=(order == "desc"))
 
     # Offset + limit.
-    page = filtered[offset: offset + limit]
+    page = filtered[offset : offset + limit]
 
     # Tag each returned message with whether auto-marking-seen is suppressed.
     # The bridge layer reads this field before deciding to mutate read_by.
@@ -189,15 +190,18 @@ def list_channels() -> list[dict]:
             continue
         messages = _load_all(path.stem)
         latest = messages[-1].get("iso") if messages else None
-        channels.append({
-            "name": path.stem,
-            "messages": len(messages),
-            "latest": latest,
-        })
+        channels.append(
+            {
+                "name": path.stem,
+                "messages": len(messages),
+                "latest": latest,
+            }
+        )
     return channels
 
 
 # ── Acknowledgment layer ──
+
 
 def acknowledge(
     message_id: str,

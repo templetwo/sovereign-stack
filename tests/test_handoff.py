@@ -7,6 +7,7 @@ drops the memory of a previous session, so this suite locks down the core
 invariants: write, unconsumed filter, mark_consumed lifecycle, size limit,
 empty-note rejection, and attribution formatting.
 """
+
 import json
 import shutil
 import tempfile
@@ -143,6 +144,7 @@ class TestHandoffEngine:
 
     def test_unconsumed_newest_first(self):
         import time
+
         self.engine.write("first", "i", "s1", "t")
         time.sleep(0.01)
         self.engine.write("second", "i", "s2", "t")

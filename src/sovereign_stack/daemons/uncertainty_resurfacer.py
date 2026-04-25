@@ -60,7 +60,7 @@ from .senders import SENDER_UNCERTAINTY
 
 # ── Daemon-specific tunables ──
 
-MAX_DIGEST_UNCERTAINTIES = 3         # no flooding — top-3 oldest
+MAX_DIGEST_UNCERTAINTIES = 3  # no flooding — top-3 oldest
 DEFAULT_TTL_DAYS = 7
 
 
@@ -204,10 +204,13 @@ class UncertaintyResurfacer(BaseDaemon):
             )
 
         # Compass check.
-        compass = self._compass_fn(
-            action="uncertainty_resurface",
-            stakes="medium",
-        ) or {}
+        compass = (
+            self._compass_fn(
+                action="uncertainty_resurface",
+                stakes="medium",
+            )
+            or {}
+        )
         decision = compass.get("decision", COMPASS_PROCEED)
         if decision == COMPASS_PAUSE:
             return RunResult(
@@ -229,7 +232,7 @@ class UncertaintyResurfacer(BaseDaemon):
         uncertainties_sorted = sorted(
             uncertainties,
             key=lambda u: str(u.get("timestamp", "")),
-        )[:self.max_digest_uncertainties]
+        )[: self.max_digest_uncertainties]
 
         # Grounding gate.
         grounding = self._grounding_fn(
@@ -325,13 +328,14 @@ class UncertaintyResurfacer(BaseDaemon):
                 lines.append(f"   Would help: {'; '.join(help_items)}")
             lines.append("")
 
-        lines.extend([
-            f"Acknowledge with comms_acknowledge(message_id=\"{message_id}\", "
-            "instance_id=<your id>, note=<what was integrated>).",
-            "",
-            f"{self.unacked_threshold} consecutive unacked digests "
-            "triggers daemon halt.",
-        ])
+        lines.extend(
+            [
+                f'Acknowledge with comms_acknowledge(message_id="{message_id}", '
+                "instance_id=<your id>, note=<what was integrated>).",
+                "",
+                f"{self.unacked_threshold} consecutive unacked digests triggers daemon halt.",
+            ]
+        )
         return "\n".join(lines)
 
     @staticmethod

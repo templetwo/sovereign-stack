@@ -24,18 +24,21 @@ def running_server(monkeypatch):
     # Patch connectivity calls so the server doesn't actually shell out
     # to launchctl during tests.
     monkeypatch.setattr(
-        conn, "_launchctl_print_text", lambda label: None,
+        conn,
+        "_launchctl_print_text",
+        lambda label: None,
     )
     monkeypatch.setattr(
-        conn, "_http_probe",
-        lambda url, timeout=2.0: {"http_status": None, "body": "",
-                                   "error": "mocked"},
+        conn,
+        "_http_probe",
+        lambda url, timeout=2.0: {"http_status": None, "body": "", "error": "mocked"},
     )
 
     server = web.serve(host="127.0.0.1", port=0)  # 0 = ephemeral
     host, port = server.server_address[:2]
     thread = threading.Thread(
-        target=server.serve_forever, daemon=True,
+        target=server.serve_forever,
+        daemon=True,
     )
     thread.start()
     # Give the server a tick to come up.
@@ -96,7 +99,8 @@ class TestEndpoints:
         host, port = running_server
         try:
             urllib.request.urlopen(
-                f"http://{host}:{port}/nonexistent", timeout=2.0,
+                f"http://{host}:{port}/nonexistent",
+                timeout=2.0,
             )
             pytest.fail("expected 404")
         except urllib.error.HTTPError as e:
@@ -121,9 +125,9 @@ class TestBuildSnapshot:
     def test_snapshot_shape(self, monkeypatch):
         monkeypatch.setattr(conn, "_launchctl_print_text", lambda label: None)
         monkeypatch.setattr(
-            conn, "_http_probe",
-            lambda url, timeout=2.0: {"http_status": None, "body": "",
-                                      "error": "mocked"},
+            conn,
+            "_http_probe",
+            lambda url, timeout=2.0: {"http_status": None, "body": "", "error": "mocked"},
         )
         snapshot = web.build_snapshot()
         assert "timestamp" in snapshot

@@ -95,11 +95,13 @@ class CommsStore:
                 break
 
     def acknowledge(self, message_id, instance_id, note=""):
-        self.acks.setdefault(message_id, []).append({
-            "message_id": message_id,
-            "instance_id": instance_id,
-            "note": note,
-        })
+        self.acks.setdefault(message_id, []).append(
+            {
+                "message_id": message_id,
+                "instance_id": instance_id,
+                "note": note,
+            }
+        )
 
     def get_acks(self, message_id):
         return list(self.acks.get(message_id, []))
@@ -168,15 +170,21 @@ def make_daemon(
 
     if digest_sequence is not None:
         seq_iter = iter(digest_sequence)
+
         def detect_fn():
             try:
                 return next(seq_iter)
             except StopIteration:
                 # Empty digest after sequence exhausted.
-                return {"contradictions": [], "stale_threads": [],
-                        "stale_hypotheses": [], "stats": {}}
+                return {
+                    "contradictions": [],
+                    "stale_threads": [],
+                    "stale_hypotheses": [],
+                    "stats": {},
+                }
     else:
         single = digest if digest is not None else _digest()
+
         def detect_fn():
             return single
 
@@ -205,8 +213,7 @@ def make_daemon(
         halt_dir=root / "daemons" / "halts",
         decisions_dir=root / "decisions",
         evidence_paths=[root / "metabolism_log.jsonl"],
-        compass_fn=lambda action, stakes: {
-            "decision": compass_decision, "rationale": "test"},
+        compass_fn=lambda action, stakes: {"decision": compass_decision, "rationale": "test"},
         detect_fn=detect_fn,
         comms_post_fn=comms.post,
         comms_get_acks_fn=comms.get_acks,
@@ -237,14 +244,11 @@ class TestAckDistinctFromReadBy:
         # Three posts read but never acked — next run halts.
         r = daemon.run()
         assert r.outcome == OUTCOME_HALTED, (
-            "read_by glances are NOT acks. If this fails, the circuit "
-            "breaker is broken."
+            "read_by glances are NOT acks. If this fails, the circuit breaker is broken."
         )
 
         # Verify acks map is empty for each digest post.
-        digest_ids = [
-            p["id"] for p in comms.posts if p["sender"] == SENDER_METABOLIZE
-        ]
+        digest_ids = [p["id"] for p in comms.posts if p["sender"] == SENDER_METABOLIZE]
         for post_id in digest_ids:
             assert comms.get_acks(post_id) == []
 
@@ -255,7 +259,8 @@ class TestAckDistinctFromReadBy:
 class TestCompassGating:
     def test_compass_pause_skips_post(self, tmp_sovereign):
         daemon, comms = make_daemon(
-            tmp_sovereign, compass_decision=COMPASS_PAUSE,
+            tmp_sovereign,
+            compass_decision=COMPASS_PAUSE,
         )
         r = daemon.run()
         assert r.outcome == OUTCOME_PAUSED
@@ -338,9 +343,7 @@ class TestHalt:
         comms.acknowledge(r3.posted_message_id, "claude-iphone", "integrated")
 
         r = daemon.run()
-        assert r.outcome == OUTCOME_POSTED, (
-            "An ack within the window must reset the unacked count."
-        )
+        assert r.outcome == OUTCOME_POSTED, "An ack within the window must reset the unacked count."
 
     def test_halt_persists_across_runs(self, tmp_sovereign):
         digests = [_digest(suffix=s) for s in "abcd"]
@@ -364,7 +367,8 @@ class TestDeltaFilter:
     def test_identical_digest_returns_no_changes(self, tmp_sovereign):
         same = _digest(suffix="x")
         daemon, comms = make_daemon(
-            tmp_sovereign, digest_sequence=[same, same],
+            tmp_sovereign,
+            digest_sequence=[same, same],
         )
         r1 = daemon.run()
         assert r1.outcome == OUTCOME_POSTED
@@ -379,7 +383,9 @@ class TestDeltaFilter:
 
     def test_partial_overlap_posts_only_new_items(self, tmp_sovereign):
         first = _digest(
-            n_contradictions=2, n_stale_threads=2, n_stale_hypotheses=2,
+            n_contradictions=2,
+            n_stale_threads=2,
+            n_stale_hypotheses=2,
             suffix="x",
         )
         # Second digest reuses ONE contradiction and ONE stale_thread from
@@ -399,8 +405,12 @@ class TestDeltaFilter:
             ],
             "stale_threads": [
                 first["stale_threads"][0],
-                {"domain": "new-std", "question": "new q", "age_days": 50,
-                 "timestamp": "2026-03-01T00:00:99Z"},
+                {
+                    "domain": "new-std",
+                    "question": "new q",
+                    "age_days": 50,
+                    "timestamp": "2026-03-01T00:00:99Z",
+                },
             ],
             "stale_hypotheses": [
                 {"domain": "new-shd", "content": "new aging hyp", "age_days": 70},
@@ -408,7 +418,8 @@ class TestDeltaFilter:
             "stats": first["stats"],
         }
         daemon, comms = make_daemon(
-            tmp_sovereign, digest_sequence=[first, second],
+            tmp_sovereign,
+            digest_sequence=[first, second],
         )
         daemon.run()
         r2 = daemon.run()
@@ -418,9 +429,7 @@ class TestDeltaFilter:
         assert r2.stale_hypotheses_included == 1
 
         # Second comms post content references ONLY the new items.
-        second_post = [
-            p for p in comms.posts if p["sender"] == SENDER_METABOLIZE
-        ][1]["content"]
+        second_post = [p for p in comms.posts if p["sender"] == SENDER_METABOLIZE][1]["content"]
         assert "new hyp" in second_post
         # The repeated item should not appear in the second digest.
         assert first["contradictions"][0]["hypothesis_preview"] not in second_post
@@ -429,8 +438,10 @@ class TestDeltaFilter:
         """Two equivalent items must hash to the same fingerprint, or
         the delta filter leaks duplicates across runs."""
         c = {
-            "hypothesis_domain": "x", "hypothesis_timestamp": "t1",
-            "ground_truth_domain": "y", "ground_truth_timestamp": "t2",
+            "hypothesis_domain": "x",
+            "hypothesis_timestamp": "t1",
+            "ground_truth_domain": "y",
+            "ground_truth_timestamp": "t2",
         }
         assert _contradiction_key(c) == _contradiction_key(dict(c))
 
@@ -446,8 +457,12 @@ class TestDeltaFilter:
 
 class TestEmptyStates:
     def test_no_findings_when_chronicle_clean(self, tmp_sovereign):
-        empty = {"contradictions": [], "stale_threads": [],
-                 "stale_hypotheses": [], "stats": {"total_insights": 0}}
+        empty = {
+            "contradictions": [],
+            "stale_threads": [],
+            "stale_hypotheses": [],
+            "stats": {"total_insights": 0},
+        }
         daemon, comms = make_daemon(tmp_sovereign, digest=empty)
         r = daemon.run()
         assert r.outcome == OUTCOME_NO_FINDINGS
@@ -456,13 +471,13 @@ class TestEmptyStates:
     def test_no_changes_when_only_duplicates(self, tmp_sovereign):
         same = _digest(suffix="z")
         daemon, comms = make_daemon(
-            tmp_sovereign, digest_sequence=[same, same],
+            tmp_sovereign,
+            digest_sequence=[same, same],
         )
         daemon.run()
         r = daemon.run()
         assert r.outcome == OUTCOME_NO_CHANGES, (
-            "Distinct from no_findings: detection produced findings, but "
-            "all already surfaced."
+            "Distinct from no_findings: detection produced findings, but all already surfaced."
         )
 
 
@@ -482,7 +497,9 @@ class TestDecisionFile:
     def test_decision_file_contains_full_content(self, tmp_sovereign):
         """Decision file is the durable record — fuller than the comms snippet."""
         digest = _digest(
-            n_contradictions=2, n_stale_threads=2, n_stale_hypotheses=2,
+            n_contradictions=2,
+            n_stale_threads=2,
+            n_stale_hypotheses=2,
         )
         daemon, _ = make_daemon(tmp_sovereign, digest=digest)
         r = daemon.run()
@@ -501,9 +518,7 @@ class TestDecisionFile:
         before = list((tmp_sovereign / "decisions").glob("*.md"))
         daemon.run()
         after = list((tmp_sovereign / "decisions").glob("*.md"))
-        assert len(after) == len(before), (
-            "no_changes must NOT produce a new decision file."
-        )
+        assert len(after) == len(before), "no_changes must NOT produce a new decision file."
 
     def test_no_decision_file_on_grounding_failure(self, tmp_sovereign):
         daemon, _ = make_daemon(tmp_sovereign, grounding_accept=False)
@@ -565,16 +580,24 @@ class TestDryRun:
         daemon, _ = make_daemon(tmp_sovereign)
         state_path = tmp_sovereign / "daemons" / "metabolize_state.json"
         state_path.parent.mkdir(parents=True, exist_ok=True)
-        state_path.write_text(json.dumps({
-            "schema_version": STATE_SCHEMA_VERSION,
-            "posted_digests": [
-                {"message_id": f"m{i}", "posted_at": "2026-04-20T00:00:00+00:00",
-                 "content_snippet": "x", "fingerprints": []}
-                for i in range(CONSECUTIVE_UNACKED_THRESHOLD)
-            ],
-            "halted_at": None,
-            "halt_reason": None,
-        }))
+        state_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": STATE_SCHEMA_VERSION,
+                    "posted_digests": [
+                        {
+                            "message_id": f"m{i}",
+                            "posted_at": "2026-04-20T00:00:00+00:00",
+                            "content_snippet": "x",
+                            "fingerprints": [],
+                        }
+                        for i in range(CONSECUTIVE_UNACKED_THRESHOLD)
+                    ],
+                    "halted_at": None,
+                    "halt_reason": None,
+                }
+            )
+        )
         r = daemon.run(dry_run=True)
         assert r.outcome == OUTCOME_HALTED
         halts = list((tmp_sovereign / "daemons" / "halts").glob("*.md"))
@@ -595,11 +618,15 @@ class TestStateSchema:
     def test_unversioned_legacy_state_loads_as_v1(self, tmp_sovereign):
         state_path = tmp_sovereign / "daemons" / "metabolize_state.json"
         state_path.parent.mkdir(parents=True, exist_ok=True)
-        state_path.write_text(json.dumps({
-            "posted_digests": [],
-            "halted_at": None,
-            "halt_reason": None,
-        }))
+        state_path.write_text(
+            json.dumps(
+                {
+                    "posted_digests": [],
+                    "halted_at": None,
+                    "halt_reason": None,
+                }
+            )
+        )
         daemon, _ = make_daemon(tmp_sovereign)
         r = daemon.run()
         assert r.outcome in (OUTCOME_POSTED, OUTCOME_NO_FINDINGS)
@@ -607,12 +634,16 @@ class TestStateSchema:
     def test_future_schema_version_refuses_to_load(self, tmp_sovereign):
         state_path = tmp_sovereign / "daemons" / "metabolize_state.json"
         state_path.parent.mkdir(parents=True, exist_ok=True)
-        state_path.write_text(json.dumps({
-            "schema_version": STATE_SCHEMA_VERSION + 1,
-            "posted_digests": [],
-            "halted_at": None,
-            "halt_reason": None,
-        }))
+        state_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": STATE_SCHEMA_VERSION + 1,
+                    "posted_digests": [],
+                    "halted_at": None,
+                    "halt_reason": None,
+                }
+            )
+        )
         daemon, _ = make_daemon(tmp_sovereign)
         with pytest.raises(ValueError):
             daemon.run()
@@ -664,14 +695,11 @@ class TestSenderTaxonomy:
         daemon.run()  # halt
         for post in comms.posts:
             assert post["sender"].startswith("daemon."), (
-                f"All daemon posts must use the daemon.* prefix. "
-                f"Got: {post['sender']}"
+                f"All daemon posts must use the daemon.* prefix. Got: {post['sender']}"
             )
 
     def test_routine_post_uses_metabolize_sender(self, tmp_sovereign):
         daemon, comms = make_daemon(tmp_sovereign)
         daemon.run()
-        digest_posts = [
-            p for p in comms.posts if p["sender"] == SENDER_METABOLIZE
-        ]
+        digest_posts = [p for p in comms.posts if p["sender"] == SENDER_METABOLIZE]
         assert len(digest_posts) == 1

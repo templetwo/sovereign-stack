@@ -22,10 +22,12 @@ SENDER_BRIDGE = "daemon.bridge"
 # Anthony has a single place to see circuit-breaker events.
 SENDER_HALT_ALERT = "daemon.halt-alert"
 
-ALL_DAEMON_SENDERS = frozenset({
-    SENDER_UNCERTAINTY,
-    SENDER_METABOLIZE,
-    SENDER_TRIAGE,
-    SENDER_BRIDGE,
-    SENDER_HALT_ALERT,
-})
+ALL_DAEMON_SENDERS = frozenset(
+    {
+        SENDER_UNCERTAINTY,
+        SENDER_METABOLIZE,
+        SENDER_TRIAGE,
+        SENDER_BRIDGE,
+        SENDER_HALT_ALERT,
+    }
+)

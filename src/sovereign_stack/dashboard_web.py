@@ -47,7 +47,7 @@ from . import dashboard
 _GLOBAL_FEED = dashboard.ActivityFeed(maxlen=200)
 _FEED_LIMIT_IN_SNAPSHOT = 30
 _WATCHER_INTERVAL = 2.0  # seconds — faster than client poll, so events
-                          # land in the next snapshot poll
+# land in the next snapshot poll
 _watcher_started = False
 _watcher_lock = threading.Lock()
 
@@ -57,9 +57,12 @@ def _watcher_loop() -> None:
     until process exit. Mirrors dashboard.run_loop's filesystem watchers,
     plus git-commit polling and launchd service-state tracking (added
     2026-04-25 to widen the live feed beyond chronicle-only activity)."""
-    root = Path(os.environ.get(
-        "SOVEREIGN_ROOT", Path.home() / ".sovereign",
-    ))
+    root = Path(
+        os.environ.get(
+            "SOVEREIGN_ROOT",
+            Path.home() / ".sovereign",
+        )
+    )
     repo_path = Path(__file__).resolve().parent.parent.parent
     chronicle_index = dashboard._MtimeIndex()
     halts_index = dashboard._MtimeIndex()
@@ -88,18 +91,32 @@ def _watcher_loop() -> None:
     )
 
     # Seed indices so the first iteration doesn't dump everything as "new".
-    chronicle_index.diff(dashboard._list_paths(
-        root / "chronicle" / "insights", "*.jsonl", recursive=True,
-    ))
-    chronicle_index.diff(dashboard._list_paths(
-        root / "chronicle" / "open_threads", "*.jsonl", recursive=True,
-    ))
-    halts_index.diff(dashboard._list_paths(
-        root / "daemons" / "halts", "*.md",
-    ))
-    decisions_index.diff(dashboard._list_paths(
-        root / "decisions", "metabolize_*.md",
-    ))
+    chronicle_index.diff(
+        dashboard._list_paths(
+            root / "chronicle" / "insights",
+            "*.jsonl",
+            recursive=True,
+        )
+    )
+    chronicle_index.diff(
+        dashboard._list_paths(
+            root / "chronicle" / "open_threads",
+            "*.jsonl",
+            recursive=True,
+        )
+    )
+    halts_index.diff(
+        dashboard._list_paths(
+            root / "daemons" / "halts",
+            "*.md",
+        )
+    )
+    decisions_index.diff(
+        dashboard._list_paths(
+            root / "decisions",
+            "metabolize_*.md",
+        )
+    )
     honks_index.diff([root / "nape" / "honks.jsonl"])
 
     _GLOBAL_FEED.add(
@@ -109,10 +126,13 @@ def _watcher_loop() -> None:
 
     while True:
         try:
-            for jsonl in chronicle_index.diff(dashboard._list_paths(
-                root / "chronicle" / "insights",
-                "*.jsonl", recursive=True,
-            )):
+            for jsonl in chronicle_index.diff(
+                dashboard._list_paths(
+                    root / "chronicle" / "insights",
+                    "*.jsonl",
+                    recursive=True,
+                )
+            ):
                 tail = dashboard.read_chronicle_tail(jsonl)
                 if tail:
                     layer = tail.get("layer", "?")
@@ -122,25 +142,35 @@ def _watcher_loop() -> None:
                         f"[{layer}] {content}…",
                     )
 
-            for jsonl in chronicle_index.diff(dashboard._list_paths(
-                root / "chronicle" / "open_threads",
-                "*.jsonl", recursive=True,
-            )):
+            for jsonl in chronicle_index.diff(
+                dashboard._list_paths(
+                    root / "chronicle" / "open_threads",
+                    "*.jsonl",
+                    recursive=True,
+                )
+            ):
                 tail = dashboard.read_chronicle_tail(jsonl)
                 if tail:
                     q = (tail.get("question") or "")[:80]
                     _GLOBAL_FEED.add(dashboard.CAT_THREAD, q)
 
-            for halt in halts_index.diff(dashboard._list_paths(
-                root / "daemons" / "halts", "*.md",
-            )):
+            for halt in halts_index.diff(
+                dashboard._list_paths(
+                    root / "daemons" / "halts",
+                    "*.md",
+                )
+            ):
                 _GLOBAL_FEED.add(
-                    dashboard.CAT_HALT, f"halt note: {halt.name}",
+                    dashboard.CAT_HALT,
+                    f"halt note: {halt.name}",
                 )
 
-            for dec in decisions_index.diff(dashboard._list_paths(
-                root / "decisions", "metabolize_*.md",
-            )):
+            for dec in decisions_index.diff(
+                dashboard._list_paths(
+                    root / "decisions",
+                    "metabolize_*.md",
+                )
+            ):
                 _GLOBAL_FEED.add(
                     dashboard.CAT_DECISION,
                     f"new metabolize digest: {dec.name}",
@@ -148,18 +178,20 @@ def _watcher_loop() -> None:
 
             if honks_index.diff([root / "nape" / "honks.jsonl"]):
                 recent = dashboard.read_recent_honks(
-                    root / "nape" / "honks.jsonl", limit=3,
+                    root / "nape" / "honks.jsonl",
+                    limit=3,
                 )
                 for h in recent:
                     _GLOBAL_FEED.add(
                         dashboard.CAT_HONK,
-                        f"[{h.get('level','?')}] {h.get('pattern','?')}: "
-                        f"{h.get('trigger_tool','?')}",
+                        f"[{h.get('level', '?')}] {h.get('pattern', '?')}: "
+                        f"{h.get('trigger_tool', '?')}",
                     )
 
             # ── Git-commit poller (Option A) ──
             recent_commits = dashboard._git_recent_commits(
-                repo_path, limit=5,
+                repo_path,
+                limit=5,
             )
             if recent_commits:
                 # Walk newest-first; emit until we hit the last seen sha.
@@ -217,8 +249,7 @@ def _ensure_watcher() -> None:
     with _watcher_lock:
         if _watcher_started:
             return
-        t = threading.Thread(target=_watcher_loop, daemon=True,
-                             name="sovereign-dashboard-watcher")
+        t = threading.Thread(target=_watcher_loop, daemon=True, name="sovereign-dashboard-watcher")
         t.start()
         _watcher_started = True
 
@@ -324,7 +355,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return
 
         if path.startswith("/static/"):
-            name = path[len("/static/"):]
+            name = path[len("/static/") :]
             # Path traversal guard.
             if "/" in name or ".." in name or name.startswith("."):
                 self._send_json(404, {"error": "not found"})
@@ -339,8 +370,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return
 
         if path == "/health":
-            self._send_json(200, {"status": "healthy",
-                                  "service": "sovereign-dashboard-web"})
+            self._send_json(200, {"status": "healthy", "service": "sovereign-dashboard-web"})
             return
 
         self._send_json(404, {"error": "not found", "path": path})
@@ -388,10 +418,10 @@ def _build_parser() -> argparse.ArgumentParser:
         prog="sovereign-dashboard-web",
         description="Web dashboard for Sovereign Stack.",
     )
-    p.add_argument("--host", default="127.0.0.1",
-                   help="bind host (default: %(default)s)")
-    p.add_argument("--port", type=int, default=DEFAULT_PORT,
-                   help="bind port (default: %(default)s)")
+    p.add_argument("--host", default="127.0.0.1", help="bind host (default: %(default)s)")
+    p.add_argument(
+        "--port", type=int, default=DEFAULT_PORT, help="bind port (default: %(default)s)"
+    )
     return p
 
 

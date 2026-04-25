@@ -42,17 +42,23 @@ from . import connectivity
 # ── Defaults ────────────────────────────────────────────────────────────────
 
 
-DEFAULT_INTERVAL = 30        # seconds between full checks
-DEFAULT_MAX_RESTARTS = 5     # per endpoint, before giving up
+DEFAULT_INTERVAL = 30  # seconds between full checks
+DEFAULT_MAX_RESTARTS = 5  # per endpoint, before giving up
 DEFAULT_BASELINE_RESET = 3600  # reset restart counters every hour
-DEFAULT_BACKOFF_BASE = 2.0   # exponential base (seconds)
+DEFAULT_BACKOFF_BASE = 2.0  # exponential base (seconds)
 DEFAULT_BACKOFF_CAP = 300.0  # max backoff (5 min)
 
 
 def _monitor_log_path() -> Path:
-    return Path(os.environ.get(
-        "SOVEREIGN_ROOT", Path.home() / ".sovereign",
-    )) / "monitor.log"
+    return (
+        Path(
+            os.environ.get(
+                "SOVEREIGN_ROOT",
+                Path.home() / ".sovereign",
+            )
+        )
+        / "monitor.log"
+    )
 
 
 def _now_iso() -> str:
@@ -81,7 +87,7 @@ class MonitorConfig:
 
 @dataclass
 class _RestartRecord:
-    count: int = 0           # failed-restart streak
+    count: int = 0  # failed-restart streak
     last_attempt: float = 0.0
     # last_baseline is the wall-clock timestamp from which the
     # "long-healthy gap clears the streak" timer counts. Default is 0
@@ -134,7 +140,7 @@ class RestartTracker:
 
         backoff = min(
             self._cfg.backoff_cap,
-            self._cfg.backoff_base ** rec.count,
+            self._cfg.backoff_base**rec.count,
         )
         return (now - rec.last_attempt) >= backoff
 
@@ -214,12 +220,14 @@ def run_once(
             continue
 
         if not tracker.should_attempt(status.name, now=now):
-            actions.append({
-                "name": status.name,
-                "action": "deferred",
-                "reason": "backoff_or_max_reached",
-                "tracker_state": tracker.state().get(status.name, {}),
-            })
+            actions.append(
+                {
+                    "name": status.name,
+                    "action": "deferred",
+                    "reason": "backoff_or_max_reached",
+                    "tracker_state": tracker.state().get(status.name, {}),
+                }
+            )
             continue
 
         endpoint = next(
@@ -230,30 +238,32 @@ def run_once(
             continue
 
         if config.dry_run:
-            actions.append({
-                "name": status.name,
-                "action": "would_restart",
-                "dry_run": True,
-            })
+            actions.append(
+                {
+                    "name": status.name,
+                    "action": "would_restart",
+                    "dry_run": True,
+                }
+            )
             continue
 
         result = do_restart(endpoint)
         tracker.record_attempt(status.name, result.ok, now=now)
-        actions.append({
-            "name": status.name,
-            "action": "restart",
-            "ok": result.ok,
-            "returncode": result.returncode,
-            "stderr": result.stderr[:200] if result.stderr else "",
-        })
+        actions.append(
+            {
+                "name": status.name,
+                "action": "restart",
+                "ok": result.ok,
+                "returncode": result.returncode,
+                "stderr": result.stderr[:200] if result.stderr else "",
+            }
+        )
 
     summary = {
         "timestamp": _now_iso(),
         "checked": [s.name for s in statuses],
-        "down": [s.name for s in statuses
-                 if s.status == connectivity.STATUS_DOWN],
-        "degraded": [s.name for s in statuses
-                     if s.status == connectivity.STATUS_DEGRADED],
+        "down": [s.name for s in statuses if s.status == connectivity.STATUS_DOWN],
+        "degraded": [s.name for s in statuses if s.status == connectivity.STATUS_DEGRADED],
         "actions": actions,
         "dry_run": config.dry_run,
     }
@@ -267,15 +277,18 @@ def run_once(
 async def run_loop(config: MonitorConfig) -> None:
     """The long-running monitor. Cancellation-safe."""
     tracker = RestartTracker(config)
-    _log_event(config, {
-        "timestamp": _now_iso(),
-        "event": "loop_start",
-        "config": {
-            "interval": config.interval,
-            "max_restarts": config.max_restarts,
-            "dry_run": config.dry_run,
+    _log_event(
+        config,
+        {
+            "timestamp": _now_iso(),
+            "event": "loop_start",
+            "config": {
+                "interval": config.interval,
+                "max_restarts": config.max_restarts,
+                "dry_run": config.dry_run,
+            },
         },
-    })
+    )
     try:
         while True:
             run_once(config, tracker)

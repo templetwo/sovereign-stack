@@ -30,19 +30,26 @@ def _build_parser() -> argparse.ArgumentParser:
         prog="sovereign-monitor",
         description="Auto-recovery monitor for Sovereign Stack endpoints.",
     )
-    p.add_argument("--interval", type=int, default=DEFAULT_INTERVAL,
-                   help="seconds between checks (default: %(default)s)")
-    p.add_argument("--max-restarts", type=int, default=DEFAULT_MAX_RESTARTS,
-                   help="per-endpoint restart cap before giving up "
-                        "(default: %(default)s)")
-    p.add_argument("--dry-run", action="store_true",
-                   help="log decisions without invoking launchctl")
-    p.add_argument("--once", action="store_true",
-                   help="run a single tick and exit")
-    p.add_argument("--exclude", action="append", default=[],
-                   help="endpoint name to skip (repeatable)")
-    p.add_argument("--json", action="store_true",
-                   help="emit JSON tick summary on --once")
+    p.add_argument(
+        "--interval",
+        type=int,
+        default=DEFAULT_INTERVAL,
+        help="seconds between checks (default: %(default)s)",
+    )
+    p.add_argument(
+        "--max-restarts",
+        type=int,
+        default=DEFAULT_MAX_RESTARTS,
+        help="per-endpoint restart cap before giving up (default: %(default)s)",
+    )
+    p.add_argument(
+        "--dry-run", action="store_true", help="log decisions without invoking launchctl"
+    )
+    p.add_argument("--once", action="store_true", help="run a single tick and exit")
+    p.add_argument(
+        "--exclude", action="append", default=[], help="endpoint name to skip (repeatable)"
+    )
+    p.add_argument("--json", action="store_true", help="emit JSON tick summary on --once")
     return p
 
 

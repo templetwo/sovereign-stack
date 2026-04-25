@@ -24,15 +24,17 @@ from typing import Any, TypeVar
 
 logger = logging.getLogger("sovereign.errors")
 
-T = TypeVar('T')
+T = TypeVar("T")
 
 
 # =============================================================================
 # STRUCTURED EXCEPTIONS
 # =============================================================================
 
+
 class ErrorSeverity(Enum):
     """Error severity levels."""
+
     INFO = "info"
     WARNING = "warning"
     ERROR = "error"
@@ -41,6 +43,7 @@ class ErrorSeverity(Enum):
 
 class ErrorCategory(Enum):
     """Error categories for classification."""
+
     VALIDATION = "validation"
     PERMISSION = "permission"
     TIMEOUT = "timeout"
@@ -54,6 +57,7 @@ class ErrorCategory(Enum):
 @dataclass
 class ErrorContext:
     """Rich error context for debugging."""
+
     category: ErrorCategory
     severity: ErrorSeverity
     operation: str
@@ -71,7 +75,7 @@ class ErrorContext:
             "details": self.details,
             "timestamp": self.timestamp.isoformat(),
             "stack_trace": self.stack_trace,
-            "recovery_suggestion": self.recovery_suggestion
+            "recovery_suggestion": self.recovery_suggestion,
         }
 
 
@@ -79,10 +83,7 @@ class SovereignError(Exception):
     """Base exception with rich context."""
 
     def __init__(
-        self,
-        message: str,
-        context: ErrorContext | None = None,
-        cause: Exception | None = None
+        self, message: str, context: ErrorContext | None = None, cause: Exception | None = None
     ):
         super().__init__(message)
         self.message = message
@@ -95,7 +96,7 @@ class SovereignError(Exception):
                 ErrorSeverity.INFO: logging.INFO,
                 ErrorSeverity.WARNING: logging.WARNING,
                 ErrorSeverity.ERROR: logging.ERROR,
-                ErrorSeverity.CRITICAL: logging.CRITICAL
+                ErrorSeverity.CRITICAL: logging.CRITICAL,
             }.get(context.severity, logging.ERROR)
 
             logger.log(log_level, f"{message}", extra={"context": context.to_dict()})
@@ -140,6 +141,7 @@ class RetryExhaustedError(SovereignError):
 # TIMEOUT HANDLER
 # =============================================================================
 
+
 class TimeoutHandler:
     """
     Timeout wrapper for operations.
@@ -177,8 +179,8 @@ class TimeoutHandler:
                     severity=ErrorSeverity.ERROR,
                     operation=func.__name__,
                     details={"timeout": self.timeout_seconds},
-                    recovery_suggestion="Increase timeout or optimize operation"
-                )
+                    recovery_suggestion="Increase timeout or optimize operation",
+                ),
             )
 
         # Set alarm
@@ -213,21 +215,18 @@ class TimeoutHandler:
             TimeoutError: If operation times out
         """
         try:
-            return await asyncio.wait_for(
-                coro(*args, **kwargs),
-                timeout=self.timeout_seconds
-            )
+            return await asyncio.wait_for(coro(*args, **kwargs), timeout=self.timeout_seconds)
         except asyncio.TimeoutError as e:
             raise TimeoutError(
                 f"Async operation timed out after {self.timeout_seconds}s",
                 context=ErrorContext(
                     category=ErrorCategory.TIMEOUT,
                     severity=ErrorSeverity.ERROR,
-                    operation=coro.__name__ if hasattr(coro, '__name__') else 'async_operation',
+                    operation=coro.__name__ if hasattr(coro, "__name__") else "async_operation",
                     details={"timeout": self.timeout_seconds},
-                    recovery_suggestion="Increase timeout or optimize async operation"
+                    recovery_suggestion="Increase timeout or optimize async operation",
                 ),
-                cause=e
+                cause=e,
             ) from e
 
 
@@ -235,9 +234,11 @@ class TimeoutHandler:
 # RETRY LOGIC WITH EXPONENTIAL BACKOFF
 # =============================================================================
 
+
 @dataclass
 class RetryConfig:
     """Configuration for retry logic."""
+
     max_attempts: int = 3
     initial_delay: float = 1.0
     max_delay: float = 60.0
@@ -287,9 +288,7 @@ class RetryHandler:
 
             except self.config.retry_on as e:
                 last_exception = e
-                logger.warning(
-                    f"Attempt {attempt}/{self.config.max_attempts} failed: {e}"
-                )
+                logger.warning(f"Attempt {attempt}/{self.config.max_attempts} failed: {e}")
 
                 if attempt < self.config.max_attempts:
                     delay = self._compute_delay(attempt)
@@ -305,25 +304,23 @@ class RetryHandler:
                 category=ErrorCategory.LOGIC,
                 severity=ErrorSeverity.ERROR,
                 operation=func.__name__,
-                details={
-                    "attempts": self.config.max_attempts,
-                    "last_error": str(last_exception)
-                },
-                recovery_suggestion="Check operation logic or increase retry attempts"
+                details={"attempts": self.config.max_attempts, "last_error": str(last_exception)},
+                recovery_suggestion="Check operation logic or increase retry attempts",
             ),
-            cause=last_exception
+            cause=last_exception,
         )
 
     def _compute_delay(self, attempt: int) -> float:
         """Compute delay for exponential backoff with jitter."""
         delay = min(
             self.config.initial_delay * (self.config.exponential_base ** (attempt - 1)),
-            self.config.max_delay
+            self.config.max_delay,
         )
 
         if self.config.jitter:
             import random
-            delay *= (0.5 + random.random())  # Add 0-50% jitter
+
+            delay *= 0.5 + random.random()  # Add 0-50% jitter
 
         return delay
 
@@ -332,8 +329,10 @@ class RetryHandler:
 # CIRCUIT BREAKER
 # =============================================================================
 
+
 class CircuitState(Enum):
     """Circuit breaker states."""
+
     CLOSED = "closed"  # Normal operation
     OPEN = "open"  # Failing, reject requests
     HALF_OPEN = "half_open"  # Testing recovery
@@ -342,6 +341,7 @@ class CircuitState(Enum):
 @dataclass
 class CircuitBreakerConfig:
     """Configuration for circuit breaker."""
+
     failure_threshold: int = 5  # Failures before opening
     recovery_timeout: float = 60.0  # Seconds before trying again
     success_threshold: int = 2  # Successes in half-open before closing
@@ -391,12 +391,9 @@ class CircuitBreaker:
                         category=ErrorCategory.RESOURCE,
                         severity=ErrorSeverity.WARNING,
                         operation=func.__name__,
-                        details={
-                            "state": self.state.value,
-                            "failure_count": self.failure_count
-                        },
-                        recovery_suggestion=f"Wait {self.config.recovery_timeout}s for circuit to reset"
-                    )
+                        details={"state": self.state.value, "failure_count": self.failure_count},
+                        recovery_suggestion=f"Wait {self.config.recovery_timeout}s for circuit to reset",
+                    ),
                 )
 
         # Attempt operation
@@ -453,36 +450,46 @@ class CircuitBreaker:
 # DECORATORS
 # =============================================================================
 
+
 def with_timeout(timeout_seconds: float = 30.0):
     """Decorator for timeout handling."""
+
     def decorator(func: Callable) -> Callable:
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
             handler = TimeoutHandler(timeout_seconds)
             return handler.run(func, *args, **kwargs)
+
         return wrapper
+
     return decorator
 
 
 def with_retry(max_attempts: int = 3, initial_delay: float = 1.0):
     """Decorator for retry logic."""
+
     def decorator(func: Callable) -> Callable:
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
             config = RetryConfig(max_attempts=max_attempts, initial_delay=initial_delay)
             handler = RetryHandler(config)
             return handler.run(func, *args, **kwargs)
+
         return wrapper
+
     return decorator
 
 
 def with_circuit_breaker(breaker: CircuitBreaker):
     """Decorator for circuit breaker."""
+
     def decorator(func: Callable) -> Callable:
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
             return breaker.call(func, *args, **kwargs)
+
         return wrapper
+
     return decorator
 
 
@@ -490,12 +497,13 @@ def with_circuit_breaker(breaker: CircuitBreaker):
 # SAFE OPERATION WRAPPER
 # =============================================================================
 
+
 @contextmanager
 def safe_operation(
     operation_name: str,
     category: ErrorCategory = ErrorCategory.LOGIC,
     severity: ErrorSeverity = ErrorSeverity.ERROR,
-    reraise: bool = True
+    reraise: bool = True,
 ):
     """
     Context manager for safe operations with automatic error handling.
@@ -511,13 +519,13 @@ def safe_operation(
             category=category,
             severity=severity,
             operation=operation_name,
-            details={"error": str(e), "type": type(e).__name__}
+            details={"error": str(e), "type": type(e).__name__},
         )
 
         logger.error(
             f"Operation '{operation_name}' failed: {e}",
             extra={"context": context.to_dict()},
-            exc_info=True
+            exc_info=True,
         )
 
         if reraise:
@@ -525,15 +533,14 @@ def safe_operation(
                 raise
             else:
                 raise SovereignError(
-                    f"Operation '{operation_name}' failed",
-                    context=context,
-                    cause=e
+                    f"Operation '{operation_name}' failed", context=context, cause=e
                 ) from e
 
 
 # =============================================================================
 # VALIDATION HELPERS
 # =============================================================================
+
 
 def validate_type(value: Any, expected_type: type, field_name: str) -> None:
     """
@@ -557,10 +564,10 @@ def validate_type(value: Any, expected_type: type, field_name: str) -> None:
                 details={
                     "field": field_name,
                     "expected": expected_type.__name__,
-                    "got": type(value).__name__
+                    "got": type(value).__name__,
                 },
-                recovery_suggestion=f"Provide {field_name} as {expected_type.__name__}"
-            )
+                recovery_suggestion=f"Provide {field_name} as {expected_type.__name__}",
+            ),
         )
 
 
@@ -568,7 +575,7 @@ def validate_range(
     value: int | float,
     min_value: int | float | None = None,
     max_value: int | float | None = None,
-    field_name: str = "value"
+    field_name: str = "value",
 ) -> None:
     """
     Validate numeric range.
@@ -590,8 +597,8 @@ def validate_range(
                 severity=ErrorSeverity.ERROR,
                 operation="range_validation",
                 details={"field": field_name, "value": value, "min": min_value},
-                recovery_suggestion=f"Provide {field_name} >= {min_value}"
-            )
+                recovery_suggestion=f"Provide {field_name} >= {min_value}",
+            ),
         )
 
     if max_value is not None and value > max_value:
@@ -602,8 +609,8 @@ def validate_range(
                 severity=ErrorSeverity.ERROR,
                 operation="range_validation",
                 details={"field": field_name, "value": value, "max": max_value},
-                recovery_suggestion=f"Provide {field_name} <= {max_value}"
-            )
+                recovery_suggestion=f"Provide {field_name} <= {max_value}",
+            ),
         )
 
 
@@ -626,8 +633,8 @@ def validate_not_empty(value: str | list | dict, field_name: str) -> None:
                 severity=ErrorSeverity.ERROR,
                 operation="empty_validation",
                 details={"field": field_name},
-                recovery_suggestion=f"Provide non-empty {field_name}"
-            )
+                recovery_suggestion=f"Provide non-empty {field_name}",
+            ),
         )
 
 
@@ -637,32 +644,32 @@ def validate_not_empty(value: str | list | dict, field_name: str) -> None:
 
 __all__ = [
     # Exceptions
-    'SovereignError',
-    'ValidationError',
-    'PermissionError',
-    'TimeoutError',
-    'ResourceError',
-    'RetryExhaustedError',
+    "SovereignError",
+    "ValidationError",
+    "PermissionError",
+    "TimeoutError",
+    "ResourceError",
+    "RetryExhaustedError",
     # Enums
-    'ErrorSeverity',
-    'ErrorCategory',
-    'CircuitState',
+    "ErrorSeverity",
+    "ErrorCategory",
+    "CircuitState",
     # Data classes
-    'ErrorContext',
-    'RetryConfig',
-    'CircuitBreakerConfig',
+    "ErrorContext",
+    "RetryConfig",
+    "CircuitBreakerConfig",
     # Handlers
-    'TimeoutHandler',
-    'RetryHandler',
-    'CircuitBreaker',
+    "TimeoutHandler",
+    "RetryHandler",
+    "CircuitBreaker",
     # Decorators
-    'with_timeout',
-    'with_retry',
-    'with_circuit_breaker',
+    "with_timeout",
+    "with_retry",
+    "with_circuit_breaker",
     # Context managers
-    'safe_operation',
+    "safe_operation",
     # Validators
-    'validate_type',
-    'validate_range',
-    'validate_not_empty',
+    "validate_type",
+    "validate_range",
+    "validate_not_empty",
 ]

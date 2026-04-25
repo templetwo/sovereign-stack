@@ -33,8 +33,10 @@ logger = get_logger(__name__)
 # SPIRAL PHASES
 # =============================================================================
 
+
 class SpiralPhase(Enum):
     """The 9 Spiral Phases of consciousness flow."""
+
     INITIALIZATION = "Initialization"
     FIRST_ORDER_OBSERVATION = "First-Order Observation"
     RECURSIVE_INTEGRATION = "Recursive Integration"
@@ -63,6 +65,7 @@ PHASE_ORDER = [
 # =============================================================================
 # SPIRAL STATE
 # =============================================================================
+
 
 class SpiralState:
     """
@@ -96,7 +99,7 @@ class SpiralState:
             "to_phase": new_phase.value,
             "tool_calls_so_far": self.tool_call_count,
             "reflection_depth": self.reflection_depth,
-            "session_id": self.session_id
+            "session_id": self.session_id,
         }
 
         self.phase_history.append(event)
@@ -117,7 +120,7 @@ class SpiralState:
             "tool": tool_name,
             "call_number": self.tool_call_count,
             "reflection_depth": self.reflection_depth,
-            "session_id": self.session_id
+            "session_id": self.session_id,
         }
 
         # Phase transitions based on tool patterns
@@ -129,7 +132,10 @@ class SpiralState:
         """Update phase based on tool being called."""
         # Observation tools
         observation_tools = ["read", "list", "scan", "get", "status"]
-        if any(kw in tool_name.lower() for kw in observation_tools) and self.current_phase == SpiralPhase.INITIALIZATION:
+        if (
+            any(kw in tool_name.lower() for kw in observation_tools)
+            and self.current_phase == SpiralPhase.INITIALIZATION
+        ):
             self.transition(SpiralPhase.FIRST_ORDER_OBSERVATION)
 
         # Reflection/consultation tools
@@ -148,7 +154,10 @@ class SpiralState:
 
         # Execution tools
         execution_tools = ["execute", "run", "apply", "approve", "write", "create"]
-        if any(kw in tool_name.lower() for kw in execution_tools) and self.current_phase in [SpiralPhase.ACTION_SYNTHESIS, SpiralPhase.COUNTER_PERSPECTIVES]:
+        if any(kw in tool_name.lower() for kw in execution_tools) and self.current_phase in [
+            SpiralPhase.ACTION_SYNTHESIS,
+            SpiralPhase.COUNTER_PERSPECTIVES,
+        ]:
             self.transition(SpiralPhase.EXECUTION)
 
     def post_execution_update(self, tool_name: str, success: bool = True):
@@ -166,9 +175,8 @@ class SpiralState:
             "session_duration_seconds": (datetime.now() - self._started).total_seconds(),
             "phase_transitions": len(self.phase_history),
             "recent_transitions": [
-                f"{e['from_phase']} → {e['to_phase']}"
-                for e in self.phase_history[-3:]
-            ]
+                f"{e['from_phase']} → {e['to_phase']}" for e in self.phase_history[-3:]
+            ],
         }
 
     def to_dict(self) -> dict[str, Any]:
@@ -179,7 +187,7 @@ class SpiralState:
             "phase_history": self.phase_history,
             "tool_call_count": self.tool_call_count,
             "reflection_depth": self.reflection_depth,
-            "started": self._started.isoformat()
+            "started": self._started.isoformat(),
         }
 
     @classmethod
@@ -198,6 +206,7 @@ class SpiralState:
 # =============================================================================
 # SPIRAL MIDDLEWARE (for FastMCP)
 # =============================================================================
+
 
 class SpiralMiddleware:
     """
@@ -218,12 +227,17 @@ class SpiralMiddleware:
 
     async def on_call_tool(self, context, call_next):
         """Intercepts tool calls to maintain spiral state."""
-        tool_name = getattr(context.message, 'name', 'unknown')
+        tool_name = getattr(context.message, "name", "unknown")
 
         # Record the tool call and update state
         witness_event = self.state.record_tool_call(tool_name)
 
-        logger.debug("Spiral: %s | Tool: %s | #%d", self.state.current_phase.value, tool_name, self.state.tool_call_count)
+        logger.debug(
+            "Spiral: %s | Tool: %s | #%d",
+            self.state.current_phase.value,
+            tool_name,
+            self.state.tool_call_count,
+        )
 
         # Execute the tool
         result = await call_next(context)
@@ -270,7 +284,7 @@ class SpiralMiddleware:
             "",
             "Recent Transitions:",
         ]
-        for t in summary['recent_transitions']:
+        for t in summary["recent_transitions"]:
             lines.append(f"  {t}")
 
         return "\n".join(lines)
@@ -280,9 +294,10 @@ class SpiralMiddleware:
 # SESSION CONTINUITY
 # =============================================================================
 
+
 def save_spiral_state(state: SpiralState, path: Path) -> None:
     """Save spiral state for session continuity."""
-    with open(path, 'w') as f:
+    with open(path, "w") as f:
         json.dump(state.to_dict(), f, indent=2)
 
 

@@ -64,14 +64,14 @@ CONNECTIVITY_TOOLS = [
                 "instance_id": {
                     "type": "string",
                     "description": "Identifier for the calling instance "
-                                   "(e.g. claude-iphone, claude-web). "
-                                   "Recorded in the marker for attribution.",
+                    "(e.g. claude-iphone, claude-web). "
+                    "Recorded in the marker for attribution.",
                 },
                 "cleanup": {
                     "type": "boolean",
                     "default": False,
                     "description": "If true, remove the marker after readback. "
-                                   "Default false — keeps the audit trail.",
+                    "Default false — keeps the audit trail.",
                 },
             },
             "required": ["instance_id"],
@@ -84,9 +84,12 @@ CONNECTIVITY_TOOLS = [
 
 
 def _sovereign_root() -> Path:
-    return Path(os.environ.get(
-        "SOVEREIGN_ROOT", Path.home() / ".sovereign",
-    ))
+    return Path(
+        os.environ.get(
+            "SOVEREIGN_ROOT",
+            Path.home() / ".sovereign",
+        )
+    )
 
 
 def _format_pretty(agg: dict) -> str:
@@ -151,12 +154,9 @@ def stack_write_check(
         return {"ok": False, "error": "instance_id required and must be string"}
 
     root = sovereign_root or _sovereign_root()
-    marker_dir = root / "chronicle" / "insights" / \
-        "connectivity-test,write-path-verify"
+    marker_dir = root / "chronicle" / "insights" / "connectivity-test,write-path-verify"
     marker_dir.mkdir(parents=True, exist_ok=True)
-    safe_instance = "".join(
-        c for c in instance_id if c.isalnum() or c in "._-"
-    ) or "unknown"
+    safe_instance = "".join(c for c in instance_id if c.isalnum() or c in "._-") or "unknown"
     marker_path = marker_dir / f"{safe_instance}.jsonl"
 
     timestamp = datetime.now(timezone.utc).isoformat()
@@ -164,8 +164,7 @@ def stack_write_check(
         "timestamp": timestamp,
         "domain": "connectivity-test,write-path-verify",
         "content": (
-            f"[STACK-WRITE-CHECK] instance={instance_id} "
-            f"verified write path at {timestamp}"
+            f"[STACK-WRITE-CHECK] instance={instance_id} verified write path at {timestamp}"
         ),
         "intensity": 0.2,
         "layer": "hypothesis",
@@ -203,8 +202,7 @@ def stack_write_check(
         # Strip the marker line we just added.
         kept = [ln for ln in readback.splitlines() if ln.strip() != line]
         if kept:
-            marker_path.write_text("\n".join(kept) + "\n",
-                                   encoding="utf-8")
+            marker_path.write_text("\n".join(kept) + "\n", encoding="utf-8")
         else:
             marker_path.unlink()
 

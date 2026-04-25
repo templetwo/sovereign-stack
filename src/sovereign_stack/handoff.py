@@ -27,8 +27,8 @@ HANDOFF_MAX_BYTES = 2048  # ~2KB per note
 
 
 def _slug(s: str, max_len: int = 40) -> str:
-    s = re.sub(r'[^\w\-]+', '_', s.strip())
-    return s[:max_len].strip('_') or "thread"
+    s = re.sub(r"[^\w\-]+", "_", s.strip())
+    return s[:max_len].strip("_") or "thread"
 
 
 class HandoffEngine:
@@ -38,8 +38,9 @@ class HandoffEngine:
         self.root = Path(root) / "handoffs"
         self.root.mkdir(parents=True, exist_ok=True)
 
-    def write(self, note: str, source_instance: str, source_session_id: str,
-              thread: str = "general") -> dict:
+    def write(
+        self, note: str, source_instance: str, source_session_id: str, thread: str = "general"
+    ) -> dict:
         """
         Write a handoff note for the next instance.
 
@@ -69,6 +70,7 @@ class HandoffEngine:
         # instance/thread within the same second (which used to silently
         # overwrite the earlier handoff — losing intent).
         import hashlib
+
         note_hash = hashlib.sha1(note.encode("utf-8")).hexdigest()[:6]
         fname = (
             f"{ts.strftime('%Y%m%dT%H%M%S_%f')}"
@@ -120,8 +122,9 @@ class HandoffEngine:
                 continue
         return count
 
-    def all(self, include_consumed: bool = True, thread: str | None = None,
-            limit: int = 50) -> list[dict]:
+    def all(
+        self, include_consumed: bool = True, thread: str | None = None, limit: int = 50
+    ) -> list[dict]:
         """All handoffs (for archaeology), newest first."""
         records = self._load_all()
         if not include_consumed:
@@ -130,7 +133,6 @@ class HandoffEngine:
             records = [r for r in records if r.get("thread") == thread]
         records.sort(key=lambda r: r.get("timestamp", ""), reverse=True)
         return records[:limit]
-
 
     def mark_acted_on(
         self,
@@ -220,5 +222,5 @@ def format_handoff_for_surface(record: dict) -> str:
     note = record.get("note", "")
     return (
         f"• [thread: {thread}] Previous instance {src} (session {sid}, {ts}) left this note:\n"
-        f"    \"{note}\""
+        f'    "{note}"'
     )

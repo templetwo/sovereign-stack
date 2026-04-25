@@ -69,9 +69,7 @@ def _print_status(statuses: list[EndpointStatus]) -> None:
     glyph = _STATUS_GLYPH.get(overall, "?")
     print("━━━ Sovereign Stack Connectivity ━━━")
     print(f"  overall: {glyph} {overall.upper()}")
-    counts_str = "  ".join(
-        f"{k}={v}" for k, v in sorted(summary["counts"].items())
-    )
+    counts_str = "  ".join(f"{k}={v}" for k, v in sorted(summary["counts"].items()))
     if counts_str:
         print(f"  counts:  {counts_str}")
     print()
@@ -119,16 +117,14 @@ def _build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="command")
 
     p_status = sub.add_parser("status", help="show endpoint status")
-    p_status.add_argument("--json", action="store_true",
-                          help="machine-readable output")
+    p_status.add_argument("--json", action="store_true", help="machine-readable output")
 
     sub.add_parser("list", help="list registered endpoints")
 
     for cmd in ("start", "stop", "restart"):
         sp = sub.add_parser(cmd, help=f"{cmd} an endpoint or 'all'")
         sp.add_argument("target", help="endpoint name or 'all'")
-        sp.add_argument("--json", action="store_true",
-                        help="machine-readable output")
+        sp.add_argument("--json", action="store_true", help="machine-readable output")
 
     return p
 
@@ -150,13 +146,14 @@ def main(argv: list[str] | None = None) -> int:
 
     if command == "list":
         for e in ENDPOINTS:
-            print(f"  {e.name:<12} {e.kind:<10} {e.label or '-':<40} "
-                  f"{e.description}")
+            print(f"  {e.name:<12} {e.kind:<10} {e.label or '-':<40} {e.description}")
         return 0
 
     if command in ("start", "stop", "restart"):
         return _do_action(
-            command, args.target, as_json=getattr(args, "json", False),
+            command,
+            args.target,
+            as_json=getattr(args, "json", False),
         )
 
     parser.print_help()

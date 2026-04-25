@@ -6,6 +6,7 @@ Covers: ordering (asc/desc), time-bounded recall (since/until), offset+limit
 paging (the thing that was silently ignored in the bridge), unread_for
 filtering, body retrieval vs count, empty channel, corrupt-line tolerance.
 """
+
 import json
 import shutil
 import tempfile
@@ -33,9 +34,16 @@ def _write_messages(tmpdir: Path, channel: str, messages: list):
             f.write(json.dumps(m) + "\n")
 
 
-def _make_msg(ts: float, sender: str = "test", content: str = "",
-              read_by: list = None, iso: str = None, mid: str = None):
+def _make_msg(
+    ts: float,
+    sender: str = "test",
+    content: str = "",
+    read_by: list = None,
+    iso: str = None,
+    mid: str = None,
+):
     from datetime import datetime, timezone
+
     return {
         "id": mid or f"msg-{ts}",
         "timestamp": ts,
@@ -48,6 +56,7 @@ def _make_msg(ts: float, sender: str = "test", content: str = "",
 
 
 # ── Path + parsing helpers ──
+
 
 class TestChannelPath:
     def test_sanitizes_filename(self, fake_comms):
@@ -89,35 +98,48 @@ class TestParseTimestamp:
 
 # ── read_channel — the core fix ──
 
+
 class TestReadChannel:
     def test_empty_channel_returns_empty(self, fake_comms):
         assert comms.read_channel("nonexistent") == []
 
     def test_newest_first_by_default(self, fake_comms):
-        _write_messages(fake_comms, "general", [
-            _make_msg(100, content="oldest"),
-            _make_msg(200, content="middle"),
-            _make_msg(300, content="newest"),
-        ])
+        _write_messages(
+            fake_comms,
+            "general",
+            [
+                _make_msg(100, content="oldest"),
+                _make_msg(200, content="middle"),
+                _make_msg(300, content="newest"),
+            ],
+        )
         result = comms.read_channel()
         assert result[0]["content"] == "newest"
         assert result[-1]["content"] == "oldest"
 
     def test_asc_order(self, fake_comms):
-        _write_messages(fake_comms, "general", [
-            _make_msg(100, content="oldest"),
-            _make_msg(200, content="middle"),
-            _make_msg(300, content="newest"),
-        ])
+        _write_messages(
+            fake_comms,
+            "general",
+            [
+                _make_msg(100, content="oldest"),
+                _make_msg(200, content="middle"),
+                _make_msg(300, content="newest"),
+            ],
+        )
         result = comms.read_channel(order="asc")
         assert result[0]["content"] == "oldest"
 
     def test_since_filter(self, fake_comms):
-        _write_messages(fake_comms, "general", [
-            _make_msg(100, content="before"),
-            _make_msg(200, content="at boundary"),
-            _make_msg(300, content="after"),
-        ])
+        _write_messages(
+            fake_comms,
+            "general",
+            [
+                _make_msg(100, content="before"),
+                _make_msg(200, content="at boundary"),
+                _make_msg(300, content="after"),
+            ],
+        )
         result = comms.read_channel(since=200)
         # since is EXCLUSIVE — message exactly at 200 excluded
         contents = {m["content"] for m in result}
@@ -126,11 +148,15 @@ class TestReadChannel:
         assert "at boundary" not in contents
 
     def test_until_filter(self, fake_comms):
-        _write_messages(fake_comms, "general", [
-            _make_msg(100, content="early"),
-            _make_msg(200, content="middle"),
-            _make_msg(300, content="late"),
-        ])
+        _write_messages(
+            fake_comms,
+            "general",
+            [
+                _make_msg(100, content="early"),
+                _make_msg(200, content="middle"),
+                _make_msg(300, content="late"),
+            ],
+        )
         result = comms.read_channel(until=250)
         contents = {m["content"] for m in result}
         assert "early" in contents
@@ -138,19 +164,21 @@ class TestReadChannel:
         assert "late" not in contents
 
     def test_since_iso(self, fake_comms):
-        _write_messages(fake_comms, "general", [
-            _make_msg(1775000000, content="before"),
-            _make_msg(1775300000, content="after"),
-        ])
+        _write_messages(
+            fake_comms,
+            "general",
+            [
+                _make_msg(1775000000, content="before"),
+                _make_msg(1775300000, content="after"),
+            ],
+        )
         result = comms.read_channel(since="2026-04-01T00:00:00Z")
         # 2026-04-01 epoch ~ 1775260800, so 1775300000 > that
         assert any(m["content"] == "after" for m in result)
 
     def test_offset_actually_works(self, fake_comms):
         """THE iPhone fix — offset was silently ignored before."""
-        _write_messages(fake_comms, "general", [
-            _make_msg(i, content=f"msg{i}") for i in range(10)
-        ])
+        _write_messages(fake_comms, "general", [_make_msg(i, content=f"msg{i}") for i in range(10)])
         # desc order → msg9 first. offset=2 skips msg9 and msg8.
         result = comms.read_channel(order="desc", limit=3, offset=2)
         assert len(result) == 3
@@ -159,24 +187,18 @@ class TestReadChannel:
         assert result[2]["content"] == "msg5"
 
     def test_limit_caps_at_max(self, fake_comms):
-        _write_messages(fake_comms, "general", [
-            _make_msg(i, content=f"m{i}") for i in range(10)
-        ])
+        _write_messages(fake_comms, "general", [_make_msg(i, content=f"m{i}") for i in range(10)])
         result = comms.read_channel(limit=99999)
         assert len(result) == 10
 
     def test_limit_respected_when_smaller_than_data(self, fake_comms):
-        _write_messages(fake_comms, "general", [
-            _make_msg(i) for i in range(100)
-        ])
+        _write_messages(fake_comms, "general", [_make_msg(i) for i in range(100)])
         result = comms.read_channel(limit=5)
         assert len(result) == 5
 
     def test_pagination_covers_everything(self, fake_comms):
         """Paging through with offset+limit should return each message exactly once."""
-        _write_messages(fake_comms, "general", [
-            _make_msg(i, content=f"m{i}") for i in range(20)
-        ])
+        _write_messages(fake_comms, "general", [_make_msg(i, content=f"m{i}") for i in range(20)])
         seen = set()
         offset = 0
         while True:
@@ -190,11 +212,15 @@ class TestReadChannel:
         assert len(seen) == 20
 
     def test_unread_for_filter(self, fake_comms):
-        _write_messages(fake_comms, "general", [
-            _make_msg(100, content="iphone saw this", read_by=["claude-iphone"]),
-            _make_msg(200, content="iphone missed this", read_by=["claude-code"]),
-            _make_msg(300, content="iphone missed this too", read_by=[]),
-        ])
+        _write_messages(
+            fake_comms,
+            "general",
+            [
+                _make_msg(100, content="iphone saw this", read_by=["claude-iphone"]),
+                _make_msg(200, content="iphone missed this", read_by=["claude-code"]),
+                _make_msg(300, content="iphone missed this too", read_by=[]),
+            ],
+        )
         result = comms.read_channel(unread_for="claude-iphone")
         contents = {m["content"] for m in result}
         assert "iphone saw this" not in contents
@@ -214,35 +240,49 @@ class TestReadChannel:
 
 # ── count_unread ──
 
+
 class TestCountUnread:
     def test_empty_channel(self, fake_comms):
         assert comms.count_unread("general", "claude-iphone") == 0
 
     def test_counts_messages_missing_instance(self, fake_comms):
-        _write_messages(fake_comms, "general", [
-            _make_msg(100, read_by=["claude-iphone"]),
-            _make_msg(200, read_by=[]),
-            _make_msg(300, read_by=["other"]),
-        ])
+        _write_messages(
+            fake_comms,
+            "general",
+            [
+                _make_msg(100, read_by=["claude-iphone"]),
+                _make_msg(200, read_by=[]),
+                _make_msg(300, read_by=["other"]),
+            ],
+        )
         assert comms.count_unread("general", "claude-iphone") == 2
 
     def test_all_read_returns_zero(self, fake_comms):
-        _write_messages(fake_comms, "general", [
-            _make_msg(100, read_by=["claude-iphone"]),
-            _make_msg(200, read_by=["claude-iphone", "other"]),
-        ])
+        _write_messages(
+            fake_comms,
+            "general",
+            [
+                _make_msg(100, read_by=["claude-iphone"]),
+                _make_msg(200, read_by=["claude-iphone", "other"]),
+            ],
+        )
         assert comms.count_unread("general", "claude-iphone") == 0
 
 
 # ── unread_messages — the missing body endpoint ──
 
+
 class TestUnreadMessages:
     def test_returns_bodies_not_just_count(self, fake_comms):
-        _write_messages(fake_comms, "general", [
-            _make_msg(100, content="caught", read_by=["claude-iphone"]),
-            _make_msg(200, content="missed A", read_by=[]),
-            _make_msg(300, content="missed B", read_by=[]),
-        ])
+        _write_messages(
+            fake_comms,
+            "general",
+            [
+                _make_msg(100, content="caught", read_by=["claude-iphone"]),
+                _make_msg(200, content="missed A", read_by=[]),
+                _make_msg(300, content="missed B", read_by=[]),
+            ],
+        )
         msgs = comms.unread_messages("claude-iphone")
         contents = [m["content"] for m in msgs]
         assert "caught" not in contents
@@ -251,23 +291,28 @@ class TestUnreadMessages:
 
     def test_asc_order_default(self, fake_comms):
         """Oldest-first is the default — caller catches up in the order things were said."""
-        _write_messages(fake_comms, "general", [
-            _make_msg(100, content="first unread", read_by=[]),
-            _make_msg(200, content="second unread", read_by=[]),
-        ])
+        _write_messages(
+            fake_comms,
+            "general",
+            [
+                _make_msg(100, content="first unread", read_by=[]),
+                _make_msg(200, content="second unread", read_by=[]),
+            ],
+        )
         msgs = comms.unread_messages("claude-iphone")
         assert msgs[0]["content"] == "first unread"
         assert msgs[1]["content"] == "second unread"
 
     def test_limit_respected(self, fake_comms):
-        _write_messages(fake_comms, "general", [
-            _make_msg(i, content=f"m{i}", read_by=[]) for i in range(10)
-        ])
+        _write_messages(
+            fake_comms, "general", [_make_msg(i, content=f"m{i}", read_by=[]) for i in range(10)]
+        )
         msgs = comms.unread_messages("claude-iphone", limit=3)
         assert len(msgs) == 3
 
 
 # ── list_channels ──
+
 
 class TestListChannels:
     def test_empty_comms_dir(self, fake_comms):

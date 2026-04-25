@@ -27,6 +27,7 @@ from sovereign_stack.server import _NAPE_AUTOHOOK_EXCLUDE, _flatten_result
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _make_nape_with_tmpdir():
     tmpdir = tempfile.mkdtemp()
     daemon = NapeDaemon(root=tmpdir)
@@ -36,6 +37,7 @@ def _make_nape_with_tmpdir():
 # ---------------------------------------------------------------------------
 # Case 1: handle_tool triggers observe with tool name
 # ---------------------------------------------------------------------------
+
 
 class TestAutoHookObserveTrigger:
     """observe() is called exactly once for a normal (non-excluded) tool."""
@@ -68,6 +70,7 @@ class TestAutoHookObserveTrigger:
             srv_module.spiral_state.session_id = "test-autohook-session"
 
             try:
+
                 async def _run():
                     # nape_summary is excluded; record_learning is not.
                     name = "record_learning"
@@ -116,6 +119,7 @@ class TestAutoHookObserveTrigger:
             srv_module.spiral_state.session_id = test_session
 
             try:
+
                 async def _run():
                     name = "spiral_status"
                     arguments = {}
@@ -139,6 +143,7 @@ class TestAutoHookObserveTrigger:
             obs_path = Path(tmpdir) / "nape" / "observations.jsonl"
             assert obs_path.exists()
             import json
+
             records = [json.loads(ln) for ln in obs_path.read_text().splitlines() if ln.strip()]
             assert any(r["session_id"] == test_session for r in records)
         finally:
@@ -148,6 +153,7 @@ class TestAutoHookObserveTrigger:
 # ---------------------------------------------------------------------------
 # Case 2: nape_observe does NOT trigger nested auto-observe
 # ---------------------------------------------------------------------------
+
 
 class TestNoInfiniteRecursion:
     """nape_observe and its siblings are in _NAPE_AUTOHOOK_EXCLUDE."""
@@ -168,14 +174,13 @@ class TestNoInfiniteRecursion:
         """The 'observe' boolean in handle_tool must be False for nape_observe."""
         name = "nape_observe"
         observe = name not in _NAPE_AUTOHOOK_EXCLUDE
-        assert observe is False, (
-            "nape_observe must be excluded to prevent infinite recursion"
-        )
+        assert observe is False, "nape_observe must be excluded to prevent infinite recursion"
 
 
 # ---------------------------------------------------------------------------
 # Case 3: my_toolkit is excluded from auto-observe
 # ---------------------------------------------------------------------------
+
 
 class TestMyToolkitExcluded:
     def test_my_toolkit_in_exclude_set(self):
@@ -189,6 +194,7 @@ class TestMyToolkitExcluded:
 # ---------------------------------------------------------------------------
 # Case 4: Tool raising still produces an observation and re-raises
 # ---------------------------------------------------------------------------
+
 
 class TestErrorObservation:
     """When _dispatch_tool raises, Nape records the error and the exception propagates."""
@@ -215,6 +221,7 @@ class TestErrorObservation:
                 raise BoomError("intentional test error")
 
             try:
+
                 async def _run():
                     name = "record_insight"
                     arguments = {"domain": "test", "content": "will fail"}
@@ -259,6 +266,7 @@ class TestErrorObservation:
 # ---------------------------------------------------------------------------
 # Case 5: recall_insights before record_insight emits a satisfied honk
 # ---------------------------------------------------------------------------
+
 
 class TestSatisfiedHonkOnVerifyDeclare:
     """recall_insights is a sovereign-stack verify-equivalent.
@@ -321,7 +329,11 @@ class TestSatisfiedHonkOnVerifyDeclare:
             )
             honks = daemon.current_honks(session)
             satisfied = [h for h in honks if h["level"] == "satisfied"]
-            sharp = [h for h in honks if h["level"] == "sharp" and h["pattern"] == "declare_before_verify"]
+            sharp = [
+                h
+                for h in honks
+                if h["level"] == "sharp" and h["pattern"] == "declare_before_verify"
+            ]
             assert len(satisfied) == 0, "No satisfied honk when verify is absent"
             assert len(sharp) >= 1, "Sharp honk must fire when declare with no verify"
         finally:
@@ -331,6 +343,7 @@ class TestSatisfiedHonkOnVerifyDeclare:
 # ---------------------------------------------------------------------------
 # Case: _flatten_result helper
 # ---------------------------------------------------------------------------
+
 
 class TestFlattenResult:
     def test_flatten_empty_list(self):

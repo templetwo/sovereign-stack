@@ -52,6 +52,7 @@ from mcp.types import TextContent, Tool
 # PATHS & CONSTANTS
 # =============================================================================
 
+
 def _root() -> Path:
     """Resolve SOVEREIGN_ROOT at call time so tests can monkeypatch it."""
     return Path(os.environ.get("SOVEREIGN_ROOT", str(Path.home() / ".sovereign")))
@@ -82,7 +83,9 @@ DEFAULT_SCHEDULE = [5, 30, 120, 1440]
 # Probe execution bounds.
 HTTP_DEFAULT_TIMEOUT = 5
 HTTP_DEFAULT_SAMPLES = 1
-HTTP_SAMPLE_SPACING_SEC = 0.2  # Small gap so N-sample bursts don't saturate a single connection pool.
+HTTP_SAMPLE_SPACING_SEC = (
+    0.2  # Small gap so N-sample bursts don't saturate a single connection pool.
+)
 COMMAND_DEFAULT_TIMEOUT = 30
 
 # Nape pattern name emitted on drift. Registered in nape_daemon.PATTERN_LEVELS.
@@ -92,6 +95,7 @@ NAPE_PATTERN_DRIFT = "post_fix_drift"
 # =============================================================================
 # TIME HELPERS
 # =============================================================================
+
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
@@ -111,6 +115,7 @@ def _parse_iso(s: str) -> datetime:
 # =============================================================================
 # STORAGE
 # =============================================================================
+
 
 def _ensure_dirs() -> None:
     _watches_dir().mkdir(parents=True, exist_ok=True)
@@ -184,6 +189,7 @@ def list_watches(status: str | None = None) -> list[dict[str, Any]]:
 # =============================================================================
 # PROBE EXECUTION
 # =============================================================================
+
 
 def _run_http_probe(probe: dict[str, Any]) -> dict[str, Any]:
     url = probe["url"]
@@ -294,6 +300,7 @@ def run_probes(probes: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
 # DRIFT DETECTION
 # =============================================================================
 
+
 def _diff_probe(
     probe: dict[str, Any],
     baseline: dict[str, Any],
@@ -318,7 +325,9 @@ def _diff_probe(
     if ptype == "http":
         min_rate = expected.get("success_rate_min")
         if min_rate is None:
-            min_rate = 1.0 if baseline.get("success_rate", 0) >= 1.0 else baseline.get("success_rate", 1.0)
+            min_rate = (
+                1.0 if baseline.get("success_rate", 0) >= 1.0 else baseline.get("success_rate", 1.0)
+            )
         if current.get("success_rate", 0) < min_rate:
             return {
                 "probe": name,
@@ -343,7 +352,11 @@ def _diff_probe(
             reason = "stdout_missing_required_substring"
         elif regex is not None and not re.search(regex, current.get("stdout") or ""):
             reason = "stdout_regex_not_matched"
-        elif contains is None and regex is None and (current.get("stdout") or "").strip() != (baseline.get("stdout") or "").strip():
+        elif (
+            contains is None
+            and regex is None
+            and (current.get("stdout") or "").strip() != (baseline.get("stdout") or "").strip()
+        ):
             # No explicit stdout matcher — fall back to baseline stdout compare.
             reason = "output_differs_from_baseline"
         if reason:
@@ -405,6 +418,7 @@ def diff_probes(
 # WATCH LIFECYCLE
 # =============================================================================
 
+
 def _new_watch_id() -> str:
     return f"pfw_{_iso(_now()).replace(':', '').replace('-', '')}_{uuid.uuid4().hex[:6]}"
 
@@ -454,12 +468,14 @@ def create_watch(
         "closed_reason": None,
     }
     save_watch(watch)
-    _append_event({
-        "event": "watch_created",
-        "watch_id": watch_id,
-        "fix": fix_description,
-        "probes": [p["name"] for p in probes],
-    })
+    _append_event(
+        {
+            "event": "watch_created",
+            "watch_id": watch_id,
+            "fix": fix_description,
+            "probes": [p["name"] for p in probes],
+        }
+    )
     return watch
 
 
@@ -569,14 +585,16 @@ def take_sample(
             watch["closed_reason"] = "all_samples_clean"
 
     save_watch(watch)
-    _append_event({
-        "event": "sample_taken",
-        "watch_id": watch_id,
-        "offset_min": offset_min,
-        "forced": forced,
-        "drift_count": len(drifts),
-        "watch_status_after": watch["status"],
-    })
+    _append_event(
+        {
+            "event": "sample_taken",
+            "watch_id": watch_id,
+            "offset_min": offset_min,
+            "forced": forced,
+            "drift_count": len(drifts),
+            "watch_status_after": watch["status"],
+        }
+    )
 
     return {
         "status": "force_sampled" if forced else "sampled",
@@ -593,7 +611,11 @@ def cancel_watch(watch_id: str, reason: str) -> dict[str, Any]:
     if watch is None:
         return {"status": "watch_not_found", "watch_id": watch_id}
     if watch.get("status") != "active":
-        return {"status": "watch_already_closed", "watch_id": watch_id, "watch_status": watch["status"]}
+        return {
+            "status": "watch_already_closed",
+            "watch_id": watch_id,
+            "watch_status": watch["status"],
+        }
     watch["status"] = "cancelled"
     watch["closed_at"] = _iso(_now())
     watch["closed_reason"] = reason
@@ -605,6 +627,7 @@ def cancel_watch(watch_id: str, reason: str) -> dict[str, Any]:
 # =============================================================================
 # TICK RUNNER (called by scripts/sovereign-watch-tick)
 # =============================================================================
+
 
 def tick_once(nape_daemon: Any = None) -> dict[str, Any]:
     """
@@ -639,6 +662,7 @@ def tick_main() -> int:
     doesn't pay the import cost of the whole server module graph.
     """
     from .nape_daemon import NapeDaemon  # Deferred — keeps import lean for tests.
+
     nape = NapeDaemon(root=str(_root()))
     result = tick_once(nape_daemon=nape)
     print(json.dumps(result, indent=2))
@@ -744,6 +768,7 @@ POST_FIX_TOOLS: list[Tool] = [
 # MCP HANDLER
 # =============================================================================
 
+
 async def handle_post_fix_tool(
     name: str,
     arguments: dict[str, Any],
@@ -767,13 +792,24 @@ async def handle_post_fix_tool(
             )
         except (KeyError, ValueError) as e:
             return [TextContent(type="text", text=f"post_fix_verify failed: {e}")]
-        return [TextContent(type="text", text=json.dumps({
-            "watch_id": watch["watch_id"],
-            "created_at": watch["created_at"],
-            "watch_until": watch["watch_until"],
-            "schedule_offsets_min": watch["schedule_offsets_min"],
-            "baseline_summary": {pname: _baseline_summary(r) for pname, r in watch["baseline"]["results"].items()},
-        }, indent=2))]
+        return [
+            TextContent(
+                type="text",
+                text=json.dumps(
+                    {
+                        "watch_id": watch["watch_id"],
+                        "created_at": watch["created_at"],
+                        "watch_until": watch["watch_until"],
+                        "schedule_offsets_min": watch["schedule_offsets_min"],
+                        "baseline_summary": {
+                            pname: _baseline_summary(r)
+                            for pname, r in watch["baseline"]["results"].items()
+                        },
+                    },
+                    indent=2,
+                ),
+            )
+        ]
 
     if name == "watch_status":
         watch_id = (arguments.get("watch_id") or "").strip()
@@ -784,10 +820,18 @@ async def handle_post_fix_tool(
                 return [TextContent(type="text", text=f"watch not found: {watch_id}")]
             return [TextContent(type="text", text=json.dumps(watch, indent=2))]
         watches = list_watches(status="all" if include_archived else "active")
-        return [TextContent(type="text", text=json.dumps({
-            "count": len(watches),
-            "watches": [_watch_summary(w) for w in watches],
-        }, indent=2))]
+        return [
+            TextContent(
+                type="text",
+                text=json.dumps(
+                    {
+                        "count": len(watches),
+                        "watches": [_watch_summary(w) for w in watches],
+                    },
+                    indent=2,
+                ),
+            )
+        ]
 
     if name == "watch_resample":
         watch_id = (arguments.get("watch_id") or "").strip()
@@ -812,9 +856,17 @@ def _baseline_summary(r: dict[str, Any]) -> dict[str, Any]:
     """Compact view of a probe result for post_fix_verify's return payload."""
     t = r.get("type")
     if t == "http":
-        return {"type": "http", "success_rate": r.get("success_rate"), "status_codes": r.get("status_codes")}
+        return {
+            "type": "http",
+            "success_rate": r.get("success_rate"),
+            "status_codes": r.get("status_codes"),
+        }
     if t == "command":
-        return {"type": "command", "exit_code": r.get("exit_code"), "stdout_head": (r.get("stdout") or "")[:160]}
+        return {
+            "type": "command",
+            "exit_code": r.get("exit_code"),
+            "stdout_head": (r.get("stdout") or "")[:160],
+        }
     if t == "file_hash":
         return {"type": "file_hash", "exists": r.get("exists"), "sha256": r.get("sha256")}
     return r

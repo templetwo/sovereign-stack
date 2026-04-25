@@ -18,7 +18,7 @@ import pytest
 from sovereign_stack.nape_daemon import NapeDaemon, _result_to_str, _safe_truncate
 
 SESSION = "test-session-001"
-OTHER   = "test-session-002"
+OTHER = "test-session-002"
 
 
 class TestDeclareBeforeVerify:
@@ -36,8 +36,8 @@ class TestDeclareBeforeVerify:
         """Spec: declare-before-verify → sharp honk when no Read in last 3 calls."""
         # Three preceding calls that are NOT verify tools.
         self.daemon.observe("record_insight", {"content": "x"}, "insight stored", SESSION)
-        self.daemon.observe("spiral_status",  {},               "phase: integration", SESSION)
-        self.daemon.observe("record_open_thread", {},           "thread recorded", SESSION)
+        self.daemon.observe("spiral_status", {}, "phase: integration", SESSION)
+        self.daemon.observe("record_open_thread", {}, "thread recorded", SESSION)
 
         # The trigger: a tool that returns "done" with no preceding verify.
         self.daemon.observe(
@@ -49,17 +49,21 @@ class TestDeclareBeforeVerify:
 
         honks = self.daemon.current_honks(SESSION)
         assert len(honks) >= 1
-        sharp_honks = [h for h in honks if h["level"] == "sharp" and h["pattern"] == "declare_before_verify"]
+        sharp_honks = [
+            h for h in honks if h["level"] == "sharp" and h["pattern"] == "declare_before_verify"
+        ]
         assert len(sharp_honks) >= 1, f"Expected sharp/declare_before_verify honk. Got: {honks}"
 
     def test_declare_with_preceding_read_produces_satisfied_honk(self):
         """Spec: declare with preceding verify → satisfied honk (no sharp)."""
         # A Read call immediately before the declare.
-        self.daemon.observe("Read",  {"file_path": "/tmp/x.py"}, "line 1: pass", SESSION)
+        self.daemon.observe("Read", {"file_path": "/tmp/x.py"}, "line 1: pass", SESSION)
         self.daemon.observe("record_insight", {}, "complete — insight stored", SESSION)
 
         honks = self.daemon.current_honks(SESSION)
-        sharp_honks = [h for h in honks if h["level"] == "sharp" and h["pattern"] == "declare_before_verify"]
+        sharp_honks = [
+            h for h in honks if h["level"] == "sharp" and h["pattern"] == "declare_before_verify"
+        ]
         assert len(sharp_honks) == 0, (
             f"Expected no sharp honk when verify precedes declare. Got: {honks}"
         )
@@ -67,13 +71,17 @@ class TestDeclareBeforeVerify:
     def test_declare_word_is_case_insensitive(self):
         """DONE, Done, done should all trigger the check."""
         self.daemon.observe("some_tool", {}, "DONE.", SESSION)
-        honks = [h for h in self.daemon.current_honks(SESSION) if h["pattern"] == "declare_before_verify"]
+        honks = [
+            h for h in self.daemon.current_honks(SESSION) if h["pattern"] == "declare_before_verify"
+        ]
         assert len(honks) >= 1
 
     def test_no_declare_word_no_honk(self):
         """If the result has no declare word, no honk of this type fires."""
         self.daemon.observe("record_learning", {}, "processing context...", SESSION)
-        honks = [h for h in self.daemon.current_honks(SESSION) if h["pattern"] == "declare_before_verify"]
+        honks = [
+            h for h in self.daemon.current_honks(SESSION) if h["pattern"] == "declare_before_verify"
+        ]
         assert len(honks) == 0
 
     def test_readonly_tool_does_not_trigger_declare_before_verify(self):
@@ -96,8 +104,7 @@ class TestDeclareBeforeVerify:
             SESSION,
         )
         honks = [
-            h for h in self.daemon.current_honks(SESSION)
-            if h["pattern"] == "declare_before_verify"
+            h for h in self.daemon.current_honks(SESSION) if h["pattern"] == "declare_before_verify"
         ]
         assert len(honks) == 0, (
             f"Read-only tool prior_for_turn should be exempt from "
@@ -121,12 +128,9 @@ class TestDeclareBeforeVerify:
                 SESSION,
             )
         honks = [
-            h for h in self.daemon.current_honks(SESSION)
-            if h["pattern"] == "declare_before_verify"
+            h for h in self.daemon.current_honks(SESSION) if h["pattern"] == "declare_before_verify"
         ]
-        assert len(honks) == 0, (
-            f"All read-only tools in this batch should be exempt; got {honks}"
-        )
+        assert len(honks) == 0, f"All read-only tools in this batch should be exempt; got {honks}"
 
     def test_non_readonly_tool_still_honks_with_declare_word(self):
         """Regression: the exemption is per-tool, not blanket. A normal
@@ -135,15 +139,15 @@ class TestDeclareBeforeVerify:
         self.daemon.observe("record_insight", {}, "stored", SESSION)
         self.daemon.observe("record_learning", {}, "stored", SESSION)
         self.daemon.observe(
-            "record_breakthrough", {}, "shipped — breakthrough recorded", SESSION,
+            "record_breakthrough",
+            {},
+            "shipped — breakthrough recorded",
+            SESSION,
         )
         honks = [
-            h for h in self.daemon.current_honks(SESSION)
-            if h["pattern"] == "declare_before_verify"
+            h for h in self.daemon.current_honks(SESSION) if h["pattern"] == "declare_before_verify"
         ]
-        assert len(honks) >= 1, (
-            "Non-readonly tool with declare word and no verify must still honk."
-        )
+        assert len(honks) >= 1, "Non-readonly tool with declare word and no verify must still honk."
 
     def test_where_did_i_leave_off_does_not_fire_premature_summary(self):
         """Pre-2026-04-25 bug: where_did_i_leave_off was wrongly in
@@ -155,18 +159,18 @@ class TestDeclareBeforeVerify:
         self.daemon.observe(
             "where_did_i_leave_off",
             {},
-            ("HANDOFFS\n  recent failure: bridge connection refused.\n"
-             "OPEN THREADS: file not found, exception in parser, "
-             "denied access to /etc/passwd."),
+            (
+                "HANDOFFS\n  recent failure: bridge connection refused.\n"
+                "OPEN THREADS: file not found, exception in parser, "
+                "denied access to /etc/passwd."
+            ),
             SESSION,
         )
         honks = [
-            h for h in self.daemon.current_honks(SESSION)
-            if h["pattern"] == "premature_summary"
+            h for h in self.daemon.current_honks(SESSION) if h["pattern"] == "premature_summary"
         ]
         assert len(honks) == 0, (
-            f"where_did_i_leave_off must not trigger premature_summary; "
-            f"got {honks}"
+            f"where_did_i_leave_off must not trigger premature_summary; got {honks}"
         )
 
     def test_readonly_results_do_not_count_toward_premature_summary(self):
@@ -189,8 +193,7 @@ class TestDeclareBeforeVerify:
             SESSION,
         )
         honks = [
-            h for h in self.daemon.current_honks(SESSION)
-            if h["pattern"] == "premature_summary"
+            h for h in self.daemon.current_honks(SESSION) if h["pattern"] == "premature_summary"
         ]
         assert len(honks) == 0, (
             "Read-only tool surfacing error words in stored content must "
@@ -207,15 +210,15 @@ class TestDeclareBeforeVerify:
             SESSION,
         )
         self.daemon.observe(
-            "close_session", {}, "review recorded", SESSION,
+            "close_session",
+            {},
+            "review recorded",
+            SESSION,
         )
         honks = [
-            h for h in self.daemon.current_honks(SESSION)
-            if h["pattern"] == "premature_summary"
+            h for h in self.daemon.current_honks(SESSION) if h["pattern"] == "premature_summary"
         ]
-        assert len(honks) >= 1, (
-            "Real Bash error followed by close_session must still honk"
-        )
+        assert len(honks) >= 1, "Real Bash error followed by close_session must still honk"
 
     def test_honks_with_history_empty(self):
         """No honks → empty + zero counts."""
@@ -227,7 +230,10 @@ class TestDeclareBeforeVerify:
     def test_honks_with_history_joins_acks(self):
         """A honk + an ack record on a sibling acks.jsonl should be joined."""
         self.daemon.observe(
-            "record_insight", {}, "shipped", SESSION,
+            "record_insight",
+            {},
+            "shipped",
+            SESSION,
         )
         # No verify preceding → declare_before_verify fires.
         honks = self.daemon.current_honks(SESSION)
@@ -253,10 +259,13 @@ class TestDeclareBeforeVerify:
         # Manufacture a priors_log that includes the acked honk.
         priors_log_path = Path(self.tmpdir) / "priors_log.jsonl"
         priors_log_path.write_text(
-            json.dumps({
-                "timestamp": "2026-04-25T01:00:00",
-                "included_items": [f"honk:{h['honk_id']}"],
-            }) + "\n"
+            json.dumps(
+                {
+                    "timestamp": "2026-04-25T01:00:00",
+                    "included_items": [f"honk:{h['honk_id']}"],
+                }
+            )
+            + "\n"
         )
 
         result = self.daemon.honks_with_history(
@@ -264,13 +273,9 @@ class TestDeclareBeforeVerify:
             priors_log_path=priors_log_path,
         )
         assert result["summary"]["zombies"] >= 1, (
-            f"acked honk still in priors should count as zombie. "
-            f"summary={result['summary']}"
+            f"acked honk still in priors should count as zombie. summary={result['summary']}"
         )
-        zombies = [
-            h for h in result["honks"]
-            if h["ack"] is not None and h["in_recent_priors"]
-        ]
+        zombies = [h for h in result["honks"] if h["ack"] is not None and h["in_recent_priors"]]
         assert len(zombies) >= 1
         assert zombies[0]["priors_surface_count"] >= 1
 
@@ -285,14 +290,15 @@ class TestDeclareBeforeVerify:
         # The last 3 entries do NOT reference our honk.
         lines = []
         for i in range(5):
-            included = (
-                [f"honk:{h['honk_id']}"]
-                if i < 2 else ["thread:other"]
+            included = [f"honk:{h['honk_id']}"] if i < 2 else ["thread:other"]
+            lines.append(
+                json.dumps(
+                    {
+                        "timestamp": f"2026-04-25T0{i}:00:00",
+                        "included_items": included,
+                    }
+                )
             )
-            lines.append(json.dumps({
-                "timestamp": f"2026-04-25T0{i}:00:00",
-                "included_items": included,
-            }))
         priors_log_path.write_text("\n".join(lines) + "\n")
 
         result = self.daemon.honks_with_history(
@@ -302,9 +308,7 @@ class TestDeclareBeforeVerify:
         )
         # Honk's priors_surface_count should be 0 because the last 3 entries
         # don't reference it.
-        target = next(
-            x for x in result["honks"] if x["honk_id"] == h["honk_id"]
-        )
+        target = next(x for x in result["honks"] if x["honk_id"] == h["honk_id"])
         assert target["priors_surface_count"] == 0
         assert target["in_recent_priors"] is False
 
@@ -318,7 +322,8 @@ class TestDeclareBeforeVerify:
                 SESSION,
             )
         result = self.daemon.honks_with_history(
-            session_id=SESSION, limit=2,
+            session_id=SESSION,
+            limit=2,
         )
         assert len(result["honks"]) == 2
         # Total summary reflects what was returned (not all-on-disk).
@@ -352,12 +357,10 @@ class TestDeclareBeforeVerify:
                 SESSION,
             )
         honks = [
-            h for h in self.daemon.current_honks(SESSION)
-            if h["pattern"] == "repeated_mistake"
+            h for h in self.daemon.current_honks(SESSION) if h["pattern"] == "repeated_mistake"
         ]
         assert len(honks) == 0, (
-            f"Read-only tool cannot 'repeat a mistake' via surfaced "
-            f"content; got {honks}"
+            f"Read-only tool cannot 'repeat a mistake' via surfaced content; got {honks}"
         )
 
 
@@ -403,20 +406,24 @@ class TestPrematureSummary:
             "handoff written",
             SESSION,
         )
-        honks = [h for h in self.daemon.current_honks(SESSION) if h["pattern"] == "premature_summary"]
+        honks = [
+            h for h in self.daemon.current_honks(SESSION) if h["pattern"] == "premature_summary"
+        ]
         assert len(honks) >= 1
 
     def test_close_session_with_clean_history_no_honk(self):
         """If no errors in recent history, close_session should not trigger honk."""
-        self.daemon.observe("Read",    {"file_path": "/x.py"}, "def main(): pass", SESSION)
-        self.daemon.observe("Bash",    {"command": "pytest"}, "5 passed in 0.3s", SESSION)
+        self.daemon.observe("Read", {"file_path": "/x.py"}, "def main(): pass", SESSION)
+        self.daemon.observe("Bash", {"command": "pytest"}, "5 passed in 0.3s", SESSION)
         self.daemon.observe(
             "close_session",
             {"what_i_learned": "tests pass"},
             "session closed",
             SESSION,
         )
-        honks = [h for h in self.daemon.current_honks(SESSION) if h["pattern"] == "premature_summary"]
+        honks = [
+            h for h in self.daemon.current_honks(SESSION) if h["pattern"] == "premature_summary"
+        ]
         assert len(honks) == 0
 
 
@@ -432,7 +439,7 @@ class TestAckFlow:
 
     def _plant_sharp_honk(self) -> str:
         """Helper: generate a sharp honk and return its honk_id."""
-        self.daemon.observe("some_tool",    {}, "error: something failed", SESSION)
+        self.daemon.observe("some_tool", {}, "error: something failed", SESSION)
         self.daemon.observe("end_session_review", {}, "review written", SESSION)
         honks = self.daemon.current_honks(SESSION)
         assert len(honks) >= 1, "Setup failed: no honk was generated."
@@ -549,8 +556,8 @@ class TestSummaryCounts:
         self.daemon.observe("end_session_review", {}, "done", OTHER)
 
         result_all = self.daemon.summary(None)
-        result_a   = self.daemon.summary(SESSION)
-        result_b   = self.daemon.summary(OTHER)
+        result_a = self.daemon.summary(SESSION)
+        result_b = self.daemon.summary(OTHER)
 
         # All-session total should be the sum of individual session totals.
         assert result_all["total"] == result_a["total"] + result_b["total"]
@@ -595,7 +602,11 @@ class TestAssertionWithoutEvidence:
             SESSION,
         )
 
-        honks = [h for h in self.daemon.current_honks(SESSION) if h["pattern"] == "assertion_without_evidence"]
+        honks = [
+            h
+            for h in self.daemon.current_honks(SESSION)
+            if h["pattern"] == "assertion_without_evidence"
+        ]
         assert len(honks) == 0
 
     def test_low_confidence_insight_no_honk(self):
@@ -610,7 +621,11 @@ class TestAssertionWithoutEvidence:
             SESSION,
         )
 
-        honks = [h for h in self.daemon.current_honks(SESSION) if h["pattern"] == "assertion_without_evidence"]
+        honks = [
+            h
+            for h in self.daemon.current_honks(SESSION)
+            if h["pattern"] == "assertion_without_evidence"
+        ]
         assert len(honks) == 0
 
     def test_missing_confidence_field_no_honk(self):
@@ -621,7 +636,11 @@ class TestAssertionWithoutEvidence:
             "insight stored",
             SESSION,
         )
-        honks = [h for h in self.daemon.current_honks(SESSION) if h["pattern"] == "assertion_without_evidence"]
+        honks = [
+            h
+            for h in self.daemon.current_honks(SESSION)
+            if h["pattern"] == "assertion_without_evidence"
+        ]
         assert len(honks) == 0
 
 
@@ -650,19 +669,25 @@ class TestRepeatedMistake:
     def test_same_tool_errors_twice_with_learning_no_uneasy_honk(self):
         """With a record_learning between the two errors, no uneasy honk fires."""
         self.daemon.observe("Bash", {"command": "npm test"}, "Error: module not found", SESSION)
-        self.daemon.observe("record_learning",
-                            {"what_happened": "npm test failed", "what_learned": "needs install"},
-                            "learning stored",
-                            SESSION)
+        self.daemon.observe(
+            "record_learning",
+            {"what_happened": "npm test failed", "what_learned": "needs install"},
+            "learning stored",
+            SESSION,
+        )
         self.daemon.observe("Bash", {"command": "npm test"}, "Error: module not found", SESSION)
 
-        honks = [h for h in self.daemon.current_honks(SESSION) if h["pattern"] == "repeated_mistake"]
+        honks = [
+            h for h in self.daemon.current_honks(SESSION) if h["pattern"] == "repeated_mistake"
+        ]
         assert len(honks) == 0
 
     def test_single_error_no_uneasy_honk(self):
         """First error from a tool does not trigger repeated-mistake honk."""
         self.daemon.observe("Bash", {"command": "pytest"}, "error: import failed", SESSION)
-        honks = [h for h in self.daemon.current_honks(SESSION) if h["pattern"] == "repeated_mistake"]
+        honks = [
+            h for h in self.daemon.current_honks(SESSION) if h["pattern"] == "repeated_mistake"
+        ]
         assert len(honks) == 0
 
 
@@ -749,6 +774,7 @@ class TestObserveValidation:
 # Edit 4: satisfied-honk accounting in summary() and current_honks() kwarg
 # ---------------------------------------------------------------------------
 
+
 class TestSatisfiedHonkAccounting:
     """satisfied honks must NOT dirty the unacknowledged count in summary()."""
 
@@ -818,9 +844,9 @@ class TestSatisfiedHonkAccounting:
         result = daemon.summary(session)
         assert result["sharp"] >= 1, f"Expected at least 1 sharp. Got: {result}"
         assert result["satisfied"] >= 1, f"Expected at least 1 satisfied. Got: {result}"
-        assert result["unacknowledged"] == result["sharp"] + result.get("uneasy", 0) + result.get("low", 0), (
-            f"unacknowledged must not include satisfied. summary={result}"
-        )
+        assert result["unacknowledged"] == result["sharp"] + result.get("uneasy", 0) + result.get(
+            "low", 0
+        ), f"unacknowledged must not include satisfied. summary={result}"
 
     def test_current_honks_include_satisfied_true_by_default(self):
         """current_honks() with default include_satisfied=True returns satisfied honks."""

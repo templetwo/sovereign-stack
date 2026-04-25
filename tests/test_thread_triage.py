@@ -73,6 +73,7 @@ def _backdate_touch(mem: ExperientialMemory, thread_id: str, days_ago: int):
 
 # ── Case 1: 20-day-old thread scores higher than 2-day-old with same tags ──
 
+
 class TestAgePressure:
     def test_older_thread_higher_triage_score(self, mem):
         """age_pressure = min(1.5, days_old/14) means older threads rise."""
@@ -108,6 +109,7 @@ class TestAgePressure:
 
 
 # ── Case 2: tag_match contributes when current_domain_tags provided ──
+
 
 class TestTagMatchContribution:
     def test_matching_domain_raises_score(self, mem):
@@ -147,6 +149,7 @@ class TestTagMatchContribution:
 
 
 # ── Case 3: recent touches reduce triage_score ──
+
 
 class TestTouchPenalty:
     def test_recent_touches_lower_triage_score(self, mem):
@@ -194,9 +197,7 @@ class TestTouchPenalty:
         # Compare vs a fresh thread with same age - their scores should be similar.
         mem.record_open_thread("No touch thread", domain="test")
         threads2 = mem.get_open_threads()
-        no_touch_id = next(
-            t["thread_id"] for t in threads2 if "No touch" in t["question"]
-        )
+        no_touch_id = next(t["thread_id"] for t in threads2 if "No touch" in t["question"])
         _backdate(mem, no_touch_id, days_ago=7)
 
         triaged = mem.triage_threads()
@@ -213,6 +214,7 @@ class TestTouchPenalty:
 
 
 # ── Case 4: 35-day thread with zero touches flagged archive_or_escalate ──
+
 
 class TestArchiveFlagging:
     def test_35_day_zero_touch_thread_flagged(self, mem):
@@ -273,6 +275,7 @@ class TestArchiveFlagging:
 
 
 # ── Edit 3 additions: no-overlap penalty and timestamp tiebreaker ──
+
 
 class TestNoOverlapPenalty:
     """When caller provides domain tags, threads with zero overlap get -0.3 penalty."""
@@ -369,6 +372,7 @@ class TestTiebreaker:
 
         # Manually set timestamps to be close but distinct using direct file edit.
         import json
+
         for jsonl_file in mem.threads_dir.glob("*.jsonl"):
             lines = []
             for line in jsonl_file.read_text().splitlines():

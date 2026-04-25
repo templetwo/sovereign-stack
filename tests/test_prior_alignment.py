@@ -41,7 +41,9 @@ from sovereign_stack.prior_alignment import (
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def _write_priors_entry(root: Path, turn_id: str, items: list, ts: str = "2026-04-25T10:00:00+00:00") -> None:
+def _write_priors_entry(
+    root: Path, turn_id: str, items: list, ts: str = "2026-04-25T10:00:00+00:00"
+) -> None:
     """Write one priors_log entry for `turn_id`."""
     priors_dir = root / "reflexive"
     priors_dir.mkdir(parents=True, exist_ok=True)
@@ -124,8 +126,15 @@ class TestRecordPriorAlignment:
 
         assert result["ok"] is True
         rec = result["alignment_record"]
-        for field_name in ("turn_id", "timestamp", "surfaced", "aligned_with",
-                           "contradicted", "ignored", "notes"):
+        for field_name in (
+            "turn_id",
+            "timestamp",
+            "surfaced",
+            "aligned_with",
+            "contradicted",
+            "ignored",
+            "notes",
+        ):
             assert field_name in rec, f"Missing field: {field_name}"
 
     def test_not_surfaced_signatures_recorded_but_still_ok(self, tmp_path):
@@ -215,7 +224,8 @@ class TestPriorAlignmentSummary:
         uncertainty→uncertainty."""
         tid = str(uuid.uuid4())
         _write_priors_entry(
-            tmp_path, tid,
+            tmp_path,
+            tid,
             ["honk:h1", "thread:t1", "insight:i1", "uncertainty:u1"],
         )
         record_prior_alignment(
@@ -241,12 +251,10 @@ class TestPriorAlignmentSummary:
     def test_time_window_since_excludes_older_records(self, tmp_path):
         """Records before `since` are excluded from the summary."""
         tid_old = str(uuid.uuid4())
-        _write_priors_entry(tmp_path, tid_old, ["thread:old"],
-                            ts="2026-01-01T00:00:00+00:00")
+        _write_priors_entry(tmp_path, tid_old, ["thread:old"], ts="2026-01-01T00:00:00+00:00")
 
         tid_new = str(uuid.uuid4())
-        _write_priors_entry(tmp_path, tid_new, ["thread:new"],
-                            ts="2026-04-25T00:00:00+00:00")
+        _write_priors_entry(tmp_path, tid_new, ["thread:new"], ts="2026-04-25T00:00:00+00:00")
 
         # Write alignment records with matching timestamps directly to log.
         align_path = tmp_path / "reflexive" / "alignment_log.jsonl"
@@ -255,13 +263,18 @@ class TestPriorAlignmentSummary:
             (tid_old, "2026-01-01T00:00:00+00:00", "thread:old"),
             (tid_new, "2026-04-25T00:00:00+00:00", "thread:new"),
         ]:
-            align_path.open("a").write(json.dumps({
-                "turn_id": tid,
-                "timestamp": ts,
-                "aligned_with": [sig],
-                "contradicted": [],
-                "ignored": [],
-            }) + "\n")
+            align_path.open("a").write(
+                json.dumps(
+                    {
+                        "turn_id": tid,
+                        "timestamp": ts,
+                        "aligned_with": [sig],
+                        "contradicted": [],
+                        "ignored": [],
+                    }
+                )
+                + "\n"
+            )
 
         # Only include records on or after April.
         result = prior_alignment_summary(
@@ -274,18 +287,22 @@ class TestPriorAlignmentSummary:
     def test_time_window_until_excludes_future_records(self, tmp_path):
         """Records after `until` are excluded."""
         tid = str(uuid.uuid4())
-        _write_priors_entry(tmp_path, tid, ["thread:t1"],
-                            ts="2026-06-01T00:00:00+00:00")
+        _write_priors_entry(tmp_path, tid, ["thread:t1"], ts="2026-06-01T00:00:00+00:00")
 
         align_path = tmp_path / "reflexive" / "alignment_log.jsonl"
         align_path.parent.mkdir(parents=True, exist_ok=True)
-        align_path.write_text(json.dumps({
-            "turn_id": tid,
-            "timestamp": "2026-06-01T00:00:00+00:00",
-            "aligned_with": ["thread:t1"],
-            "contradicted": [],
-            "ignored": [],
-        }) + "\n")
+        align_path.write_text(
+            json.dumps(
+                {
+                    "turn_id": tid,
+                    "timestamp": "2026-06-01T00:00:00+00:00",
+                    "aligned_with": ["thread:t1"],
+                    "contradicted": [],
+                    "ignored": [],
+                }
+            )
+            + "\n"
+        )
 
         # Window ends before June.
         result = prior_alignment_summary(
@@ -364,25 +381,34 @@ class TestWithinWindow:
         assert _within_window("2026-04-25T10:00:00+00:00", None, None) is True
 
     def test_before_since_returns_false(self):
-        assert _within_window(
-            "2026-01-01T00:00:00+00:00",
-            "2026-04-01T00:00:00+00:00",
-            None,
-        ) is False
+        assert (
+            _within_window(
+                "2026-01-01T00:00:00+00:00",
+                "2026-04-01T00:00:00+00:00",
+                None,
+            )
+            is False
+        )
 
     def test_after_until_returns_false(self):
-        assert _within_window(
-            "2026-12-01T00:00:00+00:00",
-            None,
-            "2026-06-01T00:00:00+00:00",
-        ) is False
+        assert (
+            _within_window(
+                "2026-12-01T00:00:00+00:00",
+                None,
+                "2026-06-01T00:00:00+00:00",
+            )
+            is False
+        )
 
     def test_within_both_bounds_true(self):
-        assert _within_window(
-            "2026-04-25T00:00:00+00:00",
-            "2026-04-01T00:00:00+00:00",
-            "2026-05-01T00:00:00+00:00",
-        ) is True
+        assert (
+            _within_window(
+                "2026-04-25T00:00:00+00:00",
+                "2026-04-01T00:00:00+00:00",
+                "2026-05-01T00:00:00+00:00",
+            )
+            is True
+        )
 
     def test_missing_timestamp_defaults_to_true(self):
         assert _within_window(None, "2026-04-01T00:00:00+00:00", None) is True
@@ -425,10 +451,9 @@ class TestGitRecentCommits:
         # Create a fake .git dir so the path guard passes.
         (tmp_path / ".git").mkdir()
 
-        fake_output = "\n".join([
-            f"abc{i:03d}\t2026-04-25T10:00:00+00:00\tcommit {i}"
-            for i in range(10)
-        ])
+        fake_output = "\n".join(
+            [f"abc{i:03d}\t2026-04-25T10:00:00+00:00\tcommit {i}" for i in range(10)]
+        )
 
         with patch("subprocess.run") as mock_run:
             mock_proc = MagicMock()
@@ -510,7 +535,8 @@ class TestLaunchctlServiceStates:
     def test_state_none_on_timeout(self):
         """TimeoutExpired → {state: None, pid: None}, no crash."""
         with patch.object(
-            subprocess, "run",
+            subprocess,
+            "run",
             side_effect=subprocess.TimeoutExpired(["launchctl"], 2.0),
         ):
             result = _launchctl_service_states(["com.example.slow"])

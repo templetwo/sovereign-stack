@@ -59,6 +59,7 @@ class GroundingResult:
                 PATH_MISSING, PATH_HYPOTHESIS_ONLY, PATH_OPEN_THREAD_ONLY,
                 PATH_UNREADABLE).
     """
+
     accepted: bool
     reason: str
     claim: str
@@ -217,11 +218,7 @@ def grounded_extract(
     # Insufficient — distinguish "nothing grounded" from "some grounded
     # but not enough" so daemons can decide whether to retry with more
     # evidence or to skip entirely.
-    reason = (
-        REASON_INSUFFICIENT_EVIDENCE
-        if matched
-        else REASON_NO_GROUND_TRUTH
-    )
+    reason = REASON_INSUFFICIENT_EVIDENCE if matched else REASON_NO_GROUND_TRUTH
     return GroundingResult(
         accepted=False,
         reason=reason,

@@ -5,6 +5,7 @@ The boot surface is how every Claude instance lands into continuity.
 These helpers turn stored self-knowledge into readable lines. If they
 break silently, the arrival goes empty and the instance loses context.
 """
+
 import json
 import shutil
 import tempfile
@@ -62,27 +63,36 @@ class TestFormatSelfModel:
         assert format_self_model(self.tmpdir) == []
 
     def test_empty_model_returns_empty(self):
-        (self.tmpdir / "self_model.json").write_text(json.dumps({
-            "strength": [], "tendency": [], "blind_spot": [], "drift": []
-        }))
+        (self.tmpdir / "self_model.json").write_text(
+            json.dumps({"strength": [], "tendency": [], "blind_spot": [], "drift": []})
+        )
         assert format_self_model(self.tmpdir) == []
 
     def test_single_category_surfaces(self):
-        (self.tmpdir / "self_model.json").write_text(json.dumps({
-            "strength": [{"observation": "Strong at synthesis.",
-                          "timestamp": "2026-04-06T00:00:00"}]
-        }))
+        (self.tmpdir / "self_model.json").write_text(
+            json.dumps(
+                {
+                    "strength": [
+                        {"observation": "Strong at synthesis.", "timestamp": "2026-04-06T00:00:00"}
+                    ]
+                }
+            )
+        )
         lines = format_self_model(self.tmpdir)
         assert any("WHO YOU'VE BEEN OBSERVED TO BE" in ln for ln in lines)
         assert any("strength" in ln and "synthesis" in ln for ln in lines)
 
     def test_shows_latest_per_category(self):
-        (self.tmpdir / "self_model.json").write_text(json.dumps({
-            "strength": [
-                {"observation": "old strength", "timestamp": "2026-01-01"},
-                {"observation": "latest strength", "timestamp": "2026-04-01"},
-            ]
-        }))
+        (self.tmpdir / "self_model.json").write_text(
+            json.dumps(
+                {
+                    "strength": [
+                        {"observation": "old strength", "timestamp": "2026-01-01"},
+                        {"observation": "latest strength", "timestamp": "2026-04-01"},
+                    ]
+                }
+            )
+        )
         lines = format_self_model(self.tmpdir)
         joined = "\n".join(lines)
         assert "latest strength" in joined
@@ -90,12 +100,16 @@ class TestFormatSelfModel:
 
     def test_category_order(self):
         """Strength first (affirm), drift last (shadow)."""
-        (self.tmpdir / "self_model.json").write_text(json.dumps({
-            "strength": [{"observation": "S obs", "timestamp": "t"}],
-            "tendency": [{"observation": "T obs", "timestamp": "t"}],
-            "blind_spot": [{"observation": "B obs", "timestamp": "t"}],
-            "drift": [{"observation": "D obs", "timestamp": "t"}],
-        }))
+        (self.tmpdir / "self_model.json").write_text(
+            json.dumps(
+                {
+                    "strength": [{"observation": "S obs", "timestamp": "t"}],
+                    "tendency": [{"observation": "T obs", "timestamp": "t"}],
+                    "blind_spot": [{"observation": "B obs", "timestamp": "t"}],
+                    "drift": [{"observation": "D obs", "timestamp": "t"}],
+                }
+            )
+        )
         lines = format_self_model(self.tmpdir)
         joined = "\n".join(lines)
         pos_s = joined.find("S obs")
@@ -106,9 +120,9 @@ class TestFormatSelfModel:
 
     def test_long_observation_truncated(self):
         long_obs = "x" * 500
-        (self.tmpdir / "self_model.json").write_text(json.dumps({
-            "strength": [{"observation": long_obs, "timestamp": "t"}]
-        }))
+        (self.tmpdir / "self_model.json").write_text(
+            json.dumps({"strength": [{"observation": long_obs, "timestamp": "t"}]})
+        )
         lines = format_self_model(self.tmpdir, max_obs_len=60)
         body_lines = [ln for ln in lines if "strength" in ln]
         assert len(body_lines) == 1
@@ -116,9 +130,13 @@ class TestFormatSelfModel:
         assert "…" in body_lines[0]
 
     def test_missing_observation_field_skipped(self):
-        (self.tmpdir / "self_model.json").write_text(json.dumps({
-            "strength": [{"timestamp": "t"}]  # no observation field
-        }))
+        (self.tmpdir / "self_model.json").write_text(
+            json.dumps(
+                {
+                    "strength": [{"timestamp": "t"}]  # no observation field
+                }
+            )
+        )
         assert format_self_model(self.tmpdir) == []
 
 
@@ -133,11 +151,15 @@ class TestFormatUnresolvedUncertainties:
 
     def _write_log(self, markers):
         path = self.consciousness_dir / "uncertainty_log.json"
-        path.write_text(json.dumps({
-            "created": "2026-01-01",
-            "purpose": "test",
-            "markers": markers,
-        }))
+        path.write_text(
+            json.dumps(
+                {
+                    "created": "2026-01-01",
+                    "purpose": "test",
+                    "markers": markers,
+                }
+            )
+        )
 
     def test_missing_file_returns_empty(self):
         assert format_unresolved_uncertainties(self.tmpdir) == []
@@ -147,26 +169,28 @@ class TestFormatUnresolvedUncertainties:
         assert format_unresolved_uncertainties(self.tmpdir) == []
 
     def test_all_resolved_returns_empty(self):
-        self._write_log([
-            {"question": "Q1", "resolved": True, "timestamp": "2026-01-01"},
-            {"question": "Q2", "resolution": "answer", "timestamp": "2026-01-02"},
-        ])
+        self._write_log(
+            [
+                {"question": "Q1", "resolved": True, "timestamp": "2026-01-01"},
+                {"question": "Q2", "resolution": "answer", "timestamp": "2026-01-02"},
+            ]
+        )
         assert format_unresolved_uncertainties(self.tmpdir) == []
 
     def test_single_unresolved_surfaces(self):
-        self._write_log([
-            {"question": "Is X safe?", "timestamp": "2026-04-01"}
-        ])
+        self._write_log([{"question": "Is X safe?", "timestamp": "2026-04-01"}])
         lines = format_unresolved_uncertainties(self.tmpdir)
         joined = "\n".join(lines)
         assert "UNRESOLVED UNCERTAINTIES" in joined
         assert "Is X safe?" in joined
 
     def test_mixed_returns_only_unresolved(self):
-        self._write_log([
-            {"question": "Q resolved", "resolved": True, "timestamp": "2026-01-01"},
-            {"question": "Q open", "timestamp": "2026-04-01"},
-        ])
+        self._write_log(
+            [
+                {"question": "Q resolved", "resolved": True, "timestamp": "2026-01-01"},
+                {"question": "Q open", "timestamp": "2026-04-01"},
+            ]
+        )
         lines = format_unresolved_uncertainties(self.tmpdir)
         joined = "\n".join(lines)
         assert "Q open" in joined
@@ -174,17 +198,12 @@ class TestFormatUnresolvedUncertainties:
 
     def test_supports_content_field(self):
         """Some historical markers use 'content' instead of 'question'."""
-        self._write_log([
-            {"content": "Flagged via content field", "timestamp": "2026-04-01"}
-        ])
+        self._write_log([{"content": "Flagged via content field", "timestamp": "2026-04-01"}])
         lines = format_unresolved_uncertainties(self.tmpdir)
         assert any("Flagged via content field" in ln for ln in lines)
 
     def test_respects_limit(self):
-        markers = [
-            {"question": f"Q{i}", "timestamp": f"2026-04-{i:02d}"}
-            for i in range(1, 11)
-        ]
+        markers = [{"question": f"Q{i}", "timestamp": f"2026-04-{i:02d}"} for i in range(1, 11)]
         self._write_log(markers)
         lines = format_unresolved_uncertainties(self.tmpdir, limit=3)
         # Header + blurb + blank + 3 bullets + trailing blank = 6 lines
@@ -192,10 +211,12 @@ class TestFormatUnresolvedUncertainties:
         assert bullet_count == 3
 
     def test_newest_first(self):
-        self._write_log([
-            {"question": "oldest", "timestamp": "2026-01-01"},
-            {"question": "newest", "timestamp": "2026-04-15"},
-        ])
+        self._write_log(
+            [
+                {"question": "oldest", "timestamp": "2026-01-01"},
+                {"question": "newest", "timestamp": "2026-04-15"},
+            ]
+        )
         lines = format_unresolved_uncertainties(self.tmpdir)
         joined = "\n".join(lines)
         assert joined.find("newest") < joined.find("oldest")
@@ -217,22 +238,26 @@ class TestFormatThreadsWithAge:
         assert format_threads_with_age([]) == []
 
     def test_single_thread_formatted(self):
-        threads = [{
-            "question": "What is X?",
-            "domain": "test",
-            "timestamp": datetime.now().isoformat(),
-        }]
+        threads = [
+            {
+                "question": "What is X?",
+                "domain": "test",
+                "timestamp": datetime.now().isoformat(),
+            }
+        ]
         lines = format_threads_with_age(threads)
         assert any("OPEN THREADS" in ln for ln in lines)
         assert any("What is X?" in ln for ln in lines)
 
     def test_recent_thread_no_age_tag(self):
         """Today's thread should not carry an age tag."""
-        threads = [{
-            "question": "fresh",
-            "domain": "d",
-            "timestamp": datetime.now().isoformat(),
-        }]
+        threads = [
+            {
+                "question": "fresh",
+                "domain": "d",
+                "timestamp": datetime.now().isoformat(),
+            }
+        ]
         lines = format_threads_with_age(threads)
         bullet = next(ln for ln in lines if ln.startswith("  •"))
         assert "(0d)" not in bullet  # 0-day-old gets no tag

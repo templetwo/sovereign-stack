@@ -75,10 +75,7 @@ class TestStackWriteCheck:
         ct.stack_write_check("instance-a", sovereign_root=tmp_root)
         ct.stack_write_check("instance-a", sovereign_root=tmp_root)
         # Two appends → two lines.
-        marker_dir = (
-            tmp_root / "chronicle" / "insights"
-            / "connectivity-test,write-path-verify"
-        )
+        marker_dir = tmp_root / "chronicle" / "insights" / "connectivity-test,write-path-verify"
         marker = marker_dir / "instance-a.jsonl"
         lines = [ln for ln in marker.read_text().splitlines() if ln.strip()]
         assert len(lines) == 2
@@ -86,10 +83,7 @@ class TestStackWriteCheck:
     def test_two_instances_get_separate_files(self, tmp_root):
         ct.stack_write_check("instance-a", sovereign_root=tmp_root)
         ct.stack_write_check("instance-b", sovereign_root=tmp_root)
-        marker_dir = (
-            tmp_root / "chronicle" / "insights"
-            / "connectivity-test,write-path-verify"
-        )
+        marker_dir = tmp_root / "chronicle" / "insights" / "connectivity-test,write-path-verify"
         files = sorted(p.name for p in marker_dir.glob("*.jsonl"))
         assert "instance-a.jsonl" in files
         assert "instance-b.jsonl" in files
@@ -100,15 +94,18 @@ class TestStackWriteCheck:
 
 class TestConnectivityStatusTool:
     def test_pretty_format(self):
-        with patch.object(conn, "_launchctl_print_text", return_value=None), \
-             patch.object(
-                 conn, "_http_probe",
-                 return_value={"http_status": None, "body": "",
-                               "error": "mocked"},
-             ):
+        with (
+            patch.object(conn, "_launchctl_print_text", return_value=None),
+            patch.object(
+                conn,
+                "_http_probe",
+                return_value={"http_status": None, "body": "", "error": "mocked"},
+            ),
+        ):
             result = asyncio.new_event_loop().run_until_complete(
                 ct.handle_connectivity_tool(
-                    "connectivity_status", {"format": "pretty"},
+                    "connectivity_status",
+                    {"format": "pretty"},
                 )
             )
         text = result[0].text
@@ -117,15 +114,18 @@ class TestConnectivityStatusTool:
             assert ep.name in text
 
     def test_json_format(self):
-        with patch.object(conn, "_launchctl_print_text", return_value=None), \
-             patch.object(
-                 conn, "_http_probe",
-                 return_value={"http_status": None, "body": "",
-                               "error": "mocked"},
-             ):
+        with (
+            patch.object(conn, "_launchctl_print_text", return_value=None),
+            patch.object(
+                conn,
+                "_http_probe",
+                return_value={"http_status": None, "body": "", "error": "mocked"},
+            ),
+        ):
             result = asyncio.new_event_loop().run_until_complete(
                 ct.handle_connectivity_tool(
-                    "connectivity_status", {"format": "json"},
+                    "connectivity_status",
+                    {"format": "json"},
                 )
             )
         data = json.loads(result[0].text)
@@ -152,7 +152,8 @@ class TestStackWriteCheckTool:
         monkeypatch.setenv("SOVEREIGN_ROOT", str(tmp_root))
         result = asyncio.new_event_loop().run_until_complete(
             ct.handle_connectivity_tool(
-                "stack_write_check", {"instance_id": ""},
+                "stack_write_check",
+                {"instance_id": ""},
             )
         )
         assert "✗" in result[0].text

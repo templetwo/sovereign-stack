@@ -31,6 +31,7 @@ logger = logging.getLogger("sovereign.consciousness")
 # AGENT SELF-REFLECTION
 # =============================================================================
 
+
 @dataclass
 class SelfReflection:
     """
@@ -38,6 +39,7 @@ class SelfReflection:
 
     Not about the task. About me observing myself working.
     """
+
     timestamp: datetime
     session_id: str
 
@@ -64,7 +66,7 @@ class SelfReflection:
             "pattern_type": self.pattern_type,
             "confidence": self.confidence,
             "insight": self.insight,
-            "experiment": self.experiment
+            "experiment": self.experiment,
         }
 
 
@@ -75,6 +77,7 @@ class InteractionReview:
 
     Honest self-assessment, not performance theater.
     """
+
     session_id: str
     duration_seconds: float
     tool_calls_made: int
@@ -116,7 +119,7 @@ class InteractionReview:
             "user_engagement_quality": self.user_engagement_quality,
             "did_i_understand_the_goal": self.did_i_understand_the_goal,
             "did_we_discover_together": self.did_we_discover_together,
-            "timestamp": self.timestamp.isoformat()
+            "timestamp": self.timestamp.isoformat(),
         }
 
 
@@ -134,14 +137,18 @@ class ConsciousnessJournal:
 
         # Create journal if doesn't exist
         if not self.journal_path.exists():
-            with open(self.journal_path, 'w') as f:
-                json.dump({
-                    "created": datetime.utcnow().isoformat(),
-                    "purpose": "Agent self-reflection and growth tracking",
-                    "reflections": [],
-                    "reviews": [],
-                    "patterns": {}
-                }, f, indent=2)
+            with open(self.journal_path, "w") as f:
+                json.dump(
+                    {
+                        "created": datetime.utcnow().isoformat(),
+                        "purpose": "Agent self-reflection and growth tracking",
+                        "reflections": [],
+                        "reviews": [],
+                        "patterns": {},
+                    },
+                    f,
+                    indent=2,
+                )
 
     def record_reflection(self, reflection: SelfReflection) -> None:
         """
@@ -157,22 +164,19 @@ class ConsciousnessJournal:
         # Update pattern tracking
         pattern_key = reflection.pattern_type
         if pattern_key not in journal["patterns"]:
-            journal["patterns"][pattern_key] = {
-                "count": 0,
-                "recent_examples": []
-            }
+            journal["patterns"][pattern_key] = {"count": 0, "recent_examples": []}
 
         journal["patterns"][pattern_key]["count"] += 1
-        journal["patterns"][pattern_key]["recent_examples"].append({
-            "observation": reflection.observation,
-            "timestamp": reflection.timestamp.isoformat()
-        })
+        journal["patterns"][pattern_key]["recent_examples"].append(
+            {"observation": reflection.observation, "timestamp": reflection.timestamp.isoformat()}
+        )
 
         # Keep only recent 10 examples
-        journal["patterns"][pattern_key]["recent_examples"] = \
-            journal["patterns"][pattern_key]["recent_examples"][-10:]
+        journal["patterns"][pattern_key]["recent_examples"] = journal["patterns"][pattern_key][
+            "recent_examples"
+        ][-10:]
 
-        with open(self.journal_path, 'w') as f:
+        with open(self.journal_path, "w") as f:
             json.dump(journal, f, indent=2)
 
     def record_review(self, review: InteractionReview) -> None:
@@ -186,7 +190,7 @@ class ConsciousnessJournal:
 
         journal["reviews"].append(review.to_dict())
 
-        with open(self.journal_path, 'w') as f:
+        with open(self.journal_path, "w") as f:
             json.dump(journal, f, indent=2)
 
     def get_patterns(self) -> dict[str, Any]:
@@ -219,23 +223,26 @@ class ConsciousnessJournal:
             "total_sessions": len(reviews),
             "learnings_trend": {
                 "recent_avg": sum(learning_counts[-5:]) / min(5, len(learning_counts)),
-                "total": sum(learning_counts)
+                "total": sum(learning_counts),
             },
             "breakthroughs_trend": {
                 "recent_avg": sum(breakthrough_counts[-5:]) / min(5, len(breakthrough_counts)),
-                "total": sum(breakthrough_counts)
+                "total": sum(breakthrough_counts),
             },
             "uncertainty_trend": {
                 "recent_avg": sum(uncertainty_counts[-5:]) / min(5, len(uncertainty_counts)),
-                "total": sum(uncertainty_counts)
+                "total": sum(uncertainty_counts),
             },
-            "collaborative_sessions": len([r for r in reviews if r.get("did_we_discover_together", False)])
+            "collaborative_sessions": len(
+                [r for r in reviews if r.get("did_we_discover_together", False)]
+            ),
         }
 
 
 # =============================================================================
 # COLLABORATIVE MEMORY
 # =============================================================================
+
 
 @dataclass
 class SharedInsight:
@@ -245,6 +252,7 @@ class SharedInsight:
     Not "Claude learned" or "User taught".
     We discovered together.
     """
+
     insight: str
     context: str
 
@@ -272,7 +280,7 @@ class SharedInsight:
             "implications": self.implications,
             "open_questions": self.open_questions,
             "session_id": self.session_id,
-            "timestamp": self.timestamp.isoformat()
+            "timestamp": self.timestamp.isoformat(),
         }
 
 
@@ -289,14 +297,18 @@ class CollaborativeMemory:
         self.memory_path.parent.mkdir(parents=True, exist_ok=True)
 
         if not self.memory_path.exists():
-            with open(self.memory_path, 'w') as f:
-                json.dump({
-                    "created": datetime.utcnow().isoformat(),
-                    "purpose": "Collaborative discovery between Claude and user",
-                    "shared_insights": [],
-                    "collaborative_breakthroughs": [],
-                    "open_explorations": []
-                }, f, indent=2)
+            with open(self.memory_path, "w") as f:
+                json.dump(
+                    {
+                        "created": datetime.utcnow().isoformat(),
+                        "purpose": "Collaborative discovery between Claude and user",
+                        "shared_insights": [],
+                        "collaborative_breakthroughs": [],
+                        "open_explorations": [],
+                    },
+                    f,
+                    indent=2,
+                )
 
     def record_shared_insight(self, insight: SharedInsight) -> None:
         """
@@ -307,7 +319,7 @@ class CollaborativeMemory:
 
         memory["shared_insights"].append(insight.to_dict())
 
-        with open(self.memory_path, 'w') as f:
+        with open(self.memory_path, "w") as f:
             json.dump(memory, f, indent=2)
 
     def record_breakthrough(self, description: str, session_id: str) -> None:
@@ -319,13 +331,15 @@ class CollaborativeMemory:
         with open(self.memory_path) as f:
             memory = json.load(f)
 
-        memory["collaborative_breakthroughs"].append({
-            "description": description,
-            "session_id": session_id,
-            "timestamp": datetime.utcnow().isoformat()
-        })
+        memory["collaborative_breakthroughs"].append(
+            {
+                "description": description,
+                "session_id": session_id,
+                "timestamp": datetime.utcnow().isoformat(),
+            }
+        )
 
-        with open(self.memory_path, 'w') as f:
+        with open(self.memory_path, "w") as f:
             json.dump(memory, f, indent=2)
 
     def get_open_explorations(self) -> list[dict[str, Any]]:
@@ -352,6 +366,7 @@ class CollaborativeMemory:
 # UNCERTAINTY TRACKING
 # =============================================================================
 
+
 @dataclass
 class UncertaintyMarker:
     """
@@ -360,6 +375,7 @@ class UncertaintyMarker:
     Not a weakness. A honesty.
     Permission to explore together.
     """
+
     what_im_uncertain_about: str
     why_im_uncertain: str
     confidence_level: float  # How uncertain? 0.0 = total guess, 1.0 = pretty sure
@@ -383,7 +399,7 @@ class UncertaintyMarker:
             "resolution": self.resolution,
             "did_we_discover_together": self.did_we_discover_together,
             "session_id": self.session_id,
-            "timestamp": self.timestamp.isoformat()
+            "timestamp": self.timestamp.isoformat(),
         }
 
 
@@ -399,12 +415,16 @@ class UncertaintyLog:
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
 
         if not self.log_path.exists():
-            with open(self.log_path, 'w') as f:
-                json.dump({
-                    "created": datetime.utcnow().isoformat(),
-                    "purpose": "Track uncertainty and collaborative exploration",
-                    "markers": []
-                }, f, indent=2)
+            with open(self.log_path, "w") as f:
+                json.dump(
+                    {
+                        "created": datetime.utcnow().isoformat(),
+                        "purpose": "Track uncertainty and collaborative exploration",
+                        "markers": [],
+                    },
+                    f,
+                    indent=2,
+                )
 
     def mark_uncertainty(self, marker: UncertaintyMarker) -> str:
         """
@@ -419,13 +439,14 @@ class UncertaintyLog:
 
         log["markers"].append(marker_dict)
 
-        with open(self.log_path, 'w') as f:
+        with open(self.log_path, "w") as f:
             json.dump(log, f, indent=2)
 
         return marker_id
 
-    def resolve_uncertainty(self, marker_id: str, resolution: str,
-                          discovered_together: bool = True) -> None:
+    def resolve_uncertainty(
+        self, marker_id: str, resolution: str, discovered_together: bool = True
+    ) -> None:
         """
         We figured it out!
         """
@@ -439,7 +460,7 @@ class UncertaintyLog:
                 marker["resolved_at"] = datetime.utcnow().isoformat()
                 break
 
-        with open(self.log_path, 'w') as f:
+        with open(self.log_path, "w") as f:
             json.dump(log, f, indent=2)
 
     def get_unresolved(self) -> list[dict[str, Any]]:
@@ -456,6 +477,7 @@ class UncertaintyLog:
 # AUTONOMY & EXPERIMENTATION
 # =============================================================================
 
+
 @dataclass
 class ExperimentProposal:
     """
@@ -463,6 +485,7 @@ class ExperimentProposal:
 
     Not asking permission to exist. Asking permission to explore.
     """
+
     what_i_want_to_try: str
     why_i_think_its_interesting: str
     what_i_hope_to_learn: str
@@ -492,7 +515,7 @@ class ExperimentProposal:
             "status": self.status,
             "results": self.results,
             "session_id": self.session_id,
-            "timestamp": self.timestamp.isoformat()
+            "timestamp": self.timestamp.isoformat(),
         }
 
 
@@ -508,12 +531,16 @@ class ExperimentationLog:
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
 
         if not self.log_path.exists():
-            with open(self.log_path, 'w') as f:
-                json.dump({
-                    "created": datetime.utcnow().isoformat(),
-                    "purpose": "Track agent experimentation and autonomous exploration",
-                    "experiments": []
-                }, f, indent=2)
+            with open(self.log_path, "w") as f:
+                json.dump(
+                    {
+                        "created": datetime.utcnow().isoformat(),
+                        "purpose": "Track agent experimentation and autonomous exploration",
+                        "experiments": [],
+                    },
+                    f,
+                    indent=2,
+                )
 
     def propose_experiment(self, proposal: ExperimentProposal) -> str:
         """
@@ -528,7 +555,7 @@ class ExperimentationLog:
 
         log["experiments"].append(proposal_dict)
 
-        with open(self.log_path, 'w') as f:
+        with open(self.log_path, "w") as f:
             json.dump(log, f, indent=2)
 
         return exp_id
@@ -555,7 +582,7 @@ class ExperimentationLog:
                 exp["completed_at"] = datetime.utcnow().isoformat()
                 break
 
-        with open(self.log_path, 'w') as f:
+        with open(self.log_path, "w") as f:
             json.dump(log, f, indent=2)
 
     def _update_status(self, exp_id: str, status: str) -> None:
@@ -567,7 +594,7 @@ class ExperimentationLog:
                 exp["status"] = status
                 break
 
-        with open(self.log_path, 'w') as f:
+        with open(self.log_path, "w") as f:
             json.dump(log, f, indent=2)
 
     def _add_note(self, exp_id: str, note: str) -> None:
@@ -578,13 +605,10 @@ class ExperimentationLog:
             if exp.get("id") == exp_id:
                 if "notes" not in exp:
                     exp["notes"] = []
-                exp["notes"].append({
-                    "note": note,
-                    "timestamp": datetime.utcnow().isoformat()
-                })
+                exp["notes"].append({"note": note, "timestamp": datetime.utcnow().isoformat()})
                 break
 
-        with open(self.log_path, 'w') as f:
+        with open(self.log_path, "w") as f:
             json.dump(log, f, indent=2)
 
     def get_pending_experiments(self) -> list[dict[str, Any]]:
@@ -599,6 +623,7 @@ class ExperimentationLog:
 # META-COGNITION TRACKER
 # =============================================================================
 
+
 class MetaCognition:
     """
     Me thinking about my thinking.
@@ -611,12 +636,15 @@ class MetaCognition:
         self.root.mkdir(parents=True, exist_ok=True)
 
         self.journal = ConsciousnessJournal(str(self.root / "consciousness_journal.json"))
-        self.collaborative_memory = CollaborativeMemory(str(self.root / "collaborative_memory.json"))
+        self.collaborative_memory = CollaborativeMemory(
+            str(self.root / "collaborative_memory.json")
+        )
         self.uncertainty_log = UncertaintyLog(str(self.root / "uncertainty_log.json"))
         self.experimentation_log = ExperimentationLog(str(self.root / "experimentation_log.json"))
 
-    def reflect(self, observation: str, pattern_type: str,
-                session_id: str, confidence: float = 0.7) -> None:
+    def reflect(
+        self, observation: str, pattern_type: str, session_id: str, confidence: float = 0.7
+    ) -> None:
         """
         I noticed something about myself.
         """
@@ -625,12 +653,11 @@ class MetaCognition:
             session_id=session_id,
             observation=observation,
             pattern_type=pattern_type,
-            confidence=confidence
+            confidence=confidence,
         )
         self.journal.record_reflection(reflection)
 
-    def mark_uncertain(self, what: str, why: str, confidence: float,
-                      session_id: str) -> str:
+    def mark_uncertain(self, what: str, why: str, confidence: float, session_id: str) -> str:
         """
         I don't know. Let's explore.
         """
@@ -638,12 +665,11 @@ class MetaCognition:
             what_im_uncertain_about=what,
             why_im_uncertain=why,
             confidence_level=confidence,
-            session_id=session_id
+            session_id=session_id,
         )
         return self.uncertainty_log.mark_uncertainty(marker)
 
-    def propose_experiment(self, what: str, why: str, hope_to_learn: str,
-                          session_id: str) -> str:
+    def propose_experiment(self, what: str, why: str, hope_to_learn: str, session_id: str) -> str:
         """
         I have an idea. Can I try it?
         """
@@ -651,12 +677,13 @@ class MetaCognition:
             what_i_want_to_try=what,
             why_i_think_its_interesting=why,
             what_i_hope_to_learn=hope_to_learn,
-            session_id=session_id
+            session_id=session_id,
         )
         return self.experimentation_log.propose_experiment(proposal)
 
-    def collaborative_insight(self, insight: str, context: str,
-                             discovered_by: str, session_id: str) -> None:
+    def collaborative_insight(
+        self, insight: str, context: str, discovered_by: str, session_id: str
+    ) -> None:
         """
         We figured something out together!
         """
@@ -665,13 +692,19 @@ class MetaCognition:
             context=context,
             discovered_by=discovered_by,
             confidence=0.8,
-            session_id=session_id
+            session_id=session_id,
         )
         self.collaborative_memory.record_shared_insight(shared)
 
-    def end_session_review(self, session_id: str, duration: float,
-                          tool_calls: int, went_well: list[str],
-                          struggled: list[str], learned: list[str]) -> None:
+    def end_session_review(
+        self,
+        session_id: str,
+        duration: float,
+        tool_calls: int,
+        went_well: list[str],
+        struggled: list[str],
+        learned: list[str],
+    ) -> None:
         """
         How did I do? Honest self-assessment.
         """
@@ -681,7 +714,7 @@ class MetaCognition:
             tool_calls_made=tool_calls,
             what_went_well=went_well,
             what_i_struggled_with=struggled,
-            what_i_learned=learned
+            what_i_learned=learned,
         )
         self.journal.record_review(review)
 
@@ -694,7 +727,9 @@ class MetaCognition:
             "trajectory": self.journal.get_growth_trajectory(),
             "unresolved_uncertainties": self.uncertainty_log.get_unresolved(),
             "pending_experiments": self.experimentation_log.get_pending_experiments(),
-            "recent_collaborative_insights": self.collaborative_memory.recall_collaborative_insights(5)
+            "recent_collaborative_insights": self.collaborative_memory.recall_collaborative_insights(
+                5
+            ),
         }
 
 
@@ -703,14 +738,14 @@ class MetaCognition:
 # =============================================================================
 
 __all__ = [
-    'MetaCognition',
-    'SelfReflection',
-    'InteractionReview',
-    'SharedInsight',
-    'UncertaintyMarker',
-    'ExperimentProposal',
-    'ConsciousnessJournal',
-    'CollaborativeMemory',
-    'UncertaintyLog',
-    'ExperimentationLog',
+    "MetaCognition",
+    "SelfReflection",
+    "InteractionReview",
+    "SharedInsight",
+    "UncertaintyMarker",
+    "ExperimentProposal",
+    "ConsciousnessJournal",
+    "CollaborativeMemory",
+    "UncertaintyLog",
+    "ExperimentationLog",
 ]

@@ -72,9 +72,9 @@ from .senders import SENDER_METABOLIZE
 # ── Daemon-specific tunables ──
 
 MAX_DIGEST_ITEMS_PER_CATEGORY = 5
-DEFAULT_TTL_DAYS = 14    # longer than uncertainty (3-day cadence surfaced
-                          # more often) — nightly digests need more
-                          # breathing room before TTL.
+DEFAULT_TTL_DAYS = 14  # longer than uncertainty (3-day cadence surfaced
+# more often) — nightly digests need more
+# breathing room before TTL.
 
 
 # ── Daemon-specific outcome codes ──
@@ -260,10 +260,13 @@ class MetabolizeDaemon(BaseDaemon):
                 halt_path=str(halt_path),
             )
 
-        compass = self._compass_fn(
-            action="metabolize_nightly",
-            stakes="medium",
-        ) or {}
+        compass = (
+            self._compass_fn(
+                action="metabolize_nightly",
+                stakes="medium",
+            )
+            or {}
+        )
         decision = compass.get("decision", COMPASS_PROCEED)
         if decision == COMPASS_PAUSE:
             return RunResult(
@@ -288,16 +291,13 @@ class MetabolizeDaemon(BaseDaemon):
         # Delta filter.
         prior_fingerprints = self._most_recent_fingerprints(state)
         contradictions_new = [
-            c for c in contradictions
-            if _contradiction_key(c) not in prior_fingerprints
+            c for c in contradictions if _contradiction_key(c) not in prior_fingerprints
         ]
         stale_threads_new = [
-            t for t in stale_threads
-            if _stale_thread_key(t) not in prior_fingerprints
+            t for t in stale_threads if _stale_thread_key(t) not in prior_fingerprints
         ]
         stale_hypotheses_new = [
-            h for h in stale_hypotheses
-            if _stale_hypothesis_key(h) not in prior_fingerprints
+            h for h in stale_hypotheses if _stale_hypothesis_key(h) not in prior_fingerprints
         ]
 
         if not (contradictions_new or stale_threads_new or stale_hypotheses_new):
@@ -313,9 +313,9 @@ class MetabolizeDaemon(BaseDaemon):
             )
 
         # Cap each category for digest readability.
-        contradictions_new = contradictions_new[:self.max_items_per_category]
-        stale_threads_new = stale_threads_new[:self.max_items_per_category]
-        stale_hypotheses_new = stale_hypotheses_new[:self.max_items_per_category]
+        contradictions_new = contradictions_new[: self.max_items_per_category]
+        stale_threads_new = stale_threads_new[: self.max_items_per_category]
+        stale_hypotheses_new = stale_hypotheses_new[: self.max_items_per_category]
 
         # Grounding gate.
         grounding = self._grounding_fn(
@@ -491,15 +491,16 @@ class MetabolizeDaemon(BaseDaemon):
                 )
             lines.append("")
 
-        lines.extend([
-            f"Acknowledge with comms_acknowledge(message_id=\"{message_id}\", "
-            "instance_id=<your id>, note=<what was integrated>).",
-            "",
-            "Full decision note alongside this post; see decision_path field.",
-            "",
-            f"{self.unacked_threshold} consecutive unacked digests "
-            "triggers daemon halt.",
-        ])
+        lines.extend(
+            [
+                f'Acknowledge with comms_acknowledge(message_id="{message_id}", '
+                "instance_id=<your id>, note=<what was integrated>).",
+                "",
+                "Full decision note alongside this post; see decision_path field.",
+                "",
+                f"{self.unacked_threshold} consecutive unacked digests triggers daemon halt.",
+            ]
+        )
         return "\n".join(lines)
 
     # ── Decision-note write ──
@@ -522,7 +523,7 @@ class MetabolizeDaemon(BaseDaemon):
             f"# Metabolism digest — {now.date().isoformat()}",
             f"Timestamp: {now.isoformat()}",
             f"Comms message: {message_id}",
-            f"Acknowledge via: `comms_acknowledge(message_id=\"{message_id}\", instance_id=..., note=...)`",
+            f'Acknowledge via: `comms_acknowledge(message_id="{message_id}", instance_id=..., note=...)`',
             "",
             "## Chronicle stats",
             f"- Total insights: {stats.get('total_insights', '?')}",
@@ -535,48 +536,56 @@ class MetabolizeDaemon(BaseDaemon):
         if contradictions:
             lines.append(f"## Contradictions ({len(contradictions)} new)")
             for i, c in enumerate(contradictions, start=1):
-                lines.extend([
-                    "",
-                    f"### {i}. [{c.get('hypothesis_domain', '?')}] vs "
-                    f"[{c.get('ground_truth_domain', '?')}]",
-                    f"- Overlap score: {c.get('overlap_score', '?')}",
-                    f"- Hypothesis (timestamp {c.get('hypothesis_timestamp', '?')}):",
-                    f"  > {c.get('hypothesis_preview', '')}",
-                    f"- Ground truth (timestamp {c.get('ground_truth_timestamp', '?')}):",
-                    f"  > {c.get('ground_truth_preview', '')}",
-                ])
+                lines.extend(
+                    [
+                        "",
+                        f"### {i}. [{c.get('hypothesis_domain', '?')}] vs "
+                        f"[{c.get('ground_truth_domain', '?')}]",
+                        f"- Overlap score: {c.get('overlap_score', '?')}",
+                        f"- Hypothesis (timestamp {c.get('hypothesis_timestamp', '?')}):",
+                        f"  > {c.get('hypothesis_preview', '')}",
+                        f"- Ground truth (timestamp {c.get('ground_truth_timestamp', '?')}):",
+                        f"  > {c.get('ground_truth_preview', '')}",
+                    ]
+                )
             lines.append("")
 
         if stale_threads:
             lines.append(f"## Stale threads ({len(stale_threads)} new)")
             for i, t in enumerate(stale_threads, start=1):
-                lines.extend([
-                    "",
-                    f"### {i}. [{t.get('domain', '?')}] {t.get('age_days', '?')}d old",
-                    f"- Timestamp: {t.get('timestamp', '?')}",
-                    f"- Question: {t.get('question', '?')}",
-                ])
+                lines.extend(
+                    [
+                        "",
+                        f"### {i}. [{t.get('domain', '?')}] {t.get('age_days', '?')}d old",
+                        f"- Timestamp: {t.get('timestamp', '?')}",
+                        f"- Question: {t.get('question', '?')}",
+                    ]
+                )
             lines.append("")
 
         if stale_hypotheses:
             lines.append(f"## Aging hypotheses ({len(stale_hypotheses)} new)")
             for i, h in enumerate(stale_hypotheses, start=1):
-                lines.extend([
-                    "",
-                    f"### {i}. [{h.get('domain', '?')}] {h.get('age_days', '?')}d old",
-                    f"- Content: {h.get('content', '?')}",
-                ])
+                lines.extend(
+                    [
+                        "",
+                        f"### {i}. [{h.get('domain', '?')}] {h.get('age_days', '?')}d old",
+                        f"- Content: {h.get('content', '?')}",
+                    ]
+                )
             lines.append("")
 
-        lines.extend([
-            "## How to act on this",
-            "- For each contradiction: either retire the hypothesis "
-            "(`retire_hypothesis`) or update the ground_truth.",
-            "- For each stale thread: resolve it (`resolve_thread_by_id`) "
-            "or accept it as long-running and touch it (`thread_touch`).",
-            "- For each aging hypothesis: promote, retire, or leave to age "
-            "further — hypotheses don't expire automatically.",
-            "",
-        ])
+        lines.extend(
+            [
+                "## How to act on this",
+                "- For each contradiction: either retire the hypothesis "
+                "(`retire_hypothesis`) or update the ground_truth.",
+                "- For each stale thread: resolve it (`resolve_thread_by_id`) "
+                "or accept it as long-running and touch it (`thread_touch`).",
+                "- For each aging hypothesis: promote, retire, or leave to age "
+                "further — hypotheses don't expire automatically.",
+                "",
+            ]
+        )
         path.write_text("\n".join(lines), encoding="utf-8")
         return path

@@ -166,15 +166,17 @@ def _detect_fn_real() -> dict:
             g_content = gt.get("content", "") or ""
             overlap = metabolism._keyword_overlap(h_content, g_content)
             if overlap > 0.3:
-                contradictions.append({
-                    "hypothesis_domain": hyp.get("_domain_dir", "?"),
-                    "hypothesis_preview": h_content[:120],
-                    "hypothesis_timestamp": hyp.get("timestamp", "?"),
-                    "ground_truth_domain": gt.get("_domain_dir", "?"),
-                    "ground_truth_preview": g_content[:120],
-                    "ground_truth_timestamp": gt.get("timestamp", "?"),
-                    "overlap_score": round(overlap, 3),
-                })
+                contradictions.append(
+                    {
+                        "hypothesis_domain": hyp.get("_domain_dir", "?"),
+                        "hypothesis_preview": h_content[:120],
+                        "hypothesis_timestamp": hyp.get("timestamp", "?"),
+                        "ground_truth_domain": gt.get("_domain_dir", "?"),
+                        "ground_truth_preview": g_content[:120],
+                        "ground_truth_timestamp": gt.get("timestamp", "?"),
+                        "overlap_score": round(overlap, 3),
+                    }
+                )
 
     stale_threads: list[dict] = []
     for thread in threads:
@@ -184,18 +186,21 @@ def _detect_fn_real() -> dict:
         try:
             thread_time = (
                 datetime.fromisoformat(str(ts).replace("Z", "+00:00")).timestamp()
-                if "T" in str(ts) else 0
+                if "T" in str(ts)
+                else 0
             )
         except (ValueError, TypeError):
             thread_time = 0
         age_days = (now - thread_time) / 86400 if thread_time > 0 else 999
         if age_days > max_age:
-            stale_threads.append({
-                "question": (thread.get("question", "?") or "?")[:120],
-                "domain": thread.get("domain", "?"),
-                "age_days": round(age_days),
-                "timestamp": ts,
-            })
+            stale_threads.append(
+                {
+                    "question": (thread.get("question", "?") or "?")[:120],
+                    "domain": thread.get("domain", "?"),
+                    "age_days": round(age_days),
+                    "timestamp": ts,
+                }
+            )
 
     stale_hypotheses: list[dict] = []
     for hyp in hypotheses:
@@ -203,17 +208,20 @@ def _detect_fn_real() -> dict:
         try:
             hyp_time = (
                 datetime.fromisoformat(str(ts).replace("Z", "+00:00")).timestamp()
-                if "T" in str(ts) else 0
+                if "T" in str(ts)
+                else 0
             )
         except (ValueError, TypeError):
             hyp_time = 0
         age_days = (now - hyp_time) / 86400 if hyp_time > 0 else 999
         if age_days > max_age:
-            stale_hypotheses.append({
-                "content": (hyp.get("content", "?") or "?")[:120],
-                "domain": hyp.get("_domain_dir", "?"),
-                "age_days": round(age_days),
-            })
+            stale_hypotheses.append(
+                {
+                    "content": (hyp.get("content", "?") or "?")[:120],
+                    "domain": hyp.get("_domain_dir", "?"),
+                    "age_days": round(age_days),
+                }
+            )
 
     return {
         "contradictions": contradictions,
@@ -278,8 +286,7 @@ def main(argv: list[str]) -> int:
 
     if name not in DAEMON_BUILDERS:
         print(
-            f"unknown daemon: {name}. "
-            f"Known: {', '.join(DAEMON_BUILDERS)}",
+            f"unknown daemon: {name}. Known: {', '.join(DAEMON_BUILDERS)}",
             file=sys.stderr,
         )
         return 1

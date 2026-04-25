@@ -30,20 +30,16 @@ AGENT_MEMORY_SCHEMA = {
         "success": "{tool_family}/{episode_group}/{step}.json",
         "partial": "{tool_family}/{episode_group}/{step}.json",
         "failure": "{error_type=unknown}/{episode_group}/{step}.json",
-        "needs_input": "{episode_group}/{step}.json"
+        "needs_input": "{episode_group}/{step}.json",
     },
     "tool_family": {
         "search|web_search|info_gather": "{episode_group}/{step}.json",
         "math|python|compute": "{episode_group}/{step}.json",
         "memory|recall|compress": "{operation=general}/{episode_group}/{step}.json",
-        "other": "{tool_name=misc}/{episode_group}/{step}.json"
+        "other": "{tool_name=misc}/{episode_group}/{step}.json",
     },
-    "confidence": {
-        ">=0.90": "/high_conf",
-        "0.75-0.89": "/medium_conf",
-        "<0.75": "/low_conf"
-    },
-    "_intake": "intake/unsorted/{episode=unknown}/{step=unknown}.json"
+    "confidence": {">=0.90": "/high_conf", "0.75-0.89": "/medium_conf", "<0.75": "/low_conf"},
+    "_intake": "intake/unsorted/{episode=unknown}/{step=unknown}.json",
 }
 
 
@@ -84,20 +80,25 @@ def prepare_agent_packet(log: dict) -> dict:
     """Transform raw agent log into routing packet."""
     packet = log.copy()
 
-    if 'episode' in log:
-        packet['episode_group'] = compute_episode_group(log['episode'])
+    if "episode" in log:
+        packet["episode_group"] = compute_episode_group(log["episode"])
 
-    if 'action' in log and 'tool_family' not in log:
-        packet['tool_family'] = extract_tool_family(log['action'])
+    if "action" in log and "tool_family" not in log:
+        packet["tool_family"] = extract_tool_family(log["action"])
 
-    if 'confidence' in log:
-        packet['confidence_path'] = compute_confidence_path(log['confidence'])
+    if "confidence" in log:
+        packet["confidence_path"] = compute_confidence_path(log["confidence"])
     else:
-        packet['confidence_path'] = ""
+        packet["confidence_path"] = ""
 
     # Defaults for optional fields
-    defaults = {'error_type': 'unknown', 'operation': 'general',
-                'tool_name': 'misc', 'episode': 'unknown', 'step': 'unknown'}
+    defaults = {
+        "error_type": "unknown",
+        "operation": "general",
+        "tool_name": "misc",
+        "episode": "unknown",
+        "step": "unknown",
+    }
     for key, default in defaults.items():
         if key not in packet:
             packet[key] = default
@@ -108,6 +109,7 @@ def prepare_agent_packet(log: dict) -> dict:
 # =============================================================================
 # COHERENCE ENGINE
 # =============================================================================
+
 
 class Coherence:
     """
@@ -149,14 +151,18 @@ class Coherence:
             matched = False
 
             for key, branches in current_node.items():
-                if key.startswith('_'):  # Skip meta keys
+                if key.startswith("_"):  # Skip meta keys
                     continue
 
                 value = packet.get(key)
 
                 if value is None:
-                    return os.path.join(self.root, "_intake", "missing_metadata",
-                                       f"{packet.get('id', 'unknown')}_{datetime.now().isoformat()}")
+                    return os.path.join(
+                        self.root,
+                        "_intake",
+                        "missing_metadata",
+                        f"{packet.get('id', 'unknown')}_{datetime.now().isoformat()}",
+                    )
 
                 selected_branch, next_node = self._match_branch(value, branches)
 
@@ -168,8 +174,12 @@ class Coherence:
                     break
 
             if not matched:
-                return os.path.join(self.root, "_intake", "no_match",
-                                   f"{packet.get('id', 'unknown')}_{datetime.now().isoformat()}")
+                return os.path.join(
+                    self.root,
+                    "_intake",
+                    "no_match",
+                    f"{packet.get('id', 'unknown')}_{datetime.now().isoformat()}",
+                )
 
         # Expand leaf template
         if isinstance(current_node, str):
@@ -182,8 +192,8 @@ class Coherence:
             filename = f"{packet.get('id', 'data')}_{datetime.now().isoformat()}"
 
         # Handle confidence path suffix
-        if 'confidence_path' in packet and packet['confidence_path']:
-            path_segments.append(packet['confidence_path'].lstrip('/'))
+        if "confidence_path" in packet and packet["confidence_path"]:
+            path_segments.append(packet["confidence_path"].lstrip("/"))
 
         full_path = os.path.join(*path_segments, filename)
 
@@ -194,7 +204,7 @@ class Coherence:
 
     def _expand_template_defaults(self, template: str, packet: dict) -> str:
         """Expand {key=default} patterns in template."""
-        pattern = r'\{(\w+)=([^}]+)\}'
+        pattern = r"\{(\w+)=([^}]+)\}"
         matches = re.findall(pattern, template)
 
         for key, default in matches:
@@ -229,7 +239,9 @@ class Coherence:
                 if "|" in pattern:
                     alternatives = [alt.strip() for alt in pattern.split("|")]
                     if value in alternatives or any(alt in value for alt in alternatives):
-                        matched = next((alt for alt in alternatives if alt in value), alternatives[0])
+                        matched = next(
+                            (alt for alt in alternatives if alt in value), alternatives[0]
+                        )
                         return (matched, next_node)
 
         return (None, None)
@@ -239,18 +251,23 @@ class Coherence:
         predicate = predicate.strip()
 
         # Range: "100-500"
-        if re.match(r'^[\d.]+\s*-\s*[\d.]+$', predicate):
-            low, high = map(float, predicate.split('-'))
+        if re.match(r"^[\d.]+\s*-\s*[\d.]+$", predicate):
+            low, high = map(float, predicate.split("-"))
             return low <= value <= high
 
         # Comparison operators
-        match = re.match(r'^([><=!]+)\s*([\d.]+)$', predicate)
+        match = re.match(r"^([><=!]+)\s*([\d.]+)$", predicate)
         if match:
             op, threshold = match.groups()
             threshold = float(threshold)
-            ops = {'>': value > threshold, '<': value < threshold,
-                   '>=': value >= threshold, '<=': value <= threshold,
-                   '==': value == threshold, '!=': value != threshold}
+            ops = {
+                ">": value > threshold,
+                "<": value < threshold,
+                ">=": value >= threshold,
+                "<=": value <= threshold,
+                "==": value == threshold,
+                "!=": value != threshold,
+            }
             return ops.get(op, False)
 
         return False
@@ -258,10 +275,10 @@ class Coherence:
     def _sanitize(self, s: str) -> str:
         """Sanitize string for filesystem path segment."""
         s = str(s)
-        s = s.replace('>=', 'gte_').replace('<=', 'lte_')
-        s = s.replace('>', 'gt_').replace('<', 'lt_')
-        s = s.replace('==', 'eq_').replace('!=', 'ne_')
-        return re.sub(r'[^\w\-.]', '', s)
+        s = s.replace(">=", "gte_").replace("<=", "lte_")
+        s = s.replace(">", "gt_").replace("<", "lt_")
+        s = s.replace("==", "eq_").replace("!=", "ne_")
+        return re.sub(r"[^\w\-.]", "", s)
 
     def receive(self, **intent) -> str:
         """
@@ -282,7 +299,7 @@ class Coherence:
             matched = False
 
             for key, branches in current_node.items():
-                if key.startswith('_'):
+                if key.startswith("_"):
                     continue
 
                 if key in intent:
@@ -326,15 +343,15 @@ class Coherence:
         parsed = [Path(p).parts for p in paths]
 
         if not parsed:
-            return {'_derived': True, '_structure': {}, '_stats': {'path_count': 0}}
+            return {"_derived": True, "_structure": {}, "_stats": {"path_count": 0}}
 
         # Analyze each level for key=value patterns
         level_patterns = defaultdict(lambda: defaultdict(int))
 
         for path_parts in parsed:
             for i, part in enumerate(path_parts):
-                if '=' in part:
-                    key, value = part.split('=', 1)
+                if "=" in part:
+                    key, value = part.split("=", 1)
                     level_patterns[i][(key, value)] += 1
                 else:
                     level_patterns[i][(None, part)] += 1
@@ -348,20 +365,20 @@ class Coherence:
                 freq = count / total_paths
                 if freq >= min_frequency and key:
                     if key not in discovered_keys:
-                        discovered_keys[key] = {'level': level, 'values': set()}
-                    discovered_keys[key]['values'].add(value)
+                        discovered_keys[key] = {"level": level, "values": set()}
+                    discovered_keys[key]["values"].add(value)
 
         result = {
-            '_derived': True,
-            '_structure': {},
-            '_stats': {'path_count': total_paths, 'unique_keys': len(discovered_keys)}
+            "_derived": True,
+            "_structure": {},
+            "_stats": {"path_count": total_paths, "unique_keys": len(discovered_keys)},
         }
 
-        for key, info in sorted(discovered_keys.items(), key=lambda x: x[1]['level']):
-            result['_structure'][key] = {
-                'level': info['level'],
-                'values': list(info['values']),
-                'pattern': f"{key}={{value}}"
+        for key, info in sorted(discovered_keys.items(), key=lambda x: x[1]["level"]):
+            result["_structure"][key] = {
+                "level": info["level"],
+                "values": list(info["values"]),
+                "pattern": f"{key}={{value}}",
             }
 
         return result

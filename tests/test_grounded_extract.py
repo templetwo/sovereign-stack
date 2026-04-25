@@ -50,9 +50,7 @@ def chronicle_root():
 @pytest.fixture
 def outside_path():
     """An existing file outside the chronicle root — structural evidence."""
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".py", delete=False
-    ) as tmp:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as tmp:
         tmp.write("# real source file\n")
     yield Path(tmp.name)
     os.unlink(tmp.name)
@@ -72,8 +70,7 @@ def _chronicle_file(root: Path, domain: str, layers: list) -> Path:
     """
     target = root / "insights" / domain / "test.jsonl"
     records = [
-        {"timestamp": "2026-01-01T00:00:00", "domain": domain,
-         "content": f"r{i}", "layer": layer}
+        {"timestamp": "2026-01-01T00:00:00", "domain": domain, "content": f"r{i}", "layer": layer}
         for i, layer in enumerate(layers)
     ]
     _write_jsonl(target, records)
@@ -81,6 +78,7 @@ def _chronicle_file(root: Path, domain: str, layers: list) -> Path:
 
 
 # ── Case 1: empty evidence ───────────────────────────────────────────────────
+
 
 def test_empty_evidence_rejected(chronicle_root):
     r = grounded_extract("c", [], chronicle_root=chronicle_root)
@@ -91,6 +89,7 @@ def test_empty_evidence_rejected(chronicle_root):
 
 
 # ── Case 2: missing path ─────────────────────────────────────────────────────
+
 
 def test_missing_path_rejected_as_missing(chronicle_root):
     r = grounded_extract(
@@ -106,9 +105,8 @@ def test_missing_path_rejected_as_missing(chronicle_root):
 
 # ── Case 3: non-chronicle existing file = structural evidence ────────────────
 
-def test_non_chronicle_existing_file_is_structural_evidence(
-    chronicle_root, outside_path
-):
+
+def test_non_chronicle_existing_file_is_structural_evidence(chronicle_root, outside_path):
     r = grounded_extract("c", [str(outside_path)], chronicle_root=chronicle_root)
     assert r.accepted
     assert r.reason is REASON_OK
@@ -118,6 +116,7 @@ def test_non_chronicle_existing_file_is_structural_evidence(
 
 # ── Case 4: chronicle ground_truth only = accepted ───────────────────────────
 
+
 def test_chronicle_ground_truth_only_accepted(chronicle_root):
     p = _chronicle_file(chronicle_root, "x", [GROUND_TRUTH_LAYER])
     r = grounded_extract("c", [str(p)], chronicle_root=chronicle_root)
@@ -126,6 +125,7 @@ def test_chronicle_ground_truth_only_accepted(chronicle_root):
 
 
 # ── Case 5: chronicle hypothesis only = rejected (LOAD-BEARING) ─────────────
+
 
 def test_chronicle_hypothesis_only_rejected(chronicle_root):
     """The load-bearing test: a hypothesis-only chronicle file must NOT
@@ -140,6 +140,7 @@ def test_chronicle_hypothesis_only_rejected(chronicle_root):
 
 # ── Case 6: chronicle open_thread only = rejected ───────────────────────────
 
+
 def test_chronicle_open_thread_only_rejected(chronicle_root):
     p = _chronicle_file(chronicle_root, "x", [OPEN_THREAD_LAYER])
     r = grounded_extract("c", [str(p)], chronicle_root=chronicle_root)
@@ -149,11 +150,13 @@ def test_chronicle_open_thread_only_rejected(chronicle_root):
 
 # ── Case 7: mixed chronicle file (ground_truth + hypothesis) = accepted ─────
 
+
 def test_chronicle_mixed_layers_accepted_if_any_ground_truth(chronicle_root):
     """A JSONL file containing both hypothesis AND ground_truth records is
     accepted — the presence of any ground_truth record grounds the file."""
     p = _chronicle_file(
-        chronicle_root, "x",
+        chronicle_root,
+        "x",
         [HYPOTHESIS_LAYER, GROUND_TRUTH_LAYER, HYPOTHESIS_LAYER],
     )
     r = grounded_extract("c", [str(p)], chronicle_root=chronicle_root)
@@ -162,6 +165,7 @@ def test_chronicle_mixed_layers_accepted_if_any_ground_truth(chronicle_root):
 
 
 # ── Case 8: min_evidence_paths threshold ─────────────────────────────────────
+
 
 def test_min_evidence_paths_insufficient(chronicle_root, outside_path):
     """One grounding path, min=2 → insufficient_evidence (not no_ground_truth,
@@ -192,9 +196,12 @@ def test_min_evidence_paths_met(chronicle_root, outside_path):
 
 # ── Case 9: __bool__ dunder ──────────────────────────────────────────────────
 
+
 def test_bool_dunder_returns_accepted(chronicle_root, outside_path):
     accepted = grounded_extract(
-        "c", [str(outside_path)], chronicle_root=chronicle_root,
+        "c",
+        [str(outside_path)],
+        chronicle_root=chronicle_root,
     )
     assert bool(accepted) is True
 
@@ -213,6 +220,7 @@ def test_daemon_idiom_if_not_result(chronicle_root):
 
 # ── Case 10: reason code stability ───────────────────────────────────────────
 
+
 def test_reason_codes_are_stable_strings():
     """Reason codes must be stable importable constants so daemons can
     branch on identity. Catches accidental renames."""
@@ -227,6 +235,7 @@ def test_reason_codes_are_stable_strings():
 
 
 # ── Case 11: unreadable / malformed JSONL ────────────────────────────────────
+
 
 def test_unreadable_chronicle_file_rejected(chronicle_root):
     """A chronicle path that's a binary file or otherwise unparseable is
@@ -267,6 +276,7 @@ def test_empty_chronicle_file_rejected(chronicle_root):
 
 # ── Case 12: claim preserved ─────────────────────────────────────────────────
 
+
 def test_claim_preserved_on_result(chronicle_root):
     claim = "v1.3.2 adds prior_for_turn"
     r = grounded_extract(claim, [], chronicle_root=chronicle_root)
@@ -274,6 +284,7 @@ def test_claim_preserved_on_result(chronicle_root):
 
 
 # ── Case 13: accounting — every path lands somewhere ────────────────────────
+
 
 def test_every_path_accounted_for(chronicle_root, outside_path):
     """matched_paths ∪ rejected_paths must equal the input, no silent drops."""
@@ -290,6 +301,7 @@ def test_every_path_accounted_for(chronicle_root, outside_path):
 
 # ── Case 14: frozen dataclass ────────────────────────────────────────────────
 
+
 def test_grounding_result_is_frozen(chronicle_root):
     """Result objects must be immutable so daemons can't mutate them
     post-return and confuse downstream consumers."""
@@ -300,22 +312,27 @@ def test_grounding_result_is_frozen(chronicle_root):
 
 # ── Case 15: no LLM leakage — the function is pure ──────────────────────────
 
+
 def test_function_is_pure_no_filesystem_side_effects(chronicle_root, outside_path):
     """grounded_extract must not write anything. Snapshot the tree before
     and after; they must match."""
+
     def snapshot(root: Path) -> set:
         return {p for p in root.rglob("*") if p.is_file()}
 
     before = snapshot(chronicle_root)
     for _ in range(5):
         grounded_extract(
-            "c", [str(outside_path)], chronicle_root=chronicle_root,
+            "c",
+            [str(outside_path)],
+            chronicle_root=chronicle_root,
         )
     after = snapshot(chronicle_root)
     assert before == after
 
 
 # ── Case 16: default chronicle root resolves to ~/.sovereign/chronicle ──────
+
 
 def test_default_chronicle_root_does_not_crash():
     """Without chronicle_root override, the function falls back to the

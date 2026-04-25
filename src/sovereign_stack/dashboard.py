@@ -79,17 +79,27 @@ CAT_THREAD = "THREAD"
 CAT_HONK = "HONK"
 CAT_HALT = "HALT"
 CAT_DECISION = "DECISION"
-CAT_SERVICE = "SERVICE"          # service lifecycle (start/stop/restart)
+CAT_SERVICE = "SERVICE"  # service lifecycle (start/stop/restart)
 CAT_COMMS = "COMMS"
 CAT_ERROR = "ERROR"
 CAT_STARTUP = "STARTUP"
-CAT_COMMIT = "COMMIT"            # git commits landing on the repo
-CAT_DEPLOY = "DEPLOY"            # service kickstarts / status changes
+CAT_COMMIT = "COMMIT"  # git commits landing on the repo
+CAT_DEPLOY = "DEPLOY"  # service kickstarts / status changes
 
 ALL_CATEGORIES = (
-    CAT_TOOLS, CAT_CHRONICLE, CAT_INSIGHT, CAT_THREAD,
-    CAT_HONK, CAT_HALT, CAT_DECISION, CAT_SERVICE,
-    CAT_COMMS, CAT_ERROR, CAT_STARTUP, CAT_COMMIT, CAT_DEPLOY,
+    CAT_TOOLS,
+    CAT_CHRONICLE,
+    CAT_INSIGHT,
+    CAT_THREAD,
+    CAT_HONK,
+    CAT_HALT,
+    CAT_DECISION,
+    CAT_SERVICE,
+    CAT_COMMS,
+    CAT_ERROR,
+    CAT_STARTUP,
+    CAT_COMMIT,
+    CAT_DEPLOY,
 )
 
 
@@ -126,8 +136,7 @@ class ActivityFeed:
         if limit is not None:
             items = items[:limit]
         return [
-            {"time": e.time_str, "ts": e.timestamp,
-             "category": e.category, "message": e.message}
+            {"time": e.time_str, "ts": e.timestamp, "category": e.category, "message": e.message}
             for e in items
         ]
 
@@ -138,6 +147,7 @@ class ActivityFeed:
 @dataclass
 class _MtimeIndex:
     """Tracks per-path mtime to detect new writes between polls."""
+
     seen: dict[str, float] = field(default_factory=dict)
 
     def diff(self, paths: list[Path]) -> list[Path]:
@@ -182,14 +192,25 @@ def _git_recent_commits(
     if not (repo_path / ".git").exists():
         return []
     import subprocess
-    args = ["git", "-C", str(repo_path), "log",
-            "--pretty=format:%H%x09%aI%x09%s",
-            "-n", str(int(limit))]
+
+    args = [
+        "git",
+        "-C",
+        str(repo_path),
+        "log",
+        "--pretty=format:%H%x09%aI%x09%s",
+        "-n",
+        str(int(limit)),
+    ]
     if since:
         args += [f"--since={since}"]
     try:
         proc = subprocess.run(
-            args, capture_output=True, text=True, timeout=3.0, check=False,
+            args,
+            capture_output=True,
+            text=True,
+            timeout=3.0,
+            check=False,
         )
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
         return []
@@ -200,11 +221,13 @@ def _git_recent_commits(
         parts = line.split("\t", 2)
         if len(parts) != 3:
             continue
-        out.append({
-            "sha": parts[0],
-            "iso": parts[1],
-            "subject": parts[2],
-        })
+        out.append(
+            {
+                "sha": parts[0],
+                "iso": parts[1],
+                "subject": parts[2],
+            }
+        )
     return out
 
 
@@ -220,6 +243,7 @@ def _launchctl_service_states(labels: list[str]) -> dict[str, dict]:
     import os
     import re
     import subprocess
+
     out: dict[str, dict] = {}
     uid = os.getuid()
     re_state = re.compile(r"^\s*state\s*=\s*(\S+)", re.MULTILINE)
@@ -228,7 +252,10 @@ def _launchctl_service_states(labels: list[str]) -> dict[str, dict]:
         try:
             proc = subprocess.run(
                 ["launchctl", "print", f"gui/{uid}/{label}"],
-                capture_output=True, text=True, timeout=2.0, check=False,
+                capture_output=True,
+                text=True,
+                timeout=2.0,
+                check=False,
             )
         except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
             out[label] = {"state": None, "pid": None}
@@ -390,8 +417,9 @@ class DashboardState:
     latest: dict[str, dict | None] = field(default_factory=dict)
 
 
-def _newest_jsonl_record(directory: Path, *, recursive: bool = False,
-                         glob: str = "*.jsonl") -> dict | None:
+def _newest_jsonl_record(
+    directory: Path, *, recursive: bool = False, glob: str = "*.jsonl"
+) -> dict | None:
     """
     Find the most-recently-modified JSONL file under `directory` and
     return its tail record (newest line). Returns None if no JSONL
@@ -411,12 +439,11 @@ def _newest_jsonl_record(directory: Path, *, recursive: bool = False,
     return None
 
 
-def _newest_file(directory: Path, *, glob: str = "*",
-                 recursive: bool = False) -> Path | None:
+def _newest_file(directory: Path, *, glob: str = "*", recursive: bool = False) -> Path | None:
     """Return the newest file matching `glob` under `directory`, or None."""
     if not directory.exists():
         return None
-    files = (directory.rglob(glob) if recursive else directory.glob(glob))
+    files = directory.rglob(glob) if recursive else directory.glob(glob)
     files = [f for f in files if f.is_file()]
     if not files:
         return None
@@ -448,7 +475,8 @@ def collect_latest_entries(sovereign_root: Path) -> dict[str, dict | None]:
     out: dict[str, dict | None] = {}
 
     insight = _newest_jsonl_record(
-        sovereign_root / "chronicle" / "insights", recursive=True,
+        sovereign_root / "chronicle" / "insights",
+        recursive=True,
     )
     if insight:
         out["insight"] = {
@@ -461,7 +489,8 @@ def collect_latest_entries(sovereign_root: Path) -> dict[str, dict | None]:
         out["insight"] = None
 
     thread = _newest_jsonl_record(
-        sovereign_root / "chronicle" / "open_threads", recursive=True,
+        sovereign_root / "chronicle" / "open_threads",
+        recursive=True,
     )
     if thread:
         out["open_thread"] = {
@@ -474,7 +503,8 @@ def collect_latest_entries(sovereign_root: Path) -> dict[str, dict | None]:
         out["open_thread"] = None
 
     learning = _newest_jsonl_record(
-        sovereign_root / "chronicle" / "learnings", recursive=True,
+        sovereign_root / "chronicle" / "learnings",
+        recursive=True,
     )
     if learning:
         out["learning"] = {
@@ -506,8 +536,7 @@ def collect_latest_entries(sovereign_root: Path) -> dict[str, dict | None]:
     else:
         out["handoff"] = None
 
-    decision_path = _newest_file(sovereign_root / "decisions",
-                                 glob="metabolize_*.md")
+    decision_path = _newest_file(sovereign_root / "decisions", glob="metabolize_*.md")
     if decision_path:
         try:
             text = decision_path.read_text(encoding="utf-8")
@@ -548,8 +577,7 @@ def collect_latest_entries(sovereign_root: Path) -> dict[str, dict | None]:
     else:
         out["halt"] = None
 
-    honks = read_recent_honks(sovereign_root / "nape" / "honks.jsonl",
-                              limit=1)
+    honks = read_recent_honks(sovereign_root / "nape" / "honks.jsonl", limit=1)
     if honks:
         h = honks[0]
         out["honk"] = {
@@ -568,7 +596,8 @@ def collect_latest_entries(sovereign_root: Path) -> dict[str, dict | None]:
 def _file_iso(path: Path) -> str | None:
     try:
         return datetime.fromtimestamp(
-            path.stat().st_mtime, tz=timezone.utc,
+            path.stat().st_mtime,
+            tz=timezone.utc,
         ).isoformat()
     except Exception:
         return None
@@ -674,8 +703,9 @@ def render_state(
         return f"{code}{s}{_RESET}" if color else s
 
     lines: list[str] = []
-    lines.append(_c(f"  {'†⟡†  SOVEREIGN STACK DASHBOARD':^{width-4}}  ",
-                    _HEADER_BG + _BOLD + _GOLD))
+    lines.append(
+        _c(f"  {'†⟡†  SOVEREIGN STACK DASHBOARD':^{width - 4}}  ", _HEADER_BG + _BOLD + _GOLD)
+    )
     lines.append("")
 
     # Header line — bridge stats
@@ -700,9 +730,7 @@ def render_state(
     overall_color = _STATUS_COLOR.get(overall, _GRAY)
     counts_str = "  ".join(f"{k}={v}" for k, v in sorted(summary["counts"].items()))
     lines.append(
-        f"  {_c('SERVICES', _BOLD)}  "
-        f"{_c(overall.upper(), overall_color)}  "
-        f"{_c(counts_str, _DIM)}"
+        f"  {_c('SERVICES', _BOLD)}  {_c(overall.upper(), overall_color)}  {_c(counts_str, _DIM)}"
     )
     lines.append(_c("  " + "─" * (width - 4), _GRAY))
     for ep in summary["endpoints"]:
@@ -730,9 +758,7 @@ def render_state(
     if state.halts_count:
         indicators.append(_c(f"⛔ {state.halts_count} halt note(s)", _RED))
     if state.decisions_count:
-        indicators.append(
-            _c(f"📋 {state.decisions_count} metabolize decision(s)", _BLUE)
-        )
+        indicators.append(_c(f"📋 {state.decisions_count} metabolize decision(s)", _BLUE))
     if state.listener_stale:
         indicators.append(_c("⏰ listener stale", _GOLD))
     if indicators:
@@ -749,17 +775,17 @@ def render_state(
             cat = entry["category"]
             color_code = _CAT_COLOR.get(cat, _GRAY)
             lines.append(
-                f"  {_c(entry['time'], _DIM)} "
-                f"{_c(cat, color_code + _BOLD):<22} "
-                f"{entry['message']}"
+                f"  {_c(entry['time'], _DIM)} {_c(cat, color_code + _BOLD):<22} {entry['message']}"
             )
 
     lines.append("")
-    lines.append(_c(
-        f"  Refresh: {DEFAULT_POLL_SECONDS}s  |  Ctrl+C to exit  |  "
-        f"{datetime.now().strftime('%H:%M:%S')}",
-        _DIM,
-    ))
+    lines.append(
+        _c(
+            f"  Refresh: {DEFAULT_POLL_SECONDS}s  |  Ctrl+C to exit  |  "
+            f"{datetime.now().strftime('%H:%M:%S')}",
+            _DIM,
+        )
+    )
     return "\n".join(lines)
 
 
@@ -787,8 +813,7 @@ async def _bridge_get_spiral(bridge_url: str, headers: dict) -> dict | None:
         return None
 
 
-async def _bridge_get_unread(bridge_url: str, headers: dict,
-                             instance_id: str) -> int | None:
+async def _bridge_get_unread(bridge_url: str, headers: dict, instance_id: str) -> int | None:
     try:
         import httpx
     except ImportError:
@@ -830,10 +855,10 @@ async def run_loop(
 
     # Seed the indices so we don't immediately spam the feed with everything
     # already on disk on the first tick.
-    chronicle_index.diff(_list_paths(root / "chronicle" / "insights",
-                                     "*.jsonl", recursive=True))
-    chronicle_index.diff(_list_paths(root / "chronicle" / "open_threads",
-                                     "*.jsonl", recursive=True))
+    chronicle_index.diff(_list_paths(root / "chronicle" / "insights", "*.jsonl", recursive=True))
+    chronicle_index.diff(
+        _list_paths(root / "chronicle" / "open_threads", "*.jsonl", recursive=True)
+    )
     halts_index.diff(_list_paths(root / "daemons" / "halts", "*.md"))
     decisions_index.diff(_list_paths(root / "decisions", "metabolize_*.md"))
     honks_index.diff([root / "nape" / "honks.jsonl"])
@@ -846,8 +871,7 @@ async def run_loop(
         try:
             # ── Filesystem watchers ──
             for jsonl in chronicle_index.diff(
-                _list_paths(root / "chronicle" / "insights",
-                            "*.jsonl", recursive=True),
+                _list_paths(root / "chronicle" / "insights", "*.jsonl", recursive=True),
             ):
                 tail = read_chronicle_tail(jsonl)
                 if tail:
@@ -856,8 +880,7 @@ async def run_loop(
                     feed.add(CAT_INSIGHT, f"[{layer}] {content}…")
 
             for jsonl in chronicle_index.diff(
-                _list_paths(root / "chronicle" / "open_threads",
-                            "*.jsonl", recursive=True),
+                _list_paths(root / "chronicle" / "open_threads", "*.jsonl", recursive=True),
             ):
                 tail = read_chronicle_tail(jsonl)
                 if tail:
@@ -875,13 +898,12 @@ async def run_loop(
                 feed.add(CAT_DECISION, f"new metabolize digest: {dec.name}")
 
             if honks_index.diff([root / "nape" / "honks.jsonl"]):
-                recent = read_recent_honks(root / "nape" / "honks.jsonl",
-                                           limit=3)
+                recent = read_recent_honks(root / "nape" / "honks.jsonl", limit=3)
                 for h in recent:
                     feed.add(
                         CAT_HONK,
-                        f"[{h.get('level','?')}] {h.get('pattern','?')}: "
-                        f"{h.get('trigger_tool','?')}",
+                        f"[{h.get('level', '?')}] {h.get('pattern', '?')}: "
+                        f"{h.get('trigger_tool', '?')}",
                     )
 
             # ── Bridge polling (optional, every 3 cycles for spiral) ──
@@ -890,24 +912,26 @@ async def run_loop(
                 if spiral is not None:
                     bs.bridge_reachable = True
                     if "phase" in spiral and spiral["phase"] != bs.phase:
-                        feed.add(CAT_TOOLS,
-                                 f"phase advanced: {bs.phase} → {spiral['phase']}")
-                    if "tool_calls" in spiral and bs.tool_calls > 0 \
-                            and spiral["tool_calls"] > bs.tool_calls:
+                        feed.add(CAT_TOOLS, f"phase advanced: {bs.phase} → {spiral['phase']}")
+                    if (
+                        "tool_calls" in spiral
+                        and bs.tool_calls > 0
+                        and spiral["tool_calls"] > bs.tool_calls
+                    ):
                         delta = spiral["tool_calls"] - bs.tool_calls
                         feed.add(CAT_TOOLS, f"+{delta} tool call(s)")
                     bs.phase = spiral.get("phase", bs.phase)
                     bs.tool_calls = spiral.get("tool_calls", bs.tool_calls)
-                    bs.reflection_depth = spiral.get("reflection_depth",
-                                                     bs.reflection_depth)
-                    bs.duration_seconds = spiral.get("duration_seconds",
-                                                     bs.duration_seconds)
+                    bs.reflection_depth = spiral.get("reflection_depth", bs.reflection_depth)
+                    bs.duration_seconds = spiral.get("duration_seconds", bs.duration_seconds)
                 else:
                     bs.bridge_reachable = False
 
             if bridge_url and cycle % 5 == 0:
                 unread = await _bridge_get_unread(
-                    bridge_url, bridge_headers, instance_id,
+                    bridge_url,
+                    bridge_headers,
+                    instance_id,
                 )
                 if unread is not None:
                     if bs.comms_unread > 0 and unread > bs.comms_unread:

@@ -34,32 +34,28 @@ COMPACTION_MEMORY_TOOLS = [
             "properties": {
                 "summary_text": {
                     "type": "string",
-                    "description": "The full compaction summary text"
+                    "description": "The full compaction summary text",
                 },
-                "session_id": {
-                    "type": "string",
-                    "description": "Current session ID"
-                },
+                "session_id": {"type": "string", "description": "Current session ID"},
                 "key_points": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "List of key points from this session segment"
+                    "description": "List of key points from this session segment",
                 },
                 "active_tasks": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Currently active tasks"
+                    "description": "Currently active tasks",
                 },
                 "recent_breakthroughs": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Recent breakthroughs to remember"
-                }
+                    "description": "Recent breakthroughs to remember",
+                },
             },
-            "required": ["summary_text", "session_id"]
-        }
+            "required": ["summary_text", "session_id"],
+        },
     ),
-
     Tool(
         name="get_compaction_context",
         description="""
@@ -73,12 +69,8 @@ COMPACTION_MEMORY_TOOLS = [
 
         Use this IMMEDIATELY after compaction to regain context.
         """,
-        inputSchema={
-            "type": "object",
-            "properties": {}
-        }
+        inputSchema={"type": "object", "properties": {}},
     ),
-
     Tool(
         name="get_compaction_stats",
         description="""
@@ -91,20 +83,16 @@ COMPACTION_MEMORY_TOOLS = [
 
         Use this to check buffer status.
         """,
-        inputSchema={
-            "type": "object",
-            "properties": {}
-        }
-    )
+        inputSchema={"type": "object", "properties": {}},
+    ),
 ]
 
 
 # Tool handlers
 
+
 async def handle_compaction_memory_tool(
-    name: str,
-    arguments: dict[str, Any],
-    sovereign_root: Path
+    name: str, arguments: dict[str, Any], sovereign_root: Path
 ) -> str:
     """Handle compaction memory tool calls"""
 
@@ -117,7 +105,7 @@ async def handle_compaction_memory_tool(
             session_id=arguments.get("session_id", ""),
             key_points=arguments.get("key_points"),
             active_tasks=arguments.get("active_tasks"),
-            recent_breakthroughs=arguments.get("recent_breakthroughs")
+            recent_breakthroughs=arguments.get("recent_breakthroughs"),
         )
 
     if name == "get_compaction_context":
@@ -135,7 +123,7 @@ async def _store_compaction_summary(
     session_id: str,
     key_points: list = None,
     active_tasks: list = None,
-    recent_breakthroughs: list = None
+    recent_breakthroughs: list = None,
 ) -> str:
     """Store compaction summary"""
 
@@ -146,7 +134,7 @@ async def _store_compaction_summary(
             session_id=session_id,
             key_points=key_points,
             active_tasks=active_tasks,
-            recent_breakthroughs=recent_breakthroughs
+            recent_breakthroughs=recent_breakthroughs,
         )
 
     except Exception as e:
@@ -174,11 +162,11 @@ async def _get_compaction_stats(storage_dir: Path) -> str:
 
         output = f"""📊 Compaction Memory Buffer Stats
 
-**Capacity:** {stats['total_summaries']}/{stats['max_capacity']} summaries
-**Total Compactions:** {stats['total_compactions']}
+**Capacity:** {stats["total_summaries"]}/{stats["max_capacity"]} summaries
+**Total Compactions:** {stats["total_compactions"]}
 
-**Oldest Summary:** {stats['oldest_timestamp'] or 'None'}
-**Newest Summary:** {stats['newest_timestamp'] or 'None'}
+**Oldest Summary:** {stats["oldest_timestamp"] or "None"}
+**Newest Summary:** {stats["newest_timestamp"] or "None"}
 """
 
         if latest:
@@ -199,6 +187,7 @@ Breakthroughs: {len(latest.recent_breakthroughs)}
 
 
 # Hook for automatic storage after compaction
+
 
 def should_auto_store_compaction() -> bool:
     """

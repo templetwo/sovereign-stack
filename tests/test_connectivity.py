@@ -48,7 +48,10 @@ from sovereign_stack.connectivity import (
 def _make_completed(stdout: str = "", stderr: str = "", returncode: int = 0):
     """Build a fake CompletedProcess matching subprocess.run's return shape."""
     return subprocess.CompletedProcess(
-        args=[], returncode=returncode, stdout=stdout, stderr=stderr,
+        args=[],
+        returncode=returncode,
+        stdout=stdout,
+        stderr=stderr,
     )
 
 
@@ -62,9 +65,7 @@ class TestRegistry:
     def test_all_endpoints_have_required_fields(self):
         for e in ENDPOINTS:
             assert e.name, f"endpoint missing name: {e}"
-            assert e.kind in (KIND_ALWAYS_ON, KIND_PERIODIC), (
-                f"unknown kind {e.kind} on {e.name}"
-            )
+            assert e.kind in (KIND_ALWAYS_ON, KIND_PERIODIC), f"unknown kind {e.kind} on {e.name}"
             assert e.description, f"endpoint missing description: {e.name}"
 
     def test_periodic_endpoints_have_cadence(self):
@@ -142,11 +143,19 @@ class TestHttpProbe:
     def test_probe_success(self):
         # Real urllib here would fail; we test the helper structure.
         with patch.object(conn.urllib.request, "urlopen") as mock_open:
+
             class FakeResp:
                 status = 200
-                def read(self, n): return b'{"ok": true}'
-                def __enter__(self): return self
-                def __exit__(self, *a): pass
+
+                def read(self, n):
+                    return b'{"ok": true}'
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *a):
+                    pass
+
             mock_open.return_value = FakeResp()
             result = conn._http_probe("http://x")
         assert result["http_status"] == 200
@@ -155,8 +164,10 @@ class TestHttpProbe:
 
     def test_probe_connection_refused(self):
         import urllib.error
+
         with patch.object(
-            conn.urllib.request, "urlopen",
+            conn.urllib.request,
+            "urlopen",
             side_effect=urllib.error.URLError("Connection refused"),
         ):
             result = conn._http_probe("http://x")
@@ -165,11 +176,15 @@ class TestHttpProbe:
 
     def test_probe_http_404(self):
         import urllib.error
+
         # HTTPError carries a status code AND is treated as "got a response"
         # not as an error from the probe's perspective.
         err = urllib.error.HTTPError(
-            url="http://x", code=404, msg="Not Found",
-            hdrs=None, fp=None,
+            url="http://x",
+            code=404,
+            msg="Not Found",
+            hdrs=None,
+            fp=None,
         )
         with patch.object(conn.urllib.request, "urlopen", side_effect=err):
             result = conn._http_probe("http://x")
@@ -183,8 +198,11 @@ class TestHttpProbe:
 class TestCheckStatusAlwaysOn:
     def _ep(self, **kw):
         defaults = {
-            "name": "t", "label": "com.templetwo.test", "kind": KIND_ALWAYS_ON,
-            "description": "test", "health_url": None,
+            "name": "t",
+            "label": "com.templetwo.test",
+            "kind": KIND_ALWAYS_ON,
+            "description": "test",
+            "health_url": None,
         }
         defaults.update(kw)
         return Endpoint(**defaults)
@@ -192,7 +210,8 @@ class TestCheckStatusAlwaysOn:
     def test_running_no_http_probe_is_ok(self):
         ep = self._ep()
         with patch.object(
-            conn, "_launchctl_print_text",
+            conn,
+            "_launchctl_print_text",
             return_value="state = running\npid = 100\n",
         ):
             s = check_status(ep)
@@ -207,13 +226,17 @@ class TestCheckStatusAlwaysOn:
 
     def test_running_with_failed_http_is_degraded(self):
         ep = self._ep(health_url="http://127.0.0.1:99/health")
-        with patch.object(
-            conn, "_launchctl_print_text",
-            return_value="state = running\npid = 100\n",
-        ), patch.object(
-            conn, "_http_probe",
-            return_value={"http_status": None, "body": "",
-                          "error": "url_error: refused"},
+        with (
+            patch.object(
+                conn,
+                "_launchctl_print_text",
+                return_value="state = running\npid = 100\n",
+            ),
+            patch.object(
+                conn,
+                "_http_probe",
+                return_value={"http_status": None, "body": "", "error": "url_error: refused"},
+            ),
         ):
             s = check_status(ep)
         assert s.status == STATUS_DEGRADED
@@ -221,12 +244,17 @@ class TestCheckStatusAlwaysOn:
 
     def test_running_with_ok_http_is_ok(self):
         ep = self._ep(health_url="http://x")
-        with patch.object(
-            conn, "_launchctl_print_text",
-            return_value="state = running\npid = 100\n",
-        ), patch.object(
-            conn, "_http_probe",
-            return_value={"http_status": 200, "body": "{}", "error": None},
+        with (
+            patch.object(
+                conn,
+                "_launchctl_print_text",
+                return_value="state = running\npid = 100\n",
+            ),
+            patch.object(
+                conn,
+                "_http_probe",
+                return_value={"http_status": 200, "body": "{}", "error": None},
+            ),
         ):
             s = check_status(ep)
         assert s.status == STATUS_OK
@@ -234,13 +262,17 @@ class TestCheckStatusAlwaysOn:
 
     def test_health_match_substring_required(self):
         ep = self._ep(health_url="http://x", health_match="healthy")
-        with patch.object(
-            conn, "_launchctl_print_text",
-            return_value="state = running\npid = 100\n",
-        ), patch.object(
-            conn, "_http_probe",
-            return_value={"http_status": 200,
-                          "body": '{"status":"DEGRADED"}', "error": None},
+        with (
+            patch.object(
+                conn,
+                "_launchctl_print_text",
+                return_value="state = running\npid = 100\n",
+            ),
+            patch.object(
+                conn,
+                "_http_probe",
+                return_value={"http_status": 200, "body": '{"status":"DEGRADED"}', "error": None},
+            ),
         ):
             s = check_status(ep)
         # Body 200 OK but missing the required match → degraded.
@@ -254,9 +286,12 @@ class TestCheckStatusAlwaysOn:
 class TestCheckStatusPeriodic:
     def _ep(self, log_path, cadence=300):
         return Endpoint(
-            name="lst", label="com.templetwo.test", kind=KIND_PERIODIC,
+            name="lst",
+            label="com.templetwo.test",
+            kind=KIND_PERIODIC,
             description="periodic test",
-            cadence_seconds=cadence, log_path=log_path,
+            cadence_seconds=cadence,
+            log_path=log_path,
         )
 
     def test_recent_log_is_ok(self, tmp_path):
@@ -293,12 +328,15 @@ class TestCheckStatusPeriodic:
 class TestCheckStatusHttpOnly:
     def test_probe_succeeds_without_label(self):
         ep = Endpoint(
-            name="ext", label=None, kind=KIND_ALWAYS_ON,
+            name="ext",
+            label=None,
+            kind=KIND_ALWAYS_ON,
             description="external service",
             health_url="http://x",
         )
         with patch.object(
-            conn, "_http_probe",
+            conn,
+            "_http_probe",
             return_value={"http_status": 200, "body": "ok", "error": None},
         ):
             s = check_status(ep)
@@ -314,16 +352,20 @@ class TestCheckStatusHttpOnly:
 class TestActions:
     def _ep(self):
         return Endpoint(
-            name="t", label="com.templetwo.test", kind=KIND_ALWAYS_ON,
+            name="t",
+            label="com.templetwo.test",
+            kind=KIND_ALWAYS_ON,
             description="t",
         )
 
     def test_restart_invokes_kickstart_with_k(self):
         ep = self._ep()
         captured = {}
+
         def fake_run(cmd, timeout=5.0):
             captured["cmd"] = cmd
             return _make_completed(returncode=0)
+
         with patch.object(conn, "_run", side_effect=fake_run):
             r = restart(ep)
         assert r.ok is True
@@ -334,9 +376,11 @@ class TestActions:
     def test_start_invokes_kickstart_no_k(self):
         ep = self._ep()
         captured = {}
+
         def fake_run(cmd, timeout=5.0):
             captured["cmd"] = cmd
             return _make_completed(returncode=0)
+
         with patch.object(conn, "_run", side_effect=fake_run):
             r = start(ep)
         assert r.ok is True
@@ -346,9 +390,11 @@ class TestActions:
     def test_stop_invokes_kill_sigterm(self):
         ep = self._ep()
         captured = {}
+
         def fake_run(cmd, timeout=5.0):
             captured["cmd"] = cmd
             return _make_completed(returncode=0)
+
         with patch.object(conn, "_run", side_effect=fake_run):
             r = stop(ep)
         assert r.ok is True
@@ -358,7 +404,8 @@ class TestActions:
     def test_action_returns_failure_on_nonzero(self):
         ep = self._ep()
         with patch.object(
-            conn, "_run",
+            conn,
+            "_run",
             return_value=_make_completed(returncode=1, stderr="failed"),
         ):
             r = restart(ep)
@@ -368,7 +415,10 @@ class TestActions:
 
     def test_action_on_no_label_endpoint(self):
         ep = Endpoint(
-            name="x", label=None, kind=KIND_ALWAYS_ON, description="",
+            name="x",
+            label=None,
+            kind=KIND_ALWAYS_ON,
+            description="",
         )
         r = restart(ep)
         assert r.ok is False
@@ -380,8 +430,7 @@ class TestActions:
 
 class TestAggregate:
     def _s(self, status):
-        return EndpointStatus(name="x", label="x", kind=KIND_ALWAYS_ON,
-                              status=status)
+        return EndpointStatus(name="x", label="x", kind=KIND_ALWAYS_ON, status=status)
 
     def test_all_ok_overall_ok(self):
         agg = aggregate([self._s(STATUS_OK), self._s(STATUS_OK)])
@@ -389,11 +438,13 @@ class TestAggregate:
         assert agg["counts"][STATUS_OK] == 2
 
     def test_any_down_overall_down(self):
-        agg = aggregate([
-            self._s(STATUS_OK),
-            self._s(STATUS_OK),
-            self._s(STATUS_DOWN),
-        ])
+        agg = aggregate(
+            [
+                self._s(STATUS_OK),
+                self._s(STATUS_OK),
+                self._s(STATUS_DOWN),
+            ]
+        )
         assert agg["overall"] == STATUS_DOWN
 
     def test_degraded_without_down_overall_degraded(self):
@@ -414,12 +465,14 @@ class TestAggregate:
 
 class TestCheckAll:
     def test_check_all_returns_one_per_endpoint(self):
-        with patch.object(conn, "_launchctl_print_text", return_value=None), \
-             patch.object(
-                 conn, "_http_probe",
-                 return_value={"http_status": None, "body": "",
-                               "error": "mocked"},
-             ):
+        with (
+            patch.object(conn, "_launchctl_print_text", return_value=None),
+            patch.object(
+                conn,
+                "_http_probe",
+                return_value={"http_status": None, "body": "", "error": "mocked"},
+            ),
+        ):
             results = check_all()
         assert len(results) == len(ENDPOINTS)
         names = {r.name for r in results}
@@ -432,22 +485,26 @@ class TestCheckAll:
 class TestCli:
     def test_status_default_returns_2_when_degraded(self, capsys):
         # All endpoints unknown/down because we mock everything to fail.
-        with patch.object(conn, "_launchctl_print_text", return_value=None), \
-             patch.object(
-                 conn, "_http_probe",
-                 return_value={"http_status": None, "body": "",
-                               "error": "mocked"},
-             ):
+        with (
+            patch.object(conn, "_launchctl_print_text", return_value=None),
+            patch.object(
+                conn,
+                "_http_probe",
+                return_value={"http_status": None, "body": "", "error": "mocked"},
+            ),
+        ):
             rc = cli.main(["status"])
         assert rc == 2
 
     def test_status_json_outputs_aggregate(self, capsys):
-        with patch.object(conn, "_launchctl_print_text", return_value=None), \
-             patch.object(
-                 conn, "_http_probe",
-                 return_value={"http_status": None, "body": "",
-                               "error": "mocked"},
-             ):
+        with (
+            patch.object(conn, "_launchctl_print_text", return_value=None),
+            patch.object(
+                conn,
+                "_http_probe",
+                return_value={"http_status": None, "body": "", "error": "mocked"},
+            ),
+        ):
             cli.main(["status", "--json"])
         captured = capsys.readouterr()
         data = json.loads(captured.out)
@@ -469,9 +526,11 @@ class TestCli:
 
     def test_restart_all_loops_endpoints(self):
         calls = []
+
         def fake_run(cmd, timeout=5.0):
             calls.append(cmd)
             return _make_completed(returncode=0)
+
         with patch.object(conn, "_run", side_effect=fake_run):
             rc = cli.main(["restart", "all"])
         assert rc == 0

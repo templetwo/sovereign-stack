@@ -54,9 +54,12 @@ from typing import Any
 
 
 def _reflexive_dir(sovereign_root: Path | None = None) -> Path:
-    root = sovereign_root or Path(os.environ.get(
-        "SOVEREIGN_ROOT", Path.home() / ".sovereign",
-    ))
+    root = sovereign_root or Path(
+        os.environ.get(
+            "SOVEREIGN_ROOT",
+            Path.home() / ".sovereign",
+        )
+    )
     d = root / "reflexive"
     d.mkdir(parents=True, exist_ok=True)
     return d
@@ -310,9 +313,7 @@ def prior_alignment_summary(
             continue
         if priors_rec.get("included_items"):
             turns_with_priors += 1
-    turns_no_alignment = max(
-        0, turns_with_priors - len(seen_turn_ids)
-    )
+    turns_no_alignment = max(0, turns_with_priors - len(seen_turn_ids))
 
     total_signatures = aligned_total + contradicted_total + ignored_total
     if total_signatures > 0:

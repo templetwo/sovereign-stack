@@ -68,6 +68,7 @@ class DaemonState:
     Daemon-specific extras (e.g. fingerprints, decision_path) are stored
     alongside without schema changes — readers tolerate unknown keys.
     """
+
     schema_version: int = STATE_SCHEMA_VERSION
     posted_digests: list[dict] = field(default_factory=list)
     halted_at: str | None = None
@@ -235,7 +236,7 @@ class BaseDaemon(abc.ABC):
         returns 0 — the circuit breaker cannot fire before the daemon has
         posted threshold-many times.
         """
-        last_n = state.posted_digests[-self.unacked_threshold:]
+        last_n = state.posted_digests[-self.unacked_threshold :]
         if len(last_n) < self.unacked_threshold:
             return 0
         unacked = 0
@@ -272,7 +273,7 @@ class BaseDaemon(abc.ABC):
         if extra:
             entry.update(extra)
         state.posted_digests.append(entry)
-        state.posted_digests = state.posted_digests[-self.posted_digests_retained:]
+        state.posted_digests = state.posted_digests[-self.posted_digests_retained :]
         self._save_state(state)
 
     # ── Halt write-path ──
@@ -302,12 +303,11 @@ class BaseDaemon(abc.ABC):
         stamp = now.strftime("%Y%m%dT%H%M%S")
         path = self.halt_dir / f"{stamp}_{self.HALT_FILENAME_TAG}_{reason}.md"
 
-        last_n = state.posted_digests[-self.unacked_threshold:]
+        last_n = state.posted_digests[-self.unacked_threshold :]
         evidence_lines = []
         for i, entry in enumerate(last_n, start=1):
             evidence_lines.append(
-                f"  {i}. {entry.get('message_id','?')} "
-                f"posted {entry.get('posted_at','?')}"
+                f"  {i}. {entry.get('message_id', '?')} posted {entry.get('posted_at', '?')}"
             )
             snippet = entry.get("content_snippet", "").replace("\n", " ")[:200]
             if snippet:

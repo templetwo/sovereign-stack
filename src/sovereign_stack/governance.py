@@ -28,6 +28,7 @@ from typing import Any
 
 try:
     import yaml
+
     YAML_AVAILABLE = True
 except ImportError:
     YAML_AVAILABLE = False
@@ -40,8 +41,10 @@ logger = logging.getLogger("governance")
 # ENUMS
 # =============================================================================
 
+
 class MetricType(Enum):
     """Types of metrics that can trigger thresholds."""
+
     FILE_COUNT = "file_count"
     DIRECTORY_DEPTH = "directory_depth"
     ENTROPY = "entropy"
@@ -52,6 +55,7 @@ class MetricType(Enum):
 
 class ThresholdSeverity(Enum):
     """Severity levels for threshold events."""
+
     INFO = "info"
     WARNING = "warning"
     CRITICAL = "critical"
@@ -60,6 +64,7 @@ class ThresholdSeverity(Enum):
 
 class DecisionType(Enum):
     """Possible deliberation outcomes."""
+
     PROCEED = "proceed"
     PAUSE = "pause"
     REJECT = "reject"
@@ -69,6 +74,7 @@ class DecisionType(Enum):
 
 class GateStatus(Enum):
     """Result of a gate check."""
+
     APPROVED = "approved"
     REJECTED = "rejected"
     TIMEOUT = "timeout"
@@ -80,9 +86,11 @@ class GateStatus(Enum):
 # DATA CLASSES
 # =============================================================================
 
+
 @dataclass
 class ThresholdConfig:
     """Configuration for a single threshold."""
+
     metric: MetricType
     limit: float
     warning_ratio: float = 0.8
@@ -93,6 +101,7 @@ class ThresholdConfig:
 @dataclass
 class ThresholdEvent:
     """Event emitted when threshold is approached or crossed."""
+
     metric: MetricType
     value: float
     threshold: float
@@ -105,7 +114,9 @@ class ThresholdEvent:
 
     def __post_init__(self):
         if not self.event_hash:
-            content = f"{self.metric.value}:{self.value}:{self.threshold}:{self.timestamp}:{self.path}"
+            content = (
+                f"{self.metric.value}:{self.value}:{self.threshold}:{self.timestamp}:{self.path}"
+            )
             self.event_hash = hashlib.sha256(content.encode()).hexdigest()[:16]
 
     def to_dict(self) -> dict[str, Any]:
@@ -118,6 +129,7 @@ class ThresholdEvent:
 @dataclass
 class StakeholderVote:
     """A single stakeholder's input to deliberation."""
+
     stakeholder_id: str
     stakeholder_type: str
     vote: DecisionType
@@ -140,6 +152,7 @@ class StakeholderVote:
 @dataclass
 class DissentRecord:
     """Record of a dissenting view."""
+
     stakeholder_id: str
     dissenting_from: DecisionType
     preferred: DecisionType
@@ -161,6 +174,7 @@ class DissentRecord:
 @dataclass
 class DeliberationResult:
     """Complete result of a deliberation session."""
+
     session_id: str
     decision: DecisionType
     rationale: str
@@ -172,12 +186,15 @@ class DeliberationResult:
 
     def __post_init__(self):
         if not self.audit_hash:
-            content = json.dumps({
-                "session_id": self.session_id,
-                "decision": self.decision.value,
-                "vote_count": len(self.votes),
-                "timestamp": self.timestamp
-            }, sort_keys=True)
+            content = json.dumps(
+                {
+                    "session_id": self.session_id,
+                    "decision": self.decision.value,
+                    "vote_count": len(self.votes),
+                    "timestamp": self.timestamp,
+                },
+                sort_keys=True,
+            )
             self.audit_hash = hashlib.sha256(content.encode()).hexdigest()[:16]
 
     def to_dict(self) -> dict[str, Any]:
@@ -189,13 +206,14 @@ class DeliberationResult:
             "dissenting_views": [d.to_dict() for d in self.dissenting_views],
             "conditions": self.conditions,
             "timestamp": self.timestamp,
-            "audit_hash": self.audit_hash
+            "audit_hash": self.audit_hash,
         }
 
 
 @dataclass
 class AuditEntry:
     """Single entry in audit trail with hash chaining."""
+
     timestamp: str
     action: str
     actor: str
@@ -205,13 +223,16 @@ class AuditEntry:
 
     def __post_init__(self):
         if not self.entry_hash:
-            content = json.dumps({
-                "timestamp": self.timestamp,
-                "action": self.action,
-                "actor": self.actor,
-                "details": str(self.details),
-                "previous_hash": self.previous_hash
-            }, sort_keys=True)
+            content = json.dumps(
+                {
+                    "timestamp": self.timestamp,
+                    "action": self.action,
+                    "actor": self.actor,
+                    "details": str(self.details),
+                    "previous_hash": self.previous_hash,
+                },
+                sort_keys=True,
+            )
             self.entry_hash = hashlib.sha256(content.encode()).hexdigest()[:32]
 
     def to_dict(self) -> dict[str, Any]:
@@ -221,6 +242,7 @@ class AuditEntry:
 @dataclass
 class GateResult:
     """Result of a single gate check."""
+
     gate_name: str
     status: GateStatus
     message: str
@@ -240,6 +262,7 @@ class GateResult:
 @dataclass
 class EnforcementResult:
     """Complete result of an intervention attempt."""
+
     decision_hash: str
     applied: bool
     rolled_back: bool
@@ -250,11 +273,14 @@ class EnforcementResult:
 
     def __post_init__(self):
         if not self.result_hash:
-            content = json.dumps({
-                "decision_hash": self.decision_hash,
-                "applied": self.applied,
-                "timestamp": self.timestamp
-            }, sort_keys=True)
+            content = json.dumps(
+                {
+                    "decision_hash": self.decision_hash,
+                    "applied": self.applied,
+                    "timestamp": self.timestamp,
+                },
+                sort_keys=True,
+            )
             self.result_hash = hashlib.sha256(content.encode()).hexdigest()[:16]
 
     def to_dict(self) -> dict[str, Any]:
@@ -265,13 +291,14 @@ class EnforcementResult:
             "gate_log": [g.to_dict() for g in self.gate_log],
             "audit_trail": [a.to_dict() for a in self.audit_trail],
             "timestamp": self.timestamp,
-            "result_hash": self.result_hash
+            "result_hash": self.result_hash,
         }
 
 
 # =============================================================================
 # DETECTION LAYER
 # =============================================================================
+
 
 class ThresholdDetector:
     """
@@ -297,16 +324,16 @@ class ThresholdDetector:
 
         for tc in config.get("thresholds", []):
             metric = MetricType(tc["metric"])
-            self.add_threshold(metric, tc["limit"],
-                             tc.get("warning_ratio", 0.8),
-                             tc.get("description", ""))
+            self.add_threshold(
+                metric, tc["limit"], tc.get("warning_ratio", 0.8), tc.get("description", "")
+            )
 
-    def add_threshold(self, metric: MetricType, limit: float,
-                     warning_ratio: float = 0.8, description: str = "") -> None:
+    def add_threshold(
+        self, metric: MetricType, limit: float, warning_ratio: float = 0.8, description: str = ""
+    ) -> None:
         """Add or update a threshold configuration."""
         self.thresholds[metric] = ThresholdConfig(
-            metric=metric, limit=limit,
-            warning_ratio=warning_ratio, description=description
+            metric=metric, limit=limit, warning_ratio=warning_ratio, description=description
         )
 
     def scan(self, path: str, recursive: bool = True) -> list[ThresholdEvent]:
@@ -329,10 +356,14 @@ class ThresholdDetector:
 
             if severity:
                 event = ThresholdEvent(
-                    metric=metric_type, value=value, threshold=config.limit,
-                    severity=severity, timestamp=timestamp, path=str(path),
+                    metric=metric_type,
+                    value=value,
+                    threshold=config.limit,
+                    severity=severity,
+                    timestamp=timestamp,
+                    path=str(path),
                     description=config.description or f"{metric_type.value} threshold",
-                    details=details
+                    details=details,
                 )
                 events.append(event)
                 self._event_log.append(event)
@@ -349,7 +380,7 @@ class ThresholdDetector:
 
             metrics[MetricType.FILE_COUNT] = {
                 "value": file_count,
-                "details": {"path": str(path), "recursive": recursive}
+                "details": {"path": str(path), "recursive": recursive},
             }
 
             # Directory depth
@@ -365,7 +396,7 @@ class ThresholdDetector:
             if chars:
                 freq = Counter(chars)
                 total = len(chars)
-                entropy = -sum((c/total) * math.log2(c/total) for c in freq.values() if c > 0)
+                entropy = -sum((c / total) * math.log2(c / total) for c in freq.values() if c > 0)
                 max_entropy = math.log2(len(freq)) if len(freq) > 1 else 1
                 metrics[MetricType.ENTROPY] = {
                     "value": entropy / max_entropy if max_entropy > 0 else 0.0
@@ -398,6 +429,7 @@ class ThresholdDetector:
 # DELIBERATION LAYER
 # =============================================================================
 
+
 class DeliberationSession:
     """
     Facilitates a structured deliberation session.
@@ -413,20 +445,26 @@ class DeliberationSession:
         "btb_dimensions": {
             "name": "BTB Five Dimensions",
             "dimensions": [
-                {"name": "legibility", "question": "Can humans understand the resulting structure?"},
+                {
+                    "name": "legibility",
+                    "question": "Can humans understand the resulting structure?",
+                },
                 {"name": "reversibility", "question": "Can changes be undone?"},
                 {"name": "auditability", "question": "Can we trace why decisions were made?"},
                 {"name": "governance", "question": "Who has authority over the system?"},
-                {"name": "paradigm_safety", "question": "Does this create risks if widely adopted?"},
-            ]
+                {
+                    "name": "paradigm_safety",
+                    "question": "Does this create risks if widely adopted?",
+                },
+            ],
         },
         "minimal": {
             "name": "Minimal Review",
             "dimensions": [
                 {"name": "risk_level", "question": "What is the worst-case outcome?"},
                 {"name": "reversibility", "question": "Can this be undone?"},
-            ]
-        }
+            ],
+        },
     }
 
     def __init__(self, events: list[Any] = None, session_id: str = None):
@@ -438,6 +476,7 @@ class DeliberationSession:
 
     def _generate_session_id(self) -> str:
         import uuid
+
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
         return f"delib-{timestamp}-{uuid.uuid4().hex[:8]}"
 
@@ -469,13 +508,15 @@ class DeliberationSession:
         dissenting_views = []
         for vote in self.votes:
             if vote.vote != majority_decision:
-                dissenting_views.append(DissentRecord(
-                    stakeholder_id=vote.stakeholder_id,
-                    dissenting_from=majority_decision,
-                    preferred=vote.vote,
-                    rationale=vote.rationale,
-                    concerns=vote.concerns
-                ))
+                dissenting_views.append(
+                    DissentRecord(
+                        stakeholder_id=vote.stakeholder_id,
+                        dissenting_from=majority_decision,
+                        preferred=vote.vote,
+                        rationale=vote.rationale,
+                        concerns=vote.concerns,
+                    )
+                )
 
         # Build rationale
         majority_votes = [v for v in self.votes if v.vote == majority_decision]
@@ -497,13 +538,14 @@ class DeliberationSession:
             votes=self.votes,
             dissenting_views=dissenting_views,
             conditions=list(set(conditions)),
-            timestamp=datetime.now(timezone.utc).isoformat()
+            timestamp=datetime.now(timezone.utc).isoformat(),
         )
 
 
 # =============================================================================
 # INTERVENTION LAYER
 # =============================================================================
+
 
 class Gate(ABC):
     """Abstract base class for intervention gates."""
@@ -521,8 +563,9 @@ class Gate(ABC):
 class HumanApprovalGate(Gate):
     """Requires explicit human approval to proceed."""
 
-    def __init__(self, approver_id: str = "human",
-                 approval_callback: Callable[[dict], bool] | None = None):
+    def __init__(
+        self, approver_id: str = "human", approval_callback: Callable[[dict], bool] | None = None
+    ):
         self.approver_id = approver_id
         self._callback = approval_callback
 
@@ -538,7 +581,7 @@ class HumanApprovalGate(Gate):
                     gate_name=self.name,
                     status=GateStatus.APPROVED if approved else GateStatus.REJECTED,
                     message="Callback response",
-                    approvers=[self.approver_id] if approved else []
+                    approvers=[self.approver_id] if approved else [],
                 )
             except Exception as e:
                 return GateResult(gate_name=self.name, status=GateStatus.ERROR, message=str(e))
@@ -548,15 +591,16 @@ class HumanApprovalGate(Gate):
             gate_name=self.name,
             status=GateStatus.APPROVED,
             message="Auto-approved (no callback)",
-            approvers=[self.approver_id]
+            approvers=[self.approver_id],
         )
 
 
 class ConditionCheckGate(Gate):
     """Verifies that specified conditions are met."""
 
-    def __init__(self, conditions: list[str],
-                 condition_checker: Callable[[str, dict], bool] | None = None):
+    def __init__(
+        self, conditions: list[str], condition_checker: Callable[[str, dict], bool] | None = None
+    ):
         self.conditions = conditions
         self._checker = condition_checker
 
@@ -579,10 +623,12 @@ class ConditionCheckGate(Gate):
             return GateResult(
                 gate_name=self.name,
                 status=GateStatus.REJECTED,
-                message=f"Conditions not met: {', '.join(failed)}"
+                message=f"Conditions not met: {', '.join(failed)}",
             )
 
-        return GateResult(gate_name=self.name, status=GateStatus.APPROVED, message="All conditions satisfied")
+        return GateResult(
+            gate_name=self.name, status=GateStatus.APPROVED, message="All conditions satisfied"
+        )
 
 
 class Intervenor:
@@ -596,15 +642,16 @@ class Intervenor:
         self._audit_log: list[AuditEntry] = []
         self._last_hash = "genesis"
 
-    def apply(self, decision: dict[str, Any], target: str,
-              gates: list[Gate]) -> EnforcementResult:
+    def apply(self, decision: dict[str, Any], target: str, gates: list[Gate]) -> EnforcementResult:
         """Apply a deliberation decision through gates."""
         timestamp = datetime.now(timezone.utc).isoformat()
         decision_hash = decision.get("audit_hash", decision.get("session_id", "unknown"))
 
-        self._log("enforcement_start", "intervenor", {
-            "decision_hash": decision_hash, "target": target, "gate_count": len(gates)
-        })
+        self._log(
+            "enforcement_start",
+            "intervenor",
+            {"decision_hash": decision_hash, "target": target, "gate_count": len(gates)},
+        )
 
         gate_log: list[GateResult] = []
         all_passed = True
@@ -614,9 +661,9 @@ class Intervenor:
             result = gate.check(context)
             gate_log.append(result)
 
-            self._log("gate_check", gate.name, {
-                "status": result.status.value, "message": result.message
-            })
+            self._log(
+                "gate_check", gate.name, {"status": result.status.value, "message": result.message}
+            )
 
             if result.status != GateStatus.APPROVED:
                 all_passed = False
@@ -638,15 +685,17 @@ class Intervenor:
             rolled_back=rolled_back,
             gate_log=gate_log,
             audit_trail=self._audit_log.copy(),
-            timestamp=timestamp
+            timestamp=timestamp,
         )
 
     def _log(self, action: str, actor: str, details: dict[str, Any]) -> None:
         """Add entry to audit trail with hash chaining."""
         entry = AuditEntry(
             timestamp=datetime.now(timezone.utc).isoformat(),
-            action=action, actor=actor, details=details,
-            previous_hash=self._last_hash
+            action=action,
+            actor=actor,
+            details=details,
+            previous_hash=self._last_hash,
         )
         self._audit_log.append(entry)
         self._last_hash = entry.entry_hash
@@ -665,6 +714,7 @@ class Intervenor:
 # GOVERNANCE CIRCUIT
 # =============================================================================
 
+
 class GovernanceCircuit:
     """
     Complete governance circuit orchestration.
@@ -676,8 +726,9 @@ class GovernanceCircuit:
         self.detector = ThresholdDetector()
         self.intervenor = Intervenor()
 
-    def run(self, target: str, stakeholder_votes: list[StakeholderVote],
-            gates: list[Gate] = None) -> dict[str, Any]:
+    def run(
+        self, target: str, stakeholder_votes: list[StakeholderVote], gates: list[Gate] = None
+    ) -> dict[str, Any]:
         """
         Run the complete governance circuit.
 
@@ -703,15 +754,13 @@ class GovernanceCircuit:
         if gates is None:
             gates = [HumanApprovalGate(approval_callback=lambda ctx: True)]
 
-        enforcement = self.intervenor.apply(
-            deliberation.to_dict(), target, gates
-        )
+        enforcement = self.intervenor.apply(deliberation.to_dict(), target, gates)
 
         return {
             "detection": {"event_count": len(events), "events": [e.to_dict() for e in events]},
             "deliberation": deliberation.to_dict(),
             "enforcement": enforcement.to_dict(),
-            "circuit_complete": True
+            "circuit_complete": True,
         }
 
 
@@ -904,20 +953,16 @@ def runtime_compass_check(
         # "destructive" and "bypass" are both in result["risk_signals"]
     """
     if not isinstance(action, str) or not action.strip():
-        raise ValueError(
-            "action must be a non-empty string describing the proposed operation"
-        )
+        raise ValueError("action must be a non-empty string describing the proposed operation")
     valid_stakes = {"low", "medium", "high", "critical"}
     if stakes not in valid_stakes:
-        raise ValueError(
-            f"stakes must be one of {sorted(valid_stakes)!r}, got {stakes!r}"
-        )
+        raise ValueError(f"stakes must be one of {sorted(valid_stakes)!r}, got {stakes!r}")
 
     combined = (action + " " + context).lower()
 
-    fired_signals: list[str] = []        # signal category labels
-    rationale_parts: list[str] = []      # human-readable explanation fragments
-    verifications: list[str] = []        # deduplicated verification suggestions
+    fired_signals: list[str] = []  # signal category labels
+    rationale_parts: list[str] = []  # human-readable explanation fragments
+    verifications: list[str] = []  # deduplicated verification suggestions
 
     # ── WITNESS check first — philosophical/ethical questions take priority ──
     for phrase in _WITNESS_PHRASES:
@@ -947,8 +992,7 @@ def runtime_compass_check(
             if "destructive" not in fired_signals:
                 fired_signals.append("destructive")
                 rationale_parts.append(
-                    f"action contains a destructive operation "
-                    f"(matched phrase: '{phrase}')"
+                    f"action contains a destructive operation (matched phrase: '{phrase}')"
                 )
             break
 
@@ -1020,9 +1064,8 @@ def runtime_compass_check(
         # externalization-flavored verb-object patterns or git-specific patterns.
         # Keeps the PROCEED path empty for clean actions with no recognizable pattern.
         import re as _re
-        _EXTERNAL_PATTERN = _re.compile(
-            r"(?:to |at |into |onto )[a-z]{3,}", _re.IGNORECASE
-        )
+
+        _EXTERNAL_PATTERN = _re.compile(r"(?:to |at |into |onto )[a-z]{3,}", _re.IGNORECASE)
         if any(kw in combined for kw in ("git", "commit", "branch", "push")):
             verifications = [
                 "check git diff for unintended changes",

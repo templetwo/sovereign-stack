@@ -65,6 +65,7 @@ def _backdate_thread(mem: ExperientialMemory, days_ago: int, question: str, doma
         for line in jsonl_file.read_text().splitlines():
             try:
                 import json
+
                 rec = json.loads(line)
                 if rec.get("thread_id") == thread_id:
                     rec["timestamp"] = target_ts
@@ -78,6 +79,7 @@ def _backdate_thread(mem: ExperientialMemory, days_ago: int, question: str, doma
 
 
 # ── Case 1: tag overlap returns higher-scored items first ──
+
 
 class TestTagOverlapScoring:
     def test_matching_domain_scores_higher_than_non_matching(self, surface, memory):
@@ -118,6 +120,7 @@ class TestTagOverlapScoring:
 
 # ── Case 2: older items score lower than recent items with same tags ──
 
+
 class TestRecencyScoring:
     def test_recent_thread_scores_higher_than_old_same_tags(self, surface, memory):
         """Two threads in the same domain — the newer one should score higher."""
@@ -147,15 +150,12 @@ class TestRecencyScoring:
 
 # ── Case 3: project_match_bonus when project string appears in question ──
 
+
 class TestProjectMatchBonus:
     def test_project_match_bonus_applied(self, surface, memory):
         """Thread whose question contains the project name should score higher."""
-        memory.record_open_thread(
-            "How does IRIS affect entropy?", domain="entropy"
-        )
-        memory.record_open_thread(
-            "What is the coupling constant?", domain="entropy"
-        )
+        memory.record_open_thread("How does IRIS affect entropy?", domain="entropy")
+        memory.record_open_thread("What is the coupling constant?", domain="entropy")
 
         result = surface.surface(domain_tags=["entropy"], project="IRIS")
         threads = result["matched_open_threads"]
@@ -176,8 +176,7 @@ class TestProjectMatchBonus:
         threads = result["matched_open_threads"]
 
         if len(threads) >= 2:
-            scores = {t.get("question", ""): t.get("_score", t.get("score", 0))
-                      for t in threads}
+            scores = {t.get("question", ""): t.get("_score", t.get("score", 0)) for t in threads}
             iris_score = scores.get("IRIS project is relevant", 0)
             no_bonus_score = scores.get("No project mention here", 0)
             assert iris_score > no_bonus_score, (
@@ -186,6 +185,7 @@ class TestProjectMatchBonus:
 
 
 # ── Case 4: scoring_explanation mentions counts ──
+
 
 class TestScoringExplanation:
     def test_scoring_explanation_mentions_candidate_counts(self, surface, memory):
@@ -243,9 +243,7 @@ class TestTagRequiredFiltering:
         threads = result["matched_open_threads"]
         domains = [t.get("domain", "") for t in threads]
 
-        assert "other" not in domains, (
-            "Off-topic thread leaked through despite zero tag overlap"
-        )
+        assert "other" not in domains, "Off-topic thread leaked through despite zero tag overlap"
         assert any("entropy" in d for d in domains)
 
     def test_off_topic_kept_when_caller_tags_empty(self, surface, memory):
@@ -257,8 +255,7 @@ class TestTagRequiredFiltering:
         result = surface.surface(domain_tags=[])
         threads = result["matched_open_threads"]
         assert len(threads) >= 1, (
-            "Empty caller_tags must fall back to recency-only ranking, "
-            "not filter to nothing."
+            "Empty caller_tags must fall back to recency-only ranking, not filter to nothing."
         )
 
     def test_project_match_alone_does_not_surface_off_topic(self, surface, memory):
@@ -271,11 +268,13 @@ class TestTagRequiredFiltering:
             domain="cooking",
         )
         memory.record_open_thread(
-            "Real entropy question", domain="entropy",
+            "Real entropy question",
+            domain="entropy",
         )
 
         result = surface.surface(
-            domain_tags=["entropy"], project="sovereign-stack",
+            domain_tags=["entropy"],
+            project="sovereign-stack",
         )
         threads = result["matched_open_threads"]
 
@@ -288,13 +287,9 @@ class TestTagRequiredFiltering:
     def test_tag_overlap_exposed_in_result(self, surface, memory):
         """_tag_overlap field should be on every returned item — debuggable
         score breakdown without re-running the scorer."""
-        memory.record_open_thread(
-            "Reflection daemons question", domain="reflection-daemons,v1.3.2"
-        )
+        memory.record_open_thread("Reflection daemons question", domain="reflection-daemons,v1.3.2")
 
-        result = surface.surface(
-            domain_tags=["reflection-daemons", "v1.3.2"]
-        )
+        result = surface.surface(domain_tags=["reflection-daemons", "v1.3.2"])
         threads = result["matched_open_threads"]
         assert len(threads) >= 1
         for t in threads:

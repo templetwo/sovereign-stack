@@ -6,6 +6,7 @@ down the invariants: test-pollution patterns are caught, archives preserve
 original content, genuine observations are untouched, self-model dedup keeps
 the first occurrence, backups are written.
 """
+
 import json
 import shutil
 import tempfile
@@ -18,6 +19,7 @@ from sovereign_stack.metabolism import (
 )
 
 # ══════════ Pattern detection ══════════
+
 
 class TestIsTestArtifact:
     def test_stress_test_prefix(self):
@@ -55,6 +57,7 @@ class TestIsTestArtifact:
 
 # ══════════ Archive test artifacts from chronicle ══════════
 
+
 class TestArchiveTestArtifacts:
     def setup_method(self):
         self.tmpdir = Path(tempfile.mkdtemp())
@@ -79,20 +82,26 @@ class TestArchiveTestArtifacts:
         assert result["archived"] == 0
 
     def test_clean_chronicle_untouched(self):
-        self._write_insights("real", [
-            {"content": "A legitimate observation.", "domain": "real"},
-            {"content": "Another real insight.", "domain": "real"},
-        ])
+        self._write_insights(
+            "real",
+            [
+                {"content": "A legitimate observation.", "domain": "real"},
+                {"content": "Another real insight.", "domain": "real"},
+            ],
+        )
         result = _archive_test_artifacts_impl(self.chronicle)
         assert result["archived"] == 0
         assert (self.insights / "real" / "session.jsonl").exists()
 
     def test_test_artifacts_moved_to_archive(self):
-        self._write_insights("stress_test", [
-            {"content": "STRESS TEST HYPOTHESIS: placeholder", "domain": "stress_test"},
-            {"content": "x" * 50000, "domain": "stress_test"},
-            {"content": "Unicode test: 🦆", "domain": "stress_test"},
-        ])
+        self._write_insights(
+            "stress_test",
+            [
+                {"content": "STRESS TEST HYPOTHESIS: placeholder", "domain": "stress_test"},
+                {"content": "x" * 50000, "domain": "stress_test"},
+                {"content": "Unicode test: 🦆", "domain": "stress_test"},
+            ],
+        )
         result = _archive_test_artifacts_impl(self.chronicle)
         assert result["archived"] == 3
         # Domain dir should be gone (all entries archived, became empty)
@@ -105,11 +114,14 @@ class TestArchiveTestArtifacts:
 
     def test_mixed_file_partially_cleaned(self):
         """A file with mixed real + test entries keeps only the real ones."""
-        path = self._write_insights("mixed", [
-            {"content": "Real observation 1.", "domain": "mixed"},
-            {"content": "STRESS TEST: noise", "domain": "mixed"},
-            {"content": "Real observation 2.", "domain": "mixed"},
-        ])
+        path = self._write_insights(
+            "mixed",
+            [
+                {"content": "Real observation 1.", "domain": "mixed"},
+                {"content": "STRESS TEST: noise", "domain": "mixed"},
+                {"content": "Real observation 2.", "domain": "mixed"},
+            ],
+        )
         result = _archive_test_artifacts_impl(self.chronicle)
         assert result["archived"] == 1
         # File should still exist with the 2 real entries
@@ -119,9 +131,16 @@ class TestArchiveTestArtifacts:
         assert all("Real observation" in k["content"] for k in kept)
 
     def test_archived_entry_preserves_provenance(self):
-        self._write_insights("stress_test", [
-            {"content": "STRESS TEST: x", "domain": "stress_test", "timestamp": "2026-04-06T00:00:00"},
-        ])
+        self._write_insights(
+            "stress_test",
+            [
+                {
+                    "content": "STRESS TEST: x",
+                    "domain": "stress_test",
+                    "timestamp": "2026-04-06T00:00:00",
+                },
+            ],
+        )
         _archive_test_artifacts_impl(self.chronicle)
         archive_files = list((self.chronicle / ".archive_test_artifacts").glob("*.jsonl"))
         assert len(archive_files) == 1
@@ -147,9 +166,12 @@ class TestArchiveTestArtifacts:
 
     def test_corrupt_jsonl_line_preserved(self):
         """A malformed line shouldn't crash and shouldn't be classified as artifact."""
-        path = self._write_insights("mixed", [
-            {"content": "Real entry.", "domain": "mixed"},
-        ])
+        path = self._write_insights(
+            "mixed",
+            [
+                {"content": "Real entry.", "domain": "mixed"},
+            ],
+        )
         # Append corrupt line
         with open(path, "a") as f:
             f.write("{ this is not valid\n")
@@ -160,9 +182,12 @@ class TestArchiveTestArtifacts:
 
     def test_multiple_calls_idempotent(self):
         """Running twice on the same chronicle does not duplicate archive entries."""
-        self._write_insights("stress_test", [
-            {"content": "STRESS TEST: x", "domain": "stress_test"},
-        ])
+        self._write_insights(
+            "stress_test",
+            [
+                {"content": "STRESS TEST: x", "domain": "stress_test"},
+            ],
+        )
         _archive_test_artifacts_impl(self.chronicle)
         _archive_test_artifacts_impl(self.chronicle)  # Second call — chronicle is clean now.
         archive_files = list((self.chronicle / ".archive_test_artifacts").glob("*.jsonl"))
@@ -176,6 +201,7 @@ class TestArchiveTestArtifacts:
 
 
 # ══════════ Dedup self model ══════════
+
 
 class TestDedupSelfModel:
     def setup_method(self):
@@ -197,26 +223,30 @@ class TestDedupSelfModel:
         assert "error" in result
 
     def test_clean_model_untouched(self):
-        self._write_model({
-            "strength": [
-                {"observation": "Strong at synthesis.", "timestamp": "2026-04-01"},
-            ],
-            "tendency": [
-                {"observation": "Moves fast.", "timestamp": "2026-04-01"},
-            ],
-        })
+        self._write_model(
+            {
+                "strength": [
+                    {"observation": "Strong at synthesis.", "timestamp": "2026-04-01"},
+                ],
+                "tendency": [
+                    {"observation": "Moves fast.", "timestamp": "2026-04-01"},
+                ],
+            }
+        )
         result = _dedup_self_model_impl(self.tmpdir)
         assert result["removed"] == 0
 
     def test_duplicate_observations_removed(self):
         """The same observation text in the same category is a duplicate."""
-        self._write_model({
-            "strength": [
-                {"observation": "Synthesis.", "timestamp": "t1"},
-                {"observation": "Synthesis.", "timestamp": "t2"},
-                {"observation": "Synthesis.", "timestamp": "t3"},
-            ]
-        })
+        self._write_model(
+            {
+                "strength": [
+                    {"observation": "Synthesis.", "timestamp": "t1"},
+                    {"observation": "Synthesis.", "timestamp": "t2"},
+                    {"observation": "Synthesis.", "timestamp": "t3"},
+                ]
+            }
+        )
         result = _dedup_self_model_impl(self.tmpdir)
         assert result["removed"] == 2
         model = json.loads((self.tmpdir / "self_model.json").read_text())
@@ -224,24 +254,31 @@ class TestDedupSelfModel:
 
     def test_dedup_keeps_first_occurrence(self):
         """Order matters: first observation stays, subsequent duplicates drop."""
-        self._write_model({
-            "strength": [
-                {"observation": "Original.", "timestamp": "2026-01-01"},
-                {"observation": "Original.", "timestamp": "2026-02-01"},
-            ]
-        })
+        self._write_model(
+            {
+                "strength": [
+                    {"observation": "Original.", "timestamp": "2026-01-01"},
+                    {"observation": "Original.", "timestamp": "2026-02-01"},
+                ]
+            }
+        )
         _dedup_self_model_impl(self.tmpdir)
         model = json.loads((self.tmpdir / "self_model.json").read_text())
         assert model["strength"][0]["timestamp"] == "2026-01-01"
 
     def test_test_pollution_always_removed(self):
         """Even if unique, test-pollution observations go away."""
-        self._write_model({
-            "strength": [
-                {"observation": "Real.", "timestamp": "t1"},
-                {"observation": "Stress test: system correctly ran all tool validations", "timestamp": "t2"},
-            ]
-        })
+        self._write_model(
+            {
+                "strength": [
+                    {"observation": "Real.", "timestamp": "t1"},
+                    {
+                        "observation": "Stress test: system correctly ran all tool validations",
+                        "timestamp": "t2",
+                    },
+                ]
+            }
+        )
         result = _dedup_self_model_impl(self.tmpdir)
         assert result["removed"] == 1
         model = json.loads((self.tmpdir / "self_model.json").read_text())
@@ -249,12 +286,14 @@ class TestDedupSelfModel:
         assert model["strength"][0]["observation"] == "Real."
 
     def test_backup_written(self):
-        self._write_model({
-            "strength": [
-                {"observation": "A.", "timestamp": "t1"},
-                {"observation": "A.", "timestamp": "t2"},
-            ]
-        })
+        self._write_model(
+            {
+                "strength": [
+                    {"observation": "A.", "timestamp": "t1"},
+                    {"observation": "A.", "timestamp": "t2"},
+                ]
+            }
+        )
         _dedup_self_model_impl(self.tmpdir)
         backup = self.tmpdir / "self_model.json.pre_dedup.bak"
         assert backup.exists()
@@ -263,13 +302,15 @@ class TestDedupSelfModel:
         assert len(backup_data["strength"]) == 2
 
     def test_archive_preserves_removed_entries(self):
-        self._write_model({
-            "strength": [
-                {"observation": "Real.", "timestamp": "t1"},
-                {"observation": "Stress test: noise", "timestamp": "t2"},
-                {"observation": "Real.", "timestamp": "t3"},
-            ]
-        })
+        self._write_model(
+            {
+                "strength": [
+                    {"observation": "Real.", "timestamp": "t1"},
+                    {"observation": "Stress test: noise", "timestamp": "t2"},
+                    {"observation": "Real.", "timestamp": "t3"},
+                ]
+            }
+        )
         _dedup_self_model_impl(self.tmpdir)
         archive = self.tmpdir / "self_model_archive.jsonl"
         assert archive.exists()
@@ -280,15 +321,17 @@ class TestDedupSelfModel:
         assert "duplicate" in reasons
 
     def test_categories_touched_reported(self):
-        self._write_model({
-            "strength": [
-                {"observation": "A.", "timestamp": "t1"},
-                {"observation": "A.", "timestamp": "t2"},
-            ],
-            "tendency": [
-                {"observation": "B.", "timestamp": "t1"},  # unique
-            ]
-        })
+        self._write_model(
+            {
+                "strength": [
+                    {"observation": "A.", "timestamp": "t1"},
+                    {"observation": "A.", "timestamp": "t2"},
+                ],
+                "tendency": [
+                    {"observation": "B.", "timestamp": "t1"},  # unique
+                ],
+            }
+        )
         result = _dedup_self_model_impl(self.tmpdir)
         assert "strength" in result["categories_touched"]
         assert "tendency" not in result["categories_touched"]

@@ -24,6 +24,7 @@ from sovereign_stack import post_fix_tools as pfx
 # FIXTURES
 # =============================================================================
 
+
 @pytest.fixture(autouse=True)
 def sovereign_root_tmp(tmp_path, monkeypatch):
     """Redirect SOVEREIGN_ROOT so every test gets its own filesystem."""
@@ -51,6 +52,7 @@ def _make_file(path: Path, content: str) -> Path:
 # =============================================================================
 # CREATE WATCH
 # =============================================================================
+
 
 class TestCreateWatch:
     def test_captures_baseline_and_persists(self, tmp_path):
@@ -87,6 +89,7 @@ class TestCreateWatch:
 # =============================================================================
 # TAKE SAMPLE — schedule / force / drift / clean
 # =============================================================================
+
 
 class TestTakeSample:
     def test_not_due_before_first_offset(self, tmp_path):
@@ -186,6 +189,7 @@ class TestTakeSample:
 # PROBE RUNNERS
 # =============================================================================
 
+
 class TestCommandProbe:
     def test_exit_code_and_stdout_captured(self):
         probe = {"name": "p", "type": "command", "cmd": "echo hello"}
@@ -206,7 +210,9 @@ class TestCommandProbe:
 
     def test_diff_stdout_contains_matches(self):
         probe = {
-            "name": "p", "type": "command", "cmd": "echo alpha",
+            "name": "p",
+            "type": "command",
+            "cmd": "echo alpha",
             "expected": {"exit_code": 0, "stdout_contains": "alpha"},
         }
         baseline = pfx._run_command_probe(probe)
@@ -215,7 +221,9 @@ class TestCommandProbe:
 
     def test_diff_missing_required_substring(self):
         probe = {
-            "name": "p", "type": "command", "cmd": "echo beta",
+            "name": "p",
+            "type": "command",
+            "cmd": "echo beta",
             "expected": {"stdout_contains": "alpha"},
         }
         baseline = {"exit_code": 0, "stdout": "beta\n"}
@@ -234,11 +242,15 @@ class TestCommandProbe:
 
     def test_diff_regex(self):
         probe = {
-            "name": "p", "type": "command", "cmd": "echo x",
+            "name": "p",
+            "type": "command",
+            "cmd": "echo x",
             "expected": {"stdout_regex": r"\bready\b"},
         }
         current = {"exit_code": 0, "stdout": "service ready to serve"}
-        drift = pfx._diff_probe(probe, {"exit_code": 0, "stdout": "service ready to serve"}, current)
+        drift = pfx._diff_probe(
+            probe, {"exit_code": 0, "stdout": "service ready to serve"}, current
+        )
         assert drift is None
         current_bad = {"exit_code": 0, "stdout": "service starting"}
         drift_bad = pfx._diff_probe(probe, {"exit_code": 0, "stdout": "service ready"}, current_bad)
@@ -254,7 +266,9 @@ class TestFileHashProbe:
         assert len(result["sha256"]) == 64
 
     def test_missing_file_reports_nonexistence(self, tmp_path):
-        result = pfx._run_file_hash_probe({"name": "f", "type": "file_hash", "path": str(tmp_path / "nope")})
+        result = pfx._run_file_hash_probe(
+            {"name": "f", "type": "file_hash", "path": str(tmp_path / "nope")}
+        )
         assert result["exists"] is False
         assert result["sha256"] is None
 
@@ -271,9 +285,15 @@ class TestHttpProbe:
     def test_success_rate_computed(self, monkeypatch):
         # Fake urlopen: first 8 of 10 return 200, last 2 return 503.
         class FakeResp:
-            def __init__(self, status): self.status = status
-            def __enter__(self): return self
-            def __exit__(self, *a): pass
+            def __init__(self, status):
+                self.status = status
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                pass
+
         calls = {"n": 0}
 
         def fake_urlopen(req, timeout=None):
@@ -283,17 +303,24 @@ class TestHttpProbe:
             return FakeResp(503)
 
         monkeypatch.setattr(pfx, "urlopen", fake_urlopen)
-        result = pfx._run_http_probe({
-            "name": "h", "type": "http", "url": "https://example.com",
-            "samples": 10, "timeout_sec": 1,
-            "expected": {"status": 200},
-        })
+        result = pfx._run_http_probe(
+            {
+                "name": "h",
+                "type": "http",
+                "url": "https://example.com",
+                "samples": 10,
+                "timeout_sec": 1,
+                "expected": {"status": 200},
+            }
+        )
         assert result["success_rate"] == 0.8
         assert result["ok_count"] == 8
 
     def test_diff_success_rate_below_min(self):
         probe = {
-            "name": "h", "type": "http", "url": "https://example.com",
+            "name": "h",
+            "type": "http",
+            "url": "https://example.com",
             "expected": {"status": 200, "success_rate_min": 0.95},
         }
         baseline = {"success_rate": 1.0, "status_codes": [200, 200]}
@@ -305,7 +332,9 @@ class TestHttpProbe:
 
     def test_diff_clean_when_rate_holds(self):
         probe = {
-            "name": "h", "type": "http", "url": "https://example.com",
+            "name": "h",
+            "type": "http",
+            "url": "https://example.com",
             "expected": {"status": 200, "success_rate_min": 0.9},
         }
         baseline = {"success_rate": 1.0}
@@ -316,6 +345,7 @@ class TestHttpProbe:
 # =============================================================================
 # WATCH CANCEL & LIST
 # =============================================================================
+
 
 class TestWatchManagement:
     def test_cancel_archives_watch(self, tmp_path):
@@ -334,7 +364,8 @@ class TestWatchManagement:
     def test_cancel_twice_is_safe(self, tmp_path):
         target = _make_file(tmp_path / "a.txt", "a")
         watch = pfx.create_watch(
-            fix_description="f", domain_tags=[],
+            fix_description="f",
+            domain_tags=[],
             probes=[{"name": "p", "type": "file_hash", "path": str(target)}],
         )
         pfx.cancel_watch(watch["watch_id"], reason="first")
@@ -343,8 +374,16 @@ class TestWatchManagement:
 
     def test_list_active_excludes_archived(self, tmp_path):
         t = _make_file(tmp_path / "a.txt", "a")
-        w1 = pfx.create_watch(fix_description="keep", domain_tags=[], probes=[{"name": "p", "type": "file_hash", "path": str(t)}])
-        w2 = pfx.create_watch(fix_description="archive", domain_tags=[], probes=[{"name": "p", "type": "file_hash", "path": str(t)}])
+        w1 = pfx.create_watch(
+            fix_description="keep",
+            domain_tags=[],
+            probes=[{"name": "p", "type": "file_hash", "path": str(t)}],
+        )
+        w2 = pfx.create_watch(
+            fix_description="archive",
+            domain_tags=[],
+            probes=[{"name": "p", "type": "file_hash", "path": str(t)}],
+        )
         pfx.cancel_watch(w2["watch_id"], reason="test")
         active = pfx.list_watches(status="active")
         assert len(active) == 1
@@ -360,11 +399,13 @@ class TestWatchManagement:
 # TICK DRIVER
 # =============================================================================
 
+
 class TestTick:
     def test_tick_drains_all_due_samples(self, tmp_path, monkeypatch, fake_nape):
         t = _make_file(tmp_path / "a.txt", "a")
         watch = pfx.create_watch(
-            fix_description="f", domain_tags=[],
+            fix_description="f",
+            domain_tags=[],
             probes=[{"name": "p", "type": "file_hash", "path": str(t)}],
             schedule_offsets_min=[5, 30, 120],
         )
@@ -385,7 +426,8 @@ class TestTick:
     def test_tick_stops_on_drift(self, tmp_path, monkeypatch, fake_nape):
         t = _make_file(tmp_path / "a.txt", "a")
         watch = pfx.create_watch(
-            fix_description="f", domain_tags=[],
+            fix_description="f",
+            domain_tags=[],
             probes=[{"name": "p", "type": "file_hash", "path": str(t)}],
             schedule_offsets_min=[5, 30],
         )
@@ -403,11 +445,13 @@ class TestTick:
 # EVENTS / AUDIT
 # =============================================================================
 
+
 class TestEventLog:
     def test_events_logged_for_lifecycle(self, tmp_path, fake_nape):
         t = _make_file(tmp_path / "a.txt", "a")
         watch = pfx.create_watch(
-            fix_description="f", domain_tags=[],
+            fix_description="f",
+            domain_tags=[],
             probes=[{"name": "p", "type": "file_hash", "path": str(t)}],
         )
         pfx.take_sample(watch["watch_id"], force=True, nape_daemon=fake_nape)

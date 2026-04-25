@@ -87,6 +87,7 @@ class TestMtimeIndex:
         # Bump mtime forward.
         future = time.time() + 100
         import os
+
         os.utime(a, (future, future))
         a.write_text("second")
         os.utime(a, (future, future))
@@ -108,14 +109,22 @@ class TestReadHonks:
 
     def test_reads_last_n_in_reverse_order(self, tmp_path):
         path = tmp_path / "honks.jsonl"
-        path.write_text("\n".join([
-            json.dumps({"honk_id": "1", "level": "sharp",
-                        "pattern": "p1", "trigger_tool": "t1"}),
-            json.dumps({"honk_id": "2", "level": "low",
-                        "pattern": "p2", "trigger_tool": "t2"}),
-            json.dumps({"honk_id": "3", "level": "uneasy",
-                        "pattern": "p3", "trigger_tool": "t3"}),
-        ]) + "\n")
+        path.write_text(
+            "\n".join(
+                [
+                    json.dumps(
+                        {"honk_id": "1", "level": "sharp", "pattern": "p1", "trigger_tool": "t1"}
+                    ),
+                    json.dumps(
+                        {"honk_id": "2", "level": "low", "pattern": "p2", "trigger_tool": "t2"}
+                    ),
+                    json.dumps(
+                        {"honk_id": "3", "level": "uneasy", "pattern": "p3", "trigger_tool": "t3"}
+                    ),
+                ]
+            )
+            + "\n"
+        )
         out = dash.read_recent_honks(path, limit=2)
         # Most recent first.
         assert out[0]["honk_id"] == "3"
@@ -123,15 +132,21 @@ class TestReadHonks:
 
     def test_skips_acks(self, tmp_path):
         path = tmp_path / "honks.jsonl"
-        path.write_text("\n".join([
-            json.dumps({"honk_id": "1", "level": "sharp",
-                        "pattern": "p1", "trigger_tool": "t1"}),
-            # Ack record uses ack_id + honk_id; we should skip it.
-            json.dumps({"ack_id": "a1", "honk_id": "1",
-                        "note": "addressed"}),
-            json.dumps({"honk_id": "2", "level": "low",
-                        "pattern": "p2", "trigger_tool": "t2"}),
-        ]) + "\n")
+        path.write_text(
+            "\n".join(
+                [
+                    json.dumps(
+                        {"honk_id": "1", "level": "sharp", "pattern": "p1", "trigger_tool": "t1"}
+                    ),
+                    # Ack record uses ack_id + honk_id; we should skip it.
+                    json.dumps({"ack_id": "a1", "honk_id": "1", "note": "addressed"}),
+                    json.dumps(
+                        {"honk_id": "2", "level": "low", "pattern": "p2", "trigger_tool": "t2"}
+                    ),
+                ]
+            )
+            + "\n"
+        )
         out = dash.read_recent_honks(path, limit=10)
         ids = [h["honk_id"] for h in out]
         # No record with ack_id should appear.
@@ -147,20 +162,31 @@ class TestReadHonks:
         standard path)."""
         honks_path = tmp_path / "honks.jsonl"
         acks_path = tmp_path / "acks.jsonl"
-        honks_path.write_text("\n".join([
-            json.dumps({"honk_id": "h1", "level": "sharp",
-                        "pattern": "p1", "trigger_tool": "t1"}),
-            json.dumps({"honk_id": "h2", "level": "sharp",
-                        "pattern": "p2", "trigger_tool": "t2"}),
-            json.dumps({"honk_id": "h3", "level": "sharp",
-                        "pattern": "p3", "trigger_tool": "t3"}),
-        ]) + "\n")
-        acks_path.write_text("\n".join([
-            json.dumps({"ack_id": "a1", "honk_id": "h1",
-                        "note": "addressed"}),
-            json.dumps({"ack_id": "a2", "honk_id": "h2",
-                        "note": "addressed"}),
-        ]) + "\n")
+        honks_path.write_text(
+            "\n".join(
+                [
+                    json.dumps(
+                        {"honk_id": "h1", "level": "sharp", "pattern": "p1", "trigger_tool": "t1"}
+                    ),
+                    json.dumps(
+                        {"honk_id": "h2", "level": "sharp", "pattern": "p2", "trigger_tool": "t2"}
+                    ),
+                    json.dumps(
+                        {"honk_id": "h3", "level": "sharp", "pattern": "p3", "trigger_tool": "t3"}
+                    ),
+                ]
+            )
+            + "\n"
+        )
+        acks_path.write_text(
+            "\n".join(
+                [
+                    json.dumps({"ack_id": "a1", "honk_id": "h1", "note": "addressed"}),
+                    json.dumps({"ack_id": "a2", "honk_id": "h2", "note": "addressed"}),
+                ]
+            )
+            + "\n"
+        )
         out = dash.read_recent_honks(honks_path, limit=10)
         ids = [h["honk_id"] for h in out]
         # h1 and h2 acked via sibling file; only h3 remains unacked.
@@ -169,9 +195,7 @@ class TestReadHonks:
     def test_missing_acks_file_treats_all_as_unacked(self, tmp_path):
         """No acks.jsonl present → every honk is unacked. Don't crash."""
         honks_path = tmp_path / "honks.jsonl"
-        honks_path.write_text(
-            json.dumps({"honk_id": "h1", "level": "sharp"}) + "\n"
-        )
+        honks_path.write_text(json.dumps({"honk_id": "h1", "level": "sharp"}) + "\n")
         out = dash.read_recent_honks(honks_path)
         assert len(out) == 1
 
@@ -179,7 +203,8 @@ class TestReadHonks:
         path = tmp_path / "honks.jsonl"
         path.write_text(
             "{garbage}\n"
-            + json.dumps({"honk_id": "1", "level": "sharp"}) + "\n"
+            + json.dumps({"honk_id": "1", "level": "sharp"})
+            + "\n"
             + "not json either\n"
         )
         out = dash.read_recent_honks(path)
@@ -193,11 +218,16 @@ class TestReadHonks:
 class TestChronicleTail:
     def test_returns_last_record(self, tmp_path):
         f = tmp_path / "x.jsonl"
-        f.write_text("\n".join([
-            json.dumps({"i": 1}),
-            json.dumps({"i": 2}),
-            json.dumps({"i": 3}),
-        ]) + "\n")
+        f.write_text(
+            "\n".join(
+                [
+                    json.dumps({"i": 1}),
+                    json.dumps({"i": 2}),
+                    json.dumps({"i": 3}),
+                ]
+            )
+            + "\n"
+        )
         assert dash.read_chronicle_tail(f) == {"i": 3}
 
     def test_returns_none_for_missing(self, tmp_path):
@@ -279,11 +309,15 @@ class TestCollectState:
         def fake_check_all():
             return [
                 conn.EndpointStatus(
-                    name="listener", label="x", kind=conn.KIND_PERIODIC,
+                    name="listener",
+                    label="x",
+                    kind=conn.KIND_PERIODIC,
                     status=conn.STATUS_STALE,
                 ),
                 conn.EndpointStatus(
-                    name="sse", label="x", kind=conn.KIND_ALWAYS_ON,
+                    name="sse",
+                    label="x",
+                    kind=conn.KIND_ALWAYS_ON,
                     status=conn.STATUS_OK,
                 ),
             ]
@@ -308,11 +342,18 @@ class TestRenderState:
         agg = {
             "overall": conn.STATUS_OK,
             "counts": {conn.STATUS_OK: 1},
-            "endpoints": [{
-                "name": "sse", "label": "x", "kind": conn.KIND_ALWAYS_ON,
-                "status": conn.STATUS_OK, "pid": 100,
-                "http_status": 200, "log_age_seconds": None, "notes": [],
-            }],
+            "endpoints": [
+                {
+                    "name": "sse",
+                    "label": "x",
+                    "kind": conn.KIND_ALWAYS_ON,
+                    "status": conn.STATUS_OK,
+                    "pid": 100,
+                    "http_status": 200,
+                    "log_age_seconds": None,
+                    "notes": [],
+                }
+            ],
             "timestamp": 1700000000.0,
         }
         defaults = {
@@ -343,16 +384,21 @@ class TestRenderState:
         plain = dash.render_state(self._state(), color=False)
         assert "halt note" not in plain
         with_halt = dash.render_state(
-            self._state(halts_count=2, listener_stale=True), color=False,
+            self._state(halts_count=2, listener_stale=True),
+            color=False,
         )
         assert "2 halt note" in with_halt
         assert "listener stale" in with_halt
 
     def test_feed_renders(self):
-        feed = [{
-            "time": "12:34:56", "ts": 1700000000.0,
-            "category": dash.CAT_INSIGHT, "message": "stored insight",
-        }]
+        feed = [
+            {
+                "time": "12:34:56",
+                "ts": 1700000000.0,
+                "category": dash.CAT_INSIGHT,
+                "message": "stored insight",
+            }
+        ]
         out = dash.render_state(self._state(feed=feed), color=False)
         assert "12:34:56" in out
         assert "stored insight" in out
@@ -367,8 +413,7 @@ class TestRenderState:
 
 
 class TestCollectLatest:
-    def _seed_chronicle(self, root: Path, kind: str, domain: str,
-                        record: dict) -> Path:
+    def _seed_chronicle(self, root: Path, kind: str, domain: str, record: dict) -> Path:
         d = root / "chronicle" / kind / domain
         d.mkdir(parents=True, exist_ok=True)
         f = d / "log.jsonl"
@@ -379,19 +424,32 @@ class TestCollectLatest:
     def test_picks_newest_jsonl_record_per_type(self, tmp_path):
         # Two insights in different domains; older + newer.
         self._seed_chronicle(
-            tmp_path, "insights", "old-dom",
-            {"timestamp": "2026-04-01T00:00:00Z", "layer": "ground_truth",
-             "content": "old", "domain": "old-dom"},
+            tmp_path,
+            "insights",
+            "old-dom",
+            {
+                "timestamp": "2026-04-01T00:00:00Z",
+                "layer": "ground_truth",
+                "content": "old",
+                "domain": "old-dom",
+            },
         )
         # Bump mtime backward via os.utime so the "old" file is older.
         old_path = tmp_path / "chronicle" / "insights" / "old-dom" / "log.jsonl"
         import os
+
         os.utime(old_path, (1000, 1000))
 
         self._seed_chronicle(
-            tmp_path, "insights", "new-dom",
-            {"timestamp": "2026-04-25T00:00:00Z", "layer": "hypothesis",
-             "content": "the latest insight body text", "domain": "new-dom"},
+            tmp_path,
+            "insights",
+            "new-dom",
+            {
+                "timestamp": "2026-04-25T00:00:00Z",
+                "layer": "hypothesis",
+                "content": "the latest insight body text",
+                "domain": "new-dom",
+            },
         )
 
         latest = dash.collect_latest_entries(tmp_path)
@@ -402,8 +460,7 @@ class TestCollectLatest:
 
     def test_returns_none_when_type_absent(self, tmp_path):
         latest = dash.collect_latest_entries(tmp_path)
-        for key in ("insight", "open_thread", "learning",
-                    "handoff", "decision", "halt", "honk"):
+        for key in ("insight", "open_thread", "learning", "handoff", "decision", "halt", "honk"):
             assert key in latest
             assert latest[key] is None
 
@@ -411,12 +468,16 @@ class TestCollectLatest:
         d = tmp_path / "handoffs"
         d.mkdir(parents=True)
         f = d / "20260425T000000_test.json"
-        f.write_text(json.dumps({
-            "timestamp": "2026-04-25T00:00:00+00:00",
-            "thread": "test-thread",
-            "note": "handoff body content",
-            "source_instance": "claude-test",
-        }))
+        f.write_text(
+            json.dumps(
+                {
+                    "timestamp": "2026-04-25T00:00:00+00:00",
+                    "thread": "test-thread",
+                    "note": "handoff body content",
+                    "source_instance": "claude-test",
+                }
+            )
+        )
         latest = dash.collect_latest_entries(tmp_path)
         h = latest["handoff"]
         assert h is not None
@@ -456,13 +517,23 @@ class TestCollectLatest:
         d = tmp_path / "nape"
         d.mkdir(parents=True)
         f = d / "honks.jsonl"
-        f.write_text("\n".join([
-            json.dumps({"honk_id": "1", "level": "sharp",
-                        "pattern": "p", "trigger_tool": "t",
-                        "observation": "the issue"}),
-            json.dumps({"ack_id": "a1", "honk_id": "1",
-                        "note": "addressed"}),
-        ]) + "\n")
+        f.write_text(
+            "\n".join(
+                [
+                    json.dumps(
+                        {
+                            "honk_id": "1",
+                            "level": "sharp",
+                            "pattern": "p",
+                            "trigger_tool": "t",
+                            "observation": "the issue",
+                        }
+                    ),
+                    json.dumps({"ack_id": "a1", "honk_id": "1", "note": "addressed"}),
+                ]
+            )
+            + "\n"
+        )
         latest = dash.collect_latest_entries(tmp_path)
         h = latest["honk"]
         # Honk record returned (ack record skipped, original is unacked-shaped
@@ -487,12 +558,14 @@ class TestCollectLatest:
 
 class TestCli:
     def test_once_json_emits_valid_json(self, capsys):
-        with patch.object(conn, "_launchctl_print_text", return_value=None), \
-             patch.object(
-                 conn, "_http_probe",
-                 return_value={"http_status": None, "body": "",
-                               "error": "mocked"},
-             ):
+        with (
+            patch.object(conn, "_launchctl_print_text", return_value=None),
+            patch.object(
+                conn,
+                "_http_probe",
+                return_value={"http_status": None, "body": "", "error": "mocked"},
+            ),
+        ):
             rc = cli.main(["--once", "--json", "--no-bridge", "--no-color"])
         captured = capsys.readouterr()
         assert rc == 0
@@ -505,11 +578,13 @@ class TestCli:
         # --once with --no-bridge runs `run_loop` with bridge_url=None;
         # under --no-bridge --json, doesn't even start the loop. Verify
         # the flag is wired.
-        with patch.object(conn, "_launchctl_print_text", return_value=None), \
-             patch.object(
-                 conn, "_http_probe",
-                 return_value={"http_status": None, "body": "",
-                               "error": "mocked"},
-             ):
+        with (
+            patch.object(conn, "_launchctl_print_text", return_value=None),
+            patch.object(
+                conn,
+                "_http_probe",
+                return_value={"http_status": None, "body": "", "error": "mocked"},
+            ),
+        ):
             rc = cli.main(["--once", "--json", "--no-bridge"])
         assert rc == 0

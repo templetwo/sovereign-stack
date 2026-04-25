@@ -3,6 +3,7 @@
 Use logger = get_logger(__name__) at module top, then logger.{debug, info,
 warning, error, exception}. Level configurable via SOVEREIGN_LOG_LEVEL env.
 """
+
 import logging
 import os
 

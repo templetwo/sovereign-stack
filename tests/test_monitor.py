@@ -28,8 +28,10 @@ def tmp_log(tmp_path, monkeypatch):
 
 def _make_status(name: str, status: str) -> conn.EndpointStatus:
     return conn.EndpointStatus(
-        name=name, label=f"com.test.{name}",
-        kind=conn.KIND_ALWAYS_ON, status=status,
+        name=name,
+        label=f"com.test.{name}",
+        kind=conn.KIND_ALWAYS_ON,
+        status=status,
     )
 
 
@@ -47,8 +49,7 @@ class TestRestartTracker:
         assert t.should_attempt("svc", now=1000.0) is True
 
     def test_streak_caps_at_max(self):
-        cfg = mon.MonitorConfig(max_restarts=3,
-                                backoff_base=1.0, backoff_cap=1.0)
+        cfg = mon.MonitorConfig(max_restarts=3, backoff_base=1.0, backoff_cap=1.0)
         t = mon.RestartTracker(cfg)
         # Three failed restarts in a row.
         for i in range(3):
@@ -66,8 +67,7 @@ class TestRestartTracker:
         assert t.should_attempt("svc", now=1003.0) is True
 
     def test_backoff_capped(self):
-        cfg = mon.MonitorConfig(backoff_base=10.0, backoff_cap=15.0,
-                                max_restarts=10)
+        cfg = mon.MonitorConfig(backoff_base=10.0, backoff_cap=15.0, max_restarts=10)
         t = mon.RestartTracker(cfg)
         # Force count = 5 → 10^5 = 100000s but cap is 15s.
         for i in range(5):
@@ -85,8 +85,7 @@ class TestRestartTracker:
         assert t.should_attempt("svc", now=1021.0) is True
 
     def test_baseline_reset_clears_streak(self):
-        cfg = mon.MonitorConfig(backoff_base=10.0, max_restarts=2,
-                                baseline_reset_seconds=100)
+        cfg = mon.MonitorConfig(backoff_base=10.0, max_restarts=2, baseline_reset_seconds=100)
         t = mon.RestartTracker(cfg)
         t.record_attempt("svc", success=False, now=1000.0)
         t.record_attempt("svc", success=False, now=1001.0)
@@ -102,8 +101,7 @@ class TestRestartTracker:
 class TestRunOnce:
     def test_no_action_when_all_ok(self, tmp_log):
         cfg = mon.MonitorConfig(log_path=tmp_log)
-        statuses = [_make_status("a", conn.STATUS_OK),
-                    _make_status("b", conn.STATUS_OK)]
+        statuses = [_make_status("a", conn.STATUS_OK), _make_status("b", conn.STATUS_OK)]
         summary = mon.run_once(
             cfg,
             check_fn=lambda: statuses,
@@ -118,9 +116,11 @@ class TestRunOnce:
         target_name = conn.ENDPOINTS[0].name
         statuses = [_make_status(target_name, conn.STATUS_DOWN)]
         called = []
+
         def fake_restart(ep):
             called.append(ep.name)
             return _make_ok_action(ep.name)
+
         summary = mon.run_once(
             cfg,
             check_fn=lambda: statuses,
@@ -170,8 +170,7 @@ class TestRunOnce:
     def test_log_event_written_to_file(self, tmp_log):
         cfg = mon.MonitorConfig(log_path=tmp_log)
         statuses = [_make_status("nope", conn.STATUS_OK)]
-        mon.run_once(cfg, check_fn=lambda: statuses,
-                     restart_fn=lambda ep: _make_ok_action(ep.name))
+        mon.run_once(cfg, check_fn=lambda: statuses, restart_fn=lambda ep: _make_ok_action(ep.name))
         assert tmp_log.exists()
         line = tmp_log.read_text().strip().splitlines()[-1]
         rec = json.loads(line)
@@ -180,33 +179,37 @@ class TestRunOnce:
 
     def test_failed_restart_increments_streak(self, tmp_log):
         cfg = mon.MonitorConfig(
-            log_path=tmp_log, max_restarts=2, backoff_base=1.0,
+            log_path=tmp_log,
+            max_restarts=2,
+            backoff_base=1.0,
         )
         target_name = conn.ENDPOINTS[0].name
         statuses = [_make_status(target_name, conn.STATUS_DOWN)]
         tracker = mon.RestartTracker(cfg)
+
         def fail_restart(ep):
             return conn.ActionResult(
-                name=ep.name, action="restart", ok=False,
-                returncode=1, stderr="boom",
+                name=ep.name,
+                action="restart",
+                ok=False,
+                returncode=1,
+                stderr="boom",
             )
+
         # First tick — restart attempted, fails.
-        s1 = mon.run_once(cfg, tracker,
-                          check_fn=lambda: statuses,
-                          restart_fn=fail_restart,
-                          now_fn=lambda: 1000.0)
+        s1 = mon.run_once(
+            cfg, tracker, check_fn=lambda: statuses, restart_fn=fail_restart, now_fn=lambda: 1000.0
+        )
         assert s1["actions"][0]["ok"] is False
         # Second tick at t=1001 — streak count=1, backoff=1s → allowed.
-        s2 = mon.run_once(cfg, tracker,
-                          check_fn=lambda: statuses,
-                          restart_fn=fail_restart,
-                          now_fn=lambda: 1002.0)
+        s2 = mon.run_once(
+            cfg, tracker, check_fn=lambda: statuses, restart_fn=fail_restart, now_fn=lambda: 1002.0
+        )
         assert s2["actions"][0]["ok"] is False
         # Third tick — count=2 == max → deferred.
-        s3 = mon.run_once(cfg, tracker,
-                          check_fn=lambda: statuses,
-                          restart_fn=fail_restart,
-                          now_fn=lambda: 1010.0)
+        s3 = mon.run_once(
+            cfg, tracker, check_fn=lambda: statuses, restart_fn=fail_restart, now_fn=lambda: 1010.0
+        )
         assert s3["actions"][0]["action"] == "deferred"
 
 
@@ -216,12 +219,15 @@ class TestRunOnce:
 class TestMonitorCli:
     def test_once_dry_run_json(self, tmp_log, capsys):
         from sovereign_stack import monitor_cli as cli
-        with patch.object(conn, "_launchctl_print_text", return_value=None), \
-             patch.object(
-                 conn, "_http_probe",
-                 return_value={"http_status": None, "body": "",
-                               "error": "mocked"},
-             ):
+
+        with (
+            patch.object(conn, "_launchctl_print_text", return_value=None),
+            patch.object(
+                conn,
+                "_http_probe",
+                return_value={"http_status": None, "body": "", "error": "mocked"},
+            ),
+        ):
             rc = cli.main(["--once", "--dry-run", "--json"])
         captured = capsys.readouterr()
         assert rc == 0

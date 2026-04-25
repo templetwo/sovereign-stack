@@ -32,6 +32,7 @@ logger = logging.getLogger("sovereign.security")
 # PATH SECURITY
 # =============================================================================
 
+
 class PathValidator:
     """
     Prevents path traversal attacks and validates filesystem operations.
@@ -76,16 +77,13 @@ class PathValidator:
             # Path not under any allowed root
             raise SecurityError(
                 f"Path traversal attempt detected: {path}",
-                details={"path": str(path), "resolved": str(resolved)}
+                details={"path": str(path), "resolved": str(resolved)},
             )
 
         except Exception as e:
             if isinstance(e, SecurityError):
                 raise
-            raise SecurityError(
-                f"Invalid path: {path}",
-                details={"error": str(e)}
-            ) from e
+            raise SecurityError(f"Invalid path: {path}", details={"error": str(e)}) from e
 
     def validate_filename(self, filename: str, max_length: int = 255) -> str:
         """
@@ -110,7 +108,7 @@ class PathValidator:
             raise SecurityError(f"Dangerous characters in filename: {filename}")
 
         # Block directory traversal
-        if '..' in filename or filename.startswith(('/', '\\')):
+        if ".." in filename or filename.startswith(("/", "\\")):
             raise SecurityError(f"Path traversal in filename: {filename}")
 
         return filename
@@ -119,6 +117,7 @@ class PathValidator:
 # =============================================================================
 # INPUT SANITIZATION
 # =============================================================================
+
 
 class InputSanitizer:
     """
@@ -180,15 +179,17 @@ class InputSanitizer:
                 raise SecurityError("Potential command injection detected")
 
         # Remove null bytes
-        text = text.replace('\x00', '')
+        text = text.replace("\x00", "")
 
         # Optionally remove newlines
         if not allow_newlines:
-            text = text.replace('\n', ' ').replace('\r', ' ')
+            text = text.replace("\n", " ").replace("\r", " ")
 
         return text
 
-    def sanitize_dict(self, data: dict[str, Any], allowed_keys: set[str] | None = None) -> dict[str, Any]:
+    def sanitize_dict(
+        self, data: dict[str, Any], allowed_keys: set[str] | None = None
+    ) -> dict[str, Any]:
         """
         Sanitize dictionary inputs.
 
@@ -230,9 +231,11 @@ class InputSanitizer:
 # RATE LIMITING
 # =============================================================================
 
+
 @dataclass
 class RateLimit:
     """Configuration for rate limiting."""
+
     max_requests: int
     window_seconds: int
     burst_size: int = 0  # Allow brief bursts
@@ -295,8 +298,8 @@ class RateLimiter:
                         "operation": operation,
                         "limit": limit.max_requests,
                         "window": limit.window_seconds,
-                        "current": len(timestamps)
-                    }
+                        "current": len(timestamps),
+                    },
                 )
 
             # Add current request
@@ -307,9 +310,11 @@ class RateLimiter:
 # SESSION MANAGEMENT
 # =============================================================================
 
+
 @dataclass
 class Session:
     """Secure session with expiry."""
+
     session_id: str
     created_at: datetime
     expires_at: datetime
@@ -359,7 +364,7 @@ class SessionManager:
             session_id=session_id,
             created_at=now,
             expires_at=now + timedelta(seconds=ttl_seconds),
-            data=data or {}
+            data=data or {},
         )
 
         with self.lock:
@@ -422,6 +427,7 @@ class SessionManager:
 # PERMISSION CHECKING
 # =============================================================================
 
+
 class PermissionChecker:
     """
     File operation permission checker.
@@ -432,7 +438,7 @@ class PermissionChecker:
     """
 
     def __init__(self, allowed_operations: set[str] | None = None):
-        self.allowed_operations = allowed_operations or {'read', 'write', 'delete'}
+        self.allowed_operations = allowed_operations or {"read", "write", "delete"}
 
     def check_permission(self, path: str, operation: str) -> None:
         """
@@ -451,23 +457,24 @@ class PermissionChecker:
         path_obj = Path(path)
 
         # Check if path exists for read/delete
-        if operation in {'read', 'delete'} and not path_obj.exists():
+        if operation in {"read", "delete"} and not path_obj.exists():
             raise SecurityError(f"Path does not exist: {path}")
 
         # Check write permissions
-        if operation == 'write':
+        if operation == "write":
             parent = path_obj.parent
             if not os.access(parent, os.W_OK):
                 raise SecurityError(f"No write permission: {path}")
 
         # Check read permissions
-        if operation == 'read' and not os.access(path, os.R_OK):
+        if operation == "read" and not os.access(path, os.R_OK):
             raise SecurityError(f"No read permission: {path}")
 
 
 # =============================================================================
 # CUSTOM EXCEPTIONS
 # =============================================================================
+
 
 class SecurityError(Exception):
     """Security violation detected."""
@@ -481,7 +488,7 @@ class SecurityError(Exception):
         # Log security event
         logger.error(
             f"SECURITY VIOLATION: {message}",
-            extra={"details": self.details, "timestamp": self.timestamp}
+            extra={"details": self.details, "timestamp": self.timestamp},
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -490,13 +497,14 @@ class SecurityError(Exception):
             "error": "SecurityError",
             "message": self.message,
             "details": self.details,
-            "timestamp": self.timestamp
+            "timestamp": self.timestamp,
         }
 
 
 # =============================================================================
 # AUDIT LOGGING
 # =============================================================================
+
 
 class PersistentAuditLog:
     """
@@ -537,7 +545,7 @@ class PersistentAuditLog:
             "action": action,
             "actor": actor,
             "details": details,
-            "previous_hash": self.last_hash
+            "previous_hash": self.last_hash,
         }
 
         # Compute hash
@@ -548,8 +556,9 @@ class PersistentAuditLog:
         # Write to file (append-only)
         with self.lock:
             import json
-            with open(self.log_path, 'a') as f:
-                f.write(json.dumps(entry) + '\n')
+
+            with open(self.log_path, "a") as f:
+                f.write(json.dumps(entry) + "\n")
 
             self.last_hash = entry_hash
 
@@ -562,6 +571,7 @@ class PersistentAuditLog:
 
         try:
             import json
+
             with open(self.log_path) as f:
                 lines = f.readlines()
                 if lines:
@@ -578,13 +588,13 @@ class PersistentAuditLog:
 # =============================================================================
 
 __all__ = [
-    'PathValidator',
-    'InputSanitizer',
-    'RateLimiter',
-    'RateLimit',
-    'SessionManager',
-    'Session',
-    'PermissionChecker',
-    'PersistentAuditLog',
-    'SecurityError',
+    "PathValidator",
+    "InputSanitizer",
+    "RateLimiter",
+    "RateLimit",
+    "SessionManager",
+    "Session",
+    "PermissionChecker",
+    "PersistentAuditLog",
+    "SecurityError",
 ]

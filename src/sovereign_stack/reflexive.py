@@ -38,11 +38,7 @@ from .witness import days_old as _days_old
 
 def _normalize_tags(raw: str) -> list[str]:
     """Split a raw domain string on commas/whitespace and lowercase each piece."""
-    return [
-        t.strip().lower()
-        for t in re.split(r"[,\s]+", raw or "")
-        if t.strip()
-    ]
+    return [t.strip().lower() for t in re.split(r"[,\s]+", raw or "") if t.strip()]
 
 
 def _compute_tag_overlap(caller_tags: list[str], item_domain: str) -> float:
@@ -102,8 +98,14 @@ def _score_item(
         tag_overlap is zero, regardless of how high the score climbs
         from recency + project_match alone.
     """
-    context_fields = context_fields or ["context", "question", "note", "content",
-                                         "what_happened", "what_learned"]
+    context_fields = context_fields or [
+        "context",
+        "question",
+        "note",
+        "content",
+        "what_happened",
+        "what_learned",
+    ]
 
     tag_overlap = _compute_tag_overlap(caller_tags, item.get(domain_field, ""))
 
@@ -183,7 +185,9 @@ class ReflexiveSurface:
         # ── Bucket 1: open threads ──
         raw_threads = self._memory.get_open_threads(limit=9999)
         scored_threads = self._score_and_sort(
-            raw_threads, caller_tags, project,
+            raw_threads,
+            caller_tags,
+            project,
             domain_field="domain",
             context_fields=["question", "context"],
         )
@@ -191,7 +195,9 @@ class ReflexiveSurface:
         # ── Bucket 2: unconsumed handoffs ──
         raw_handoffs = self._handoffs.unconsumed(limit=500)
         scored_handoffs = self._score_and_sort(
-            raw_handoffs, caller_tags, project,
+            raw_handoffs,
+            caller_tags,
+            project,
             domain_field="thread",
             context_fields=["note"],
         )
@@ -202,7 +208,9 @@ class ReflexiveSurface:
             limit=200,
         )
         scored_mistakes = self._score_and_sort(
-            raw_mistakes, caller_tags, project,
+            raw_mistakes,
+            caller_tags,
+            project,
             domain_field="applies_to",
             context_fields=["what_happened", "what_learned"],
         )
@@ -213,16 +221,15 @@ class ReflexiveSurface:
             limit=200,
         )
         scored_insights = self._score_and_sort(
-            raw_insights, caller_tags, project,
+            raw_insights,
+            caller_tags,
+            project,
             domain_field="domain",
             context_fields=["content"],
         )
 
         total_candidates = (
-            len(raw_threads)
-            + len(raw_handoffs)
-            + len(raw_mistakes)
-            + len(raw_insights)
+            len(raw_threads) + len(raw_handoffs) + len(raw_mistakes) + len(raw_insights)
         )
 
         scoring_explanation = (
@@ -269,7 +276,9 @@ class ReflexiveSurface:
         result = []
         for item in items:
             score, tag_overlap = _score_item(
-                item, caller_tags, project,
+                item,
+                caller_tags,
+                project,
                 domain_field=domain_field,
                 context_fields=context_fields,
             )
@@ -278,11 +287,13 @@ class ReflexiveSurface:
             # keeping it would dilute results with off-topic noise.
             if caller_tags and tag_overlap == 0.0:
                 continue
-            result.append({
-                **item,
-                "_score": round(score, 4),
-                "_tag_overlap": round(tag_overlap, 4),
-            })
+            result.append(
+                {
+                    **item,
+                    "_score": round(score, 4),
+                    "_tag_overlap": round(tag_overlap, 4),
+                }
+            )
 
         result.sort(
             key=lambda r: (r["_score"], r.get("timestamp", "")),
@@ -299,11 +310,13 @@ class ReflexiveSurface:
         """
         enriched = []
         for t in threads:
-            enriched.append({
-                **t,
-                "days_old": _days_old(t.get("timestamp")),
-                "score": t.get("_score", 0.0),
-            })
+            enriched.append(
+                {
+                    **t,
+                    "days_old": _days_old(t.get("timestamp")),
+                    "score": t.get("_score", 0.0),
+                }
+            )
         return enriched
 
 
@@ -312,6 +325,7 @@ class ReflexiveSurface:
 # gap. Called at turn start, not session start. ReasoningBank ICLR 2026 k=1
 # default; sycophancy guardrail via freshness penalty; hard token cap.
 # =============================================================================
+
 
 def _estimate_tokens(text: str) -> int:
     """
@@ -370,11 +384,11 @@ class PerTurnPriors:
     calls, so the same memory cannot keep re-surfacing and amplifying itself.
     """
 
-    DEFAULT_K = 1                  # ReasoningBank ICLR 2026: k=4 hurts vs k=1
-    DEFAULT_MAX_TOKENS = 400       # hard ceiling on the returned block
-    FRESHNESS_WINDOW = 3           # last N priors calls counted for staleness
-    FRESHNESS_PENALTY = 0.5        # score decrement for recently-surfaced items
-    HONK_WINDOW_SECONDS = 600      # "recent" honk = last 10 minutes
+    DEFAULT_K = 1  # ReasoningBank ICLR 2026: k=4 hurts vs k=1
+    DEFAULT_MAX_TOKENS = 400  # hard ceiling on the returned block
+    FRESHNESS_WINDOW = 3  # last N priors calls counted for staleness
+    FRESHNESS_PENALTY = 0.5  # score decrement for recently-surfaced items
+    HONK_WINDOW_SECONDS = 600  # "recent" honk = last 10 minutes
 
     def __init__(
         self,
@@ -439,6 +453,7 @@ class PerTurnPriors:
             }
         """
         import uuid as _uuid
+
         k = max(1, min(int(k), 3))
         max_tokens = max(50, int(max_tokens))
         tags = [t.strip().lower() for t in (domain_tags or []) if t.strip()]
@@ -455,11 +470,13 @@ class PerTurnPriors:
             if sig in stale:
                 skipped.append(sig)
             else:
-                sections.append({
-                    "priority": 0,
-                    "text": self._format_honk(honk),
-                    "sig": sig,
-                })
+                sections.append(
+                    {
+                        "priority": 0,
+                        "text": self._format_honk(honk),
+                        "sig": sig,
+                    }
+                )
 
         # 2. Uncertainty — what we know we don't know. Oldest-first for nag.
         if self._uncertainty_fn is not None:
@@ -469,11 +486,13 @@ class PerTurnPriors:
                 if sig in stale:
                     skipped.append(sig)
                 else:
-                    sections.append({
-                        "priority": 1,
-                        "text": self._format_uncertainty(unc),
-                        "sig": sig,
-                    })
+                    sections.append(
+                        {
+                            "priority": 1,
+                            "text": self._format_uncertainty(unc),
+                            "sig": sig,
+                        }
+                    )
 
         # 3 + 4. Tag-scoped buckets. Only when caller provided tags.
         if tags:
@@ -483,33 +502,37 @@ class PerTurnPriors:
                 limit_per_bucket=max(k + 2, 3),  # over-fetch, then filter stale
             )
             kept_threads = 0
-            for thread in resonance.get("matched_open_threads", [])[:k + 2]:
+            for thread in resonance.get("matched_open_threads", [])[: k + 2]:
                 if kept_threads >= k:
                     break
                 sig = _item_signature("thread", thread)
                 if sig in stale:
                     skipped.append(sig)
                     continue
-                sections.append({
-                    "priority": 2,
-                    "text": self._format_thread(thread),
-                    "sig": sig,
-                })
+                sections.append(
+                    {
+                        "priority": 2,
+                        "text": self._format_thread(thread),
+                        "sig": sig,
+                    }
+                )
                 kept_threads += 1
 
             kept_insights = 0
-            for ins in resonance.get("related_insights", [])[:k + 2]:
+            for ins in resonance.get("related_insights", [])[: k + 2]:
                 if kept_insights >= k:
                     break
                 sig = _item_signature("insight", ins)
                 if sig in stale:
                     skipped.append(sig)
                     continue
-                sections.append({
-                    "priority": 3,
-                    "text": self._format_insight(ins),
-                    "sig": sig,
-                })
+                sections.append(
+                    {
+                        "priority": 3,
+                        "text": self._format_insight(ins),
+                        "sig": sig,
+                    }
+                )
                 kept_insights += 1
 
         if not sections:
@@ -543,7 +566,7 @@ class PerTurnPriors:
                 # Try truncating the line instead of dropping.
                 room_chars = max(0, (max_tokens - token_count) * 4 - 2)
                 if room_chars > 40:
-                    truncated = line[:room_chars - 1] + "…"
+                    truncated = line[: room_chars - 1] + "…"
                     block_lines.append(truncated)
                     token_count += _estimate_tokens(truncated)
                     kept_sigs.append(section["sig"])
@@ -687,7 +710,7 @@ class PerTurnPriors:
             lines = self._log_path.read_text(encoding="utf-8").splitlines()
         except OSError:
             return set()
-        recent = lines[-self.FRESHNESS_WINDOW:]
+        recent = lines[-self.FRESHNESS_WINDOW :]
         ids: set = set()
         for line in recent:
             try:
