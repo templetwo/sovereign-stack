@@ -45,7 +45,7 @@ Changelog = "https://github.com/templetwo/sovereign-stack/blob/main/CHANGELOG.md
 dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
-    "ruff>=0.6.0",
+    "ruff==0.14.2",
 ]
 
 [project.scripts]
