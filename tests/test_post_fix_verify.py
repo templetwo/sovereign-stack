@@ -13,15 +13,12 @@ avoid any network dependency.
 from __future__ import annotations
 
 import json
-import os
-import time
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 
 from sovereign_stack import post_fix_tools as pfx
-
 
 # =============================================================================
 # FIXTURES
@@ -152,7 +149,7 @@ class TestTakeSample:
             schedule_offsets_min=[5, 30],
         )
         # Fast-forward `now` so both scheduled offsets are due.
-        fake_now_iso = pfx._iso(pfx._parse_iso(watch["created_at"]).replace(year=2099))
+        pfx._iso(pfx._parse_iso(watch["created_at"]).replace(year=2099))
         # Simpler: monkeypatch _now to return a value well past both offsets.
         future = pfx._parse_iso(watch["created_at"]).replace(year=2099)
         monkeypatch.setattr(pfx, "_now", lambda: future)

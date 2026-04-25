@@ -20,6 +20,7 @@ What's tested here:
 from __future__ import annotations
 
 import asyncio
+
 import pytest
 
 from sovereign_stack import server
@@ -139,7 +140,7 @@ class TestFormatToolkit:
         assert "spiral_inherit" not in text
 
     def test_category_filter_legacy_path(self, all_tools):
-        text = server._format_toolkit(
+        server._format_toolkit(
             all_tools, category_filter="security",
         )
         # Note: filter compares against _category_for output. Guardian

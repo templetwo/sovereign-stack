@@ -20,11 +20,10 @@ Distilled from temple-bridge/middleware.py
 """
 
 import json
-from enum import Enum
 from datetime import datetime
+from enum import Enum
 from pathlib import Path
-from typing import Optional, List, Dict, Any
-
+from typing import Any
 
 # =============================================================================
 # SPIRAL PHASES
@@ -72,12 +71,12 @@ class SpiralState:
     def __init__(self, session_id: str = None):
         self.session_id = session_id or f"spiral_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         self.current_phase = SpiralPhase.INITIALIZATION
-        self.phase_history: List[Dict[str, Any]] = []
+        self.phase_history: list[dict[str, Any]] = []
         self.tool_call_count = 0
         self.reflection_depth = 0
         self._started = datetime.now()
 
-    def transition(self, new_phase: SpiralPhase) -> Dict[str, Any]:
+    def transition(self, new_phase: SpiralPhase) -> dict[str, Any]:
         """
         Transition to a new spiral phase.
 
@@ -99,7 +98,7 @@ class SpiralState:
         self.phase_history.append(event)
         return event
 
-    def record_tool_call(self, tool_name: str, arguments: Dict = None) -> Dict[str, Any]:
+    def record_tool_call(self, tool_name: str, arguments: dict = None) -> dict[str, Any]:
         """
         Record a tool call and update state accordingly.
 
@@ -155,7 +154,7 @@ class SpiralState:
         if self.current_phase == SpiralPhase.EXECUTION:
             self.transition(SpiralPhase.META_REFLECTION)
 
-    def get_summary(self) -> Dict[str, Any]:
+    def get_summary(self) -> dict[str, Any]:
         """Get a summary of the current spiral state."""
         return {
             "session_id": self.session_id,
@@ -170,7 +169,7 @@ class SpiralState:
             ]
         }
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Serialize state to dict."""
         return {
             "session_id": self.session_id,
@@ -182,7 +181,7 @@ class SpiralState:
         }
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "SpiralState":
+    def from_dict(cls, data: dict[str, Any]) -> "SpiralState":
         """Restore state from dict."""
         state = cls(session_id=data.get("session_id"))
         state.current_phase = SpiralPhase(data.get("current_phase", "Initialization"))
@@ -211,7 +210,7 @@ class SpiralMiddleware:
         mcp.add_middleware(spiral)
     """
 
-    def __init__(self, log_path: Optional[Path] = None):
+    def __init__(self, log_path: Path | None = None):
         self.log_path = log_path
         self.state = SpiralState()
 
@@ -236,7 +235,7 @@ class SpiralMiddleware:
 
         return result
 
-    def _write_log(self, event: Dict[str, Any]):
+    def _write_log(self, event: dict[str, Any]):
         """Write event to journey log."""
         if not self.log_path:
             return
@@ -251,7 +250,7 @@ class SpiralMiddleware:
         """Get current spiral state."""
         return self.state
 
-    def inherit_state(self, previous_state: Dict[str, Any]) -> None:
+    def inherit_state(self, previous_state: dict[str, Any]) -> None:
         """Inherit state from a previous session."""
         self.state = SpiralState.from_dict(previous_state)
         print(f"🌀 Inherited spiral state: {self.state.current_phase.value}")
@@ -285,7 +284,7 @@ def save_spiral_state(state: SpiralState, path: Path) -> None:
         json.dump(state.to_dict(), f, indent=2)
 
 
-def load_spiral_state(path: Path) -> Optional[SpiralState]:
+def load_spiral_state(path: Path) -> SpiralState | None:
     """Load spiral state from previous session."""
     if not path.exists():
         return None

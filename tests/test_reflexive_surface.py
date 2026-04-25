@@ -10,15 +10,14 @@ Verifies:
 
 import shutil
 import tempfile
-import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
 
-from sovereign_stack.reflexive import ReflexiveSurface
-from sovereign_stack.memory import ExperientialMemory
 from sovereign_stack.handoff import HandoffEngine
+from sovereign_stack.memory import ExperientialMemory
+from sovereign_stack.reflexive import ReflexiveSurface
 
 
 @pytest.fixture

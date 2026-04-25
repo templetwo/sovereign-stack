@@ -26,22 +26,16 @@ Design notes (frontend):
 from __future__ import annotations
 
 import argparse
-import asyncio
-import io
 import json
 import os
-import socket
 import sys
 import threading
 import time
 import urllib.parse
-from dataclasses import asdict
 from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from pathlib import Path
-from typing import Dict, Optional
 
 from . import dashboard
-
 
 # ── Shared activity feed + background watcher ──────────────────────────────
 #
@@ -74,7 +68,7 @@ def _watcher_loop() -> None:
 
     # Git: track the SHA of the latest commit we've already surfaced so we
     # don't repeat-emit on every poll.
-    last_commit_sha: Optional[str] = None
+    last_commit_sha: str | None = None
     initial_commits = dashboard._git_recent_commits(repo_path, limit=1)
     if initial_commits:
         last_commit_sha = initial_commits[0]["sha"]
@@ -89,7 +83,7 @@ def _watcher_loop() -> None:
         "com.templetwo.sovereign.uncertainty",
         "com.templetwo.sovereign.metabolize",
     ]
-    last_service_state: Dict[str, Dict] = dashboard._launchctl_service_states(
+    last_service_state: dict[str, dict] = dashboard._launchctl_service_states(
         service_labels,
     )
 
@@ -235,7 +229,7 @@ def _ensure_watcher() -> None:
 STATIC_DIR = Path(__file__).parent / "dashboard_web_static"
 
 
-def _read_static(name: str) -> Optional[bytes]:
+def _read_static(name: str) -> bytes | None:
     p = STATIC_DIR / name
     if not p.exists() or not p.is_file():
         return None
@@ -285,7 +279,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         return
 
-    def _send_json(self, code: int, payload: dict, *, headers: Optional[dict] = None) -> None:
+    def _send_json(self, code: int, payload: dict, *, headers: dict | None = None) -> None:
         body = json.dumps(payload, indent=2).encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -368,6 +362,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 time.sleep(3)
         except (BrokenPipeError, ConnectionResetError):
             return
+        # best-effort SSE loop: any other transport-layer error (ssl, socket,
+        # encoding) should silently drop the stream rather than crash the thread.
         except Exception:
             return
 
@@ -384,8 +380,7 @@ def serve(host: str = "127.0.0.1", port: int = DEFAULT_PORT) -> HTTPServer:
     parallel with poll requests. Starts the activity-watcher thread on
     first call."""
     _ensure_watcher()
-    server = ThreadingHTTPServer((host, port), DashboardHandler)
-    return server
+    return ThreadingHTTPServer((host, port), DashboardHandler)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -400,7 +395,7 @@ def _build_parser() -> argparse.ArgumentParser:
     return p
 
 
-def main(argv: Optional[list] = None) -> int:
+def main(argv: list | None = None) -> int:
     args = _build_parser().parse_args(argv)
     server = serve(args.host, args.port)
     actual_host, actual_port = server.server_address[:2]

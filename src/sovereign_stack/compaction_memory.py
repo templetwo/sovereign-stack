@@ -8,10 +8,10 @@ This creates high-fidelity short-term memory that survives compaction.
 """
 
 import json
+from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import List, Dict, Any, Optional
-from dataclasses import dataclass, asdict
+from typing import Any
 
 
 @dataclass
@@ -21,15 +21,15 @@ class CompactionSummary:
     summary_text: str
     session_id: str
     compaction_number: int
-    key_points: List[str]
-    active_tasks: List[str]
-    recent_breakthroughs: List[str]
+    key_points: list[str]
+    active_tasks: list[str]
+    recent_breakthroughs: list[str]
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> 'CompactionSummary':
+    def from_dict(cls, data: dict[str, Any]) -> 'CompactionSummary':
         return cls(**data)
 
 
@@ -49,7 +49,7 @@ class CompactionMemoryBuffer:
         self.storage_dir = Path(storage_dir)
         self.storage_dir.mkdir(parents=True, exist_ok=True)
         self.buffer_file = self.storage_dir / "compaction_buffer.json"
-        self.summaries: List[CompactionSummary] = []
+        self.summaries: list[CompactionSummary] = []
         self._load()
 
     def _load(self):
@@ -59,7 +59,7 @@ class CompactionMemoryBuffer:
             return
 
         try:
-            with open(self.buffer_file, 'r') as f:
+            with open(self.buffer_file) as f:
                 data = json.load(f)
                 self.summaries = [
                     CompactionSummary.from_dict(s)
@@ -82,9 +82,9 @@ class CompactionMemoryBuffer:
         self,
         summary_text: str,
         session_id: str,
-        key_points: Optional[List[str]] = None,
-        active_tasks: Optional[List[str]] = None,
-        recent_breakthroughs: Optional[List[str]] = None
+        key_points: list[str] | None = None,
+        active_tasks: list[str] | None = None,
+        recent_breakthroughs: list[str] | None = None
     ) -> CompactionSummary:
         """
         Add a new compaction summary to the buffer
@@ -118,11 +118,11 @@ class CompactionMemoryBuffer:
 
         return new_summary
 
-    def get_all_summaries(self) -> List[CompactionSummary]:
+    def get_all_summaries(self) -> list[CompactionSummary]:
         """Get all summaries in buffer (up to 3)"""
         return self.summaries.copy()
 
-    def get_latest_summary(self) -> Optional[CompactionSummary]:
+    def get_latest_summary(self) -> CompactionSummary | None:
         """Get the most recent summary"""
         return self.summaries[-1] if self.summaries else None
 
@@ -172,7 +172,7 @@ class CompactionMemoryBuffer:
         self.summaries = []
         self._save()
 
-    def get_stats(self) -> Dict[str, Any]:
+    def get_stats(self) -> dict[str, Any]:
         """Get buffer statistics"""
         return {
             "total_summaries": len(self.summaries),
@@ -189,9 +189,9 @@ def auto_store_compaction(
     storage_dir: Path,
     summary_text: str,
     session_id: str,
-    key_points: Optional[List[str]] = None,
-    active_tasks: Optional[List[str]] = None,
-    recent_breakthroughs: Optional[List[str]] = None
+    key_points: list[str] | None = None,
+    active_tasks: list[str] | None = None,
+    recent_breakthroughs: list[str] | None = None
 ) -> str:
     """
     Automatically store compaction summary and return confirmation

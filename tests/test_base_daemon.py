@@ -23,19 +23,17 @@ import shutil
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List
 
 import pytest
 
 from sovereign_stack.daemons.base import (
-    BaseDaemon,
     CONSECUTIVE_UNACKED_THRESHOLD,
-    DaemonState,
     POSTED_DIGESTS_RETAINED,
     STATE_SCHEMA_VERSION,
+    BaseDaemon,
+    DaemonState,
 )
 from sovereign_stack.daemons.senders import SENDER_HALT_ALERT
-
 
 # ── Fixtures + minimal concrete subclass ────────────────────────────────────
 
@@ -52,8 +50,8 @@ def tmp_root():
 
 class CommsStore:
     def __init__(self):
-        self.posts: List[Dict] = []
-        self.acks: Dict[str, List[Dict]] = {}
+        self.posts: list[dict] = []
+        self.acks: dict[str, list[dict]] = {}
 
     def post(self, *, sender, content, channel, message_id, extra_fields=None):
         rec = {
@@ -89,10 +87,10 @@ class StubDaemon(BaseDaemon):
         # Not exercised — direct tests call helpers, not run().
         raise NotImplementedError
 
-    def _halt_what_tried(self) -> List[str]:
+    def _halt_what_tried(self) -> list[str]:
         return ["Stub daemon — exercises BaseDaemon helpers in tests."]
 
-    def _halt_blocked_downstream(self) -> List[str]:
+    def _halt_blocked_downstream(self) -> list[str]:
         return ["- Nothing real; this is a test scaffold."]
 
 

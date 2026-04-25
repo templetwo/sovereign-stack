@@ -32,13 +32,12 @@ import asyncio
 import json
 import os
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Dict, List, Optional
 
 from . import connectivity
-
 
 # ── Defaults ────────────────────────────────────────────────────────────────
 
@@ -71,10 +70,10 @@ class MonitorConfig:
     backoff_base: float = DEFAULT_BACKOFF_BASE
     backoff_cap: float = DEFAULT_BACKOFF_CAP
     dry_run: bool = False
-    log_path: Optional[Path] = None
+    log_path: Path | None = None
     # Names to skip (e.g. periodic services that shouldn't be restarted
     # on stale, or services Anthony intentionally has off).
-    exclude: List[str] = field(default_factory=list)
+    exclude: list[str] = field(default_factory=list)
 
 
 # ── Restart tracker ─────────────────────────────────────────────────────────
@@ -107,7 +106,7 @@ class RestartTracker:
 
     def __init__(self, config: MonitorConfig):
         self._cfg = config
-        self._records: Dict[str, _RestartRecord] = {}
+        self._records: dict[str, _RestartRecord] = {}
 
     def _record(self, name: str) -> _RestartRecord:
         rec = self._records.get(name)
@@ -118,7 +117,7 @@ class RestartTracker:
             self._records[name] = rec
         return rec
 
-    def should_attempt(self, name: str, now: Optional[float] = None) -> bool:
+    def should_attempt(self, name: str, now: float | None = None) -> bool:
         now = now if now is not None else time.time()
         rec = self._record(name)
 
@@ -143,7 +142,7 @@ class RestartTracker:
         self,
         name: str,
         success: bool,
-        now: Optional[float] = None,
+        now: float | None = None,
     ) -> None:
         now = now if now is not None else time.time()
         rec = self._record(name)
@@ -159,7 +158,7 @@ class RestartTracker:
         else:
             rec.count += 1
 
-    def state(self) -> Dict[str, Dict]:
+    def state(self) -> dict[str, dict]:
         return {
             name: {"count": r.count, "last_attempt": r.last_attempt}
             for name, r in self._records.items()
@@ -169,7 +168,7 @@ class RestartTracker:
 # ── Logging ─────────────────────────────────────────────────────────────────
 
 
-def _log_event(config: MonitorConfig, event: Dict) -> None:
+def _log_event(config: MonitorConfig, event: dict) -> None:
     path = config.log_path or _monitor_log_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as f:
@@ -181,12 +180,12 @@ def _log_event(config: MonitorConfig, event: Dict) -> None:
 
 def run_once(
     config: MonitorConfig,
-    tracker: Optional[RestartTracker] = None,
+    tracker: RestartTracker | None = None,
     *,
-    check_fn: Optional[Callable[[], List]] = None,
-    restart_fn: Optional[Callable[[connectivity.Endpoint], connectivity.ActionResult]] = None,
-    now_fn: Optional[Callable[[], float]] = None,
-) -> Dict:
+    check_fn: Callable[[], list] | None = None,
+    restart_fn: Callable[[connectivity.Endpoint], connectivity.ActionResult] | None = None,
+    now_fn: Callable[[], float] | None = None,
+) -> dict:
     """
     Execute one monitoring tick. Returns the tick summary dict.
 
@@ -203,7 +202,7 @@ def run_once(
     now = (now_fn or time.time)()
 
     statuses = check()
-    actions: List[Dict] = []
+    actions: list[dict] = []
 
     for status in statuses:
         if status.name in config.exclude:

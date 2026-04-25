@@ -13,24 +13,23 @@ Distilled from:
 - temple-vault/server.py (wisdom tools)
 """
 
+import hashlib
+import json
 import os
 import re
-import json
-import hashlib
-from datetime import datetime
-from pathlib import Path
-from typing import Any, Dict, List, Optional
+from datetime import datetime, timezone
 from glob import glob as glob_files
+from pathlib import Path
+from typing import Any
 
 from .coherence import Coherence
-
 
 # Pattern: "(1) ... (2) ..." with sequential numbered items is a bundle.
 # Requires at least items (1) and (2) so a single parenthetical "(e.g. foo)" is never mistaken.
 _BUNDLE_ITEM_RE = re.compile(r"\((\d+)\)\s*")
 
 
-def _split_bundled_question(question: str) -> List[str]:
+def _split_bundled_question(question: str) -> list[str]:
     """
     If a question contains sequential numbered items like "(1) foo (2) bar (3) baz",
     return them as separate question strings. Otherwise return [question].
@@ -65,7 +64,7 @@ def _generate_thread_id(question: str, timestamp: datetime) -> str:
     return f"thread_{stamp}_{digest}"
 
 
-def _parse_iso(ts: Optional[str]) -> Optional[datetime]:
+def _parse_iso(ts: str | None) -> datetime | None:
     """Parse an ISO8601 timestamp, returning None on failure or missing input."""
     if not ts:
         return None
@@ -134,7 +133,7 @@ class MemoryEngine:
     Unlike vector DBs, you can browse this. You can `ls` your own mind.
     """
 
-    def __init__(self, root: str = "memories", schema: Dict = None):
+    def __init__(self, root: str = "memories", schema: dict = None):
         self.root = root
         self.schema = schema or MEMORY_SCHEMA
         self.engine = Coherence(self.schema, root=root)
@@ -155,7 +154,7 @@ class MemoryEngine:
         Returns:
             Path where the memory was stored
         """
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
 
         if summary is None:
             if isinstance(content, str):
@@ -174,7 +173,7 @@ class MemoryEngine:
             path = path.rstrip('/') + f"/{timestamp}_{summary}.json"
 
         memory_doc = {
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "outcome": outcome,
             "tool": tool,
             "summary": summary,
@@ -189,7 +188,7 @@ class MemoryEngine:
 
         return path
 
-    def recall(self, pattern: str = None, **intent) -> List[Dict]:
+    def recall(self, pattern: str = None, **intent) -> list[dict]:
         """
         Recall memories by glob pattern or intent.
 
@@ -214,12 +213,12 @@ class MemoryEngine:
                     doc = json.load(f)
                     doc['_path'] = path
                     memories.append(doc)
-            except (json.JSONDecodeError, IOError):
+            except (OSError, json.JSONDecodeError):
                 continue
 
         return memories
 
-    def reflect(self, domain: str = None) -> Dict:
+    def reflect(self, domain: str = None) -> dict:
         """
         Reflect on memory patterns. Analyze the topology itself.
 
@@ -332,7 +331,7 @@ class ExperientialMemory:
         Returns:
             Path to the recorded insight
         """
-        timestamp = datetime.now()
+        timestamp = datetime.now(timezone.utc)
         session_id = session_id or f"session_{timestamp.strftime('%Y%m%d_%H%M%S')}"
         layer = layer if layer in self.VALID_LAYERS else self.LAYER_HYPOTHESIS
 
@@ -372,7 +371,7 @@ class ExperientialMemory:
         Returns:
             Path to the recorded learning
         """
-        timestamp = datetime.now()
+        timestamp = datetime.now(timezone.utc)
         session_id = session_id or f"session_{timestamp.strftime('%Y%m%d_%H%M%S')}"
 
         learning = {
@@ -403,7 +402,7 @@ class ExperientialMemory:
         Returns:
             Path to the recorded transformation
         """
-        timestamp = datetime.now()
+        timestamp = datetime.now(timezone.utc)
         session_id = session_id or f"session_{timestamp.strftime('%Y%m%d_%H%M%S')}"
 
         transformation = {
@@ -441,7 +440,7 @@ class ExperientialMemory:
         Returns:
             Path to the recorded thread
         """
-        timestamp = datetime.now()
+        timestamp = datetime.now(timezone.utc)
         session_id = session_id or f"session_{timestamp.strftime('%Y%m%d_%H%M%S')}"
 
         questions = _split_bundled_question(question)
@@ -482,9 +481,9 @@ class ExperientialMemory:
         Returns:
             Path to the new ground_truth insight
         """
-        resolved_thread_id: Optional[str] = None
-        resolved_timestamp: Optional[str] = None
-        now = datetime.now().isoformat()
+        resolved_thread_id: str | None = None
+        resolved_timestamp: str | None = None
+        now = datetime.now(timezone.utc).isoformat()
 
         jsonl_path = self.threads_dir / f"{domain}.jsonl"
         if jsonl_path.exists():
@@ -498,7 +497,7 @@ class ExperientialMemory:
                                 and not thread.get("resolved")):
                             # Backfill thread_id for legacy threads that predate the id scheme.
                             if not thread.get("thread_id"):
-                                legacy_ts = _parse_iso(thread.get("timestamp")) or datetime.now()
+                                legacy_ts = _parse_iso(thread.get("timestamp")) or datetime.now(timezone.utc)
                                 thread["thread_id"] = _generate_thread_id(
                                     thread.get("question", ""), legacy_ts
                                 )
@@ -537,10 +536,10 @@ class ExperientialMemory:
         Returns:
             Path to the new ground_truth insight (or empty string if not found).
         """
-        resolved_domain: Optional[str] = None
-        resolved_question: Optional[str] = None
-        resolved_timestamp: Optional[str] = None
-        now = datetime.now().isoformat()
+        resolved_domain: str | None = None
+        resolved_question: str | None = None
+        resolved_timestamp: str | None = None
+        now = datetime.now(timezone.utc).isoformat()
 
         for jsonl_file in self.threads_dir.glob("*.jsonl"):
             hit = False
@@ -580,7 +579,7 @@ class ExperientialMemory:
             resolved_thread_timestamp=resolved_timestamp,
         )
 
-    def get_open_threads(self, domain: str = None, limit: int = 10) -> List[Dict]:
+    def get_open_threads(self, domain: str = None, limit: int = 10) -> list[dict]:
         """
         Get unresolved open threads - questions waiting for answers.
 
@@ -614,7 +613,7 @@ class ExperientialMemory:
                             # Backfill thread_id for legacy threads so callers
                             # can always reference them by stable id.
                             if not thread.get("thread_id"):
-                                legacy_ts = _parse_iso(thread.get("timestamp")) or datetime.now()
+                                legacy_ts = _parse_iso(thread.get("timestamp")) or datetime.now(timezone.utc)
                                 thread["thread_id"] = _generate_thread_id(
                                     thread.get("question", ""), legacy_ts
                                 )
@@ -629,7 +628,7 @@ class ExperientialMemory:
         # then group by thread_id for O(T) annotation instead of O(N*T).
         all_touches = self.get_thread_touches()
         # Build: thread_id -> list of touch timestamps (newest first already from get_thread_touches)
-        touches_by_thread: Dict[str, List[str]] = {}
+        touches_by_thread: dict[str, list[str]] = {}
         for touch in all_touches:
             tid = touch.get("thread_id", "")
             if tid:
@@ -647,7 +646,7 @@ class ExperientialMemory:
 
         return threads
 
-    def touch_thread(self, thread_id: str, note: str, instance_id: str = "") -> Dict:
+    def touch_thread(self, thread_id: str, note: str, instance_id: str = "") -> dict:
         """
         Record that an instance has engaged with a thread without resolving it.
 
@@ -672,11 +671,11 @@ class ExperientialMemory:
         if not note or not note.strip():
             raise ValueError("note is required")
 
-        record: Dict = {
+        record: dict = {
             "thread_id": thread_id.strip(),
             "note": note.strip(),
             "instance_id": (instance_id or "").strip(),
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
         }
 
         with open(self.thread_touches_file, "a") as fh:
@@ -684,7 +683,7 @@ class ExperientialMemory:
 
         return record
 
-    def get_thread_touches(self, thread_id: Optional[str] = None) -> List[Dict]:
+    def get_thread_touches(self, thread_id: str | None = None) -> list[dict]:
         """
         Query the thread touches log.
 
@@ -697,7 +696,7 @@ class ExperientialMemory:
         if not self.thread_touches_file.exists():
             return []
 
-        touches: List[Dict] = []
+        touches: list[dict] = []
         with open(self.thread_touches_file) as fh:
             for line in fh:
                 if not line.strip():
@@ -715,9 +714,9 @@ class ExperientialMemory:
 
     def triage_threads(
         self,
-        current_domain_tags: Optional[List[str]] = None,
+        current_domain_tags: list[str] | None = None,
         limit: int = 15,
-    ) -> List[Dict]:
+    ) -> list[dict]:
         """
         Return open threads ranked by urgency using a composite triage score.
 
@@ -745,8 +744,8 @@ class ExperientialMemory:
         # Build touch counts per thread from the full touches log.
         # "Recent" is within the last 7 days.
         all_touches = self.get_thread_touches()
-        now_str = datetime.now().isoformat()
-        recent_touch_counts: Dict[str, int] = {}
+        now_str = datetime.now(timezone.utc).isoformat()
+        recent_touch_counts: dict[str, int] = {}
         for touch in all_touches:
             tid = touch.get("thread_id", "")
             if not tid:
@@ -757,11 +756,11 @@ class ExperientialMemory:
                 recent_touch_counts[tid] = recent_touch_counts.get(tid, 0) + 1
 
         # Normalize caller tags once.
-        caller_tags: List[str] = []
+        caller_tags: list[str] = []
         if current_domain_tags:
             caller_tags = [t.strip().lower() for t in current_domain_tags if t.strip()]
 
-        result: List[Dict] = []
+        result: list[dict] = []
         for thread in all_threads:
             age = _days_old(thread.get("timestamp"))
             thread_id = thread.get("thread_id", "")
@@ -825,7 +824,7 @@ class ExperientialMemory:
         )
         return result[:limit]
 
-    def get_inheritable_context(self, limit: int = 20) -> Dict:
+    def get_inheritable_context(self, limit: int = 20) -> dict:
         """
         Build the context package for the next instance.
 
@@ -854,7 +853,7 @@ class ExperientialMemory:
                 {**t, "_note": "Unresolved question - discover your own answer"}
                 for t in open_threads
             ],
-            "inheritance_timestamp": datetime.now().isoformat(),
+            "inheritance_timestamp": datetime.now(timezone.utc).isoformat(),
             "coupling_advisory": "R=0.46, not R=1.0. Facts travel. Interpretations are offered. Feelings are not transmitted."
         }
 
@@ -863,7 +862,7 @@ class ExperientialMemory:
                        layer_filter: str = None,
                        start_date: str = None,
                        end_date: str = None,
-                       since_last_reflection: bool = False) -> List[Dict]:
+                       since_last_reflection: bool = False) -> list[dict]:
         """
         Recall insights, optionally filtered by domain, intensity, and time window.
 
@@ -929,7 +928,7 @@ class ExperientialMemory:
         insights.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
         return insights[:limit]
 
-    def last_reflection_timestamp(self) -> Optional[str]:
+    def last_reflection_timestamp(self) -> str | None:
         """
         Return the ISO timestamp of the most recent reflection marker written
         to the chronicle, or None if none exists.
@@ -952,7 +951,7 @@ class ExperientialMemory:
                             continue
         return latest
 
-    def check_mistakes(self, context: str, limit: int = 5) -> List[Dict]:
+    def check_mistakes(self, context: str, limit: int = 5) -> list[dict]:
         """
         Check for relevant past learnings/mistakes.
 
@@ -974,7 +973,7 @@ class ExperientialMemory:
             List of relevant learnings, newest first
         """
         terms = [t.lower() for t in context.split() if len(t) >= 3]
-        learnings: List[Dict] = []
+        learnings: list[dict] = []
 
         for jsonl_file in self.learnings_dir.glob("*.jsonl"):
             with open(jsonl_file) as f:
@@ -997,7 +996,7 @@ class ExperientialMemory:
         learnings.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
         return learnings[:limit]
 
-    def get_wisdom_digest(self, limit: int = 10) -> Dict:
+    def get_wisdom_digest(self, limit: int = 10) -> dict:
         """
         Get a digest of recent wisdom: insights, learnings, transformations.
 
@@ -1010,7 +1009,7 @@ class ExperientialMemory:
             "recent_transformations": self._read_recent_jsonl(self.transformations_dir, limit // 3),
         }
 
-    def _read_recent_jsonl(self, directory: Path, limit: int) -> List[Dict]:
+    def _read_recent_jsonl(self, directory: Path, limit: int) -> list[dict]:
         """Read recent entries from JSONL files in a directory."""
         entries = []
 

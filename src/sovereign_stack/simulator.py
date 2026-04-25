@@ -13,14 +13,14 @@ Key features:
 Distilled from threshold-protocols/simulation/simulator.py
 """
 
-import json
-import random
 import hashlib
+import json
 import logging
-from enum import Enum
-from dataclasses import dataclass, field, asdict
-from typing import List, Dict, Any, Optional, Tuple
+import random
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
+from enum import Enum
+from typing import Any
 
 try:
     import networkx as nx
@@ -53,12 +53,12 @@ class Outcome:
     name: str
     probability: float
     reversibility: float
-    side_effects: List[str]
+    side_effects: list[str]
     state_hash: str
-    confidence_interval: Tuple[float, float] = (0.0, 1.0)
-    details: Dict[str, Any] = field(default_factory=dict)
+    confidence_interval: tuple[float, float] = (0.0, 1.0)
+    details: dict[str, Any] = field(default_factory=dict)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         result = asdict(self)
         result["scenario"] = self.scenario.value
         return result
@@ -69,7 +69,7 @@ class Prediction:
     """Complete prediction from simulation."""
     event_hash: str
     model: str
-    outcomes: List[Outcome]
+    outcomes: list[Outcome]
     timestamp: str
     seed: int
     monte_carlo_runs: int
@@ -86,7 +86,7 @@ class Prediction:
             }, sort_keys=True)
             self.prediction_hash = hashlib.sha256(content.encode()).hexdigest()[:16]
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "event_hash": self.event_hash,
             "model": self.model,
@@ -100,13 +100,13 @@ class Prediction:
     def to_json(self) -> str:
         return json.dumps(self.to_dict(), indent=2)
 
-    def best_outcome(self) -> Optional[Outcome]:
+    def best_outcome(self) -> Outcome | None:
         """Return highest probability outcome."""
         if not self.outcomes:
             return None
         return max(self.outcomes, key=lambda o: o.probability)
 
-    def most_reversible(self) -> Optional[Outcome]:
+    def most_reversible(self) -> Outcome | None:
         """Return most reversible outcome."""
         if not self.outcomes:
             return None
@@ -133,7 +133,7 @@ class Simulator:
     """
 
     def __init__(self, model: str = "generic", seed: int = 42,
-                 config: Optional[SimulationConfig] = None):
+                 config: SimulationConfig | None = None):
         if not NETWORKX_AVAILABLE:
             raise ImportError("NetworkX required: pip install networkx")
 
@@ -142,9 +142,9 @@ class Simulator:
         self.config = config or SimulationConfig(seed=seed)
         self._rng = random.Random(seed)
         self.graph: nx.DiGraph = nx.DiGraph()
-        self._initial_state: Optional[nx.DiGraph] = None
+        self._initial_state: nx.DiGraph | None = None
 
-    def model(self, event: Dict[str, Any], scenarios: List[ScenarioType]) -> Prediction:
+    def model(self, event: dict[str, Any], scenarios: list[ScenarioType]) -> Prediction:
         """
         Model outcomes for given scenarios.
 
@@ -158,7 +158,7 @@ class Simulator:
         self._build_state_from_event(event)
         self._initial_state = self.graph.copy()
 
-        outcomes: List[Outcome] = []
+        outcomes: list[Outcome] = []
 
         for scenario in scenarios:
             outcome = self._simulate_scenario(scenario, event)
@@ -179,7 +179,7 @@ class Simulator:
             monte_carlo_runs=self.config.monte_carlo_runs,
         )
 
-    def _build_state_from_event(self, event: Dict[str, Any]) -> None:
+    def _build_state_from_event(self, event: dict[str, Any]) -> None:
         """Build graph representation of system state from event."""
         self.graph.clear()
 
@@ -209,7 +209,7 @@ class Simulator:
             self.graph.add_node("generic_state", metric=metric, value=value)
             self.graph.add_edge("root", "generic_state")
 
-    def _simulate_scenario(self, scenario: ScenarioType, event: Dict[str, Any]) -> Outcome:
+    def _simulate_scenario(self, scenario: ScenarioType, event: dict[str, Any]) -> Outcome:
         """Simulate a single scenario using Monte Carlo runs."""
         results = []
 
@@ -224,7 +224,7 @@ class Simulator:
             })
 
         avg_reversibility = sum(r["reversibility"] for r in results) / len(results)
-        all_effects = list(set(e for r in results for e in r["effects"]))
+        all_effects = list({e for r in results for e in r["effects"]})
 
         reversibilities = sorted(r["reversibility"] for r in results)
         ci_low = reversibilities[int(len(reversibilities) * 0.05)]
@@ -243,10 +243,10 @@ class Simulator:
             details={"monte_carlo_runs": self.config.monte_carlo_runs},
         )
 
-    def _apply_scenario(self, scenario: ScenarioType, run_seed: int) -> Tuple[nx.DiGraph, List[str]]:
+    def _apply_scenario(self, scenario: ScenarioType, run_seed: int) -> tuple[nx.DiGraph, list[str]]:
         """Apply scenario transformation to graph."""
         rng = random.Random(run_seed)
-        effects: List[str] = []
+        effects: list[str] = []
         state = self.graph.copy()
 
         if scenario == ScenarioType.REORGANIZE:
@@ -327,7 +327,7 @@ class Simulator:
         return 1.0 - min(edit_distance_normalized, 1.0)
 
     def _estimate_probability(self, scenario: ScenarioType,
-                            reversibility: float, event: Dict[str, Any]) -> float:
+                            reversibility: float, event: dict[str, Any]) -> float:
         """Estimate scenario probability."""
         base_probs = {
             ScenarioType.REORGANIZE: 0.3,

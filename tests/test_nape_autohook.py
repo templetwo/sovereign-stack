@@ -16,14 +16,12 @@ Cases:
 import shutil
 import tempfile
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch, call
-import types
+from unittest.mock import MagicMock
 
 import pytest
 
-from sovereign_stack.nape_daemon import NapeDaemon, VERIFY_TOOL_NAMES
-from sovereign_stack.server import _flatten_result, _NAPE_AUTOHOOK_EXCLUDE
-
+from sovereign_stack.nape_daemon import VERIFY_TOOL_NAMES, NapeDaemon
+from sovereign_stack.server import _NAPE_AUTOHOOK_EXCLUDE, _flatten_result
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -59,8 +57,9 @@ class TestAutoHookObserveTrigger:
             # full async server, we exercise _dispatch_tool + the auto-hook logic
             # inline, mirroring exactly what handle_tool does.
             import asyncio
-            from sovereign_stack.server import _dispatch_tool, _flatten_result
+
             from sovereign_stack import server as srv_module
+            from sovereign_stack.server import _dispatch_tool, _flatten_result
 
             # Patch the nape_daemon at module level and set a session_id.
             original_daemon = srv_module.nape_daemon
@@ -106,8 +105,9 @@ class TestAutoHookObserveTrigger:
         daemon, tmpdir = _make_nape_with_tmpdir()
         try:
             import asyncio
-            from sovereign_stack.server import _dispatch_tool, _flatten_result
+
             from sovereign_stack import server as srv_module
+            from sovereign_stack.server import _dispatch_tool, _flatten_result
 
             original_daemon = srv_module.nape_daemon
             srv_module.nape_daemon = daemon
@@ -199,6 +199,7 @@ class TestErrorObservation:
         try:
             import asyncio
             import json
+
             from sovereign_stack import server as srv_module
 
             original_daemon = srv_module.nape_daemon

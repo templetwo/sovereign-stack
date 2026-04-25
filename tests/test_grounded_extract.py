@@ -19,22 +19,21 @@ from pathlib import Path
 import pytest
 
 from sovereign_stack.grounding import (
-    GroundingResult,
-    grounded_extract,
-    # Claim-level reason codes
-    REASON_OK,
-    REASON_NO_EVIDENCE,
-    REASON_NO_GROUND_TRUTH,
-    REASON_INSUFFICIENT_EVIDENCE,
-    # Per-path reject codes
-    PATH_MISSING,
-    PATH_HYPOTHESIS_ONLY,
-    PATH_OPEN_THREAD_ONLY,
-    PATH_UNREADABLE,
     # Layer names
     GROUND_TRUTH_LAYER,
     HYPOTHESIS_LAYER,
     OPEN_THREAD_LAYER,
+    PATH_HYPOTHESIS_ONLY,
+    # Per-path reject codes
+    PATH_MISSING,
+    PATH_OPEN_THREAD_ONLY,
+    PATH_UNREADABLE,
+    REASON_INSUFFICIENT_EVIDENCE,
+    REASON_NO_EVIDENCE,
+    REASON_NO_GROUND_TRUTH,
+    # Claim-level reason codes
+    REASON_OK,
+    grounded_extract,
 )
 
 

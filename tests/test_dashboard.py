@@ -19,12 +19,9 @@ import time
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
-
-from sovereign_stack import dashboard as dash
 from sovereign_stack import connectivity as conn
+from sovereign_stack import dashboard as dash
 from sovereign_stack import dashboard_cli as cli
-
 
 # ── ActivityFeed ────────────────────────────────────────────────────────────
 
@@ -318,16 +315,16 @@ class TestRenderState:
             }],
             "timestamp": 1700000000.0,
         }
-        defaults = dict(
-            timestamp=1700000000.0,
-            connectivity_summary=agg,
-            bridge_stats=dash.BridgeStats(),
-            feed=[],
-            listener_stale=False,
-            halts_count=0,
-            decisions_count=0,
-            unacked_honks=0,
-        )
+        defaults = {
+            "timestamp": 1700000000.0,
+            "connectivity_summary": agg,
+            "bridge_stats": dash.BridgeStats(),
+            "feed": [],
+            "listener_stale": False,
+            "halts_count": 0,
+            "decisions_count": 0,
+            "unacked_honks": 0,
+        }
         defaults.update(overrides)
         return dash.DashboardState(**defaults)
 

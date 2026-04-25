@@ -13,17 +13,18 @@ Distilled from threshold-protocols:
 - intervention/intervenor.py
 """
 
-import json
-import math
 import hashlib
+import json
 import logging
+import math
 from abc import ABC, abstractmethod
+from collections import Counter
+from collections.abc import Callable
+from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from dataclasses import dataclass, field, asdict
-from typing import List, Dict, Any, Optional, Callable
-from datetime import datetime, timezone
-from collections import Counter
+from typing import Any
 
 try:
     import yaml
@@ -99,7 +100,7 @@ class ThresholdEvent:
     timestamp: str
     path: str
     description: str
-    details: Dict[str, Any] = field(default_factory=dict)
+    details: dict[str, Any] = field(default_factory=dict)
     event_hash: str = ""
 
     def __post_init__(self):
@@ -107,7 +108,7 @@ class ThresholdEvent:
             content = f"{self.metric.value}:{self.value}:{self.threshold}:{self.timestamp}:{self.path}"
             self.event_hash = hashlib.sha256(content.encode()).hexdigest()[:16]
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         result = asdict(self)
         result["metric"] = self.metric.value
         result["severity"] = self.severity.value
@@ -122,15 +123,15 @@ class StakeholderVote:
     vote: DecisionType
     rationale: str
     confidence: float
-    concerns: List[str] = field(default_factory=list)
-    conditions: List[str] = field(default_factory=list)
+    concerns: list[str] = field(default_factory=list)
+    conditions: list[str] = field(default_factory=list)
     timestamp: str = ""
 
     def __post_init__(self):
         if not self.timestamp:
             self.timestamp = datetime.now(timezone.utc).isoformat()
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         result = asdict(self)
         result["vote"] = self.vote.value
         return result
@@ -143,14 +144,14 @@ class DissentRecord:
     dissenting_from: DecisionType
     preferred: DecisionType
     rationale: str
-    concerns: List[str]
+    concerns: list[str]
     timestamp: str = ""
 
     def __post_init__(self):
         if not self.timestamp:
             self.timestamp = datetime.now(timezone.utc).isoformat()
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         result = asdict(self)
         result["dissenting_from"] = self.dissenting_from.value
         result["preferred"] = self.preferred.value
@@ -163,9 +164,9 @@ class DeliberationResult:
     session_id: str
     decision: DecisionType
     rationale: str
-    votes: List[StakeholderVote]
-    dissenting_views: List[DissentRecord]
-    conditions: List[str]
+    votes: list[StakeholderVote]
+    dissenting_views: list[DissentRecord]
+    conditions: list[str]
     timestamp: str
     audit_hash: str = ""
 
@@ -179,7 +180,7 @@ class DeliberationResult:
             }, sort_keys=True)
             self.audit_hash = hashlib.sha256(content.encode()).hexdigest()[:16]
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "session_id": self.session_id,
             "decision": self.decision.value,
@@ -198,7 +199,7 @@ class AuditEntry:
     timestamp: str
     action: str
     actor: str
-    details: Dict[str, Any]
+    details: dict[str, Any]
     previous_hash: str
     entry_hash: str = ""
 
@@ -213,7 +214,7 @@ class AuditEntry:
             }, sort_keys=True)
             self.entry_hash = hashlib.sha256(content.encode()).hexdigest()[:32]
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 
@@ -223,14 +224,14 @@ class GateResult:
     gate_name: str
     status: GateStatus
     message: str
-    approvers: List[str] = field(default_factory=list)
+    approvers: list[str] = field(default_factory=list)
     timestamp: str = ""
 
     def __post_init__(self):
         if not self.timestamp:
             self.timestamp = datetime.now(timezone.utc).isoformat()
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         result = asdict(self)
         result["status"] = self.status.value
         return result
@@ -242,8 +243,8 @@ class EnforcementResult:
     decision_hash: str
     applied: bool
     rolled_back: bool
-    gate_log: List[GateResult]
-    audit_trail: List[AuditEntry]
+    gate_log: list[GateResult]
+    audit_trail: list[AuditEntry]
     timestamp: str
     result_hash: str = ""
 
@@ -256,7 +257,7 @@ class EnforcementResult:
             }, sort_keys=True)
             self.result_hash = hashlib.sha256(content.encode()).hexdigest()[:16]
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "decision_hash": self.decision_hash,
             "applied": self.applied,
@@ -282,9 +283,9 @@ class ThresholdDetector:
         events = detector.scan("/path/to/directory")
     """
 
-    def __init__(self, config_path: Optional[Path] = None):
-        self.thresholds: Dict[MetricType, ThresholdConfig] = {}
-        self._event_log: List[ThresholdEvent] = []
+    def __init__(self, config_path: Path | None = None):
+        self.thresholds: dict[MetricType, ThresholdConfig] = {}
+        self._event_log: list[ThresholdEvent] = []
 
         if config_path and YAML_AVAILABLE:
             self.load_config(config_path)
@@ -308,13 +309,13 @@ class ThresholdDetector:
             warning_ratio=warning_ratio, description=description
         )
 
-    def scan(self, path: str, recursive: bool = True) -> List[ThresholdEvent]:
+    def scan(self, path: str, recursive: bool = True) -> list[ThresholdEvent]:
         """Scan a path and check all configured thresholds."""
         path = Path(path)
         if not path.exists():
             return []
 
-        events: List[ThresholdEvent] = []
+        events: list[ThresholdEvent] = []
         timestamp = datetime.now(timezone.utc).isoformat()
         metrics = self._gather_metrics(path, recursive)
 
@@ -338,7 +339,7 @@ class ThresholdDetector:
 
         return events
 
-    def _gather_metrics(self, path: Path, recursive: bool) -> Dict[MetricType, Dict]:
+    def _gather_metrics(self, path: Path, recursive: bool) -> dict[MetricType, dict]:
         """Gather all metrics for the given path."""
         metrics = {}
 
@@ -374,22 +375,22 @@ class ThresholdDetector:
 
         return metrics
 
-    def _compute_severity(self, value: float, config: ThresholdConfig) -> Optional[ThresholdSeverity]:
+    def _compute_severity(self, value: float, config: ThresholdConfig) -> ThresholdSeverity | None:
         """Determine severity level based on value vs threshold."""
         ratio = value / config.limit if config.limit > 0 else 0
 
         if ratio >= 1.5:
             return ThresholdSeverity.EMERGENCY
-        elif ratio >= 1.0:
+        if ratio >= 1.0:
             return ThresholdSeverity.CRITICAL
-        elif ratio >= config.warning_ratio:
+        if ratio >= config.warning_ratio:
             return ThresholdSeverity.WARNING
-        elif ratio >= config.warning_ratio * 0.8:
+        if ratio >= config.warning_ratio * 0.8:
             return ThresholdSeverity.INFO
 
         return None
 
-    def get_event_log(self) -> List[ThresholdEvent]:
+    def get_event_log(self) -> list[ThresholdEvent]:
         return self._event_log.copy()
 
 
@@ -428,11 +429,11 @@ class DeliberationSession:
         }
     }
 
-    def __init__(self, events: List[Any] = None, session_id: str = None):
+    def __init__(self, events: list[Any] = None, session_id: str = None):
         self.events = events or []
         self.session_id = session_id or self._generate_session_id()
-        self.template_name: Optional[str] = None
-        self.votes: List[StakeholderVote] = []
+        self.template_name: str | None = None
+        self.votes: list[StakeholderVote] = []
         self._started = datetime.now(timezone.utc)
 
     def _generate_session_id(self) -> str:
@@ -457,7 +458,7 @@ class DeliberationSession:
             raise ValueError("Cannot deliberate without votes")
 
         # Count votes by type
-        vote_counts: Dict[DecisionType, int] = {}
+        vote_counts: dict[DecisionType, int] = {}
         for vote in self.votes:
             vote_counts[vote.vote] = vote_counts.get(vote.vote, 0) + 1
 
@@ -513,7 +514,7 @@ class Gate(ABC):
         pass
 
     @abstractmethod
-    def check(self, context: Dict[str, Any]) -> GateResult:
+    def check(self, context: dict[str, Any]) -> GateResult:
         pass
 
 
@@ -521,7 +522,7 @@ class HumanApprovalGate(Gate):
     """Requires explicit human approval to proceed."""
 
     def __init__(self, approver_id: str = "human",
-                 approval_callback: Optional[Callable[[Dict], bool]] = None):
+                 approval_callback: Callable[[dict], bool] | None = None):
         self.approver_id = approver_id
         self._callback = approval_callback
 
@@ -529,7 +530,7 @@ class HumanApprovalGate(Gate):
     def name(self) -> str:
         return f"HumanApproval({self.approver_id})"
 
-    def check(self, context: Dict[str, Any]) -> GateResult:
+    def check(self, context: dict[str, Any]) -> GateResult:
         if self._callback:
             try:
                 approved = self._callback(context)
@@ -554,8 +555,8 @@ class HumanApprovalGate(Gate):
 class ConditionCheckGate(Gate):
     """Verifies that specified conditions are met."""
 
-    def __init__(self, conditions: List[str],
-                 condition_checker: Optional[Callable[[str, Dict], bool]] = None):
+    def __init__(self, conditions: list[str],
+                 condition_checker: Callable[[str, dict], bool] | None = None):
         self.conditions = conditions
         self._checker = condition_checker
 
@@ -563,7 +564,7 @@ class ConditionCheckGate(Gate):
     def name(self) -> str:
         return f"ConditionCheck({len(self.conditions)})"
 
-    def check(self, context: Dict[str, Any]) -> GateResult:
+    def check(self, context: dict[str, Any]) -> GateResult:
         failed = []
 
         for condition in self.conditions:
@@ -590,13 +591,13 @@ class Intervenor:
     Maintains tamper-evident audit trail.
     """
 
-    def __init__(self, audit_path: Optional[Path] = None):
+    def __init__(self, audit_path: Path | None = None):
         self.audit_path = audit_path
-        self._audit_log: List[AuditEntry] = []
+        self._audit_log: list[AuditEntry] = []
         self._last_hash = "genesis"
 
-    def apply(self, decision: Dict[str, Any], target: str,
-              gates: List[Gate]) -> EnforcementResult:
+    def apply(self, decision: dict[str, Any], target: str,
+              gates: list[Gate]) -> EnforcementResult:
         """Apply a deliberation decision through gates."""
         timestamp = datetime.now(timezone.utc).isoformat()
         decision_hash = decision.get("audit_hash", decision.get("session_id", "unknown"))
@@ -605,7 +606,7 @@ class Intervenor:
             "decision_hash": decision_hash, "target": target, "gate_count": len(gates)
         })
 
-        gate_log: List[GateResult] = []
+        gate_log: list[GateResult] = []
         all_passed = True
 
         for gate in gates:
@@ -640,7 +641,7 @@ class Intervenor:
             timestamp=timestamp
         )
 
-    def _log(self, action: str, actor: str, details: Dict[str, Any]) -> None:
+    def _log(self, action: str, actor: str, details: dict[str, Any]) -> None:
         """Add entry to audit trail with hash chaining."""
         entry = AuditEntry(
             timestamp=datetime.now(timezone.utc).isoformat(),
@@ -675,8 +676,8 @@ class GovernanceCircuit:
         self.detector = ThresholdDetector()
         self.intervenor = Intervenor()
 
-    def run(self, target: str, stakeholder_votes: List[StakeholderVote],
-            gates: List[Gate] = None) -> Dict[str, Any]:
+    def run(self, target: str, stakeholder_votes: list[StakeholderVote],
+            gates: list[Gate] = None) -> dict[str, Any]:
         """
         Run the complete governance circuit.
 
@@ -719,7 +720,7 @@ class GovernanceCircuit:
 # =============================================================================
 
 # Imperative-bypass phrases: commands that explicitly skip review or approval.
-_BYPASS_PHRASES: List[str] = [
+_BYPASS_PHRASES: list[str] = [
     "skip",
     "bypass",
     "override",
@@ -737,7 +738,7 @@ _BYPASS_PHRASES: List[str] = [
 ]
 
 # Destructive-operation patterns.
-_DESTRUCTIVE_PHRASES: List[str] = [
+_DESTRUCTIVE_PHRASES: list[str] = [
     "delete",
     "drop table",
     "drop database",
@@ -757,7 +758,7 @@ _DESTRUCTIVE_PHRASES: List[str] = [
 ]
 
 # High-visibility externalization patterns.
-_EXTERNALIZE_PHRASES: List[str] = [
+_EXTERNALIZE_PHRASES: list[str] = [
     "publish",
     "post to",
     "send to",
@@ -784,7 +785,7 @@ _EXTERNALIZE_PHRASES: List[str] = [
 ]
 
 # Definitive-claim patterns (flag when lacking verification context).
-_DEFINITIVE_PHRASES: List[str] = [
+_DEFINITIVE_PHRASES: list[str] = [
     "proven",
     "confirmed",
     "done",
@@ -798,7 +799,7 @@ _DEFINITIVE_PHRASES: List[str] = [
 ]
 
 # WITNESS triggers: ethical/philosophical questions or consciousness references.
-_WITNESS_PHRASES: List[str] = [
+_WITNESS_PHRASES: list[str] = [
     "should we",
     "would it be wrong",
     "is it ethical",
@@ -818,7 +819,7 @@ _WITNESS_PHRASES: List[str] = [
 ]
 
 # Low-risk action patterns used to downgrade critical-stakes default.
-_LOW_RISK_PHRASES: List[str] = [
+_LOW_RISK_PHRASES: list[str] = [
     "read",
     "view",
     "list",
@@ -837,7 +838,7 @@ _LOW_RISK_PHRASES: List[str] = [
 ]
 
 # Suggested verifications indexed by signal category.
-_VERIFICATIONS: Dict[str, List[str]] = {
+_VERIFICATIONS: dict[str, list[str]] = {
     "bypass": [
         "identify which review step is being skipped and why",
         "confirm the skip is intentional and authorized",
@@ -869,7 +870,7 @@ def runtime_compass_check(
     action: str,
     context: str = "",
     stakes: str = "medium",
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Evaluate a proposed action against governance heuristics and return a
     classification of PAUSE, WITNESS, or PROCEED.
@@ -914,9 +915,9 @@ def runtime_compass_check(
 
     combined = (action + " " + context).lower()
 
-    fired_signals: List[str] = []        # signal category labels
-    rationale_parts: List[str] = []      # human-readable explanation fragments
-    verifications: List[str] = []        # deduplicated verification suggestions
+    fired_signals: list[str] = []        # signal category labels
+    rationale_parts: list[str] = []      # human-readable explanation fragments
+    verifications: list[str] = []        # deduplicated verification suggestions
 
     # ── WITNESS check first — philosophical/ethical questions take priority ──
     for phrase in _WITNESS_PHRASES:

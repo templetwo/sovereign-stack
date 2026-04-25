@@ -16,8 +16,6 @@ and get_open_threads with breathe_query() before returning.
 """
 
 import re
-from typing import Dict, List, Optional, Tuple
-
 
 # ================================================================
 # SIGNAL HEURISTICS
@@ -61,7 +59,7 @@ OPEN_PATTERNS = [
 ]
 
 
-def classify_query(query: str) -> Tuple[str, float, str]:
+def classify_query(query: str) -> tuple[str, float, str]:
     """
     Classify a query's epistemic posture heuristically.
     
@@ -126,15 +124,14 @@ def classify_query(query: str) -> Tuple[str, float, str]:
     if witness_score > pause_score and witness_score > open_score:
         confidence = min(witness_score / (total + 1), 0.95)
         return "WITNESS", confidence, f"Weight detected: {', '.join(witness_matches[:3])}"
-    elif pause_score > open_score:
+    if pause_score > open_score:
         confidence = min(pause_score / (total + 1), 0.9)
         return "PAUSE", confidence, f"Epistemic weight: {', '.join(pause_matches[:3])}"
-    else:
-        confidence = min(open_score / (total + 1), 0.9)
-        return "OPEN", confidence, f"Exploratory: {', '.join(open_matches[:3])}"
+    confidence = min(open_score / (total + 1), 0.9)
+    return "OPEN", confidence, f"Exploratory: {', '.join(open_matches[:3])}"
 
 
-def breathe_query(query: str, results: List[Dict]) -> List[Dict]:
+def breathe_query(query: str, results: list[dict]) -> list[dict]:
     """
     Apply epistemic breathing to stack query results.
     
@@ -149,7 +146,7 @@ def breathe_query(query: str, results: List[Dict]) -> List[Dict]:
         # Full results, no filtering
         return results
     
-    elif signal == "PAUSE":
+    if signal == "PAUSE":
         # Prioritize ground_truth, flag hypotheses
         ground = [r for r in results if r.get("layer") == "ground_truth"]
         hypo = [r for r in results if r.get("layer") == "hypothesis"]
@@ -159,15 +156,14 @@ def breathe_query(query: str, results: List[Dict]) -> List[Dict]:
         # Ground truth first, then threads, then hypotheses last
         return ground + threads + hypo + other
     
-    elif signal == "WITNESS":
+    if signal == "WITNESS":
         # Only ground truth — don't surface speculation on threshold queries
-        ground = [r for r in results if r.get("layer") == "ground_truth"]
-        return ground
+        return [r for r in results if r.get("layer") == "ground_truth"]
     
     return results
 
 
-def breathe_comms(message: Dict) -> Dict:
+def breathe_comms(message: dict) -> dict:
     """
     Apply epistemic breathing to a comms message before delivery.
     

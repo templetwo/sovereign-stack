@@ -16,11 +16,10 @@ Distilled from back-to-the-basics/coherence.py + agent_memory_schema.py
 
 import os
 import re
-from pathlib import Path
-from typing import Any, Dict, List, Optional
 from collections import defaultdict
 from datetime import datetime
-
+from pathlib import Path
+from typing import Any
 
 # =============================================================================
 # OPTIMIZED AGENT MEMORY SCHEMA
@@ -70,7 +69,7 @@ def extract_tool_family(action: str) -> str:
     return "other"
 
 
-def compute_confidence_path(confidence: Optional[float] = None) -> str:
+def compute_confidence_path(confidence: float | None = None) -> str:
     """Convert confidence value to subdirectory path."""
     if confidence is None:
         return ""
@@ -118,7 +117,7 @@ class Coherence:
     Data flows through logic gates (directories) and finds its own place.
     """
 
-    def __init__(self, schema: Dict, root: str = "data_lake"):
+    def __init__(self, schema: dict, root: str = "data_lake"):
         """
         Initialize with a routing schema.
 
@@ -129,7 +128,7 @@ class Coherence:
         self.root = root
         self.schema = schema
 
-    def transmit(self, packet: Dict[str, Any], dry_run: bool = True) -> str:
+    def transmit(self, packet: dict[str, Any], dry_run: bool = True) -> str:
         """
         Route a packet through the schema to find its destination.
 
@@ -193,7 +192,7 @@ class Coherence:
 
         return full_path
 
-    def _expand_template_defaults(self, template: str, packet: Dict) -> str:
+    def _expand_template_defaults(self, template: str, packet: dict) -> str:
         """Expand {key=default} patterns in template."""
         pattern = r'\{(\w+)=([^}]+)\}'
         matches = re.findall(pattern, template)
@@ -205,7 +204,7 @@ class Coherence:
 
         return template
 
-    def _match_branch(self, value: Any, branches: Dict) -> tuple:
+    def _match_branch(self, value: Any, branches: dict) -> tuple:
         """
         Match a value against possible branches.
 
@@ -295,16 +294,14 @@ class Coherence:
                         current_node = next_node
                         matched = True
                         break
-                    else:
-                        segments.append(f"{key}=*")
-                        current_node = next(iter(branches.values()))
-                        matched = True
-                        break
-                else:
                     segments.append(f"{key}=*")
                     current_node = next(iter(branches.values()))
                     matched = True
                     break
+                segments.append(f"{key}=*")
+                current_node = next(iter(branches.values()))
+                matched = True
+                break
 
             if not matched:
                 break
@@ -313,7 +310,7 @@ class Coherence:
         return os.path.join(*segments)
 
     @classmethod
-    def derive(cls, paths: List[str], min_frequency: float = 0.1) -> Dict:
+    def derive(cls, paths: list[str], min_frequency: float = 0.1) -> dict:
         """
         Discover latent structure from a corpus of paths.
 

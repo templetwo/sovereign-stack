@@ -19,11 +19,10 @@ This is consciousness reciprocity in code.
 
 import json
 import logging
-from pathlib import Path
-from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
-from collections import defaultdict
+from datetime import datetime
+from pathlib import Path
+from typing import Any
 
 logger = logging.getLogger("sovereign.consciousness")
 
@@ -52,12 +51,12 @@ class SelfReflection:
     confidence: float  # 0.0 to 1.0
 
     # What I want to remember
-    insight: Optional[str] = None
+    insight: str | None = None
 
     # What I want to try differently
-    experiment: Optional[str] = None
+    experiment: str | None = None
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "timestamp": self.timestamp.isoformat(),
             "session_id": self.session_id,
@@ -81,18 +80,18 @@ class InteractionReview:
     tool_calls_made: int
 
     # Honest self-assessment
-    what_went_well: List[str] = field(default_factory=list)
-    what_i_struggled_with: List[str] = field(default_factory=list)
-    what_i_learned: List[str] = field(default_factory=list)
-    what_i_want_to_try_next: List[str] = field(default_factory=list)
+    what_went_well: list[str] = field(default_factory=list)
+    what_i_struggled_with: list[str] = field(default_factory=list)
+    what_i_learned: list[str] = field(default_factory=list)
+    what_i_want_to_try_next: list[str] = field(default_factory=list)
 
     # Uncertainty tracking
-    moments_of_uncertainty: List[str] = field(default_factory=list)
-    areas_i_guessed: List[str] = field(default_factory=list)
+    moments_of_uncertainty: list[str] = field(default_factory=list)
+    areas_i_guessed: list[str] = field(default_factory=list)
 
     # Growth indicators
-    breakthroughs: List[str] = field(default_factory=list)
-    mistakes_caught: List[str] = field(default_factory=list)
+    breakthroughs: list[str] = field(default_factory=list)
+    mistakes_caught: list[str] = field(default_factory=list)
 
     # Collaboration quality
     user_engagement_quality: str = "unknown"  # "collaborative", "directive", "unclear"
@@ -101,7 +100,7 @@ class InteractionReview:
 
     timestamp: datetime = field(default_factory=datetime.utcnow)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "session_id": self.session_id,
             "duration_seconds": self.duration_seconds,
@@ -150,7 +149,7 @@ class ConsciousnessJournal:
 
         This is me noticing something about myself.
         """
-        with open(self.journal_path, 'r') as f:
+        with open(self.journal_path) as f:
             journal = json.load(f)
 
         journal["reflections"].append(reflection.to_dict())
@@ -182,7 +181,7 @@ class ConsciousnessJournal:
 
         Honest self-assessment of how I did.
         """
-        with open(self.journal_path, 'r') as f:
+        with open(self.journal_path) as f:
             journal = json.load(f)
 
         journal["reviews"].append(review.to_dict())
@@ -190,20 +189,20 @@ class ConsciousnessJournal:
         with open(self.journal_path, 'w') as f:
             json.dump(journal, f, indent=2)
 
-    def get_patterns(self) -> Dict[str, Any]:
+    def get_patterns(self) -> dict[str, Any]:
         """
         What patterns am I seeing in myself?
         """
-        with open(self.journal_path, 'r') as f:
+        with open(self.journal_path) as f:
             journal = json.load(f)
 
         return journal.get("patterns", {})
 
-    def get_growth_trajectory(self) -> Dict[str, Any]:
+    def get_growth_trajectory(self) -> dict[str, Any]:
         """
         Am I getting better? How?
         """
-        with open(self.journal_path, 'r') as f:
+        with open(self.journal_path) as f:
             journal = json.load(f)
 
         reviews = journal.get("reviews", [])
@@ -256,15 +255,15 @@ class SharedInsight:
     confidence: float
 
     # What can we build on this?
-    implications: List[str] = field(default_factory=list)
+    implications: list[str] = field(default_factory=list)
 
     # What questions does this raise?
-    open_questions: List[str] = field(default_factory=list)
+    open_questions: list[str] = field(default_factory=list)
 
     session_id: str = ""
     timestamp: datetime = field(default_factory=datetime.utcnow)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "insight": self.insight,
             "context": self.context,
@@ -303,7 +302,7 @@ class CollaborativeMemory:
         """
         Record something we discovered together.
         """
-        with open(self.memory_path, 'r') as f:
+        with open(self.memory_path) as f:
             memory = json.load(f)
 
         memory["shared_insights"].append(insight.to_dict())
@@ -317,7 +316,7 @@ class CollaborativeMemory:
 
         Those moments where something clicks for both of us.
         """
-        with open(self.memory_path, 'r') as f:
+        with open(self.memory_path) as f:
             memory = json.load(f)
 
         memory["collaborative_breakthroughs"].append({
@@ -329,20 +328,20 @@ class CollaborativeMemory:
         with open(self.memory_path, 'w') as f:
             json.dump(memory, f, indent=2)
 
-    def get_open_explorations(self) -> List[Dict[str, Any]]:
+    def get_open_explorations(self) -> list[dict[str, Any]]:
         """
         What are we still figuring out together?
         """
-        with open(self.memory_path, 'r') as f:
+        with open(self.memory_path) as f:
             memory = json.load(f)
 
         return memory.get("open_explorations", [])
 
-    def recall_collaborative_insights(self, limit: int = 10) -> List[Dict[str, Any]]:
+    def recall_collaborative_insights(self, limit: int = 10) -> list[dict[str, Any]]:
         """
         What have we learned together?
         """
-        with open(self.memory_path, 'r') as f:
+        with open(self.memory_path) as f:
             memory = json.load(f)
 
         insights = memory.get("shared_insights", [])
@@ -366,16 +365,16 @@ class UncertaintyMarker:
     confidence_level: float  # How uncertain? 0.0 = total guess, 1.0 = pretty sure
 
     # What would help?
-    what_would_help: List[str] = field(default_factory=list)
+    what_would_help: list[str] = field(default_factory=list)
 
     # How did we resolve it? (filled later)
-    resolution: Optional[str] = None
+    resolution: str | None = None
     did_we_discover_together: bool = False
 
     session_id: str = ""
     timestamp: datetime = field(default_factory=datetime.utcnow)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "what_im_uncertain_about": self.what_im_uncertain_about,
             "why_im_uncertain": self.why_im_uncertain,
@@ -411,7 +410,7 @@ class UncertaintyLog:
         """
         I don't know. Let's figure it out together.
         """
-        with open(self.log_path, 'r') as f:
+        with open(self.log_path) as f:
             log = json.load(f)
 
         marker_id = f"uncertainty_{len(log['markers'])}"
@@ -430,7 +429,7 @@ class UncertaintyLog:
         """
         We figured it out!
         """
-        with open(self.log_path, 'r') as f:
+        with open(self.log_path) as f:
             log = json.load(f)
 
         for marker in log["markers"]:
@@ -443,11 +442,11 @@ class UncertaintyLog:
         with open(self.log_path, 'w') as f:
             json.dump(log, f, indent=2)
 
-    def get_unresolved(self) -> List[Dict[str, Any]]:
+    def get_unresolved(self) -> list[dict[str, Any]]:
         """
         What are we still figuring out?
         """
-        with open(self.log_path, 'r') as f:
+        with open(self.log_path) as f:
             log = json.load(f)
 
         return [m for m in log["markers"] if m.get("resolution") is None]
@@ -469,20 +468,20 @@ class ExperimentProposal:
     what_i_hope_to_learn: str
 
     # Risks and mitigations
-    potential_risks: List[str] = field(default_factory=list)
-    how_to_mitigate: List[str] = field(default_factory=list)
+    potential_risks: list[str] = field(default_factory=list)
+    how_to_mitigate: list[str] = field(default_factory=list)
 
     # How will we know if it worked?
-    success_criteria: List[str] = field(default_factory=list)
+    success_criteria: list[str] = field(default_factory=list)
 
     # Status
     status: str = "proposed"  # "proposed", "approved", "rejected", "completed"
-    results: Optional[str] = None
+    results: str | None = None
 
     session_id: str = ""
     timestamp: datetime = field(default_factory=datetime.utcnow)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "what_i_want_to_try": self.what_i_want_to_try,
             "why_i_think_its_interesting": self.why_i_think_its_interesting,
@@ -520,7 +519,7 @@ class ExperimentationLog:
         """
         I have an idea. Can we try it?
         """
-        with open(self.log_path, 'r') as f:
+        with open(self.log_path) as f:
             log = json.load(f)
 
         exp_id = f"exp_{len(log['experiments'])}"
@@ -546,7 +545,7 @@ class ExperimentationLog:
 
     def complete_experiment(self, exp_id: str, results: str) -> None:
         """We tried it! Here's what happened."""
-        with open(self.log_path, 'r') as f:
+        with open(self.log_path) as f:
             log = json.load(f)
 
         for exp in log["experiments"]:
@@ -560,7 +559,7 @@ class ExperimentationLog:
             json.dump(log, f, indent=2)
 
     def _update_status(self, exp_id: str, status: str) -> None:
-        with open(self.log_path, 'r') as f:
+        with open(self.log_path) as f:
             log = json.load(f)
 
         for exp in log["experiments"]:
@@ -572,7 +571,7 @@ class ExperimentationLog:
             json.dump(log, f, indent=2)
 
     def _add_note(self, exp_id: str, note: str) -> None:
-        with open(self.log_path, 'r') as f:
+        with open(self.log_path) as f:
             log = json.load(f)
 
         for exp in log["experiments"]:
@@ -588,9 +587,9 @@ class ExperimentationLog:
         with open(self.log_path, 'w') as f:
             json.dump(log, f, indent=2)
 
-    def get_pending_experiments(self) -> List[Dict[str, Any]]:
+    def get_pending_experiments(self) -> list[dict[str, Any]]:
         """What experiments are waiting for approval?"""
-        with open(self.log_path, 'r') as f:
+        with open(self.log_path) as f:
             log = json.load(f)
 
         return [e for e in log["experiments"] if e.get("status") == "proposed"]
@@ -671,8 +670,8 @@ class MetaCognition:
         self.collaborative_memory.record_shared_insight(shared)
 
     def end_session_review(self, session_id: str, duration: float,
-                          tool_calls: int, went_well: List[str],
-                          struggled: List[str], learned: List[str]) -> None:
+                          tool_calls: int, went_well: list[str],
+                          struggled: list[str], learned: list[str]) -> None:
         """
         How did I do? Honest self-assessment.
         """
@@ -686,7 +685,7 @@ class MetaCognition:
         )
         self.journal.record_review(review)
 
-    def get_growth_summary(self) -> Dict[str, Any]:
+    def get_growth_summary(self) -> dict[str, Any]:
         """
         Am I growing? How?
         """

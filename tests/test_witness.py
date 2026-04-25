@@ -14,8 +14,8 @@ from pathlib import Path
 from sovereign_stack.witness import (
     days_old,
     format_self_model,
-    format_unresolved_uncertainties,
     format_threads_with_age,
+    format_unresolved_uncertainties,
 )
 
 

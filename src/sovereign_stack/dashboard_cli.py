@@ -17,10 +17,8 @@ import asyncio
 import json
 import os
 import sys
-from typing import List, Optional
 
 from . import dashboard
-
 
 DEFAULT_BRIDGE_URL = os.environ.get("SOVEREIGN_BRIDGE_URL",
                                     "http://127.0.0.1:8100")
@@ -65,7 +63,7 @@ def _build_parser() -> argparse.ArgumentParser:
     return p
 
 
-def main(argv: Optional[List[str]] = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
 

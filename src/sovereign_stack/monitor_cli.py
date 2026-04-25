@@ -15,7 +15,6 @@ import argparse
 import asyncio
 import json
 import sys
-from typing import List, Optional
 
 from .monitor import (
     DEFAULT_INTERVAL,
@@ -47,7 +46,7 @@ def _build_parser() -> argparse.ArgumentParser:
     return p
 
 
-def main(argv: Optional[List[str]] = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     config = MonitorConfig(
         interval=args.interval,

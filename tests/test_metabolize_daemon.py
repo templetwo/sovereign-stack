@@ -22,12 +22,10 @@ from pathlib import Path
 import pytest
 
 from sovereign_stack.daemons.metabolize_daemon import (
-    CONSECUTIVE_UNACKED_THRESHOLD,
     COMPASS_PAUSE,
     COMPASS_PROCEED,
-    DaemonState,
+    CONSECUTIVE_UNACKED_THRESHOLD,
     MAX_DIGEST_ITEMS_PER_CATEGORY,
-    MetabolizeDaemon,
     OUTCOME_ALREADY_HALTED,
     OUTCOME_DRY_RUN,
     OUTCOME_GROUNDING_FAILED,
@@ -37,6 +35,7 @@ from sovereign_stack.daemons.metabolize_daemon import (
     OUTCOME_PAUSED,
     OUTCOME_POSTED,
     STATE_SCHEMA_VERSION,
+    MetabolizeDaemon,
     _contradiction_key,
     _stale_hypothesis_key,
     _stale_thread_key,
@@ -50,7 +49,6 @@ from sovereign_stack.grounding import (
     REASON_OK,
     GroundingResult,
 )
-
 
 # ── Fixtures + stubs ────────────────────────────────────────────────────────
 
@@ -179,7 +177,8 @@ def make_daemon(
                         "stale_hypotheses": [], "stats": {}}
     else:
         single = digest if digest is not None else _digest()
-        detect_fn = lambda: single
+        def detect_fn():
+            return single
 
     def grounding_fn(claim, evidence_paths, **kw):
         if grounding_accept:

@@ -2,11 +2,7 @@
 from __future__ import annotations
 
 import asyncio
-import json
-import tempfile
 from pathlib import Path
-
-import pytest
 
 from sovereign_stack.memory import ExperientialMemory
 from sovereign_stack.reflexive import ReflexiveSurface
@@ -20,7 +16,7 @@ def _seed(root: Path, threads_spec):
 
 
 def test_reflexive_surface_ranks_matched_threads_first(tmp_path):
-    mem = _seed(tmp_path, [
+    _seed(tmp_path, [
         ("unrelated,other", "Generic question about nothing here", "context"),
         ("compass,witness,governance", "How should the compass handle imperative bypass?", "relates to governance work"),
         ("temple-wars,rts", "Fog of war vs enemy AI next?", "game loop"),

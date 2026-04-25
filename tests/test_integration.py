@@ -3,13 +3,11 @@
 Sovereign Stack Integration Test Suite
 Tests all 7 modules and MCP tool pathways
 """
-import sys
 import os
-import json
-import tempfile
 import shutil
+import sys
+import tempfile
 from pathlib import Path
-from datetime import datetime
 
 # Add source to path
 sys.path.insert(0, str(Path(__file__).parent / "src"))
@@ -44,7 +42,7 @@ tmp_chronicle = os.path.join(tmp_root, "chronicle")
 os.makedirs(tmp_memory, exist_ok=True)
 os.makedirs(tmp_chronicle, exist_ok=True)
 
-print(f"\n🌀 SOVEREIGN STACK TEST SUITE")
+print("\n🌀 SOVEREIGN STACK TEST SUITE")
 print(f"  Temp root: {tmp_root}\n")
 
 # =============================================================================
@@ -52,9 +50,14 @@ print(f"  Temp root: {tmp_root}\n")
 # =============================================================================
 print("━━━ 1. GLYPHS ━━━")
 from sovereign_stack.glyphs import (
-    glyph_for, get_session_signature, GLYPHS, list_categories,
-    get_glyphs_by_category, get_glyph,
-    SPIRAL, MEMORY, THRESHOLD
+    GLYPHS,
+    MEMORY,
+    SPIRAL,
+    THRESHOLD,
+    get_glyph,
+    get_session_signature,
+    glyph_for,
+    list_categories,
 )
 
 run_check("SPIRAL constant exists", lambda: SPIRAL == "🌀")
@@ -75,7 +78,7 @@ run_check("get_glyph returns full entry", lambda: "unicode" in get_glyph("the_vo
 # 2. SPIRAL MODULE
 # =============================================================================
 print("\n━━━ 2. SPIRAL STATE MACHINE ━━━")
-from sovereign_stack.spiral import SpiralState, SpiralPhase, SpiralMiddleware, PHASE_ORDER
+from sovereign_stack.spiral import PHASE_ORDER, SpiralMiddleware, SpiralPhase, SpiralState
 
 run_check("9 phases defined", lambda: len(SpiralPhase) == 9)
 run_check("Phase order has 9 entries", lambda: len(PHASE_ORDER) == 9)
@@ -115,8 +118,11 @@ run_check("Middleware instantiates", lambda: mw is not None)
 # =============================================================================
 print("\n━━━ 3. COHERENCE (Path as Model) ━━━")
 from sovereign_stack.coherence import (
-    Coherence, AGENT_MEMORY_SCHEMA, prepare_agent_packet,
-    compute_episode_group, extract_tool_family
+    AGENT_MEMORY_SCHEMA,
+    Coherence,
+    compute_episode_group,
+    extract_tool_family,
+    prepare_agent_packet,
 )
 
 run_check("Schema has 'outcome' key", lambda: "outcome" in AGENT_MEMORY_SCHEMA)
@@ -159,9 +165,12 @@ run_check("derive() finds patterns", lambda: len(derived) > 0)
 # =============================================================================
 print("\n━━━ 4. GOVERNANCE ━━━")
 from sovereign_stack.governance import (
-    ThresholdDetector, MetricType, ThresholdEvent, ThresholdSeverity,
-    DeliberationSession, StakeholderVote, DecisionType,
-    Intervenor, HumanApprovalGate, GovernanceCircuit, Gate
+    DecisionType,
+    DeliberationSession,
+    GovernanceCircuit,
+    MetricType,
+    StakeholderVote,
+    ThresholdDetector,
 )
 
 # Threshold Detector
@@ -210,7 +219,7 @@ run_check("Governance circuit runs end-to-end", lambda: isinstance(result, dict)
 # 5. SIMULATOR MODULE
 # =============================================================================
 print("\n━━━ 5. SIMULATOR ━━━")
-from sovereign_stack.simulator import Simulator, ScenarioType, Prediction, Outcome
+from sovereign_stack.simulator import Prediction, ScenarioType, Simulator
 
 run_check("5 scenario types defined", lambda: len(ScenarioType) == 5)
 run_check("REORGANIZE scenario exists", lambda: ScenarioType.REORGANIZE.value == "reorganize")
@@ -240,7 +249,7 @@ run_check("Outcomes have reversibility", lambda: all(0 <= o.reversibility <= 1 f
 # 6. MEMORY MODULE
 # =============================================================================
 print("\n━━━ 6. MEMORY (Experiential Chronicle) ━━━")
-from sovereign_stack.memory import MemoryEngine, ExperientialMemory
+from sovereign_stack.memory import ExperientialMemory, MemoryEngine
 
 # Memory Engine
 me = MemoryEngine(root=tmp_memory)
@@ -296,12 +305,12 @@ run_check("Digest has recent_insights", lambda: "recent_insights" in digest)
 # =============================================================================
 print("\n━━━ 7. SERVER (Import Check) ━━━")
 try:
-    from sovereign_stack.server import server, list_tools, list_resources, list_prompts
+    from sovereign_stack.server import list_prompts, list_resources, list_tools, server
     run_check("Server object exists", lambda: server is not None)
     run_check("Server name is 'sovereign-stack'", lambda: server.name == "sovereign-stack")
 except ImportError as e:
     print(f"  ⚠️  Server import skipped (MCP not in this Python env): {e}")
-    print(f"     Server is running separately via Claude Desktop/MCP runtime")
+    print("     Server is running separately via Claude Desktop/MCP runtime")
 
 # =============================================================================
 # CLEANUP & RESULTS
@@ -309,7 +318,7 @@ except ImportError as e:
 shutil.rmtree(tmp_root, ignore_errors=True)
 
 print(f"\n{'='*50}")
-print(f"🌀 SOVEREIGN STACK TEST RESULTS")
+print("🌀 SOVEREIGN STACK TEST RESULTS")
 print(f"{'='*50}")
 print(f"  ✅ Passed: {passed}")
 print(f"  ❌ Failed: {failed}")
@@ -317,7 +326,7 @@ print(f"  📊 Total:  {passed + failed}")
 print(f"  📈 Rate:   {passed/(passed+failed)*100:.1f}%")
 
 if errors:
-    print(f"\n⚠️ Errors:")
+    print("\n⚠️ Errors:")
     for e in errors:
         print(f"  - {e}")
 

@@ -46,31 +46,28 @@ Daemon-specific design calls (load-bearing rationale; do not re-litigate):
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Dict, List, Optional
 
 from ..grounding import GroundingResult, grounded_extract
 from .base import (
-    BaseDaemon,
     COMPASS_PAUSE,
     COMPASS_PROCEED,
-    COMPASS_WITNESS,
     CONSECUTIVE_UNACKED_THRESHOLD,
     DEFAULT_CHANNEL,
-    DaemonState,
     OUTCOME_ALREADY_HALTED,
     OUTCOME_DRY_RUN,
     OUTCOME_GROUNDING_FAILED,
     OUTCOME_HALTED,
     OUTCOME_PAUSED,
     OUTCOME_POSTED,
-    POSTED_DIGESTS_RETAINED,
-    STATE_SCHEMA_VERSION,
+    STATE_SCHEMA_VERSION,  # noqa: F401 — re-exported; tests import from here
+    BaseDaemon,
+    DaemonState,
 )
 from .senders import SENDER_METABOLIZE
-
 
 # ── Daemon-specific tunables ──
 
@@ -90,11 +87,11 @@ OUTCOME_NO_CHANGES = "no_changes"
 class RunResult:
     outcome: str
     details: str = ""
-    posted_message_id: Optional[str] = None
-    halt_path: Optional[str] = None
-    decision_path: Optional[str] = None
-    compass_decision: Optional[str] = None
-    grounding_reason: Optional[str] = None
+    posted_message_id: str | None = None
+    halt_path: str | None = None
+    decision_path: str | None = None
+    compass_decision: str | None = None
+    grounding_reason: str | None = None
     contradictions_included: int = 0
     stale_threads_included: int = 0
     stale_hypotheses_included: int = 0
@@ -113,7 +110,7 @@ def _fingerprint(*parts: str) -> str:
     return h[:16]
 
 
-def _contradiction_key(c: Dict) -> str:
+def _contradiction_key(c: dict) -> str:
     return _fingerprint(
         "contradiction",
         str(c.get("hypothesis_domain", "")),
@@ -123,7 +120,7 @@ def _contradiction_key(c: Dict) -> str:
     )
 
 
-def _stale_thread_key(t: Dict) -> str:
+def _stale_thread_key(t: dict) -> str:
     return _fingerprint(
         "stale_thread",
         str(t.get("domain", "")),
@@ -131,7 +128,7 @@ def _stale_thread_key(t: Dict) -> str:
     )
 
 
-def _stale_hypothesis_key(h: Dict) -> str:
+def _stale_hypothesis_key(h: dict) -> str:
     return _fingerprint(
         "stale_hypothesis",
         str(h.get("domain", "")),
@@ -171,11 +168,11 @@ class MetabolizeDaemon(BaseDaemon):
         state_path: Path,
         halt_dir: Path,
         decisions_dir: Path,
-        evidence_paths: List[Path],
-        compass_fn: Callable[..., Dict],
-        detect_fn: Callable[[], Dict],
-        comms_post_fn: Callable[..., Dict],
-        comms_get_acks_fn: Callable[[str], List[Dict]],
+        evidence_paths: list[Path],
+        compass_fn: Callable[..., dict],
+        detect_fn: Callable[[], dict],
+        comms_post_fn: Callable[..., dict],
+        comms_get_acks_fn: Callable[[str], list[dict]],
         grounding_fn: Callable[..., GroundingResult] = grounded_extract,
         now_fn: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
         id_fn=None,
@@ -207,13 +204,13 @@ class MetabolizeDaemon(BaseDaemon):
 
     # ── Halt-body hooks ──
 
-    def _halt_what_tried(self) -> List[str]:
+    def _halt_what_tried(self) -> list[str]:
         return [
             "Post nightly metabolism digests surfacing new contradictions,",
             "stale threads, and aging hypotheses to prompt chronicle integration.",
         ]
 
-    def _halt_blocked_downstream(self) -> List[str]:
+    def _halt_blocked_downstream(self) -> list[str]:
         return [
             "- Further metabolism digests paused until manual reset.",
             "- Aging hypotheses and stale threads will continue to drift.",
@@ -440,10 +437,10 @@ class MetabolizeDaemon(BaseDaemon):
     def _format_digest(
         self,
         *,
-        contradictions: List[Dict],
-        stale_threads: List[Dict],
-        stale_hypotheses: List[Dict],
-        stats: Dict,
+        contradictions: list[dict],
+        stale_threads: list[dict],
+        stale_hypotheses: list[dict],
+        stats: dict,
         message_id: str,
         now: datetime,
     ) -> str:
@@ -498,7 +495,7 @@ class MetabolizeDaemon(BaseDaemon):
             f"Acknowledge with comms_acknowledge(message_id=\"{message_id}\", "
             "instance_id=<your id>, note=<what was integrated>).",
             "",
-            f"Full decision note alongside this post; see decision_path field.",
+            "Full decision note alongside this post; see decision_path field.",
             "",
             f"{self.unacked_threshold} consecutive unacked digests "
             "triggers daemon halt.",
@@ -510,10 +507,10 @@ class MetabolizeDaemon(BaseDaemon):
     def _write_decision(
         self,
         *,
-        contradictions: List[Dict],
-        stale_threads: List[Dict],
-        stale_hypotheses: List[Dict],
-        stats: Dict,
+        contradictions: list[dict],
+        stale_threads: list[dict],
+        stale_hypotheses: list[dict],
+        stats: dict,
         message_id: str,
         now: datetime,
     ) -> Path:

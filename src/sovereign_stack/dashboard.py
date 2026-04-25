@@ -29,18 +29,17 @@ Public API:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
-import sys
 import time
 from collections import deque
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Deque, Dict, List, Optional, Tuple
+from typing import Any
 
 from . import connectivity
-
 
 # ── Defaults / paths ────────────────────────────────────────────────────────
 
@@ -109,9 +108,9 @@ class ActivityFeed:
     """Bounded deque of ActivityEvent. Newest first when iterated."""
 
     def __init__(self, maxlen: int = DEFAULT_FEED_MAX):
-        self._events: Deque[ActivityEvent] = deque(maxlen=maxlen)
+        self._events: deque[ActivityEvent] = deque(maxlen=maxlen)
 
-    def add(self, category: str, message: str, *, ts: Optional[float] = None) -> None:
+    def add(self, category: str, message: str, *, ts: float | None = None) -> None:
         if ts is None:
             ts = time.time()
         self._events.appendleft(ActivityEvent(ts, category, message))
@@ -122,7 +121,7 @@ class ActivityFeed:
     def __iter__(self):
         return iter(self._events)
 
-    def to_list(self, limit: Optional[int] = None) -> List[Dict]:
+    def to_list(self, limit: int | None = None) -> list[dict]:
         items = list(self._events)
         if limit is not None:
             items = items[:limit]
@@ -139,12 +138,12 @@ class ActivityFeed:
 @dataclass
 class _MtimeIndex:
     """Tracks per-path mtime to detect new writes between polls."""
-    seen: Dict[str, float] = field(default_factory=dict)
+    seen: dict[str, float] = field(default_factory=dict)
 
-    def diff(self, paths: List[Path]) -> List[Path]:
+    def diff(self, paths: list[Path]) -> list[Path]:
         """Return the subset of `paths` whose mtime is newer than the last
         recorded value, then update the index. New paths count as 'changed'."""
-        changed: List[Path] = []
+        changed: list[Path] = []
         for p in paths:
             try:
                 mtime = p.stat().st_mtime
@@ -158,7 +157,7 @@ class _MtimeIndex:
         return changed
 
 
-def _list_paths(directory: Path, glob: str = "*", recursive: bool = False) -> List[Path]:
+def _list_paths(directory: Path, glob: str = "*", recursive: bool = False) -> list[Path]:
     if not directory.exists():
         return []
     if recursive:
@@ -172,9 +171,9 @@ def _list_paths(directory: Path, glob: str = "*", recursive: bool = False) -> Li
 def _git_recent_commits(
     repo_path: Path,
     *,
-    since: Optional[str] = None,
+    since: str | None = None,
     limit: int = 5,
-) -> List[Dict]:
+) -> list[dict]:
     """
     Return recent commits as [{sha, subject, author_iso}]. If `since` is
     given (a unix timestamp string), only commits after that are returned.
@@ -185,7 +184,7 @@ def _git_recent_commits(
     import subprocess
     args = ["git", "-C", str(repo_path), "log",
             "--pretty=format:%H%x09%aI%x09%s",
-            f"-n", str(int(limit))]
+            "-n", str(int(limit))]
     if since:
         args += [f"--since={since}"]
     try:
@@ -196,7 +195,7 @@ def _git_recent_commits(
         return []
     if proc.returncode != 0:
         return []
-    out: List[Dict] = []
+    out: list[dict] = []
     for line in proc.stdout.splitlines():
         parts = line.split("\t", 2)
         if len(parts) != 3:
@@ -212,7 +211,7 @@ def _git_recent_commits(
 # ── launchd service-state poller ────────────────────────────────────────────
 
 
-def _launchctl_service_states(labels: List[str]) -> Dict[str, Dict]:
+def _launchctl_service_states(labels: list[str]) -> dict[str, dict]:
     """
     For each launchd label, return its current state via `launchctl print`.
     Returns {label: {state, pid, last_exit_code}}. Errors are absorbed:
@@ -221,7 +220,7 @@ def _launchctl_service_states(labels: List[str]) -> Dict[str, Dict]:
     import os
     import re
     import subprocess
-    out: Dict[str, Dict] = {}
+    out: dict[str, dict] = {}
     uid = os.getuid()
     re_state = re.compile(r"^\s*state\s*=\s*(\S+)", re.MULTILINE)
     re_pid = re.compile(r"^\s*pid\s*=\s*(\d+)", re.MULTILINE)
@@ -249,7 +248,7 @@ def _launchctl_service_states(labels: List[str]) -> Dict[str, Dict]:
 # ── Source readers (pure: take a path, return events) ───────────────────────
 
 
-def read_recent_honks(path: Path, *, limit: int = 5) -> List[Dict]:
+def read_recent_honks(path: Path, *, limit: int = 5) -> list[dict]:
     """
     Read the last N UNACKED entries from nape honks.jsonl, with cross-file
     ack lookup against acks.jsonl in the same directory.
@@ -288,7 +287,7 @@ def read_recent_honks(path: Path, *, limit: int = 5) -> List[Dict]:
         except OSError:
             pass
 
-    out: List[Dict] = []
+    out: list[dict] = []
     for line in reversed(lines):
         line = line.strip()
         if not line:
@@ -310,7 +309,7 @@ def read_recent_honks(path: Path, *, limit: int = 5) -> List[Dict]:
     return out
 
 
-def read_chronicle_tail(path: Path) -> Optional[Dict]:
+def read_chronicle_tail(path: Path) -> dict | None:
     """Read the last record from a chronicle JSONL file, or None."""
     try:
         text = path.read_text(encoding="utf-8")
@@ -352,29 +351,23 @@ def _format_uptime(seconds: float) -> str:
     return f"{mins}m"
 
 
-def parse_spiral_status_text(text: str) -> Dict:
+def parse_spiral_status_text(text: str) -> dict:
     """Parse the spiral_status MCP tool's text output into a dict."""
-    out: Dict[str, Any] = {}
+    out: dict[str, Any] = {}
     for line in text.splitlines():
         line = line.strip()
         if line.startswith("Phase:"):
             out["phase"] = line.split(":", 1)[1].strip()
         elif line.startswith("Tool Calls:"):
-            try:
+            with contextlib.suppress(ValueError):
                 out["tool_calls"] = int(line.split(":", 1)[1].strip())
-            except ValueError:
-                pass
         elif line.startswith("Reflection Depth:"):
-            try:
+            with contextlib.suppress(ValueError):
                 out["reflection_depth"] = int(line.split(":", 1)[1].strip())
-            except ValueError:
-                pass
         elif line.startswith("Duration:"):
             raw = line.split(":", 1)[1].strip().replace("s", "")
-            try:
+            with contextlib.suppress(ValueError):
                 out["duration_seconds"] = float(raw)
-            except ValueError:
-                pass
     return out
 
 
@@ -384,9 +377,9 @@ def parse_spiral_status_text(text: str) -> Dict:
 @dataclass
 class DashboardState:
     timestamp: float
-    connectivity_summary: Dict
+    connectivity_summary: dict
     bridge_stats: BridgeStats
-    feed: List[Dict]
+    feed: list[dict]
     listener_stale: bool = False
     halts_count: int = 0
     decisions_count: int = 0
@@ -394,11 +387,11 @@ class DashboardState:
     # Latest entries by type. Each value is a small preview dict or None.
     # Rendered in the dashboard's "Latest" panel so a watcher sees the
     # most recent substantive content alongside the pulse-of-services.
-    latest: Dict[str, Optional[Dict]] = field(default_factory=dict)
+    latest: dict[str, dict | None] = field(default_factory=dict)
 
 
 def _newest_jsonl_record(directory: Path, *, recursive: bool = False,
-                         glob: str = "*.jsonl") -> Optional[Dict]:
+                         glob: str = "*.jsonl") -> dict | None:
     """
     Find the most-recently-modified JSONL file under `directory` and
     return its tail record (newest line). Returns None if no JSONL
@@ -419,7 +412,7 @@ def _newest_jsonl_record(directory: Path, *, recursive: bool = False,
 
 
 def _newest_file(directory: Path, *, glob: str = "*",
-                 recursive: bool = False) -> Optional[Path]:
+                 recursive: bool = False) -> Path | None:
     """Return the newest file matching `glob` under `directory`, or None."""
     if not directory.exists():
         return None
@@ -437,7 +430,7 @@ def _preview_text(text: str, limit: int = 160) -> str:
     return text
 
 
-def collect_latest_entries(sovereign_root: Path) -> Dict[str, Optional[Dict]]:
+def collect_latest_entries(sovereign_root: Path) -> dict[str, dict | None]:
     """
     Collect the most-recent record of each notable type, formatted for
     dashboard display. Each value is None if no record exists for that
@@ -452,7 +445,7 @@ def collect_latest_entries(sovereign_root: Path) -> Dict[str, Optional[Dict]]:
       halt          — newest *.md in daemons/halts/
       honk          — newest unacked honk in nape/honks.jsonl
     """
-    out: Dict[str, Optional[Dict]] = {}
+    out: dict[str, dict | None] = {}
 
     insight = _newest_jsonl_record(
         sovereign_root / "chronicle" / "insights", recursive=True,
@@ -505,7 +498,7 @@ def collect_latest_entries(sovereign_root: Path) -> Dict[str, Optional[Dict]]:
                 "preview": _preview_text(data.get("note", "")),
                 "consumed_by": data.get("consumed_by"),
             }
-        except Exception:
+        except (OSError, json.JSONDecodeError):
             out["handoff"] = {
                 "timestamp": None,
                 "preview": f"(unreadable: {handoff_path.name})",
@@ -518,7 +511,7 @@ def collect_latest_entries(sovereign_root: Path) -> Dict[str, Optional[Dict]]:
     if decision_path:
         try:
             text = decision_path.read_text(encoding="utf-8")
-        except Exception:
+        except OSError:
             text = ""
         # First non-header line as preview.
         preview_line = ""
@@ -572,7 +565,7 @@ def collect_latest_entries(sovereign_root: Path) -> Dict[str, Optional[Dict]]:
     return out
 
 
-def _file_iso(path: Path) -> Optional[str]:
+def _file_iso(path: Path) -> str | None:
     try:
         return datetime.fromtimestamp(
             path.stat().st_mtime, tz=timezone.utc,
@@ -583,10 +576,10 @@ def _file_iso(path: Path) -> Optional[str]:
 
 def collect_state(
     feed: ActivityFeed,
-    bridge_stats: Optional[BridgeStats] = None,
+    bridge_stats: BridgeStats | None = None,
     *,
-    sovereign_root: Optional[Path] = None,
-    connectivity_check: Optional[Any] = None,
+    sovereign_root: Path | None = None,
+    connectivity_check: Any | None = None,
 ) -> DashboardState:
     """
     Build a one-shot snapshot of the stack state. Pure-data — no
@@ -601,10 +594,7 @@ def collect_state(
     """
     root = sovereign_root or _sovereign_root()
 
-    if connectivity_check is None:
-        statuses = connectivity.check_all()
-    else:
-        statuses = connectivity_check()
+    statuses = connectivity.check_all() if connectivity_check is None else connectivity_check()
 
     summary = connectivity.aggregate(statuses)
 
@@ -683,7 +673,7 @@ def render_state(
     def _c(s: str, code: str) -> str:
         return f"{code}{s}{_RESET}" if color else s
 
-    lines: List[str] = []
+    lines: list[str] = []
     lines.append(_c(f"  {'†⟡†  SOVEREIGN STACK DASHBOARD':^{width-4}}  ",
                     _HEADER_BG + _BOLD + _GOLD))
     lines.append("")
@@ -719,7 +709,7 @@ def render_state(
         sc = _STATUS_COLOR.get(ep["status"], _GRAY)
         glyph = "●" if ep["status"] == connectivity.STATUS_OK else "○"
         pid = f"pid={ep['pid']}" if ep.get("pid") else "—"
-        extra: List[str] = []
+        extra: list[str] = []
         if ep.get("http_status") is not None:
             extra.append(f"http={ep['http_status']}")
         if ep.get("log_age_seconds") is not None:
@@ -734,7 +724,7 @@ def render_state(
     lines.append("")
 
     # v1.3.2 indicators
-    indicators: List[str] = []
+    indicators: list[str] = []
     if state.unacked_honks:
         indicators.append(_c(f"⚠ {state.unacked_honks} unacked honk(s)", _GOLD))
     if state.halts_count:
@@ -776,7 +766,7 @@ def render_state(
 # ── Async loop (the live TUI) ───────────────────────────────────────────────
 
 
-async def _bridge_get_spiral(bridge_url: str, headers: Dict) -> Optional[Dict]:
+async def _bridge_get_spiral(bridge_url: str, headers: dict) -> dict | None:
     """Best-effort bridge call. Returns None on any failure."""
     try:
         import httpx  # local import — bridge is optional
@@ -797,8 +787,8 @@ async def _bridge_get_spiral(bridge_url: str, headers: Dict) -> Optional[Dict]:
         return None
 
 
-async def _bridge_get_unread(bridge_url: str, headers: Dict,
-                             instance_id: str) -> Optional[int]:
+async def _bridge_get_unread(bridge_url: str, headers: dict,
+                             instance_id: str) -> int | None:
     try:
         import httpx
     except ImportError:
@@ -819,8 +809,8 @@ async def _bridge_get_unread(bridge_url: str, headers: Dict,
 async def run_loop(
     *,
     interval: int = DEFAULT_POLL_SECONDS,
-    bridge_url: Optional[str] = None,
-    bridge_token: Optional[str] = None,
+    bridge_url: str | None = None,
+    bridge_token: str | None = None,
     instance_id: str = "dashboard",
     once: bool = False,
     color: bool = True,

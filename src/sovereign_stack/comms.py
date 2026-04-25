@@ -26,8 +26,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Literal, Optional
-
+from typing import Literal
 
 COMMS_DIR = Path.home() / ".sovereign" / "comms"
 DEFAULT_CHANNEL = "general"
@@ -43,7 +42,7 @@ def _channel_path(channel: str) -> Path:
     return COMMS_DIR / f"{safe}.jsonl"
 
 
-def _parse_timestamp(value) -> Optional[float]:
+def _parse_timestamp(value) -> float | None:
     """Accept epoch float, epoch int, ISO8601 string, or None. Return epoch float."""
     if value is None or value == "":
         return None
@@ -65,12 +64,12 @@ def _parse_timestamp(value) -> Optional[float]:
 
 # ── Core read ──
 
-def _load_all(channel: str) -> List[Dict]:
+def _load_all(channel: str) -> list[dict]:
     """Read the full channel file (chronological order preserved)."""
     path = _channel_path(channel)
     if not path.exists():
         return []
-    messages: List[Dict] = []
+    messages: list[dict] = []
     for line in path.read_text().splitlines():
         if not line.strip():
             continue
@@ -83,14 +82,14 @@ def _load_all(channel: str) -> List[Dict]:
 
 def read_channel(
     channel: str = DEFAULT_CHANNEL,
-    since: Optional[object] = None,
-    until: Optional[object] = None,
+    since: object | None = None,
+    until: object | None = None,
     order: Literal["asc", "desc"] = "desc",
     limit: int = 50,
     offset: int = 0,
-    unread_for: Optional[str] = None,
+    unread_for: str | None = None,
     mark_seen: bool = True,
-) -> List[Dict]:
+) -> list[dict]:
     """
     Read messages from a channel with real pagination.
 
@@ -123,7 +122,7 @@ def read_channel(
     messages = _load_all(channel)
 
     # Apply filters.
-    filtered: List[Dict] = []
+    filtered: list[dict] = []
     for msg in messages:
         ts = msg.get("timestamp", 0)
         if since_ts is not None and ts <= since_ts:
@@ -165,7 +164,7 @@ def unread_messages(
     channel: str = DEFAULT_CHANNEL,
     limit: int = 50,
     order: Literal["asc", "desc"] = "asc",
-) -> List[Dict]:
+) -> list[dict]:
     """
     Return actual message bodies that instance_id has not yet acknowledged.
 
@@ -180,7 +179,7 @@ def unread_messages(
     )
 
 
-def list_channels() -> List[Dict]:
+def list_channels() -> list[dict]:
     """Return metadata for every channel currently on disk."""
     if not COMMS_DIR.exists():
         return []
@@ -205,7 +204,7 @@ def acknowledge(
     instance_id: str,
     note: str = "",
     channel: str = DEFAULT_CHANNEL,
-) -> Dict:
+) -> dict:
     """
     Record that an instance has integrated a message — distinct from read_by.
 
@@ -228,7 +227,7 @@ def acknowledge(
     if not instance_id or not instance_id.strip():
         raise ValueError("instance_id is required")
 
-    record: Dict = {
+    record: dict = {
         "message_id": message_id.strip(),
         "instance_id": instance_id.strip(),
         "note": (note or "").strip(),
@@ -245,9 +244,9 @@ def acknowledge(
 
 
 def get_acknowledgments(
-    message_id: Optional[str] = None,
-    instance_id: Optional[str] = None,
-) -> List[Dict]:
+    message_id: str | None = None,
+    instance_id: str | None = None,
+) -> list[dict]:
     """
     Query the acknowledgments log.
 
@@ -262,7 +261,7 @@ def get_acknowledgments(
     if not acks_path.exists():
         return []
 
-    acks: List[Dict] = []
+    acks: list[dict] = []
     for line in acks_path.read_text().splitlines():
         if not line.strip():
             continue

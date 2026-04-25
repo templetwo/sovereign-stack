@@ -15,8 +15,8 @@ from pathlib import Path
 import pytest
 
 from sovereign_stack.handoff import (
-    HandoffEngine,
     HANDOFF_MAX_BYTES,
+    HandoffEngine,
     format_handoff_for_surface,
 )
 
@@ -128,7 +128,7 @@ class TestHandoffEngine:
 
     def test_unconsumed_returns_only_unconsumed(self):
         r1 = self.engine.write("first", "i", "s", "general")
-        r2 = self.engine.write("second", "i", "s", "general")
+        self.engine.write("second", "i", "s", "general")
         self.engine.mark_consumed([r1["_path"]], consumed_by="reader")
         open_records = self.engine.unconsumed()
         assert len(open_records) == 1

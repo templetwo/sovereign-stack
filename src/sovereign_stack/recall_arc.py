@@ -14,7 +14,6 @@ import os
 import subprocess
 from datetime import datetime, timedelta
 
-
 TOKEN = os.environ.get("STACK_TOKEN", "")
 BASE_URL = os.environ.get("STACK_URL", "https://stack.templetwo.com/api/call")
 

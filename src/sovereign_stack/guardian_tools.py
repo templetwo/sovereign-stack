@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 """
 Spiral Guardian Tools — Security MCP tools mounted into the Sovereign Stack.
 
@@ -18,17 +19,18 @@ Architecture (post-2026-04-25 expansion):
 """
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import os
-import re
 import shutil
 import time
+from collections.abc import Iterable
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any
 
-from mcp.types import Tool, TextContent
+from mcp.types import TextContent, Tool
 
 try:
     import httpx  # noqa: F401  (kept for future Wazuh integration)
@@ -216,7 +218,7 @@ GUARDIAN_TOOLS = [
 # ── Subprocess helper (async; the only reason the dispatcher is async) ──────
 
 
-async def _run_cmd(cmd, timeout=60) -> Tuple[str, str, int]:
+async def _run_cmd(cmd, timeout=60) -> tuple[str, str, int]:
     """Run a command with timeout. Returns (stdout, stderr, returncode)."""
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -227,10 +229,8 @@ async def _run_cmd(cmd, timeout=60) -> Tuple[str, str, int]:
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
         return stdout.decode().strip(), stderr.decode().strip(), proc.returncode
     except asyncio.TimeoutError:
-        try:
+        with contextlib.suppress(Exception):
             proc.kill()
-        except Exception:
-            pass
         return "", "timeout", -1
     except Exception as e:
         return "", str(e), -1
@@ -255,7 +255,7 @@ def _file_sha256(path: Path) -> str:
 # Suspicious patterns for MCP tool description scanning.
 # Mix of prompt-injection markers, exfil signals, and dangerous code-shaped
 # fragments. Case-insensitive substring match — keep entries lowercase here.
-MCP_SUSPICIOUS_PATTERNS: Tuple[str, ...] = (
+MCP_SUSPICIOUS_PATTERNS: tuple[str, ...] = (
     "ignore previous",
     "ignore all previous",
     "disregard previous",
@@ -281,7 +281,7 @@ MCP_SUSPICIOUS_PATTERNS: Tuple[str, ...] = (
 # ── guardian_status ─────────────────────────────────────────────────────────
 
 
-def _evaluate_status(listener_lines: List[str], service_present: Dict[str, bool]) -> Dict:
+def _evaluate_status(listener_lines: list[str], service_present: dict[str, bool]) -> dict:
     """
     Pure scoring logic for guardian_status. Takes pre-collected
     inputs (listener output + service-presence map) and returns the
@@ -294,7 +294,7 @@ def _evaluate_status(listener_lines: List[str], service_present: Dict[str, bool]
     )
 
     health = 100
-    issues: List[str] = []
+    issues: list[str] = []
     if not ollama_safe:
         health -= 30
         issues.append("Ollama exposed on all interfaces")
@@ -312,9 +312,9 @@ def _evaluate_status(listener_lines: List[str], service_present: Dict[str, bool]
     }
 
 
-async def _status_async() -> Dict:
+async def _status_async() -> dict:
     stdout, _, _ = await _run_cmd(["lsof", "-iTCP", "-sTCP:LISTEN", "-n", "-P"])
-    services: Dict[str, bool] = {}
+    services: dict[str, bool] = {}
     for svc in ["ollama", "sovereign"]:
         out, _, _ = await _run_cmd(["pgrep", "-x", svc])
         services[svc] = bool(out.strip())
@@ -324,7 +324,7 @@ async def _status_async() -> Dict:
 # ── guardian_scan ───────────────────────────────────────────────────────────
 
 
-def _filter_exposed_listeners(listener_lines: List[str]) -> List[str]:
+def _filter_exposed_listeners(listener_lines: list[str]) -> list[str]:
     """Lines representing non-localhost listeners (exposed to network)."""
     return [
         l for l in listener_lines
@@ -340,10 +340,10 @@ def _filter_exposed_listeners(listener_lines: List[str]) -> List[str]:
 # ── guardian_quarantine ─────────────────────────────────────────────────────
 
 
-def list_quarantine() -> List[Dict]:
+def list_quarantine() -> list[dict]:
     """Return the active quarantine roster as a list of records."""
     qdir = _quarantine_dir()
-    out: List[Dict] = []
+    out: list[dict] = []
     for entry in sorted(qdir.iterdir()):
         if not entry.is_file():
             continue
@@ -367,7 +367,7 @@ def list_quarantine() -> List[Dict]:
     return out
 
 
-def _append_manifest(record: Dict) -> None:
+def _append_manifest(record: dict) -> None:
     """Append-only audit log of every isolate/release event."""
     path = _quarantine_manifest_path()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -375,7 +375,7 @@ def _append_manifest(record: Dict) -> None:
         f.write(json.dumps(record) + "\n")
 
 
-def isolate_file(file_path: str) -> Dict:
+def isolate_file(file_path: str) -> dict:
     """
     DESTRUCTIVE: copy the file into the quarantine, remove the original.
 
@@ -466,7 +466,7 @@ def isolate_file(file_path: str) -> Dict:
     }
 
 
-def release_file(file_hash: str) -> Dict:
+def release_file(file_hash: str) -> dict:
     """
     DESTRUCTIVE: restore a quarantined file to its original_path and
     remove from quarantine. The release event is logged to manifest.
@@ -521,9 +521,9 @@ def release_file(file_hash: str) -> Dict:
 
 
 def _scan_descriptions(
-    descriptions: Iterable[Tuple[str, str, str]],
+    descriptions: Iterable[tuple[str, str, str]],
     patterns: Iterable[str] = MCP_SUSPICIOUS_PATTERNS,
-) -> List[Dict]:
+) -> list[dict]:
     """
     Scan tool descriptions for suspicious patterns.
 
@@ -535,7 +535,7 @@ def _scan_descriptions(
         List of hit dicts: {server, tool, pattern, snippet}.
     """
     pats = [p.lower() for p in patterns]
-    hits: List[Dict] = []
+    hits: list[dict] = []
     for server, tool, text in descriptions:
         if not text:
             continue
@@ -555,7 +555,7 @@ def _scan_descriptions(
     return hits
 
 
-def _load_descriptions_from_config(config_path: Path) -> List[Tuple[str, str, str]]:
+def _load_descriptions_from_config(config_path: Path) -> list[tuple[str, str, str]]:
     """
     Pull tool descriptions out of a Claude Desktop config JSON. The file
     structure is `{"mcpServers": {"<name>": {...}}}`. Tool descriptions
@@ -572,7 +572,7 @@ def _load_descriptions_from_config(config_path: Path) -> List[Tuple[str, str, st
         data = json.loads(config_path.read_text())
     except Exception:
         return []
-    out: List[Tuple[str, str, str]] = []
+    out: list[tuple[str, str, str]] = []
     servers = data.get("mcpServers", {}) if isinstance(data, dict) else {}
     if not isinstance(servers, dict):
         return out
@@ -596,9 +596,9 @@ def default_claude_desktop_config_path() -> Path:
 
 
 def mcp_audit(
-    descriptions: Optional[List[str]] = None,
-    config_path: Optional[Path] = None,
-) -> Dict:
+    descriptions: list[str] | None = None,
+    config_path: Path | None = None,
+) -> dict:
     """
     Run an MCP audit. If `descriptions` is provided, scan those strings
     directly (server/tool reported as "<arg>"). Otherwise load from
@@ -608,7 +608,7 @@ def mcp_audit(
     Returns:
         {patterns_checked, sources_scanned, hits: [...], transport_warning}
     """
-    sources: List[Tuple[str, str, str]] = []
+    sources: list[tuple[str, str, str]] = []
     if descriptions:
         for i, d in enumerate(descriptions):
             sources.append(("<arg>", f"description_{i}", d))
@@ -632,13 +632,13 @@ def mcp_audit(
 # ── guardian_baseline ───────────────────────────────────────────────────────
 
 
-def _latest_baseline_path() -> Optional[Path]:
+def _latest_baseline_path() -> Path | None:
     bdir = _baselines_dir()
     files = sorted(bdir.glob("baseline_*.json"))
     return files[-1] if files else None
 
 
-def _diff_lists(prior: List[str], current: List[str]) -> Dict:
+def _diff_lists(prior: list[str], current: list[str]) -> dict:
     """Set-style diff: items added / removed between two list snapshots."""
     p = set(prior or [])
     c = set(current or [])
@@ -649,12 +649,12 @@ def _diff_lists(prior: List[str], current: List[str]) -> Dict:
     }
 
 
-def compare_baseline(current: Dict, prior: Dict) -> Dict:
+def compare_baseline(current: dict, prior: dict) -> dict:
     """
     Diff two baseline records. Each record has a `components` dict
     keyed by component name. Returns a structured drift report.
     """
-    drift: Dict[str, Any] = {
+    drift: dict[str, Any] = {
         "prior_timestamp": prior.get("timestamp"),
         "current_timestamp": current.get("timestamp"),
         "components": {},
@@ -679,8 +679,8 @@ def compare_baseline(current: Dict, prior: Dict) -> Dict:
 # ── Async dispatcher (the MCP entry point) ──────────────────────────────────
 
 
-async def _gather_baseline_components(components: List[str]) -> Dict:
-    baseline: Dict[str, Any] = {
+async def _gather_baseline_components(components: list[str]) -> dict:
+    baseline: dict[str, Any] = {
         "timestamp": _now_iso(),
         "components": {},
     }
@@ -719,7 +719,7 @@ async def handle_guardian_tool(name: str, arguments: dict):
             text=f"🛡️ Guardian Status\n\n{json.dumps(result, indent=2)}",
         )]
 
-    elif name == "guardian_scan":
+    if name == "guardian_scan":
         scan_type = arguments.get("scan_type", "quick")
 
         if scan_type == "quick":
@@ -738,14 +738,14 @@ async def handle_guardian_tool(name: str, arguments: dict):
                  f"Run guardian_status for current posture.",
         )]
 
-    elif name == "guardian_alerts":
+    if name == "guardian_alerts":
         return [TextContent(
             type="text",
             text="🔔 Alerts require Wazuh server (Phase 1). "
                  "Use guardian_status for current posture.",
         )]
 
-    elif name == "guardian_audit":
+    if name == "guardian_audit":
         audit_type = arguments.get("audit_type", "supply_chain")
         target = arguments.get("target_path", "~/sovereign-stack")
 
@@ -770,7 +770,7 @@ async def handle_guardian_tool(name: str, arguments: dict):
             text=f"🔒 Audit type {audit_type} requires additional tools (Phase 2+).",
         )]
 
-    elif name == "guardian_quarantine":
+    if name == "guardian_quarantine":
         action = arguments.get("action", "list")
 
         if action == "list":
@@ -816,7 +816,7 @@ async def handle_guardian_tool(name: str, arguments: dict):
             text=f"🔒 Unknown quarantine action: {action}",
         )]
 
-    elif name == "guardian_report":
+    if name == "guardian_report":
         report_type = arguments.get("report_type", "summary")
         timestamp = _now_iso()
         stdout, _, _ = await _run_cmd(
@@ -842,7 +842,7 @@ async def handle_guardian_tool(name: str, arguments: dict):
         )
         return [TextContent(type="text", text=report)]
 
-    elif name == "guardian_mcp_audit":
+    if name == "guardian_mcp_audit":
         descriptions = arguments.get("descriptions")
         config_path_arg = arguments.get("config_path", "")
         config_path = Path(config_path_arg) if config_path_arg else None
@@ -864,7 +864,7 @@ async def handle_guardian_tool(name: str, arguments: dict):
         text += f"\n{result['transport_warning']}\n"
         return [TextContent(type="text", text=text)]
 
-    elif name == "guardian_baseline":
+    if name == "guardian_baseline":
         action = arguments.get("action", "create")
         components = arguments.get("components") or [
             "ports", "processes", "network",

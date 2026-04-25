@@ -19,9 +19,8 @@ from pathlib import Path
 import pytest
 
 from sovereign_stack import comms
-from sovereign_stack.memory import ExperientialMemory
 from sovereign_stack.handoff import HandoffEngine
-
+from sovereign_stack.memory import ExperientialMemory
 
 # ── Fixtures ──
 
@@ -74,7 +73,7 @@ def _make_msg(ts: float, mid: str = "msg-1", content: str = "", read_by=None):
 class TestAcknowledge:
     def test_acknowledge_writes_ack_record(self, fake_comms_dir):
         """acknowledge() must append to acks.jsonl."""
-        ack = comms.acknowledge("msg-abc", "claude-code", note="integrated", channel="general")
+        comms.acknowledge("msg-abc", "claude-code", note="integrated", channel="general")
 
         acks_path = fake_comms_dir / "acks.jsonl"
         assert acks_path.exists(), "acks.jsonl should be created on first acknowledge"
@@ -361,8 +360,8 @@ class TestOpenThreadsTouchAnnotations:
         assert len(threads) == 1
         tid = threads[0]["thread_id"]
 
-        touch1 = mem.touch_thread(tid, note="First look", instance_id="inst-A")
-        touch2 = mem.touch_thread(tid, note="Second look", instance_id="inst-A")
+        mem.touch_thread(tid, note="First look", instance_id="inst-A")
+        mem.touch_thread(tid, note="Second look", instance_id="inst-A")
         touch3 = mem.touch_thread(tid, note="Third look", instance_id="inst-B")
 
         threads_after = mem.get_open_threads()

@@ -42,12 +42,11 @@ import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from mcp.types import Tool, TextContent
-
+from mcp.types import TextContent, Tool
 
 # =============================================================================
 # PATHS & CONSTANTS
@@ -118,7 +117,7 @@ def _ensure_dirs() -> None:
     _archive_dir().mkdir(parents=True, exist_ok=True)
 
 
-def _append_event(event: Dict[str, Any]) -> None:
+def _append_event(event: dict[str, Any]) -> None:
     _ensure_dirs()
     event = {"ts": _iso(_now()), **event}
     with _events_path().open("a") as f:
@@ -130,7 +129,7 @@ def _watch_path(watch_id: str, archived: bool = False) -> Path:
     return base / f"{watch_id}.json"
 
 
-def load_watch(watch_id: str) -> Optional[Dict[str, Any]]:
+def load_watch(watch_id: str) -> dict[str, Any] | None:
     """Load an active or archived watch by id. Returns None if not found."""
     for archived in (False, True):
         p = _watch_path(watch_id, archived=archived)
@@ -139,7 +138,7 @@ def load_watch(watch_id: str) -> Optional[Dict[str, Any]]:
     return None
 
 
-def save_watch(watch: Dict[str, Any]) -> None:
+def save_watch(watch: dict[str, Any]) -> None:
     """Persist a watch. Archived watches move to archive/; active stay in watches/."""
     _ensure_dirs()
     watch_id = watch["watch_id"]
@@ -153,7 +152,7 @@ def save_watch(watch: Dict[str, Any]) -> None:
         active_path.unlink()
 
 
-def list_watches(status: Optional[str] = None) -> List[Dict[str, Any]]:
+def list_watches(status: str | None = None) -> list[dict[str, Any]]:
     """
     List watches filtered by status.
 
@@ -163,8 +162,8 @@ def list_watches(status: Optional[str] = None) -> List[Dict[str, Any]]:
     status=<other>      — filter by exact status field
     """
     _ensure_dirs()
-    watches: List[Dict[str, Any]] = []
-    dirs: List[Path] = [_watches_dir()]
+    watches: list[dict[str, Any]] = []
+    dirs: list[Path] = [_watches_dir()]
     if status == "all" or status in ("completed_clean", "drift_detected", "cancelled"):
         dirs.append(_archive_dir())
     for d in dirs:
@@ -186,7 +185,7 @@ def list_watches(status: Optional[str] = None) -> List[Dict[str, Any]]:
 # PROBE EXECUTION
 # =============================================================================
 
-def _run_http_probe(probe: Dict[str, Any]) -> Dict[str, Any]:
+def _run_http_probe(probe: dict[str, Any]) -> dict[str, Any]:
     url = probe["url"]
     method = probe.get("method", "GET")
     timeout = probe.get("timeout_sec", HTTP_DEFAULT_TIMEOUT)
@@ -194,8 +193,8 @@ def _run_http_probe(probe: Dict[str, Any]) -> Dict[str, Any]:
     expected_status = probe.get("expected", {}).get("status", 200)
 
     ok_count = 0
-    status_codes: List[int] = []
-    errors: List[str] = []
+    status_codes: list[int] = []
+    errors: list[str] = []
     for i in range(samples):
         if i > 0:
             time.sleep(HTTP_SAMPLE_SPACING_SEC)
@@ -225,7 +224,7 @@ def _run_http_probe(probe: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _run_command_probe(probe: Dict[str, Any]) -> Dict[str, Any]:
+def _run_command_probe(probe: dict[str, Any]) -> dict[str, Any]:
     cmd = probe["cmd"]
     timeout = probe.get("timeout_sec", COMMAND_DEFAULT_TIMEOUT)
     shell = probe.get("shell", False)
@@ -263,7 +262,7 @@ def _run_command_probe(probe: Dict[str, Any]) -> Dict[str, Any]:
         }
 
 
-def _run_file_hash_probe(probe: Dict[str, Any]) -> Dict[str, Any]:
+def _run_file_hash_probe(probe: dict[str, Any]) -> dict[str, Any]:
     path = Path(os.path.expanduser(probe["path"]))
     if not path.exists():
         return {"type": "file_hash", "path": str(path), "exists": False, "sha256": None}
@@ -274,9 +273,9 @@ def _run_file_hash_probe(probe: Dict[str, Any]) -> Dict[str, Any]:
     return {"type": "file_hash", "path": str(path), "exists": True, "sha256": h.hexdigest()}
 
 
-def run_probes(probes: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+def run_probes(probes: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     """Run each probe and return {probe_name: result_dict}."""
-    results: Dict[str, Dict[str, Any]] = {}
+    results: dict[str, dict[str, Any]] = {}
     for probe in probes:
         name = probe["name"]
         ptype = probe["type"]
@@ -296,10 +295,10 @@ def run_probes(probes: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
 # =============================================================================
 
 def _diff_probe(
-    probe: Dict[str, Any],
-    baseline: Dict[str, Any],
-    current: Dict[str, Any],
-) -> Optional[Dict[str, Any]]:
+    probe: dict[str, Any],
+    baseline: dict[str, Any],
+    current: dict[str, Any],
+) -> dict[str, Any] | None:
     """
     Compare a probe's current result against its baseline.
 
@@ -389,12 +388,12 @@ def _diff_probe(
 
 
 def diff_probes(
-    probes: List[Dict[str, Any]],
-    baseline: Dict[str, Dict[str, Any]],
-    current: Dict[str, Dict[str, Any]],
-) -> List[Dict[str, Any]]:
+    probes: list[dict[str, Any]],
+    baseline: dict[str, dict[str, Any]],
+    current: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
     """Return a list of drift descriptors (one per divergent probe)."""
-    drifts: List[Dict[str, Any]] = []
+    drifts: list[dict[str, Any]] = []
     for probe in probes:
         name = probe["name"]
         d = _diff_probe(probe, baseline.get(name, {}), current.get(name, {}))
@@ -413,11 +412,11 @@ def _new_watch_id() -> str:
 
 def create_watch(
     fix_description: str,
-    domain_tags: List[str],
-    probes: List[Dict[str, Any]],
-    schedule_offsets_min: Optional[List[int]] = None,
+    domain_tags: list[str],
+    probes: list[dict[str, Any]],
+    schedule_offsets_min: list[int] | None = None,
     session_id: str = "",
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Create a new watch: capture baseline probes and persist to disk.
 
@@ -429,7 +428,7 @@ def create_watch(
         raise ValueError("create_watch requires at least one probe")
     if schedule_offsets_min is None:
         schedule_offsets_min = list(DEFAULT_SCHEDULE)
-    schedule_offsets_min = sorted(set(int(x) for x in schedule_offsets_min))
+    schedule_offsets_min = sorted({int(x) for x in schedule_offsets_min})
 
     watch_id = _new_watch_id()
     created = _now()
@@ -465,7 +464,7 @@ def create_watch(
     return watch
 
 
-def _next_due_offset(watch: Dict[str, Any], now: Optional[datetime] = None) -> Optional[int]:
+def _next_due_offset(watch: dict[str, Any], now: datetime | None = None) -> int | None:
     """
     Return the earliest schedule offset (minutes) that is due but not yet
     sampled. Returns None if nothing is due right now.
@@ -488,7 +487,7 @@ def take_sample(
     watch_id: str,
     force: bool = False,
     nape_daemon: Any = None,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Run the next due sample for a watch.
 
@@ -537,7 +536,7 @@ def take_sample(
     watch.setdefault("samples", []).append(sample)
 
     # Emit Nape honk if drift detected.
-    emitted_honks: List[str] = []
+    emitted_honks: list[str] = []
     if drifts and nape_daemon is not None:
         session = watch.get("session_id") or "post_fix_watcher"
         summary = "; ".join(f"{d['probe']}:{d['reason']}" for d in drifts)
@@ -590,7 +589,7 @@ def take_sample(
     }
 
 
-def cancel_watch(watch_id: str, reason: str) -> Dict[str, Any]:
+def cancel_watch(watch_id: str, reason: str) -> dict[str, Any]:
     watch = load_watch(watch_id)
     if watch is None:
         return {"status": "watch_not_found", "watch_id": watch_id}
@@ -608,14 +607,14 @@ def cancel_watch(watch_id: str, reason: str) -> Dict[str, Any]:
 # TICK RUNNER (called by scripts/sovereign-watch-tick)
 # =============================================================================
 
-def tick_once(nape_daemon: Any = None) -> Dict[str, Any]:
+def tick_once(nape_daemon: Any = None) -> dict[str, Any]:
     """
     Drain all currently-due samples across all active watches.
 
     For each active watch, repeatedly take the next due sample until nothing
     is due. Safe to call on any cadence — idempotent.
     """
-    taken: List[Dict[str, Any]] = []
+    taken: list[dict[str, Any]] = []
     watches = list_watches(status="active")
     for watch in watches:
         watch_id = watch["watch_id"]
@@ -651,7 +650,7 @@ def tick_main() -> int:
 # MCP TOOL DEFINITIONS
 # =============================================================================
 
-POST_FIX_TOOLS: List[Tool] = [
+POST_FIX_TOOLS: list[Tool] = [
     Tool(
         name="post_fix_verify",
         description=(
@@ -748,10 +747,10 @@ POST_FIX_TOOLS: List[Tool] = [
 
 async def handle_post_fix_tool(
     name: str,
-    arguments: Dict[str, Any],
+    arguments: dict[str, Any],
     session_id: str,
     nape_daemon: Any = None,
-) -> List[TextContent]:
+) -> list[TextContent]:
     if name == "post_fix_verify":
         fix_description = (arguments.get("fix_description") or "").strip()
         probes = arguments.get("probes") or []
@@ -810,7 +809,7 @@ async def handle_post_fix_tool(
     return [TextContent(type="text", text=f"unknown post_fix tool: {name}")]
 
 
-def _baseline_summary(r: Dict[str, Any]) -> Dict[str, Any]:
+def _baseline_summary(r: dict[str, Any]) -> dict[str, Any]:
     """Compact view of a probe result for post_fix_verify's return payload."""
     t = r.get("type")
     if t == "http":
@@ -822,7 +821,7 @@ def _baseline_summary(r: Dict[str, Any]) -> Dict[str, Any]:
     return r
 
 
-def _watch_summary(w: Dict[str, Any]) -> Dict[str, Any]:
+def _watch_summary(w: dict[str, Any]) -> dict[str, Any]:
     return {
         "watch_id": w["watch_id"],
         "fix_description": w.get("fix_description", ""),

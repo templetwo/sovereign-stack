@@ -18,15 +18,12 @@ import json
 import os
 import sys
 import traceback
-import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List
 
 from ..comms import get_acknowledgments
 from ..governance import runtime_compass_check
 from .metabolize_daemon import MetabolizeDaemon
-from .senders import SENDER_UNCERTAINTY
 from .uncertainty_resurfacer import UncertaintyResurfacer
 
 
@@ -35,7 +32,7 @@ def _sovereign_root() -> Path:
     return Path(os.environ.get("SOVEREIGN_ROOT", Path.home() / ".sovereign"))
 
 
-def _compass_fn_real(action: str, stakes: str) -> Dict:
+def _compass_fn_real(action: str, stakes: str) -> dict:
     """
     Thin adapter over runtime_compass_check. Ensures the return shape
     matches the daemon's contract: dict with at least {"decision": str}.
@@ -58,7 +55,7 @@ def _compass_fn_real(action: str, stakes: str) -> Dict:
     }
 
 
-def _uncertainty_fn_real() -> List[Dict]:
+def _uncertainty_fn_real() -> list[dict]:
     """
     Load unresolved uncertainty markers. Kept here (not imported from
     consciousness_tools) to avoid pulling the full MetaCognition singleton
@@ -82,8 +79,8 @@ def _comms_post_fn_real(
     content: str,
     channel: str,
     message_id: str,
-    extra_fields: Dict,
-) -> Dict:
+    extra_fields: dict,
+) -> dict:
     """
     Append a message to the comms JSONL channel file. This matches the
     on-disk schema the bridge writes so every reader (bridge, comms.py,
@@ -118,7 +115,7 @@ def _comms_post_fn_real(
     return record
 
 
-def _comms_get_acks_fn_real(message_id: str) -> List[Dict]:
+def _comms_get_acks_fn_real(message_id: str) -> list[dict]:
     """Pass-through to the canonical ack query."""
     return get_acknowledgments(message_id=message_id)
 
@@ -136,7 +133,7 @@ def _build_uncertainty_resurfacer() -> UncertaintyResurfacer:
     )
 
 
-def _detect_fn_real() -> Dict:
+def _detect_fn_real() -> dict:
     """
     Run the existing metabolism detection logic and return the digest
     dict shape the MetabolizeDaemon expects:
@@ -162,7 +159,7 @@ def _detect_fn_real() -> Dict:
     ground_truths = [i for i in insights if i.get("layer") == "ground_truth"]
     hypotheses = [i for i in insights if i.get("layer") == "hypothesis"]
 
-    contradictions: List[Dict] = []
+    contradictions: list[dict] = []
     for hyp in hypotheses:
         h_content = hyp.get("content", "") or ""
         for gt in ground_truths:
@@ -179,7 +176,7 @@ def _detect_fn_real() -> Dict:
                     "overlap_score": round(overlap, 3),
                 })
 
-    stale_threads: List[Dict] = []
+    stale_threads: list[dict] = []
     for thread in threads:
         if thread.get("resolved"):
             continue
@@ -200,7 +197,7 @@ def _detect_fn_real() -> Dict:
                 "timestamp": ts,
             })
 
-    stale_hypotheses: List[Dict] = []
+    stale_hypotheses: list[dict] = []
     for hyp in hypotheses:
         ts = hyp.get("timestamp", "")
         try:
@@ -267,7 +264,7 @@ DAEMON_BUILDERS = {
 }
 
 
-def main(argv: List[str]) -> int:
+def main(argv: list[str]) -> int:
     if len(argv) < 2:
         print(
             f"usage: python -m sovereign_stack.daemons.entrypoint "

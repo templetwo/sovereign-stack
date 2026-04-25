@@ -26,16 +26,17 @@ memory profiles).
 
 import json
 import re
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any
 
-from .memory import ExperientialMemory, _parse_iso
 from .handoff import HandoffEngine
+from .memory import ExperientialMemory, _parse_iso
 from .witness import days_old as _days_old
 
 
-def _normalize_tags(raw: str) -> List[str]:
+def _normalize_tags(raw: str) -> list[str]:
     """Split a raw domain string on commas/whitespace and lowercase each piece."""
     return [
         t.strip().lower()
@@ -44,7 +45,7 @@ def _normalize_tags(raw: str) -> List[str]:
     ]
 
 
-def _compute_tag_overlap(caller_tags: List[str], item_domain: str) -> float:
+def _compute_tag_overlap(caller_tags: list[str], item_domain: str) -> float:
     """
     Jaccard-style tag overlap between caller tags and item domain tags.
 
@@ -78,11 +79,11 @@ NO_OVERLAP_PENALTY = -0.3
 
 
 def _score_item(
-    item: Dict,
-    caller_tags: List[str],
-    project: Optional[str],
+    item: dict,
+    caller_tags: list[str],
+    project: str | None,
     domain_field: str = "domain",
-    context_fields: Optional[List[str]] = None,
+    context_fields: list[str] | None = None,
 ) -> tuple:
     """
     Compute the relevance score for a single candidate item.
@@ -154,11 +155,11 @@ class ReflexiveSurface:
 
     def surface(
         self,
-        domain_tags: List[str],
-        project: Optional[str] = None,
-        recent_tools: Optional[List[str]] = None,
+        domain_tags: list[str],
+        project: str | None = None,
+        recent_tools: list[str] | None = None,
         limit_per_bucket: int = 5,
-    ) -> Dict:
+    ) -> dict:
         """
         Surface the most relevant items from all buckets for the given context.
 
@@ -244,12 +245,12 @@ class ReflexiveSurface:
 
     def _score_and_sort(
         self,
-        items: List[Dict],
-        caller_tags: List[str],
-        project: Optional[str],
+        items: list[dict],
+        caller_tags: list[str],
+        project: str | None,
         domain_field: str,
-        context_fields: List[str],
-    ) -> List[Dict]:
+        context_fields: list[str],
+    ) -> list[dict]:
         """
         Attach _score and _tag_overlap fields to each item and sort by
         score desc, timestamp desc.
@@ -289,7 +290,7 @@ class ReflexiveSurface:
         )
         return result
 
-    def _enrich_threads(self, threads: List[Dict]) -> List[Dict]:
+    def _enrich_threads(self, threads: list[dict]) -> list[dict]:
         """
         Add days_old and score to thread records for convenience.
 
@@ -322,7 +323,7 @@ def _estimate_tokens(text: str) -> int:
     return max(1, (len(text) + 3) // 4)
 
 
-def _item_signature(kind: str, item: Dict) -> str:
+def _item_signature(kind: str, item: dict) -> str:
     """
     Stable id for freshness tracking. Threads have thread_id; insights and
     handoffs sometimes only have timestamps; fall back to kind + content hash.
@@ -379,8 +380,8 @@ class PerTurnPriors:
         self,
         surface: ReflexiveSurface,
         sovereign_root: Path,
-        uncertainty_fn: Optional[Callable[[], List[Dict]]] = None,
-        honks_fn: Optional[Callable[[], List[Dict]]] = None,
+        uncertainty_fn: Callable[[], list[dict]] | None = None,
+        honks_fn: Callable[[], list[dict]] | None = None,
     ):
         """
         Args:
@@ -402,12 +403,12 @@ class PerTurnPriors:
 
     def inject(
         self,
-        domain_tags: Optional[List[str]] = None,
-        project: Optional[str] = None,
+        domain_tags: list[str] | None = None,
+        project: str | None = None,
         k: int = DEFAULT_K,
         max_tokens: int = DEFAULT_MAX_TOKENS,
         dry_run: bool = False,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Assemble the priors block for this turn.
 
@@ -444,8 +445,8 @@ class PerTurnPriors:
         stale = self._recent_surfaced_ids()
         turn_id = str(_uuid.uuid4())
 
-        sections: List[Dict[str, Any]] = []
-        skipped: List[str] = []
+        sections: list[dict[str, Any]] = []
+        skipped: list[str] = []
 
         # 1. Drift — most actionable signal. Recent uneasy or sharp honk.
         honk = self._recent_drift_honk()
@@ -530,10 +531,10 @@ class PerTurnPriors:
         # lowest-priority sections first. Header is always present when any
         # section is kept.
         sections.sort(key=lambda s: s["priority"])
-        header = "━━━ PRIORS (k={k}, reflexive) ━━━".format(k=k)
-        block_lines: List[str] = [header]
+        header = f"━━━ PRIORS (k={k}, reflexive) ━━━"
+        block_lines: list[str] = [header]
         token_count = _estimate_tokens(header)
-        kept_sigs: List[str] = []
+        kept_sigs: list[str] = []
 
         for section in sections:
             line = "  " + section["text"]
@@ -588,7 +589,7 @@ class PerTurnPriors:
 
     # ── Formatters — one-line, glyph-free, information-dense. ──
 
-    def _format_honk(self, honk: Dict) -> str:
+    def _format_honk(self, honk: dict) -> str:
         level = honk.get("level", "?")
         pattern = honk.get("pattern", "unknown")
         trigger = honk.get("trigger_tool", "")
@@ -596,26 +597,26 @@ class PerTurnPriors:
         trig = f" on {trigger}" if trigger else ""
         return f"drift: [{level} | nape] {pattern}{trig} ({when})"
 
-    def _format_uncertainty(self, unc: Dict) -> str:
+    def _format_uncertainty(self, unc: dict) -> str:
         what = str(unc.get("what", ""))[:120].replace("\n", " ")
         days = _days_old(unc.get("timestamp"))
         return f"uncertainty: [{days}d] {what}"
 
-    def _format_thread(self, thread: Dict) -> str:
+    def _format_thread(self, thread: dict) -> str:
         q = str(thread.get("question", ""))[:120].replace("\n", " ")
         score = thread.get("score", thread.get("_score", 0.0))
         days = thread.get("days_old", _days_old(thread.get("timestamp")))
         domain = str(thread.get("domain", ""))[:40]
         return f"thread: [{score:.2f} | {days}d | {domain}] {q}"
 
-    def _format_insight(self, ins: Dict) -> str:
+    def _format_insight(self, ins: dict) -> str:
         content = str(ins.get("content", ""))[:120].replace("\n", " ")
         score = ins.get("_score", 0.0)
         days = _days_old(ins.get("timestamp"))
         return f"insight: [{score:.2f} | {days}d] {content}"
 
     @staticmethod
-    def _short_time(ts: Optional[str]) -> str:
+    def _short_time(ts: str | None) -> str:
         if not ts:
             return "?"
         dt = _parse_iso(ts)
@@ -625,7 +626,7 @@ class PerTurnPriors:
 
     # ── Auxiliary retrieval ──
 
-    def _recent_drift_honk(self) -> Optional[Dict]:
+    def _recent_drift_honk(self) -> dict | None:
         """
         Return the most recent unacknowledged uneasy or sharp honk within
         the HONK_WINDOW_SECONDS window. Satisfied honks are ignored — they
@@ -635,6 +636,8 @@ class PerTurnPriors:
             return None
         try:
             honks = self._honks_fn() or []
+        # best-effort: _honks_fn is an injected callable; any exception means the
+        # honk source is unavailable — degrade gracefully rather than surface noise.
         except Exception:
             return None
         cutoff = datetime.utcnow().timestamp() - self.HONK_WINDOW_SECONDS
@@ -647,11 +650,11 @@ class PerTurnPriors:
             try:
                 if ts.timestamp() >= cutoff:
                     return h
-            except Exception:
+            except OSError:
                 continue
         return None
 
-    def _top_uncertainty(self) -> Optional[Dict]:
+    def _top_uncertainty(self) -> dict | None:
         """
         Oldest unresolved uncertainty (nag function). Oldest first because
         new uncertainties are still live in attention; old ones are what
@@ -661,6 +664,8 @@ class PerTurnPriors:
             return None
         try:
             items = self._uncertainty_fn() or []
+        # best-effort: _uncertainty_fn is an injected callable; any exception means
+        # the uncertainty source is unavailable — return None to skip the nag.
         except Exception:
             return None
         if not items:
@@ -680,7 +685,7 @@ class PerTurnPriors:
             return set()
         try:
             lines = self._log_path.read_text(encoding="utf-8").splitlines()
-        except Exception:
+        except OSError:
             return set()
         recent = lines[-self.FRESHNESS_WINDOW:]
         ids: set = set()
@@ -689,15 +694,15 @@ class PerTurnPriors:
                 rec = json.loads(line)
                 for sig in rec.get("included_items", []):
                     ids.add(sig)
-            except Exception:
+            except (ValueError, KeyError):
                 continue
         return ids
 
     def _append_freshness_log(
         self,
-        included_items: List[str],
+        included_items: list[str],
         *,
-        turn_id: Optional[str] = None,
+        turn_id: str | None = None,
     ) -> None:
         record = {
             "timestamp": datetime.utcnow().isoformat(),

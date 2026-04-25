@@ -29,17 +29,14 @@ Public API:
 
 from __future__ import annotations
 
-import json
 import os
 import re
 import subprocess
 import time
 import urllib.error
 import urllib.request
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Callable, Dict, List, Optional
-
 
 # ── Status constants ────────────────────────────────────────────────────────
 
@@ -78,16 +75,16 @@ class Endpoint:
             "last run" indicator (stdout/stderr file from launchd).
     """
     name: str
-    label: Optional[str]
+    label: str | None
     kind: str
     description: str
-    health_url: Optional[str] = None
-    health_match: Optional[str] = None
-    cadence_seconds: Optional[int] = None
-    log_path: Optional[str] = None
+    health_url: str | None = None
+    health_match: str | None = None
+    cadence_seconds: int | None = None
+    log_path: str | None = None
 
 
-ENDPOINTS: List[Endpoint] = [
+ENDPOINTS: list[Endpoint] = [
     Endpoint(
         name="sse",
         label="com.templetwo.sovereign-sse",
@@ -148,26 +145,26 @@ def get_endpoint(name: str) -> Endpoint:
 @dataclass
 class EndpointStatus:
     name: str
-    label: Optional[str]
+    label: str | None
     kind: str
     status: str                                # one of STATUS_*
-    launchctl_state: Optional[str] = None      # "running" | "not running" | None
-    pid: Optional[int] = None
-    last_exit_code: Optional[int] = None
-    http_status: Optional[int] = None
-    http_ok: Optional[bool] = None
-    http_error: Optional[str] = None
-    log_age_seconds: Optional[float] = None
-    notes: List[str] = field(default_factory=list)
+    launchctl_state: str | None = None      # "running" | "not running" | None
+    pid: int | None = None
+    last_exit_code: int | None = None
+    http_status: int | None = None
+    http_ok: bool | None = None
+    http_error: str | None = None
+    log_age_seconds: float | None = None
+    notes: list[str] = field(default_factory=list)
 
-    def to_dict(self) -> Dict:
+    def to_dict(self) -> dict:
         return asdict(self)
 
 
 # ── Subprocess + HTTP helpers (thin, mockable) ──────────────────────────────
 
 
-def _run(cmd: List[str], timeout: float = 5.0) -> "subprocess.CompletedProcess":
+def _run(cmd: list[str], timeout: float = 5.0) -> subprocess.CompletedProcess:
     """Thin subprocess wrapper. Tests patch this."""
     return subprocess.run(
         cmd,
@@ -178,7 +175,7 @@ def _run(cmd: List[str], timeout: float = 5.0) -> "subprocess.CompletedProcess":
     )
 
 
-def _http_probe(url: str, timeout: float = 2.0) -> Dict:
+def _http_probe(url: str, timeout: float = 2.0) -> dict:
     """
     GET `url` with a short timeout. Returns:
       {"http_status": int|None, "body": str, "error": str|None}
@@ -192,7 +189,7 @@ def _http_probe(url: str, timeout: float = 2.0) -> Dict:
     except urllib.error.HTTPError as e:
         try:
             body = e.read(4096).decode("utf-8", errors="replace")
-        except Exception:
+        except OSError:
             body = ""
         return {"http_status": e.code, "body": body, "error": None}
     except urllib.error.URLError as e:
@@ -206,7 +203,7 @@ def _http_probe(url: str, timeout: float = 2.0) -> Dict:
 # ── launchctl parsing ───────────────────────────────────────────────────────
 
 
-def _launchctl_print_text(label: str) -> Optional[str]:
+def _launchctl_print_text(label: str) -> str | None:
     """
     Run `launchctl print gui/<uid>/<label>` and return stdout, or None if
     the service isn't loaded.
@@ -223,7 +220,7 @@ _RE_PID = re.compile(r"^\s*pid\s*=\s*(\d+)", re.MULTILINE)
 _RE_LAST_EXIT = re.compile(r"^\s*last exit code\s*=\s*(-?\d+)", re.MULTILINE)
 
 
-def parse_launchctl_print(text: str) -> Dict:
+def parse_launchctl_print(text: str) -> dict:
     """
     Parse the relevant fields from `launchctl print` output. Returns a
     dict with keys: state, pid, last_exit_code (each Optional).
@@ -258,7 +255,7 @@ def parse_launchctl_print(text: str) -> Dict:
 # ── Per-endpoint status check ───────────────────────────────────────────────
 
 
-def _log_age_seconds(path: str, now: float) -> Optional[float]:
+def _log_age_seconds(path: str, now: float) -> float | None:
     p = Path(path)
     if not p.exists():
         return None
@@ -268,7 +265,7 @@ def _log_age_seconds(path: str, now: float) -> Optional[float]:
 def check_status(
     endpoint: Endpoint,
     *,
-    now: Optional[float] = None,
+    now: float | None = None,
 ) -> EndpointStatus:
     """
     Return the current status of one endpoint.
@@ -368,7 +365,7 @@ def check_status(
     return status
 
 
-def check_all(*, now: Optional[float] = None) -> List[EndpointStatus]:
+def check_all(*, now: float | None = None) -> list[EndpointStatus]:
     """Check every endpoint in the registry. Order matches ENDPOINTS."""
     return [check_status(e, now=now) for e in ENDPOINTS]
 
@@ -383,13 +380,13 @@ class ActionResult:
     ok: bool
     stdout: str = ""
     stderr: str = ""
-    returncode: Optional[int] = None
+    returncode: int | None = None
 
-    def to_dict(self) -> Dict:
+    def to_dict(self) -> dict:
         return asdict(self)
 
 
-def _action(label: str, args: List[str], action_name: str, name: str) -> ActionResult:
+def _action(label: str, args: list[str], action_name: str, name: str) -> ActionResult:
     proc = _run(args, timeout=10.0)
     return ActionResult(
         name=name,
@@ -460,21 +457,19 @@ def stop(endpoint: Endpoint) -> ActionResult:
 # ── Aggregation helpers ─────────────────────────────────────────────────────
 
 
-def aggregate(statuses: List[EndpointStatus]) -> Dict:
+def aggregate(statuses: list[EndpointStatus]) -> dict:
     """
     Roll up a list of statuses into a top-level summary suitable for
     dashboards, JSON output, or alerting hooks.
     """
-    counts: Dict[str, int] = {}
+    counts: dict[str, int] = {}
     for s in statuses:
         counts[s.status] = counts.get(s.status, 0) + 1
 
     overall = STATUS_OK
     if counts.get(STATUS_DOWN):
         overall = STATUS_DOWN
-    elif counts.get(STATUS_DEGRADED) or counts.get(STATUS_STALE):
-        overall = STATUS_DEGRADED
-    elif counts.get(STATUS_UNKNOWN):
+    elif counts.get(STATUS_DEGRADED) or counts.get(STATUS_STALE) or counts.get(STATUS_UNKNOWN):
         overall = STATUS_DEGRADED
 
     return {

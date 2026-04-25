@@ -22,8 +22,6 @@ import json
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional
-
 
 HANDOFF_MAX_BYTES = 2048  # ~2KB per note
 
@@ -41,7 +39,7 @@ class HandoffEngine:
         self.root.mkdir(parents=True, exist_ok=True)
 
     def write(self, note: str, source_instance: str, source_session_id: str,
-              thread: str = "general") -> Dict:
+              thread: str = "general") -> dict:
         """
         Write a handoff note for the next instance.
 
@@ -83,18 +81,18 @@ class HandoffEngine:
         record["_path"] = str(path)
         return record
 
-    def _load_all(self) -> List[Dict]:
+    def _load_all(self) -> list[dict]:
         records = []
         for fp in sorted(self.root.glob("*.json")):
             try:
                 data = json.loads(fp.read_text())
                 data["_path"] = str(fp)
                 records.append(data)
-            except (json.JSONDecodeError, IOError):
+            except (OSError, json.JSONDecodeError):
                 continue
         return records
 
-    def unconsumed(self, thread: Optional[str] = None, limit: int = 20) -> List[Dict]:
+    def unconsumed(self, thread: str | None = None, limit: int = 20) -> list[dict]:
         """Return handoffs that have not yet been surfaced to a reader."""
         records = [r for r in self._load_all() if not r.get("consumed_at")]
         if thread:
@@ -102,7 +100,7 @@ class HandoffEngine:
         records.sort(key=lambda r: r.get("timestamp", ""), reverse=True)
         return records[:limit]
 
-    def mark_consumed(self, paths: List[str], consumed_by: str) -> int:
+    def mark_consumed(self, paths: list[str], consumed_by: str) -> int:
         """Flip consumed_at on the given handoff files. Returns count marked."""
         count = 0
         ts = datetime.now().isoformat()
@@ -118,12 +116,12 @@ class HandoffEngine:
                 data["consumed_by"] = consumed_by or "unknown"
                 fp.write_text(json.dumps(data, indent=2))
                 count += 1
-            except (json.JSONDecodeError, IOError):
+            except (OSError, json.JSONDecodeError):
                 continue
         return count
 
-    def all(self, include_consumed: bool = True, thread: Optional[str] = None,
-            limit: int = 50) -> List[Dict]:
+    def all(self, include_consumed: bool = True, thread: str | None = None,
+            limit: int = 50) -> list[dict]:
         """All handoffs (for archaeology), newest first."""
         records = self._load_all()
         if not include_consumed:
@@ -139,7 +137,7 @@ class HandoffEngine:
         handoff_path: str,
         consumed_by: str,
         what_was_done: str,
-    ) -> Dict:
+    ) -> dict:
         """
         Record what the reader actually did with a handoff.
 
@@ -167,7 +165,7 @@ class HandoffEngine:
         if not what_was_done or not what_was_done.strip():
             raise ValueError("what_was_done is required")
 
-        record: Dict = {
+        record: dict = {
             "handoff_path": str(handoff_path).strip(),
             "consumed_by": consumed_by.strip(),
             "what_was_done": what_was_done.strip(),
@@ -180,7 +178,7 @@ class HandoffEngine:
 
         return record
 
-    def acted_on_records(self, handoff_path: Optional[str] = None) -> List[Dict]:
+    def acted_on_records(self, handoff_path: str | None = None) -> list[dict]:
         """
         Query the acted_on log.
 
@@ -194,7 +192,7 @@ class HandoffEngine:
         if not acted_on_log.exists():
             return []
 
-        records: List[Dict] = []
+        records: list[dict] = []
         for line in acted_on_log.read_text().splitlines():
             if not line.strip():
                 continue
@@ -210,7 +208,7 @@ class HandoffEngine:
         return records
 
 
-def format_handoff_for_surface(record: Dict) -> str:
+def format_handoff_for_surface(record: dict) -> str:
     """
     Attribution-framed rendering. This is the epistemic-hygiene move:
     the new instance reads this as someone else's claim, not as its own intent.

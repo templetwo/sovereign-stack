@@ -12,7 +12,6 @@ import json
 import shutil
 import tempfile
 from datetime import datetime, timedelta
-from pathlib import Path
 
 import pytest
 
@@ -189,7 +188,7 @@ class TestTouchPenalty:
         _backdate_touch(mem, tid, days_ago=10)
 
         _backdate(mem, tid, days_ago=7)
-        triaged_no_touch = mem.triage_threads()
+        mem.triage_threads()
 
         # Score should not include a touch_penalty since the touch is > 7 days old.
         # Compare vs a fresh thread with same age - their scores should be similar.
@@ -358,8 +357,8 @@ class TestTiebreaker:
         ids_in_order = [t["thread_id"] for t in triaged]
 
         # The 6-day thread (newer_id) is newer → its timestamp is later → appears first on tie.
-        newer_pos = ids_in_order.index(newer_id) if newer_id in ids_in_order else 999
-        older_pos = ids_in_order.index(older_id) if older_id in ids_in_order else 999
+        ids_in_order.index(newer_id) if newer_id in ids_in_order else 999
+        ids_in_order.index(older_id) if older_id in ids_in_order else 999
 
         # 6 days → age_pressure = 6/14 ≈ 0.4286; 7 days → 0.5. Scores differ slightly.
         # For a strict tiebreaker test, make scores actually equal by patching to identical timestamps.
@@ -370,7 +369,6 @@ class TestTiebreaker:
 
         # Manually set timestamps to be close but distinct using direct file edit.
         import json
-        from datetime import timedelta
         for jsonl_file in mem.threads_dir.glob("*.jsonl"):
             lines = []
             for line in jsonl_file.read_text().splitlines():

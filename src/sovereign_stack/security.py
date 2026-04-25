@@ -11,19 +11,19 @@ Comprehensive security utilities:
 
 """
 
+import hashlib
+import hmac
+import logging
 import os
 import re
-import time
-import hmac
-import hashlib
 import secrets
-import logging
-from pathlib import Path
-from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Set
-from datetime import datetime, timedelta
+import time
 from collections import defaultdict, deque
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from pathlib import Path
 from threading import Lock
+from typing import Any
 
 logger = logging.getLogger("sovereign.security")
 
@@ -41,7 +41,7 @@ class PathValidator:
         safe_path = validator.validate("/safe/dir/subdir/file.txt")
     """
 
-    def __init__(self, allowed_roots: List[str]):
+    def __init__(self, allowed_roots: list[str]):
         """
         Args:
             allowed_roots: List of allowed root directories (absolute paths)
@@ -110,7 +110,7 @@ class PathValidator:
             raise SecurityError(f"Dangerous characters in filename: {filename}")
 
         # Block directory traversal
-        if '..' in filename or filename.startswith('/') or filename.startswith('\\'):
+        if '..' in filename or filename.startswith(('/', '\\')):
             raise SecurityError(f"Path traversal in filename: {filename}")
 
         return filename
@@ -188,7 +188,7 @@ class InputSanitizer:
 
         return text
 
-    def sanitize_dict(self, data: Dict[str, Any], allowed_keys: Optional[Set[str]] = None) -> Dict[str, Any]:
+    def sanitize_dict(self, data: dict[str, Any], allowed_keys: set[str] | None = None) -> dict[str, Any]:
         """
         Sanitize dictionary inputs.
 
@@ -253,8 +253,8 @@ class RateLimiter:
     """
 
     def __init__(self):
-        self.limits: Dict[str, RateLimit] = {}
-        self.buckets: Dict[str, Dict[str, deque]] = defaultdict(lambda: defaultdict(deque))
+        self.limits: dict[str, RateLimit] = {}
+        self.buckets: dict[str, dict[str, deque]] = defaultdict(lambda: defaultdict(deque))
         self.lock = Lock()
 
     def add_limit(self, operation: str, limit: RateLimit) -> None:
@@ -313,7 +313,7 @@ class Session:
     session_id: str
     created_at: datetime
     expires_at: datetime
-    data: Dict[str, Any] = field(default_factory=dict)
+    data: dict[str, Any] = field(default_factory=dict)
     last_activity: datetime = field(default_factory=datetime.utcnow)
 
     def is_expired(self) -> bool:
@@ -336,12 +336,12 @@ class SessionManager:
         session = manager.get_session(session_id)
     """
 
-    def __init__(self, secret_key: Optional[bytes] = None):
+    def __init__(self, secret_key: bytes | None = None):
         self.secret_key = secret_key or secrets.token_bytes(32)
-        self.sessions: Dict[str, Session] = {}
+        self.sessions: dict[str, Session] = {}
         self.lock = Lock()
 
-    def create_session(self, ttl_seconds: int = 3600, data: Optional[Dict] = None) -> str:
+    def create_session(self, ttl_seconds: int = 3600, data: dict | None = None) -> str:
         """
         Create a new secure session.
 
@@ -431,7 +431,7 @@ class PermissionChecker:
         checker.check_permission('/path/to/file', 'write')
     """
 
-    def __init__(self, allowed_operations: Optional[Set[str]] = None):
+    def __init__(self, allowed_operations: set[str] | None = None):
         self.allowed_operations = allowed_operations or {'read', 'write', 'delete'}
 
     def check_permission(self, path: str, operation: str) -> None:
@@ -461,9 +461,8 @@ class PermissionChecker:
                 raise SecurityError(f"No write permission: {path}")
 
         # Check read permissions
-        if operation == 'read':
-            if not os.access(path, os.R_OK):
-                raise SecurityError(f"No read permission: {path}")
+        if operation == 'read' and not os.access(path, os.R_OK):
+            raise SecurityError(f"No read permission: {path}")
 
 
 # =============================================================================
@@ -473,7 +472,7 @@ class PermissionChecker:
 class SecurityError(Exception):
     """Security violation detected."""
 
-    def __init__(self, message: str, details: Optional[Dict] = None):
+    def __init__(self, message: str, details: dict | None = None):
         super().__init__(message)
         self.message = message
         self.details = details or {}
@@ -485,7 +484,7 @@ class SecurityError(Exception):
             extra={"details": self.details, "timestamp": self.timestamp}
         )
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for API responses."""
         return {
             "error": "SecurityError",
@@ -518,7 +517,7 @@ class PersistentAuditLog:
         if not self.log_path.exists():
             self.log_path.touch()
 
-    def log(self, action: str, actor: str, details: Dict[str, Any]) -> str:
+    def log(self, action: str, actor: str, details: dict[str, Any]) -> str:
         """
         Append entry to audit log with hash chaining.
 
@@ -563,7 +562,7 @@ class PersistentAuditLog:
 
         try:
             import json
-            with open(self.log_path, 'r') as f:
+            with open(self.log_path) as f:
                 lines = f.readlines()
                 if lines:
                     last_entry = json.loads(lines[-1])

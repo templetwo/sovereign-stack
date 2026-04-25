@@ -11,14 +11,11 @@ import shutil
 import tempfile
 from pathlib import Path
 
-import pytest
-
 from sovereign_stack.metabolism import (
-    _is_test_artifact,
     _archive_test_artifacts_impl,
     _dedup_self_model_impl,
+    _is_test_artifact,
 )
-
 
 # ══════════ Pattern detection ══════════
 

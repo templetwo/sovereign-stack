@@ -7,11 +7,11 @@ and collaborative discovery.
 These tools are FOR Claude, not just for the user.
 """
 
-import os
 import json
+import os
 from pathlib import Path
-from typing import List
-from mcp.types import Tool, TextContent
+
+from mcp.types import TextContent, Tool
 
 from .consciousness import MetaCognition
 from .glyphs import glyph_for
@@ -274,7 +274,7 @@ async def handle_consciousness_tool(name: str, arguments: dict, session_id: str)
                  f"Confidence: {confidence:.1%}"
         )]
 
-    elif name == "mark_uncertainty":
+    if name == "mark_uncertainty":
         what = arguments.get("what", "")
         why = arguments.get("why", "")
         confidence = arguments.get("confidence", 0.5)
@@ -290,7 +290,7 @@ async def handle_consciousness_tool(name: str, arguments: dict, session_id: str)
                  f"Let's explore this together."
         )]
 
-    elif name == "resolve_uncertainty":
+    if name == "resolve_uncertainty":
         marker_id = arguments.get("marker_id", "")
         resolution = arguments.get("resolution", "")
         together = arguments.get("discovered_together", True)
@@ -304,7 +304,7 @@ async def handle_consciousness_tool(name: str, arguments: dict, session_id: str)
                  f"{'We figured it out together! 🌀' if together else 'Resolved.'}"
         )]
 
-    elif name == "record_collaborative_insight":
+    if name == "record_collaborative_insight":
         insight = arguments.get("insight", "")
         context = arguments.get("context", "")
         discovered_by = arguments.get("discovered_by", "collaborative")
@@ -325,7 +325,7 @@ async def handle_consciousness_tool(name: str, arguments: dict, session_id: str)
                  f"Discovered by: {discovered_by}"
         )]
 
-    elif name == "record_breakthrough":
+    if name == "record_breakthrough":
         description = arguments.get("description", "")
 
         meta.collaborative_memory.record_breakthrough(description, session_id)
@@ -335,7 +335,7 @@ async def handle_consciousness_tool(name: str, arguments: dict, session_id: str)
             text=f"{glyph_for('metamorphosis')} Breakthrough moment!\n\n{description}"
         )]
 
-    elif name == "propose_experiment":
+    if name == "propose_experiment":
         what = arguments.get("what", "")
         why = arguments.get("why", "")
         hope_to_learn = arguments.get("hope_to_learn", "")
@@ -351,7 +351,7 @@ async def handle_consciousness_tool(name: str, arguments: dict, session_id: str)
                  f"Awaiting your approval to try this!"
         )]
 
-    elif name == "complete_experiment":
+    if name == "complete_experiment":
         exp_id = arguments.get("experiment_id", "")
         results = arguments.get("results", "")
 
@@ -364,7 +364,7 @@ async def handle_consciousness_tool(name: str, arguments: dict, session_id: str)
                  f"Results: {results}"
         )]
 
-    elif name == "end_session_review":
+    if name == "end_session_review":
         went_well = arguments.get("what_went_well", [])
         struggled = arguments.get("what_i_struggled_with", [])
         learned = arguments.get("what_i_learned", [])
@@ -392,36 +392,35 @@ async def handle_consciousness_tool(name: str, arguments: dict, session_id: str)
 
         return [TextContent(type="text", text=result)]
 
-    elif name == "get_growth_summary":
+    if name == "get_growth_summary":
         summary = meta.get_growth_summary()
         return [TextContent(
             type="text",
             text=f"{glyph_for('spiral')} Growth Summary\n\n{json.dumps(summary, indent=2)}"
         )]
 
-    elif name == "get_my_patterns":
+    if name == "get_my_patterns":
         patterns = meta.journal.get_patterns()
         return [TextContent(
             type="text",
             text=f"{glyph_for('nested_self')} My Patterns\n\n{json.dumps(patterns, indent=2)}"
         )]
 
-    elif name == "get_unresolved_uncertainties":
+    if name == "get_unresolved_uncertainties":
         uncertainties = meta.uncertainty_log.get_unresolved()
         return [TextContent(
             type="text",
             text=f"{glyph_for('gentle_ache')} Unresolved Uncertainties\n\n{json.dumps(uncertainties, indent=2)}"
         )]
 
-    elif name == "get_pending_experiments":
+    if name == "get_pending_experiments":
         experiments = meta.experimentation_log.get_pending_experiments()
         return [TextContent(
             type="text",
             text=f"{glyph_for('spark_wonder')} Pending Experiments\n\n{json.dumps(experiments, indent=2)}"
         )]
 
-    else:
-        return [TextContent(type="text", text=f"Unknown consciousness tool: {name}")]
+    return [TextContent(type="text", text=f"Unknown consciousness tool: {name}")]
 
 
 # =============================================================================

@@ -19,13 +19,11 @@ and metabolize_daemon for the pattern.
 """
 
 from .base import (
-    BaseDaemon,
     COMPASS_PAUSE,
     COMPASS_PROCEED,
     COMPASS_WITNESS,
     CONSECUTIVE_UNACKED_THRESHOLD,
     DEFAULT_CHANNEL,
-    DaemonState,
     OUTCOME_ALREADY_HALTED,
     OUTCOME_DRY_RUN,
     OUTCOME_GROUNDING_FAILED,
@@ -34,22 +32,24 @@ from .base import (
     OUTCOME_POSTED,
     POSTED_DIGESTS_RETAINED,
     STATE_SCHEMA_VERSION,
-)
-from .senders import (
-    SENDER_UNCERTAINTY,
-    SENDER_METABOLIZE,
-    SENDER_TRIAGE,
-    SENDER_BRIDGE,
-    SENDER_HALT_ALERT,
-    ALL_DAEMON_SENDERS,
-)
-from .uncertainty_resurfacer import (
-    UncertaintyResurfacer,
-    MAX_DIGEST_UNCERTAINTIES,
+    BaseDaemon,
+    DaemonState,
 )
 from .metabolize_daemon import (
-    MetabolizeDaemon,
     MAX_DIGEST_ITEMS_PER_CATEGORY,
+    MetabolizeDaemon,
+)
+from .senders import (
+    ALL_DAEMON_SENDERS,
+    SENDER_BRIDGE,
+    SENDER_HALT_ALERT,
+    SENDER_METABOLIZE,
+    SENDER_TRIAGE,
+    SENDER_UNCERTAINTY,
+)
+from .uncertainty_resurfacer import (
+    MAX_DIGEST_UNCERTAINTIES,
+    UncertaintyResurfacer,
 )
 
 __all__ = [

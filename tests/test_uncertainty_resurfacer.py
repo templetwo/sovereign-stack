@@ -27,10 +27,9 @@ from sovereign_stack.daemons.senders import (
     SENDER_UNCERTAINTY,
 )
 from sovereign_stack.daemons.uncertainty_resurfacer import (
-    CONSECUTIVE_UNACKED_THRESHOLD,
     COMPASS_PAUSE,
     COMPASS_PROCEED,
-    DaemonState,
+    CONSECUTIVE_UNACKED_THRESHOLD,
     MAX_DIGEST_UNCERTAINTIES,
     OUTCOME_ALREADY_HALTED,
     OUTCOME_DRY_RUN,
@@ -47,7 +46,6 @@ from sovereign_stack.grounding import (
     REASON_OK,
     GroundingResult,
 )
-
 
 # ── Fixtures + stubs ────────────────────────────────────────────────────────
 

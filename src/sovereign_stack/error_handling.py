@@ -11,15 +11,16 @@ Comprehensive error handling utilities:
 
 """
 
-import time
-import logging
 import asyncio
 import functools
-from enum import Enum
-from typing import Any, Callable, Dict, List, Optional, Type, TypeVar, Union
-from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+import logging
+import time
+from collections.abc import Callable
 from contextlib import contextmanager
+from dataclasses import dataclass, field
+from datetime import datetime
+from enum import Enum
+from typing import Any, TypeVar
 
 logger = logging.getLogger("sovereign.errors")
 
@@ -56,12 +57,12 @@ class ErrorContext:
     category: ErrorCategory
     severity: ErrorSeverity
     operation: str
-    details: Dict[str, Any]
+    details: dict[str, Any]
     timestamp: datetime = field(default_factory=datetime.utcnow)
-    stack_trace: Optional[str] = None
-    recovery_suggestion: Optional[str] = None
+    stack_trace: str | None = None
+    recovery_suggestion: str | None = None
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary."""
         return {
             "category": self.category.value,
@@ -80,8 +81,8 @@ class SovereignError(Exception):
     def __init__(
         self,
         message: str,
-        context: Optional[ErrorContext] = None,
-        cause: Optional[Exception] = None
+        context: ErrorContext | None = None,
+        cause: Exception | None = None
     ):
         super().__init__(message)
         self.message = message
@@ -99,7 +100,7 @@ class SovereignError(Exception):
 
             logger.log(log_level, f"{message}", extra={"context": context.to_dict()})
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for API responses."""
         result = {
             "error": self.__class__.__name__,
@@ -117,27 +118,22 @@ class SovereignError(Exception):
 
 class ValidationError(SovereignError):
     """Input validation failed."""
-    pass
 
 
 class PermissionError(SovereignError):
     """Permission denied."""
-    pass
 
 
 class TimeoutError(SovereignError):
     """Operation timed out."""
-    pass
 
 
 class ResourceError(SovereignError):
     """Resource exhausted or unavailable."""
-    pass
 
 
 class RetryExhaustedError(SovereignError):
     """Retry attempts exhausted."""
-    pass
 
 
 # =============================================================================
@@ -195,7 +191,7 @@ class TimeoutHandler:
             return result
         except TimeoutError:
             raise
-        except Exception as e:
+        except Exception:
             signal.alarm(0)
             raise
         finally:
@@ -360,12 +356,12 @@ class CircuitBreaker:
         result = breaker.call(unreliable_service)
     """
 
-    def __init__(self, config: Optional[CircuitBreakerConfig] = None):
+    def __init__(self, config: CircuitBreakerConfig | None = None):
         self.config = config or CircuitBreakerConfig()
         self.state = CircuitState.CLOSED
         self.failure_count = 0
         self.success_count = 0
-        self.last_failure_time: Optional[datetime] = None
+        self.last_failure_time: datetime | None = None
 
     def call(self, func: Callable[..., T], *args, **kwargs) -> T:
         """
@@ -409,7 +405,7 @@ class CircuitBreaker:
             self._on_success()
             return result
 
-        except Exception as e:
+        except Exception:
             self._on_failure()
             raise
 
@@ -539,7 +535,7 @@ def safe_operation(
 # VALIDATION HELPERS
 # =============================================================================
 
-def validate_type(value: Any, expected_type: Type, field_name: str) -> None:
+def validate_type(value: Any, expected_type: type, field_name: str) -> None:
     """
     Validate type of a value.
 
@@ -569,9 +565,9 @@ def validate_type(value: Any, expected_type: Type, field_name: str) -> None:
 
 
 def validate_range(
-    value: Union[int, float],
-    min_value: Optional[Union[int, float]] = None,
-    max_value: Optional[Union[int, float]] = None,
+    value: int | float,
+    min_value: int | float | None = None,
+    max_value: int | float | None = None,
     field_name: str = "value"
 ) -> None:
     """
@@ -611,7 +607,7 @@ def validate_range(
         )
 
 
-def validate_not_empty(value: Union[str, list, dict], field_name: str) -> None:
+def validate_not_empty(value: str | list | dict, field_name: str) -> None:
     """
     Validate value is not empty.
 

@@ -17,12 +17,10 @@ import json
 import os
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
 
-from mcp.types import Tool, TextContent
+from mcp.types import TextContent, Tool
 
 from . import connectivity
-
 
 # ── Tool registrations ──────────────────────────────────────────────────────
 
@@ -130,7 +128,7 @@ def stack_write_check(
     instance_id: str,
     *,
     cleanup: bool = False,
-    sovereign_root: Optional[Path] = None,
+    sovereign_root: Path | None = None,
 ) -> dict:
     """
     Smoke-test the chronicle write path for `instance_id`.

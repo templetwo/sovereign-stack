@@ -15,26 +15,23 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from typing import List, Optional
 
 from .connectivity import (
     ENDPOINTS,
-    Endpoint,
-    EndpointStatus,
     STATUS_DEGRADED,
     STATUS_DOWN,
     STATUS_OK,
     STATUS_STALE,
     STATUS_UNKNOWN,
+    Endpoint,
+    EndpointStatus,
     aggregate,
     check_all,
-    check_status,
     get_endpoint,
     restart,
     start,
     stop,
 )
-
 
 # ── Output helpers ──────────────────────────────────────────────────────────
 
@@ -53,7 +50,7 @@ def _format_status_row(s: EndpointStatus) -> str:
     name_col = s.name.ljust(12)
     status_col = s.status.upper().ljust(9)
     pid_part = f"pid={s.pid}" if s.pid else "—"
-    extra: List[str] = []
+    extra: list[str] = []
     if s.http_status is not None:
         extra.append(f"http={s.http_status}")
     if s.http_error:
@@ -66,7 +63,7 @@ def _format_status_row(s: EndpointStatus) -> str:
     return f"  {glyph} {name_col} {status_col} {pid_part}{extra_str}"
 
 
-def _print_status(statuses: List[EndpointStatus]) -> None:
+def _print_status(statuses: list[EndpointStatus]) -> None:
     summary = aggregate(statuses)
     overall = summary["overall"]
     glyph = _STATUS_GLYPH.get(overall, "?")
@@ -86,7 +83,7 @@ def _print_status(statuses: List[EndpointStatus]) -> None:
 # ── Action dispatch ─────────────────────────────────────────────────────────
 
 
-def _resolve_targets(target: str) -> List[Endpoint]:
+def _resolve_targets(target: str) -> list[Endpoint]:
     if target == "all":
         return [e for e in ENDPOINTS if e.label]
     try:
@@ -125,7 +122,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_status.add_argument("--json", action="store_true",
                           help="machine-readable output")
 
-    p_list = sub.add_parser("list", help="list registered endpoints")
+    sub.add_parser("list", help="list registered endpoints")
 
     for cmd in ("start", "stop", "restart"):
         sp = sub.add_parser(cmd, help=f"{cmd} an endpoint or 'all'")
@@ -136,7 +133,7 @@ def _build_parser() -> argparse.ArgumentParser:
     return p
 
 
-def main(argv: Optional[List[str]] = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
     command = args.command or "status"

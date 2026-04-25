@@ -13,12 +13,10 @@ No MCP coupling here. Pure data → formatted lines. Testable in isolation.
 import json
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional
-
 
 # ── Time ──
 
-def days_old(iso_timestamp: Optional[str]) -> int:
+def days_old(iso_timestamp: str | None) -> int:
     """
     Number of whole days between the given ISO timestamp and now.
 
@@ -45,7 +43,7 @@ def days_old(iso_timestamp: Optional[str]) -> int:
 _SELF_MODEL_CATEGORY_ORDER = ("strength", "tendency", "blind_spot", "drift")
 
 
-def format_self_model(sovereign_root: Path, max_obs_len: int = 180) -> List[str]:
+def format_self_model(sovereign_root: Path, max_obs_len: int = 180) -> list[str]:
     """
     Read ~/.sovereign/self_model.json and return lines for the boot surface.
 
@@ -61,7 +59,7 @@ def format_self_model(sovereign_root: Path, max_obs_len: int = 180) -> List[str]
         model = json.loads(path.read_text())
     except (json.JSONDecodeError, OSError):
         return []
-    body: List[str] = []
+    body: list[str] = []
     for cat in _SELF_MODEL_CATEGORY_ORDER:
         entries = model.get(cat) or []
         if not entries:
@@ -87,7 +85,7 @@ def format_self_model(sovereign_root: Path, max_obs_len: int = 180) -> List[str]
 # ── Uncertainty surfacing ──
 
 def format_unresolved_uncertainties(sovereign_root: Path,
-                                    limit: int = 5) -> List[str]:
+                                    limit: int = 5) -> list[str]:
     """
     Read ~/.sovereign/consciousness/uncertainty_log.json and return lines
     for unresolved markers.
@@ -143,8 +141,8 @@ def format_unresolved_uncertainties(sovereign_root: Path,
 
 # ── Thread age annotation ──
 
-def format_threads_with_age(threads: List[Dict],
-                            truncate_question: int = 140) -> List[str]:
+def format_threads_with_age(threads: list[dict],
+                            truncate_question: int = 140) -> list[str]:
     """
     Render open threads with age annotation. Threads older than 30 days
     get a stale marker — not to hide them, but to signal they may have

@@ -45,16 +45,15 @@ from __future__ import annotations
 
 import json
 import os
-from collections import Counter, defaultdict
+from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
-
+from typing import Any
 
 # ── Paths ────────────────────────────────────────────────────────────────────
 
 
-def _reflexive_dir(sovereign_root: Optional[Path] = None) -> Path:
+def _reflexive_dir(sovereign_root: Path | None = None) -> Path:
     root = sovereign_root or Path(os.environ.get(
         "SOVEREIGN_ROOT", Path.home() / ".sovereign",
     ))
@@ -63,11 +62,11 @@ def _reflexive_dir(sovereign_root: Optional[Path] = None) -> Path:
     return d
 
 
-def _priors_log_path(sovereign_root: Optional[Path] = None) -> Path:
+def _priors_log_path(sovereign_root: Path | None = None) -> Path:
     return _reflexive_dir(sovereign_root) / "priors_log.jsonl"
 
 
-def _alignment_log_path(sovereign_root: Optional[Path] = None) -> Path:
+def _alignment_log_path(sovereign_root: Path | None = None) -> Path:
     return _reflexive_dir(sovereign_root) / "alignment_log.jsonl"
 
 
@@ -75,8 +74,8 @@ def _alignment_log_path(sovereign_root: Optional[Path] = None) -> Path:
 
 
 def _load_priors_index(
-    sovereign_root: Optional[Path] = None,
-) -> Dict[str, Dict]:
+    sovereign_root: Path | None = None,
+) -> dict[str, dict]:
     """
     Build a turn_id → priors-record index from the priors_log. Records
     without a turn_id (legacy) are skipped — alignment requires the id.
@@ -84,7 +83,7 @@ def _load_priors_index(
     path = _priors_log_path(sovereign_root)
     if not path.exists():
         return {}
-    out: Dict[str, Dict] = {}
+    out: dict[str, dict] = {}
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
     except OSError:
@@ -110,12 +109,12 @@ def _load_priors_index(
 def record_prior_alignment(
     turn_id: str,
     *,
-    aligned_with: Optional[List[str]] = None,
-    contradicted: Optional[List[str]] = None,
-    ignored: Optional[List[str]] = None,
+    aligned_with: list[str] | None = None,
+    contradicted: list[str] | None = None,
+    ignored: list[str] | None = None,
     notes: str = "",
-    sovereign_root: Optional[Path] = None,
-) -> Dict:
+    sovereign_root: Path | None = None,
+) -> dict:
     """
     Append an alignment record for a prior_for_turn call.
 
@@ -153,7 +152,7 @@ def record_prior_alignment(
 
     priors_rec = index[turn_id]
     surfaced = priors_rec.get("included_items", []) or []
-    surfaced_set: Set[str] = set(surfaced)
+    surfaced_set: set[str] = set(surfaced)
 
     # Validate: every signature in aligned_with / contradicted / ignored
     # should be a signature that was actually surfaced. Report mismatches
@@ -198,9 +197,9 @@ def _kind_for_signature(sig: str) -> str:
 
 
 def _within_window(
-    iso_ts: Optional[str],
-    since_iso: Optional[str],
-    until_iso: Optional[str],
+    iso_ts: str | None,
+    since_iso: str | None,
+    until_iso: str | None,
 ) -> bool:
     if not iso_ts:
         return True
@@ -232,11 +231,11 @@ def _within_window(
 
 
 def prior_alignment_summary(
-    since: Optional[str] = None,
-    until: Optional[str] = None,
+    since: str | None = None,
+    until: str | None = None,
     *,
-    sovereign_root: Optional[Path] = None,
-) -> Dict[str, Any]:
+    sovereign_root: Path | None = None,
+) -> dict[str, Any]:
     """
     Aggregate alignment records into the Jain et al.-shaped summary.
 
@@ -261,13 +260,13 @@ def prior_alignment_summary(
     aligned_total = 0
     contradicted_total = 0
     ignored_total = 0
-    by_source: Dict[str, Dict[str, int]] = defaultdict(
+    by_source: dict[str, dict[str, int]] = defaultdict(
         lambda: {"aligned": 0, "contradicted": 0, "ignored": 0, "total": 0}
     )
-    by_drift_pattern: Dict[str, Dict[str, int]] = defaultdict(
+    by_drift_pattern: dict[str, dict[str, int]] = defaultdict(
         lambda: {"aligned": 0, "contradicted": 0, "ignored": 0, "total": 0}
     )
-    seen_turn_ids: Set[str] = set()
+    seen_turn_ids: set[str] = set()
 
     if align_path.exists():
         try:
@@ -306,7 +305,7 @@ def prior_alignment_summary(
     # a non-empty block, but no alignment record exists. The Stage B caller
     # may not have followed up. Useful as a hygiene metric.
     turns_with_priors = 0
-    for tid, priors_rec in priors_index.items():
+    for _tid, priors_rec in priors_index.items():
         if not _within_window(priors_rec.get("timestamp"), since, until):
             continue
         if priors_rec.get("included_items"):

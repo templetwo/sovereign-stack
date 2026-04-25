@@ -5,16 +5,16 @@ Exposes rolling compaction memory buffer via MCP protocol.
 Automatically stores last 3 compaction summaries for instant context recovery.
 """
 
-from mcp.types import Tool
 from pathlib import Path
-from typing import Dict, Any
+from typing import Any
+
+from mcp.types import Tool
 
 from .compaction_memory import (
     CompactionMemoryBuffer,
     auto_store_compaction,
-    retrieve_compaction_context
+    retrieve_compaction_context,
 )
-
 
 # Tool definitions
 
@@ -103,7 +103,7 @@ COMPACTION_MEMORY_TOOLS = [
 
 async def handle_compaction_memory_tool(
     name: str,
-    arguments: Dict[str, Any],
+    arguments: dict[str, Any],
     sovereign_root: Path
 ) -> str:
     """Handle compaction memory tool calls"""
@@ -120,14 +120,13 @@ async def handle_compaction_memory_tool(
             recent_breakthroughs=arguments.get("recent_breakthroughs")
         )
 
-    elif name == "get_compaction_context":
+    if name == "get_compaction_context":
         return await _get_compaction_context(storage_dir)
 
-    elif name == "get_compaction_stats":
+    if name == "get_compaction_stats":
         return await _get_compaction_stats(storage_dir)
 
-    else:
-        return f"Unknown compaction memory tool: {name}"
+    return f"Unknown compaction memory tool: {name}"
 
 
 async def _store_compaction_summary(
@@ -141,7 +140,7 @@ async def _store_compaction_summary(
     """Store compaction summary"""
 
     try:
-        result = auto_store_compaction(
+        return auto_store_compaction(
             storage_dir=storage_dir,
             summary_text=summary_text,
             session_id=session_id,
@@ -149,7 +148,6 @@ async def _store_compaction_summary(
             active_tasks=active_tasks,
             recent_breakthroughs=recent_breakthroughs
         )
-        return result
 
     except Exception as e:
         return f"❌ Error storing compaction summary: {str(e)}"
@@ -159,8 +157,7 @@ async def _get_compaction_context(storage_dir: Path) -> str:
     """Retrieve compaction context"""
 
     try:
-        context = retrieve_compaction_context(storage_dir)
-        return context
+        return retrieve_compaction_context(storage_dir)
 
     except Exception as e:
         return f"❌ Error retrieving compaction context: {str(e)}"

@@ -7,6 +7,92 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.3.2] - 2026-04-25
+
+### Reflection daemons + connectivity layer + tiered toolkit — 75 tools, 651/651 tests
+
+Substrate shifts in three layers: scheduled feedback loops, multi-instance
+operational tooling, and a curated boot experience for first-time instances.
+
+### Added — Reflection daemons (scheduled feedback loops)
+- **`prior_for_turn`** — turn-start priors block (drift / uncertainty / thread / insight)
+  with k=1 default (ReasoningBank ICLR 2026), 400-token cap, freshness penalty
+  (Jain et al. MIT/IDSS 2026 sycophancy guardrail). Returns a `turn_id` UUID
+  for Stage B alignment instrumentation.
+- **`grounded_extract`** — three-layer epistemic typing for daemon output verification.
+  Filesystem reality counts as structural evidence; chronicle paths are
+  layer-checked record-by-record.
+- **`UncertaintyResurfacer`** (every 3 days, 09:17) — surfaces top-3 oldest
+  unresolved uncertainties; halts on three consecutive unacked digests + writes
+  halt-alert.
+- **`MetabolizeDaemon`** (nightly, 03:17) — surfaces NEW contradictions, stale
+  threads, aging hypotheses with delta filtering. Dual sinks: comms post +
+  `~/.sovereign/decisions/metabolize_<ts>.md`.
+- **`BaseDaemon`** — shared scaffolding (DaemonState w/ schema_version +
+  future-version refusal, halt-write four-field contract, ack-counting,
+  circuit breaker). Saves ~150 LOC per future daemon.
+
+### Added — Connectivity + operations layer
+- **`connectivity.py`** — canonical endpoint registry. `launchctl`-truth status,
+  HTTP health probes, periodic-vs-always-on awareness, start/stop/restart helpers.
+- **`sovereign-connectivity`** CLI — status / list / start / stop / restart, JSON or pretty.
+- **`sovereign-monitor`** — auto-recovery loop with exponential backoff + audit log.
+- **`sovereign-dashboard`** (TUI) — services + indicators + live activity feed.
+- **`sovereign-dashboard-web`** (HTTP) — stdlib-only browser dashboard on port 3435.
+  Live feed now includes git commits + launchd state changes alongside chronicle
+  activity.
+- **`connectivity_status`** + **`stack_write_check`** MCP tools — any instance can
+  probe stack health and verify their write path from inside a conversation.
+
+### Added — Tiered toolkit + start_here orientation
+- **`my_toolkit()`** now defaults to `tier="essential"` — 12 curated tools grouped
+  by intent. `tier="core"` adds the active-session set (~30); `tier="all"` shows
+  the full registry.
+- **`intent`** axis: orient / read / write / govern / communicate / introspect /
+  handoff / route / ops / security.
+- **`start_here()`** — 5-minute narrative orientation tool for first-time instances.
+  Cheaper than reading CLAUDE.md cold.
+- Hygiene tests guarantee curation stays meaningful.
+
+### Added — Stage A+B reflection-daemon observability
+- **`nape_honks_with_history`** — for each honk: paired ack record (cross-file
+  lookup against `acks.jsonl`), age, cross-reference against `prior_for_turn`'s
+  freshness log. Returns a `zombies` count (acked honks still in priors — the
+  smoking gun for "does a resolved honk persist past its relevance").
+- **`record_prior_alignment`** — Stage B instrumentation. Logs how the response
+  used a `prior_for_turn` call. Validates `turn_id` against `priors_log`.
+- **`prior_alignment_summary`** — Jain et al.-shaped rollup: alignment /
+  contradiction / ignore ratios by source.
+
+### Added — Guardian rewrite
+- Real `quarantine_isolate` / `quarantine_release` (was stubs). Append-only manifest.
+- Real `mcp_audit` pattern scanning over Claude Desktop config.
+- Real `baseline compare` (was create-only).
+- `GUARDIAN_ROOT` env override for testability.
+- 38 tests on a previously-zero-test module.
+
+### Fixed — Nape false positives
+- `where_did_i_leave_off` removed from `SUMMARY_TOOL_NAMES` (it's a boot tool).
+- `ERROR_WORDS` scans now exempt `READONLY_TOOL_NAMES` (read-only tools surface
+  stored content, not their own errors).
+- Dashboard `read_recent_honks` now cross-references the canonical `acks.jsonl`
+  sibling file instead of only checking `ack_id` inline.
+
+### Fixed — operational
+- `comms_listener.sh` integer-comparison crash on empty `$COUNT` + heartbeat echo.
+- `guardian_report` `NameError` on line 272 (bareword `quarantine`).
+- Ollama exposed on `0.0.0.0:11434` via `~/.zshrc` — rebound to `127.0.0.1`.
+- Bridge version drift (1.2.0 → 1.3.2).
+
+### Stats
+- Tools: **64 → 75** (+11)
+- Tests: **413 → 651** (+238 across 13 new test files)
+- Modules: **24 → 34**
+- Health score: 60 → 100
+- Unacked Nape honks: 100 → 0
+
+---
+
 ## [1.3.1] - 2026-04-23
 
 ### 🌀 Feedback-Loop Fortification — 64 tools, 315/315 tests, runtime-reflexive

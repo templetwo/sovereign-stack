@@ -20,10 +20,9 @@ from unittest.mock import patch
 import pytest
 
 from sovereign_stack import connectivity as conn
+from sovereign_stack import connectivity_cli as cli
 from sovereign_stack.connectivity import (
     ENDPOINTS,
-    Endpoint,
-    EndpointStatus,
     KIND_ALWAYS_ON,
     KIND_PERIODIC,
     STATUS_DEGRADED,
@@ -31,6 +30,8 @@ from sovereign_stack.connectivity import (
     STATUS_OK,
     STATUS_STALE,
     STATUS_UNKNOWN,
+    Endpoint,
+    EndpointStatus,
     aggregate,
     check_all,
     check_status,
@@ -40,8 +41,6 @@ from sovereign_stack.connectivity import (
     start,
     stop,
 )
-from sovereign_stack import connectivity_cli as cli
-
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -183,10 +182,10 @@ class TestHttpProbe:
 
 class TestCheckStatusAlwaysOn:
     def _ep(self, **kw):
-        defaults = dict(
-            name="t", label="com.templetwo.test", kind=KIND_ALWAYS_ON,
-            description="test", health_url=None,
-        )
+        defaults = {
+            "name": "t", "label": "com.templetwo.test", "kind": KIND_ALWAYS_ON,
+            "description": "test", "health_url": None,
+        }
         defaults.update(kw)
         return Endpoint(**defaults)
 

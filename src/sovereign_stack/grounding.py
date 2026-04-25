@@ -23,8 +23,6 @@ scheduled daemon before it acts.
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional
-
 
 # Stable reason codes — importable constants so daemons branch on identity,
 # not string contents. If a new reason appears, add it here and document it.
@@ -64,8 +62,8 @@ class GroundingResult:
     accepted: bool
     reason: str
     claim: str
-    matched_paths: List[str] = field(default_factory=list)
-    rejected_paths: List[dict] = field(default_factory=list)
+    matched_paths: list[str] = field(default_factory=list)
+    rejected_paths: list[dict] = field(default_factory=list)
 
     def __bool__(self) -> bool:
         return self.accepted
@@ -84,7 +82,7 @@ def _is_chronicle_path(path: Path, chronicle_root: Path) -> bool:
         return False
 
 
-def _scan_chronicle_layers(path: Path) -> Optional[set]:
+def _scan_chronicle_layers(path: Path) -> set | None:
     """
     Return the set of layers present among JSONL records in `path`.
 
@@ -115,7 +113,7 @@ def _scan_chronicle_layers(path: Path) -> Optional[set]:
     return layers
 
 
-def _classify_chronicle_path(path: Path) -> Optional[str]:
+def _classify_chronicle_path(path: Path) -> str | None:
     """
     Inspect a chronicle path's record layers and return either None
     (qualifies as grounding — contains at least one ground_truth record)
@@ -135,9 +133,9 @@ def _classify_chronicle_path(path: Path) -> Optional[str]:
 
 def grounded_extract(
     claim: str,
-    evidence_paths: List[str],
+    evidence_paths: list[str],
     *,
-    chronicle_root: Optional[Path] = None,
+    chronicle_root: Path | None = None,
     min_evidence_paths: int = 1,
 ) -> GroundingResult:
     """
@@ -188,8 +186,8 @@ def grounded_extract(
             claim=claim,
         )
 
-    matched: List[str] = []
-    rejected: List[dict] = []
+    matched: list[str] = []
+    rejected: list[dict] = []
 
     for raw_path in evidence_paths:
         p = Path(raw_path)

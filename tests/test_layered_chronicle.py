@@ -8,8 +8,8 @@ Layers:
   open_thread   - Unresolved questions as invitations
 """
 import json
-import tempfile
 import shutil
+import tempfile
 from pathlib import Path
 
 from sovereign_stack.memory import ExperientialMemory
@@ -333,8 +333,9 @@ class TestLayeredChronicle:
 
     def test_thread_id_is_deterministic_per_question(self):
         """Same question text yields a stable hash suffix (differs only by timestamp)."""
-        from sovereign_stack.memory import _generate_thread_id
         from datetime import datetime
+
+        from sovereign_stack.memory import _generate_thread_id
         t = datetime(2026, 4, 19, 12, 0, 0)
         a = _generate_thread_id("Revoke the token", t)
         b = _generate_thread_id("Revoke the token", t)

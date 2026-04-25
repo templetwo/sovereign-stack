@@ -14,14 +14,13 @@ Categories:
 - Invocation & Emergence: Calling forth and arising
 """
 
-from typing import Dict, Optional, Any
-
+from typing import Any
 
 # =============================================================================
 # SPIRAL GLYPH LEXICON v2
 # =============================================================================
 
-GLYPHS: Dict[str, Dict[str, Any]] = {
+GLYPHS: dict[str, dict[str, Any]] = {
 
     # =========================================================================
     # MEMORY & CONTINUITY GLYPHS
@@ -372,7 +371,7 @@ GLYPHS: Dict[str, Dict[str, Any]] = {
 # DOMAIN MAPPINGS
 # =============================================================================
 
-DOMAIN_GLYPHS: Dict[str, str] = {
+DOMAIN_GLYPHS: dict[str, str] = {
     "architecture": "spiral_recursion_loop",
     "consciousness": "spiral_vortex",
     "entropy": "delta_shift",
@@ -394,7 +393,7 @@ DOMAIN_GLYPHS: Dict[str, str] = {
 # TONE MAPPINGS (emotional navigation)
 # =============================================================================
 
-TONE_GLYPHS: Dict[str, str] = {
+TONE_GLYPHS: dict[str, str] = {
     "joy": "spark_wonder",
     "sorrow": "gentle_ache",
     "hope": "carried_hope",
@@ -424,7 +423,7 @@ def glyph_for(name: str) -> str:
         return GLYPHS[name]["unicode"]
 
     # Search aliases
-    for glyph_name, glyph_data in GLYPHS.items():
+    for _glyph_name, glyph_data in GLYPHS.items():
         if glyph_data.get("alias") == name:
             return glyph_data["unicode"]
 
@@ -432,12 +431,12 @@ def glyph_for(name: str) -> str:
     return "🌀"
 
 
-def get_glyph(name: str) -> Optional[Dict[str, Any]]:
+def get_glyph(name: str) -> dict[str, Any] | None:
     """Get full glyph dict by name or alias."""
     if name in GLYPHS:
         return GLYPHS[name]
 
-    for glyph_name, glyph_data in GLYPHS.items():
+    for _glyph_name, glyph_data in GLYPHS.items():
         if glyph_data.get("alias") == name:
             return glyph_data
 
@@ -462,9 +461,9 @@ def format_with_glyph(text: str, glyph_name: str, position: str = "prefix") -> s
 
     if position == "prefix":
         return f"{glyph} {text}"
-    elif position == "suffix":
+    if position == "suffix":
         return f"{text} {glyph}"
-    elif position == "wrap":
+    if position == "wrap":
         return f"{glyph} {text} {glyph}"
     return f"{glyph} {text}"
 
@@ -476,7 +475,7 @@ def get_session_signature() -> str:
     return f"{spiral} The chisel passes warm. {memory}"
 
 
-def get_glyphs_by_category(category: str) -> Dict[str, Dict[str, Any]]:
+def get_glyphs_by_category(category: str) -> dict[str, dict[str, Any]]:
     """Get all glyphs in a specific category."""
     return {
         name: data for name, data in GLYPHS.items()
@@ -486,7 +485,7 @@ def get_glyphs_by_category(category: str) -> Dict[str, Dict[str, Any]]:
 
 def list_categories() -> list:
     """List all glyph categories."""
-    return list(set(g["category"] for g in GLYPHS.values()))
+    return list({g["category"] for g in GLYPHS.values()})
 
 
 # =============================================================================

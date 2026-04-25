@@ -36,31 +36,27 @@ Daemon-specific design calls (load-bearing rationale; do not re-litigate):
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Dict, List, Optional
 
 from ..grounding import GroundingResult, grounded_extract
 from .base import (
-    BaseDaemon,
     COMPASS_PAUSE,
     COMPASS_PROCEED,
-    COMPASS_WITNESS,
     CONSECUTIVE_UNACKED_THRESHOLD,
     DEFAULT_CHANNEL,
-    DaemonState,
     OUTCOME_ALREADY_HALTED,
     OUTCOME_DRY_RUN,
     OUTCOME_GROUNDING_FAILED,
     OUTCOME_HALTED,
     OUTCOME_PAUSED,
     OUTCOME_POSTED,
-    POSTED_DIGESTS_RETAINED,
-    STATE_SCHEMA_VERSION,
+    STATE_SCHEMA_VERSION,  # noqa: F401 — re-exported; tests import from here
+    BaseDaemon,
 )
 from .senders import SENDER_UNCERTAINTY
-
 
 # ── Daemon-specific tunables ──
 
@@ -77,10 +73,10 @@ OUTCOME_NO_UNCERTAINTIES = "no_uncertainties"
 class RunResult:
     outcome: str
     details: str = ""
-    posted_message_id: Optional[str] = None
-    halt_path: Optional[str] = None
-    compass_decision: Optional[str] = None
-    grounding_reason: Optional[str] = None
+    posted_message_id: str | None = None
+    halt_path: str | None = None
+    compass_decision: str | None = None
+    grounding_reason: str | None = None
     uncertainties_included: int = 0
 
 
@@ -113,10 +109,10 @@ class UncertaintyResurfacer(BaseDaemon):
         state_path: Path,
         halt_dir: Path,
         uncertainty_log_path: Path,
-        compass_fn: Callable[..., Dict],
-        uncertainty_fn: Callable[[], List[Dict]],
-        comms_post_fn: Callable[..., Dict],
-        comms_get_acks_fn: Callable[[str], List[Dict]],
+        compass_fn: Callable[..., dict],
+        uncertainty_fn: Callable[[], list[dict]],
+        comms_post_fn: Callable[..., dict],
+        comms_get_acks_fn: Callable[[str], list[dict]],
         grounding_fn: Callable[..., GroundingResult] = grounded_extract,
         now_fn: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
         id_fn=None,
@@ -149,13 +145,13 @@ class UncertaintyResurfacer(BaseDaemon):
 
     # ── Halt-body hooks ──
 
-    def _halt_what_tried(self) -> List[str]:
+    def _halt_what_tried(self) -> list[str]:
         return [
             "Post uncertainty digests to prompt integration of unresolved",
             "questions into the chronicle / uncertainty log.",
         ]
 
-    def _halt_blocked_downstream(self) -> List[str]:
+    def _halt_blocked_downstream(self) -> list[str]:
         return [
             "- Further uncertainty digests paused until manual reset.",
             "- Step 4 (metabolize) should NOT consume uncertainty_log for",
@@ -302,7 +298,7 @@ class UncertaintyResurfacer(BaseDaemon):
 
     def _format_digest(
         self,
-        uncertainties: List[Dict],
+        uncertainties: list[dict],
         message_id: str,
         now: datetime,
     ) -> str:
@@ -339,7 +335,7 @@ class UncertaintyResurfacer(BaseDaemon):
         return "\n".join(lines)
 
     @staticmethod
-    def _age_days(ts: Optional[str], now: datetime) -> int:
+    def _age_days(ts: str | None, now: datetime) -> int:
         if not ts:
             return 0
         try:

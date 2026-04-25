@@ -44,14 +44,14 @@ from __future__ import annotations
 import abc
 import json
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, ClassVar, Dict, List, Optional
+from typing import ClassVar
 
 from ..grounding import GroundingResult, grounded_extract
 from .senders import SENDER_HALT_ALERT
-
 
 # ── State schema ────────────────────────────────────────────────────────────
 
@@ -69,11 +69,11 @@ class DaemonState:
     alongside without schema changes — readers tolerate unknown keys.
     """
     schema_version: int = STATE_SCHEMA_VERSION
-    posted_digests: List[Dict] = field(default_factory=list)
-    halted_at: Optional[str] = None
-    halt_reason: Optional[str] = None
+    posted_digests: list[dict] = field(default_factory=list)
+    halted_at: str | None = None
+    halt_reason: str | None = None
 
-    def to_dict(self) -> Dict:
+    def to_dict(self) -> dict:
         return {
             "schema_version": self.schema_version,
             "posted_digests": self.posted_digests,
@@ -82,7 +82,7 @@ class DaemonState:
         }
 
     @classmethod
-    def from_dict(cls, data: Dict) -> "DaemonState":
+    def from_dict(cls, data: dict) -> DaemonState:
         version = int(data.get("schema_version", 1))
         if version > STATE_SCHEMA_VERSION:
             # Refuse rather than silently downgrade — better to halt the
@@ -172,9 +172,9 @@ class BaseDaemon(abc.ABC):
         *,
         state_path: Path,
         halt_dir: Path,
-        compass_fn: Callable[..., Dict],
-        comms_post_fn: Callable[..., Dict],
-        comms_get_acks_fn: Callable[[str], List[Dict]],
+        compass_fn: Callable[..., dict],
+        comms_post_fn: Callable[..., dict],
+        comms_get_acks_fn: Callable[[str], list[dict]],
         grounding_fn: Callable[..., GroundingResult] = grounded_extract,
         now_fn: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
         id_fn: Callable[[], str] = lambda: str(uuid.uuid4()),
@@ -206,11 +206,11 @@ class BaseDaemon(abc.ABC):
     # ── Halt-body hooks (subclass overrides) ──
 
     @abc.abstractmethod
-    def _halt_what_tried(self) -> List[str]:
+    def _halt_what_tried(self) -> list[str]:
         """Body lines for the halt note's 'What the daemon tried to do' section."""
 
     @abc.abstractmethod
-    def _halt_blocked_downstream(self) -> List[str]:
+    def _halt_blocked_downstream(self) -> list[str]:
         """Body lines for the halt note's 'What's blocked downstream' section."""
 
     def _halt_alert_content(self, *, state: DaemonState, halt_path: Path) -> str:
@@ -257,7 +257,7 @@ class BaseDaemon(abc.ABC):
         message_id: str,
         content: str,
         now: datetime,
-        extra: Optional[Dict] = None,
+        extra: dict | None = None,
     ) -> None:
         """
         Append a post record to state.posted_digests, trim to the

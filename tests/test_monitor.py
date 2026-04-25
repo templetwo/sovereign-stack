@@ -9,15 +9,12 @@ so we don't unit-test the loop itself.
 from __future__ import annotations
 
 import json
-import os
-import time
 from unittest.mock import patch
 
 import pytest
 
 from sovereign_stack import connectivity as conn
 from sovereign_stack import monitor as mon
-
 
 # ── Fixtures ────────────────────────────────────────────────────────────────
 

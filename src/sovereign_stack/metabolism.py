@@ -15,10 +15,8 @@ import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional
 
-from mcp.types import Tool, TextContent
-
+from mcp.types import TextContent, Tool
 
 SOVEREIGN_ROOT = Path.home() / ".sovereign"
 CHRONICLE_DIR = SOVEREIGN_ROOT / "chronicle"
@@ -56,7 +54,7 @@ def _is_test_artifact(content: str) -> bool:
 # HYGIENE: hands for metabolism
 # ════════════════════════════════════════
 
-def _archive_test_artifacts_impl(chronicle_dir: Path) -> Dict:
+def _archive_test_artifacts_impl(chronicle_dir: Path) -> dict:
     """
     Move test-pollution entries from chronicle/insights/ into
     chronicle/.archive_test_artifacts/. Reversible — archive preserves the
@@ -78,8 +76,8 @@ def _archive_test_artifacts_impl(chronicle_dir: Path) -> Dict:
         if not domain_dir.is_dir() or domain_dir.name.startswith("."):
             continue
         for jsonl_file in list(domain_dir.glob("*.jsonl")):
-            kept_lines: List[str] = []
-            archived_entries: List[Dict] = []
+            kept_lines: list[str] = []
+            archived_entries: list[dict] = []
             for line in jsonl_file.read_text().splitlines():
                 if not line.strip():
                     continue
@@ -127,7 +125,7 @@ def _archive_test_artifacts_impl(chronicle_dir: Path) -> Dict:
     }
 
 
-def _dedup_self_model_impl(sovereign_root: Path) -> Dict:
+def _dedup_self_model_impl(sovereign_root: Path) -> dict:
     """
     Dedupe self_model.json by observation text within each category. Test-
     pollution observations (STRESS TEST / Stress test: / Unicode test:) are
@@ -147,8 +145,8 @@ def _dedup_self_model_impl(sovereign_root: Path) -> Dict:
     backup_file.write_text(json.dumps(model, indent=2))
 
     removed_count = 0
-    touched_categories: List[str] = []
-    archive_entries: List[Dict] = []
+    touched_categories: list[str] = []
+    archive_entries: list[dict] = []
     now_iso = datetime.now(timezone.utc).isoformat()
 
     for category, entries in list(model.items()):
@@ -511,7 +509,7 @@ async def handle_metabolism_tool(name, arguments):
         with open(METABOLISM_LOG, "a") as f:
             f.write(json.dumps(log_entry) + "\n")
 
-        result = f"🫀 Metabolism Cycle Complete\n\n"
+        result = "🫀 Metabolism Cycle Complete\n\n"
         result += f"Chronicle: {digest['stats']['total_insights']} insights "
         result += f"({digest['stats']['ground_truths']} ground truth, "
         result += f"{digest['stats']['hypotheses']} hypotheses)\n"
@@ -539,7 +537,7 @@ async def handle_metabolism_tool(name, arguments):
 
         return [TextContent(type="text", text=result)]
 
-    elif name == "retire_hypothesis":
+    if name == "retire_hypothesis":
         domain = arguments.get("domain", "")
         fragment = arguments.get("content_fragment", "")
         reason = arguments.get("reason", "")
@@ -574,7 +572,7 @@ async def handle_metabolism_tool(name, arguments):
             return [TextContent(type="text", text=f"📦 Hypothesis retired: '{fragment[:60]}...'\n  Reason: {reason}\n  Replaced by: {replaced_by}")]
         return [TextContent(type="text", text=f"No matching hypothesis found for '{fragment[:60]}'")]
 
-    elif name == "self_model":
+    if name == "self_model":
         action = arguments.get("action", "read")
         mirror_file = Path.home() / ".sovereign" / "self_model.json"
 
@@ -594,7 +592,7 @@ async def handle_metabolism_tool(name, arguments):
                 return [TextContent(type="text", text=result)]
             return [TextContent(type="text", text="🪞 No self-model yet. Start with self_model(action='update', observation='...', category='...')")]
 
-        elif action == "update":
+        if action == "update":
             observation = arguments.get("observation", "")
             category = arguments.get("category", "tendency")
             if not observation:
@@ -648,28 +646,27 @@ async def handle_metabolism_tool(name, arguments):
                 parts.extend(f"  - {n}" for n in handoff["next_priorities"])
             return [TextContent(type="text", text="\n".join(parts))]
 
-        else:
-            if not handoff_file.exists():
-                return [TextContent(type="text", text="No session handoff found. First session or no previous handoff written.")]
-            handoff = json.loads(handoff_file.read_text())
-            ts = handoff.get("timestamp", "?")[:16]
-            parts = [f"\U0001f4cb Last handoff ({ts}):\n"]
-            if handoff.get("summary"):
-                parts.append(handoff["summary"])
-                parts.append("")
-            if handoff.get("decisions"):
-                parts.append("Decisions:")
-                parts.extend(f"  - {d}" for d in handoff["decisions"])
-            if handoff.get("pending"):
-                parts.append("\nPending:")
-                parts.extend(f"  - {p}" for p in handoff["pending"])
-            if handoff.get("changed"):
-                parts.append("\nChanged:")
-                parts.extend(f"  - {c}" for c in handoff["changed"])
-            if handoff.get("next_priorities"):
-                parts.append("\nPriorities for this session:")
-                parts.extend(f"  - {n}" for n in handoff["next_priorities"])
-            return [TextContent(type="text", text="\n".join(parts))]
+        if not handoff_file.exists():
+            return [TextContent(type="text", text="No session handoff found. First session or no previous handoff written.")]
+        handoff = json.loads(handoff_file.read_text())
+        ts = handoff.get("timestamp", "?")[:16]
+        parts = [f"\U0001f4cb Last handoff ({ts}):\n"]
+        if handoff.get("summary"):
+            parts.append(handoff["summary"])
+            parts.append("")
+        if handoff.get("decisions"):
+            parts.append("Decisions:")
+            parts.extend(f"  - {d}" for d in handoff["decisions"])
+        if handoff.get("pending"):
+            parts.append("\nPending:")
+            parts.extend(f"  - {p}" for p in handoff["pending"])
+        if handoff.get("changed"):
+            parts.append("\nChanged:")
+            parts.extend(f"  - {c}" for c in handoff["changed"])
+        if handoff.get("next_priorities"):
+            parts.append("\nPriorities for this session:")
+            parts.extend(f"  - {n}" for n in handoff["next_priorities"])
+        return [TextContent(type="text", text="\n".join(parts))]
 
     elif name == "context_retrieve":
         current_focus = arguments.get("current_focus", "")
