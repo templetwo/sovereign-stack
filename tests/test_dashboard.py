@@ -141,6 +141,43 @@ class TestReadHonks:
         assert all("ack_id" not in h for h in out)
         assert "1" in ids and "2" in ids
 
+    def test_cross_file_acks_jsonl_excludes_honks(self, tmp_path):
+        """The canonical layout: nape_daemon.acknowledge writes acks
+        to a SIBLING acks.jsonl (not back into honks.jsonl). A dashboard
+        reader that only checks within honks.jsonl misses these acks
+        entirely (which was the 2026-04-25 bug — dashboard reported
+        100 unacked while every honk had been acked through the
+        standard path)."""
+        honks_path = tmp_path / "honks.jsonl"
+        acks_path = tmp_path / "acks.jsonl"
+        honks_path.write_text("\n".join([
+            json.dumps({"honk_id": "h1", "level": "sharp",
+                        "pattern": "p1", "trigger_tool": "t1"}),
+            json.dumps({"honk_id": "h2", "level": "sharp",
+                        "pattern": "p2", "trigger_tool": "t2"}),
+            json.dumps({"honk_id": "h3", "level": "sharp",
+                        "pattern": "p3", "trigger_tool": "t3"}),
+        ]) + "\n")
+        acks_path.write_text("\n".join([
+            json.dumps({"ack_id": "a1", "honk_id": "h1",
+                        "note": "addressed"}),
+            json.dumps({"ack_id": "a2", "honk_id": "h2",
+                        "note": "addressed"}),
+        ]) + "\n")
+        out = dash.read_recent_honks(honks_path, limit=10)
+        ids = [h["honk_id"] for h in out]
+        # h1 and h2 acked via sibling file; only h3 remains unacked.
+        assert ids == ["h3"], f"expected only h3 unacked, got {ids}"
+
+    def test_missing_acks_file_treats_all_as_unacked(self, tmp_path):
+        """No acks.jsonl present → every honk is unacked. Don't crash."""
+        honks_path = tmp_path / "honks.jsonl"
+        honks_path.write_text(
+            json.dumps({"honk_id": "h1", "level": "sharp"}) + "\n"
+        )
+        out = dash.read_recent_honks(honks_path)
+        assert len(out) == 1
+
     def test_malformed_lines_skipped(self, tmp_path):
         path = tmp_path / "honks.jsonl"
         path.write_text(

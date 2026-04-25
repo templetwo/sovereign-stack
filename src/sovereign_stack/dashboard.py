@@ -169,10 +169,16 @@ def _list_paths(directory: Path, glob: str = "*", recursive: bool = False) -> Li
 
 def read_recent_honks(path: Path, *, limit: int = 5) -> List[Dict]:
     """
-    Read the last N entries from nape honks.jsonl. Skips acked honks
-    (Nape writes both the honk and ack records to the same file in some
-    layouts; we keep this conservative — only return those without an
-    "ack_id" field).
+    Read the last N UNACKED entries from nape honks.jsonl, with cross-file
+    ack lookup against acks.jsonl in the same directory.
+
+    Nape's canonical layout writes honks to honks.jsonl and acks to a
+    SIBLING acks.jsonl — two files. An earlier dashboard implementation
+    only checked the `ack_id` field within honks.jsonl, which missed
+    every ack made through the standard nape_daemon.acknowledge() path
+    (which writes to acks.jsonl, not back into honks.jsonl). This
+    function now reads both files and excludes honk_ids that appear in
+    acks.jsonl as well.
     """
     if not path.exists():
         return []
@@ -180,6 +186,26 @@ def read_recent_honks(path: Path, *, limit: int = 5) -> List[Dict]:
         lines = path.read_text(encoding="utf-8").splitlines()
     except OSError:
         return []
+
+    # Sibling acks file. Build the set of acked honk_ids once.
+    acks_path = path.parent / "acks.jsonl"
+    acked_ids: set = set()
+    if acks_path.exists():
+        try:
+            for line in acks_path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                hid = rec.get("honk_id")
+                if hid:
+                    acked_ids.add(hid)
+        except OSError:
+            pass
+
     out: List[Dict] = []
     for line in reversed(lines):
         line = line.strip()
@@ -189,7 +215,12 @@ def read_recent_honks(path: Path, *, limit: int = 5) -> List[Dict]:
             rec = json.loads(line)
         except json.JSONDecodeError:
             continue
+        # Two ways an ack can be recorded:
+        #   - inline (ack_id field present in the honk record itself)
+        #   - cross-file (honk_id appears as a record in acks.jsonl)
         if rec.get("ack_id"):
+            continue
+        if rec.get("honk_id") in acked_ids:
             continue
         out.append(rec)
         if len(out) >= limit:

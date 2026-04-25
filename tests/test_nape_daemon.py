@@ -147,6 +147,98 @@ class TestDeclareBeforeVerify:
             "Non-readonly tool with declare word and no verify must still honk."
         )
 
+    def test_where_did_i_leave_off_does_not_fire_premature_summary(self):
+        """Pre-2026-04-25 bug: where_did_i_leave_off was wrongly in
+        SUMMARY_TOOL_NAMES, so EVERY arrival call fired premature_summary
+        because the chronicle text it surfaces contains error-shaped
+        words. The fix removed it from SUMMARY_TOOL_NAMES."""
+        # Long surfaced chronicle text full of error-shaped words from
+        # past records — the kind where_did_i_leave_off actually returns.
+        self.daemon.observe(
+            "where_did_i_leave_off",
+            {},
+            ("HANDOFFS\n  recent failure: bridge connection refused.\n"
+             "OPEN THREADS: file not found, exception in parser, "
+             "denied access to /etc/passwd."),
+            SESSION,
+        )
+        honks = [
+            h for h in self.daemon.current_honks(SESSION)
+            if h["pattern"] == "premature_summary"
+        ]
+        assert len(honks) == 0, (
+            f"where_did_i_leave_off must not trigger premature_summary; "
+            f"got {honks}"
+        )
+
+    def test_readonly_results_do_not_count_toward_premature_summary(self):
+        """When a real summary tool fires, error-words in surfaced
+        content from preceding READ-ONLY tool calls must not count as
+        'recent errors.' Only actual error-shaped tool results trigger
+        the honk."""
+        # A read-only retrieval surfaces chronicle text with error words.
+        self.daemon.observe(
+            "recall_insights",
+            {},
+            "Past insight mentions: failure of approach X, exception trace.",
+            SESSION,
+        )
+        # No actual errors. Real summary call should NOT fire.
+        self.daemon.observe(
+            "close_session",
+            {},
+            "session closed — reflection recorded",
+            SESSION,
+        )
+        honks = [
+            h for h in self.daemon.current_honks(SESSION)
+            if h["pattern"] == "premature_summary"
+        ]
+        assert len(honks) == 0, (
+            "Read-only tool surfacing error words in stored content must "
+            "not count as a 'recent error' for premature_summary"
+        )
+
+    def test_real_error_from_writing_tool_still_fires_premature_summary(self):
+        """Regression: the readonly exemption must not break detection
+        on actual write-tool errors."""
+        self.daemon.observe(
+            "Bash",
+            {"command": "pytest"},
+            "Error: 3 tests failed\nTraceback (most recent call last):",
+            SESSION,
+        )
+        self.daemon.observe(
+            "close_session", {}, "review recorded", SESSION,
+        )
+        honks = [
+            h for h in self.daemon.current_honks(SESSION)
+            if h["pattern"] == "premature_summary"
+        ]
+        assert len(honks) >= 1, (
+            "Real Bash error followed by close_session must still honk"
+        )
+
+    def test_readonly_tool_does_not_fire_repeated_mistake(self):
+        """where_did_i_leave_off / prior_for_turn / etc. surface stored
+        content. Their result_str containing error words is NOT them
+        repeating a mistake — it's them showing chronicle text."""
+        for _ in range(2):
+            self.daemon.observe(
+                "where_did_i_leave_off",
+                {},
+                "surfaced thread mentions: cannot resolve, parser failed.",
+                SESSION,
+            )
+        honks = [
+            h for h in self.daemon.current_honks(SESSION)
+            if h["pattern"] == "repeated_mistake"
+        ]
+        assert len(honks) == 0, (
+            f"Read-only tool cannot 'repeat a mistake' via surfaced "
+            f"content; got {honks}"
+        )
+
 
 class TestPrematureSummary:
     """Pattern 2: sharp honk when end_session_review/handoff/close_session called

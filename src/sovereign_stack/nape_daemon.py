@@ -136,11 +136,15 @@ DECLARE_WORDS: frozenset = frozenset({
 })
 
 # Tools that write a session summary or handoff — used for premature-summary check.
+# `where_did_i_leave_off` is NOT a summary tool — it's the boot/orient call.
+# Including it here (pre-2026-04-25) caused false-positive premature_summary
+# honks every time a Claude instance arrived: their result string surfaces
+# chronicle content that frequently contains error-shaped words (failure,
+# cannot, etc.), which then matched the recent-error scan.
 SUMMARY_TOOL_NAMES: frozenset = frozenset({
     "end_session_review",
     "handoff",
     "close_session",
-    "where_did_i_leave_off",
 })
 
 # Words in recent results that indicate an unresolved error state.
@@ -553,7 +557,11 @@ class NapeDaemon:
 
         Pattern: sharp honk.
         Fires when: trigger tool is in SUMMARY_TOOL_NAMES and any of the
-        preceding WINDOW_PREMATURE results contains an ERROR_WORD.
+        preceding WINDOW_PREMATURE results contains an ERROR_WORD —
+        EXCEPT for results from READONLY_TOOL_NAMES, whose result_str is
+        surfaced chronicle content (insights, threads, comms) that may
+        contain error-shaped words from stored history rather than from
+        an actual error in the current session.
         """
         if latest.get("tool_name") not in SUMMARY_TOOL_NAMES:
             return []
@@ -561,7 +569,8 @@ class NapeDaemon:
         preceding = recent_obs[:-1][-WINDOW_PREMATURE:]
         error_obs = [
             obs for obs in preceding
-            if any(word in obs.get("result_str", "").lower() for word in ERROR_WORDS)
+            if obs.get("tool_name") not in READONLY_TOOL_NAMES
+            and any(word in obs.get("result_str", "").lower() for word in ERROR_WORDS)
         ]
 
         if not error_obs:
@@ -631,12 +640,22 @@ class NapeDaemon:
         Fires when: latest result contains an ERROR_WORD, and the same tool
         produced an error earlier in the window, and no record_learning call
         appears between the two error occurrences.
+
+        Read-only tools (READONLY_TOOL_NAMES) are exempt — their result_str
+        is surfaced chronicle content, so an error word in their result
+        reflects stored history, not a current-session error.
         """
+        trigger_tool = latest.get("tool_name")
+
+        # Read-only retrieval tools cannot "repeat a mistake" via their
+        # result_str — what they surface is content, not their own status.
+        if trigger_tool in READONLY_TOOL_NAMES:
+            return []
+
         if not any(word in latest.get("result_str", "").lower() for word in ERROR_WORDS):
             return []
 
-        trigger_tool = latest.get("tool_name")
-        session_id   = latest.get("session_id")
+        session_id = latest.get("session_id")
 
         # Scan the preceding window (not including latest) for the same tool erroring.
         preceding = recent_obs[:-1][-WINDOW_REPEATED:]
