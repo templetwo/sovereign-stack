@@ -219,6 +219,129 @@ class TestDeclareBeforeVerify:
             "Real Bash error followed by close_session must still honk"
         )
 
+    def test_honks_with_history_empty(self):
+        """No honks → empty + zero counts."""
+        result = self.daemon.honks_with_history()
+        assert result["honks"] == []
+        assert result["summary"]["total"] == 0
+        assert result["summary"]["zombies"] == 0
+
+    def test_honks_with_history_joins_acks(self):
+        """A honk + an ack record on a sibling acks.jsonl should be joined."""
+        self.daemon.observe(
+            "record_insight", {}, "shipped", SESSION,
+        )
+        # No verify preceding → declare_before_verify fires.
+        honks = self.daemon.current_honks(SESSION)
+        assert len(honks) >= 1
+        target = honks[0]
+        self.daemon.ack(honk_id=target["honk_id"], note="addressed")
+
+        result = self.daemon.honks_with_history(session_id=SESSION)
+        assert result["summary"]["acked"] >= 1
+        # The acked honk should have an ack record attached.
+        acked_records = [h for h in result["honks"] if h["ack"] is not None]
+        assert len(acked_records) >= 1
+        ack = acked_records[0]["ack"]
+        assert ack["note"] == "addressed"
+
+    def test_honks_with_history_zombie_detection(self):
+        """Honk acked AND still in recent priors_log = zombie."""
+        # Fire a honk and ack it.
+        self.daemon.observe("record_insight", {}, "shipped", SESSION)
+        h = self.daemon.current_honks(SESSION)[0]
+        self.daemon.ack(honk_id=h["honk_id"], note="addressed")
+
+        # Manufacture a priors_log that includes the acked honk.
+        priors_log_path = Path(self.tmpdir) / "priors_log.jsonl"
+        priors_log_path.write_text(
+            json.dumps({
+                "timestamp": "2026-04-25T01:00:00",
+                "included_items": [f"honk:{h['honk_id']}"],
+            }) + "\n"
+        )
+
+        result = self.daemon.honks_with_history(
+            session_id=SESSION,
+            priors_log_path=priors_log_path,
+        )
+        assert result["summary"]["zombies"] >= 1, (
+            f"acked honk still in priors should count as zombie. "
+            f"summary={result['summary']}"
+        )
+        zombies = [
+            h for h in result["honks"]
+            if h["ack"] is not None and h["in_recent_priors"]
+        ]
+        assert len(zombies) >= 1
+        assert zombies[0]["priors_surface_count"] >= 1
+
+    def test_honks_with_history_freshness_window(self):
+        """Only the LAST N priors-log entries should count for surface_count."""
+        self.daemon.observe("record_insight", {}, "shipped", SESSION)
+        h = self.daemon.current_honks(SESSION)[0]
+
+        priors_log_path = Path(self.tmpdir) / "priors_log.jsonl"
+        # 5 entries; only the last 3 (default window) should be scanned.
+        # The first 2 entries reference our honk — should be IGNORED.
+        # The last 3 entries do NOT reference our honk.
+        lines = []
+        for i in range(5):
+            included = (
+                [f"honk:{h['honk_id']}"]
+                if i < 2 else ["thread:other"]
+            )
+            lines.append(json.dumps({
+                "timestamp": f"2026-04-25T0{i}:00:00",
+                "included_items": included,
+            }))
+        priors_log_path.write_text("\n".join(lines) + "\n")
+
+        result = self.daemon.honks_with_history(
+            session_id=SESSION,
+            priors_log_path=priors_log_path,
+            freshness_window=3,
+        )
+        # Honk's priors_surface_count should be 0 because the last 3 entries
+        # don't reference it.
+        target = next(
+            x for x in result["honks"] if x["honk_id"] == h["honk_id"]
+        )
+        assert target["priors_surface_count"] == 0
+        assert target["in_recent_priors"] is False
+
+    def test_honks_with_history_limit_returns_newest(self):
+        """limit=N should return the last N honks, newest-end."""
+        for i in range(5):
+            self.daemon.observe(
+                "record_insight",
+                {},
+                f"shipped variant {i}",
+                SESSION,
+            )
+        result = self.daemon.honks_with_history(
+            session_id=SESSION, limit=2,
+        )
+        assert len(result["honks"]) == 2
+        # Total summary reflects what was returned (not all-on-disk).
+        assert result["summary"]["total"] == 2
+
+    def test_honks_with_history_session_filter(self):
+        self.daemon.observe("record_insight", {}, "shipped a", "session-a")
+        self.daemon.observe("record_insight", {}, "shipped b", "session-b")
+        a = self.daemon.honks_with_history(session_id="session-a")
+        b = self.daemon.honks_with_history(session_id="session-b")
+        assert all(h["session_id"] == "session-a" for h in a["honks"])
+        assert all(h["session_id"] == "session-b" for h in b["honks"])
+
+    def test_honks_with_history_age_seconds(self):
+        self.daemon.observe("record_insight", {}, "shipped", SESSION)
+        result = self.daemon.honks_with_history(session_id=SESSION)
+        assert len(result["honks"]) >= 1
+        # Just-fired honk should be a few seconds old at most.
+        ages = [h["age_seconds"] for h in result["honks"]]
+        assert all(a is not None and a >= 0 for a in ages)
+
     def test_readonly_tool_does_not_fire_repeated_mistake(self):
         """where_did_i_leave_off / prior_for_turn / etc. surface stored
         content. Their result_str containing error words is NOT them

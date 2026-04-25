@@ -104,6 +104,7 @@ READONLY_TOOL_NAMES: frozenset = frozenset({
     # Nape introspection
     "nape_honks",
     "nape_summary",
+    "nape_honks_with_history",
     # Watch / post-fix introspection
     "watch_status",
     "post_fix_verify",
@@ -487,6 +488,169 @@ class NapeDaemon:
     # -------------------------------------------------------------------------
     # Pattern detectors (private)
     # -------------------------------------------------------------------------
+
+    def honks_with_history(
+        self,
+        *,
+        session_id: Optional[str] = None,
+        priors_log_path: Optional[Path] = None,
+        freshness_window: int = 3,
+        limit: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """
+        Read-side observability for the v1.3.2 Nape-honk-persistence question.
+
+        For each honk currently on disk, return the honk record paired with:
+          - ack record (if any) — joined by honk_id from sibling acks.jsonl
+          - age_seconds — wall-clock age since the honk fired
+          - in_recent_priors — bool, True if `honk:<honk_id>` appears in any
+            of the last `freshness_window` priors_log entries
+          - priors_surface_count — int, how many of those last N entries
+            include this honk_id
+
+        The cross-reference into priors_log answers the question the Nape-
+        honk-persistence open thread is built around: does an acked /
+        resolved honk linger in priors past its relevance? If a honk has
+        ack=non-null AND in_recent_priors=True, that's a zombie.
+
+        Args:
+            session_id: Filter to this session. None = all sessions.
+            priors_log_path: Override for tests. Default
+                ~/.sovereign/reflexive/priors_log.jsonl.
+            freshness_window: How many recent priors-log entries to scan.
+                Default 3 — matches PerTurnPriors.FRESHNESS_WINDOW.
+            limit: Max honks to return. None = all.
+
+        Returns:
+            {
+              "honks": [{honk_id, session_id, pattern, level, trigger_tool,
+                          fired_at, observation, ack: null | {...},
+                          age_seconds, in_recent_priors, priors_surface_count}],
+              "summary": {total, acked, unacked, zombies, in_recent_priors},
+              "freshness_window": int,
+              "priors_log_window": list of timestamps scanned,
+            }
+        """
+        # ── Load honks (no acks inline; that's the bug fix from earlier) ──
+        all_honks: List[Dict] = []
+        for line in _read_jsonl(self._honks_path):
+            if "honk_id" not in line:
+                continue
+            if "ack_id" in line:  # legacy inline ack — skip
+                continue
+            if session_id and line.get("session_id") != session_id:
+                continue
+            all_honks.append(line)
+
+        # ── Load acks (canonical sibling file) ──
+        acks_by_honk: Dict[str, Dict] = {}
+        for line in _read_jsonl(self._acks_path):
+            hid = line.get("honk_id")
+            if hid and "ack_id" in line:
+                # Most-recent ack wins if there are duplicates.
+                acks_by_honk[hid] = line
+
+        # ── Load recent priors-log entries ──
+        log_path = priors_log_path or (
+            self._root / "reflexive" / "priors_log.jsonl"
+        )
+        recent_priors: List[Dict] = []
+        if log_path.exists():
+            try:
+                lines = log_path.read_text(encoding="utf-8").splitlines()
+            except OSError:
+                lines = []
+            for raw in lines[-freshness_window:]:
+                raw = raw.strip()
+                if not raw:
+                    continue
+                try:
+                    recent_priors.append(json.loads(raw))
+                except json.JSONDecodeError:
+                    continue
+
+        # Build the set of honk_ids surfaced in the recent window, plus a
+        # count of how many entries included each honk_id.
+        priors_count: Dict[str, int] = {}
+        for entry in recent_priors:
+            included = entry.get("included_items", []) or []
+            seen_in_this_entry: set = set()
+            for sig in included:
+                if not isinstance(sig, str):
+                    continue
+                if sig.startswith("honk:"):
+                    hid = sig[len("honk:"):]
+                    if hid not in seen_in_this_entry:
+                        seen_in_this_entry.add(hid)
+                        priors_count[hid] = priors_count.get(hid, 0) + 1
+
+        # ── Build per-honk records ──
+        now_ts = datetime.now(timezone.utc).timestamp()
+        out_honks: List[Dict] = []
+        for h in all_honks:
+            hid = h.get("honk_id", "")
+            ack_record = acks_by_honk.get(hid)
+            fired_at = h.get("timestamp", "")
+            age_seconds = None
+            if fired_at:
+                try:
+                    fired_dt = datetime.fromisoformat(
+                        str(fired_at).replace("Z", "+00:00")
+                    )
+                    if fired_dt.tzinfo is None:
+                        fired_dt = fired_dt.replace(tzinfo=timezone.utc)
+                    age_seconds = max(0, int(now_ts - fired_dt.timestamp()))
+                except (ValueError, OSError):
+                    age_seconds = None
+
+            count = priors_count.get(hid, 0)
+            out_honks.append({
+                "honk_id": hid,
+                "session_id": h.get("session_id"),
+                "pattern": h.get("pattern"),
+                "level": h.get("level"),
+                "trigger_tool": h.get("trigger_tool"),
+                "fired_at": fired_at,
+                "observation": h.get("observation", ""),
+                "ack": (
+                    {
+                        "ack_id": ack_record.get("ack_id"),
+                        "note": ack_record.get("note"),
+                        "acked_at": ack_record.get("acked_at"),
+                    } if ack_record else None
+                ),
+                "age_seconds": age_seconds,
+                "in_recent_priors": count > 0,
+                "priors_surface_count": count,
+            })
+
+        if limit is not None:
+            out_honks = out_honks[-int(limit):]
+
+        # ── Summary ──
+        acked = sum(1 for h in out_honks if h["ack"] is not None)
+        unacked = len(out_honks) - acked
+        in_priors = sum(1 for h in out_honks if h["in_recent_priors"])
+        # Zombie: acked AND still in recent priors. The smoking-gun count.
+        zombies = sum(
+            1 for h in out_honks
+            if h["ack"] is not None and h["in_recent_priors"]
+        )
+
+        return {
+            "honks": out_honks,
+            "summary": {
+                "total": len(out_honks),
+                "acked": acked,
+                "unacked": unacked,
+                "in_recent_priors": in_priors,
+                "zombies": zombies,
+            },
+            "freshness_window": freshness_window,
+            "priors_log_window": [
+                e.get("timestamp") for e in recent_priors
+            ],
+        }
 
     def _detect_declare_before_verify(
         self, latest: Dict, recent_obs: List[Dict]

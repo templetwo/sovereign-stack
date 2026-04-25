@@ -813,6 +813,37 @@ async def list_tools():
             },
         ),
         Tool(
+            name="nape_honks_with_history",
+            description=(
+                "Read-side observability for Nape honks: each honk paired "
+                "with its ack (from the canonical sibling acks.jsonl), age "
+                "in seconds, and a cross-reference against prior_for_turn's "
+                "freshness log so you can see whether a honk is currently "
+                "lingering in priors. Returns a `zombies` count: honks that "
+                "are acked AND still surfacing in recent priors — the "
+                "smoking gun for the 'does a resolved honk persist past "
+                "its relevance' open thread."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "session_id": {
+                        "type": "string",
+                        "description": "Filter to this session. Omit for all sessions.",
+                    },
+                    "freshness_window": {
+                        "type": "integer",
+                        "default": 3,
+                        "description": "Number of recent prior_for_turn calls to scan for honk resurfacing. Default 3 matches PerTurnPriors.FRESHNESS_WINDOW.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max honks to return (newest-last). Omit for all.",
+                    },
+                },
+            },
+        ),
+        Tool(
             name="nape_summary",
             description=(
                 "Return honk counts by level (sharp/low/uneasy/satisfied) for a session. "
@@ -1047,6 +1078,7 @@ TOOL_CATEGORIES: Dict[str, str] = {
     "nape_honks":    "nape",
     "nape_ack":      "nape",
     "nape_summary":  "nape",
+    "nape_honks_with_history": "nape",
     # Acknowledgment split
     "comms_acknowledge": "comms",
     "comms_get_acks": "comms",
@@ -1138,6 +1170,7 @@ TOOL_TIERS: Dict[str, str] = {
     "comms_channels":           TIER_CORE,
     "comms_get_acks":           TIER_CORE,
     "nape_honks":               TIER_CORE,
+    "nape_honks_with_history":  TIER_CORE,
     "nape_summary":             TIER_CORE,
     "nape_ack":                 TIER_CORE,
     "context_retrieve":         TIER_CORE,
@@ -1174,6 +1207,7 @@ TOOL_INTENTS: Dict[str, str] = {
     "get_unresolved_uncertainties": "read",
     "get_pending_experiments": "read",
     "nape_honks": "read",
+    "nape_honks_with_history": "read",
     "nape_summary": "read",
     "get_compaction_context": "read",
     "get_compaction_stats": "read",
@@ -2174,6 +2208,17 @@ Phase: {spiral_state.current_phase.value}
         except ValueError as exc:
             return [TextContent(type="text", text=f"nape_ack failed: {exc}")]
         return [TextContent(type="text", text=f"Honk {honk_id_arg} acknowledged.\n{json.dumps(record, indent=2)}")]
+
+    elif name == "nape_honks_with_history":
+        session_arg = arguments.get("session_id")
+        window_arg  = int(arguments.get("freshness_window", 3))
+        limit_arg   = arguments.get("limit")
+        result = nape_daemon.honks_with_history(
+            session_id=session_arg,
+            freshness_window=window_arg,
+            limit=int(limit_arg) if limit_arg is not None else None,
+        )
+        return [TextContent(type="text", text=json.dumps(result, indent=2))]
 
     elif name == "nape_summary":
         session_arg = arguments.get("session_id")
