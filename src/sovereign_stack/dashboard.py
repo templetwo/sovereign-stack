@@ -80,15 +80,17 @@ CAT_THREAD = "THREAD"
 CAT_HONK = "HONK"
 CAT_HALT = "HALT"
 CAT_DECISION = "DECISION"
-CAT_SERVICE = "SERVICE"
+CAT_SERVICE = "SERVICE"          # service lifecycle (start/stop/restart)
 CAT_COMMS = "COMMS"
 CAT_ERROR = "ERROR"
 CAT_STARTUP = "STARTUP"
+CAT_COMMIT = "COMMIT"            # git commits landing on the repo
+CAT_DEPLOY = "DEPLOY"            # service kickstarts / status changes
 
 ALL_CATEGORIES = (
     CAT_TOOLS, CAT_CHRONICLE, CAT_INSIGHT, CAT_THREAD,
     CAT_HONK, CAT_HALT, CAT_DECISION, CAT_SERVICE,
-    CAT_COMMS, CAT_ERROR, CAT_STARTUP,
+    CAT_COMMS, CAT_ERROR, CAT_STARTUP, CAT_COMMIT, CAT_DEPLOY,
 )
 
 
@@ -162,6 +164,86 @@ def _list_paths(directory: Path, glob: str = "*", recursive: bool = False) -> Li
     if recursive:
         return sorted(directory.rglob(glob))
     return sorted(directory.glob(glob))
+
+
+# ── Git activity poller ────────────────────────────────────────────────────
+
+
+def _git_recent_commits(
+    repo_path: Path,
+    *,
+    since: Optional[str] = None,
+    limit: int = 5,
+) -> List[Dict]:
+    """
+    Return recent commits as [{sha, subject, author_iso}]. If `since` is
+    given (a unix timestamp string), only commits after that are returned.
+    Quiet on any git failure (no repo, git not installed, network glitch).
+    """
+    if not (repo_path / ".git").exists():
+        return []
+    import subprocess
+    args = ["git", "-C", str(repo_path), "log",
+            "--pretty=format:%H%x09%aI%x09%s",
+            f"-n", str(int(limit))]
+    if since:
+        args += [f"--since={since}"]
+    try:
+        proc = subprocess.run(
+            args, capture_output=True, text=True, timeout=3.0, check=False,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return []
+    if proc.returncode != 0:
+        return []
+    out: List[Dict] = []
+    for line in proc.stdout.splitlines():
+        parts = line.split("\t", 2)
+        if len(parts) != 3:
+            continue
+        out.append({
+            "sha": parts[0],
+            "iso": parts[1],
+            "subject": parts[2],
+        })
+    return out
+
+
+# ── launchd service-state poller ────────────────────────────────────────────
+
+
+def _launchctl_service_states(labels: List[str]) -> Dict[str, Dict]:
+    """
+    For each launchd label, return its current state via `launchctl print`.
+    Returns {label: {state, pid, last_exit_code}}. Errors are absorbed:
+    missing labels return state=None and pid=None.
+    """
+    import os
+    import re
+    import subprocess
+    out: Dict[str, Dict] = {}
+    uid = os.getuid()
+    re_state = re.compile(r"^\s*state\s*=\s*(\S+)", re.MULTILINE)
+    re_pid = re.compile(r"^\s*pid\s*=\s*(\d+)", re.MULTILINE)
+    for label in labels:
+        try:
+            proc = subprocess.run(
+                ["launchctl", "print", f"gui/{uid}/{label}"],
+                capture_output=True, text=True, timeout=2.0, check=False,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+            out[label] = {"state": None, "pid": None}
+            continue
+        if proc.returncode != 0:
+            out[label] = {"state": None, "pid": None}
+            continue
+        m_state = re_state.search(proc.stdout)
+        m_pid = re_pid.search(proc.stdout)
+        out[label] = {
+            "state": m_state.group(1).strip().rstrip(",") if m_state else None,
+            "pid": int(m_pid.group(1)) if m_pid else None,
+        }
+    return out
 
 
 # ── Source readers (pure: take a path, return events) ───────────────────────

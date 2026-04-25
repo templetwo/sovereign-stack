@@ -38,7 +38,7 @@ import urllib.parse
 from dataclasses import asdict
 from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from pathlib import Path
-from typing import Optional
+from typing import Dict, Optional
 
 from . import dashboard
 
@@ -60,14 +60,38 @@ _watcher_lock = threading.Lock()
 
 def _watcher_loop() -> None:
     """Background watcher — populates _GLOBAL_FEED. Daemon thread, runs
-    until process exit. Mirrors dashboard.run_loop's filesystem watchers."""
+    until process exit. Mirrors dashboard.run_loop's filesystem watchers,
+    plus git-commit polling and launchd service-state tracking (added
+    2026-04-25 to widen the live feed beyond chronicle-only activity)."""
     root = Path(os.environ.get(
         "SOVEREIGN_ROOT", Path.home() / ".sovereign",
     ))
+    repo_path = Path(__file__).resolve().parent.parent.parent
     chronicle_index = dashboard._MtimeIndex()
     halts_index = dashboard._MtimeIndex()
     decisions_index = dashboard._MtimeIndex()
     honks_index = dashboard._MtimeIndex()
+
+    # Git: track the SHA of the latest commit we've already surfaced so we
+    # don't repeat-emit on every poll.
+    last_commit_sha: Optional[str] = None
+    initial_commits = dashboard._git_recent_commits(repo_path, limit=1)
+    if initial_commits:
+        last_commit_sha = initial_commits[0]["sha"]
+
+    # launchd: track the per-label state + pid so we can detect transitions.
+    service_labels = [
+        "com.templetwo.sovereign-sse",
+        "com.templetwo.sovereign-bridge",
+        "com.templetwo.cloudflared-tunnel",
+        "com.templetwo.comms-dispatcher",
+        "com.templetwo.comms-listener",
+        "com.templetwo.sovereign.uncertainty",
+        "com.templetwo.sovereign.metabolize",
+    ]
+    last_service_state: Dict[str, Dict] = dashboard._launchctl_service_states(
+        service_labels,
+    )
 
     # Seed indices so the first iteration doesn't dump everything as "new".
     chronicle_index.diff(dashboard._list_paths(
@@ -138,6 +162,51 @@ def _watcher_loop() -> None:
                         f"[{h.get('level','?')}] {h.get('pattern','?')}: "
                         f"{h.get('trigger_tool','?')}",
                     )
+
+            # ── Git-commit poller (Option A) ──
+            recent_commits = dashboard._git_recent_commits(
+                repo_path, limit=5,
+            )
+            if recent_commits:
+                # Walk newest-first; emit until we hit the last seen sha.
+                new_commits = []
+                for c in recent_commits:
+                    if c["sha"] == last_commit_sha:
+                        break
+                    new_commits.append(c)
+                # Emit in chronological order (oldest of the new batch first).
+                for c in reversed(new_commits):
+                    _GLOBAL_FEED.add(
+                        dashboard.CAT_COMMIT,
+                        f"{c['sha'][:7]}  {c['subject'][:80]}",
+                    )
+                if recent_commits:
+                    last_commit_sha = recent_commits[0]["sha"]
+
+            # ── launchd service-state poller (Option B) ──
+            current = dashboard._launchctl_service_states(service_labels)
+            for label, now_state in current.items():
+                prev = last_service_state.get(label, {})
+                # Surface transitions: state changed OR pid changed (restart).
+                state_changed = now_state.get("state") != prev.get("state")
+                pid_changed = (
+                    now_state.get("pid") is not None
+                    and prev.get("pid") is not None
+                    and now_state.get("pid") != prev.get("pid")
+                )
+                if state_changed:
+                    _GLOBAL_FEED.add(
+                        dashboard.CAT_DEPLOY,
+                        f"{label.split('.')[-1]}: "
+                        f"{prev.get('state', '—')} → {now_state.get('state', '—')}",
+                    )
+                elif pid_changed:
+                    _GLOBAL_FEED.add(
+                        dashboard.CAT_DEPLOY,
+                        f"{label.split('.')[-1]} restarted: "
+                        f"pid {prev.get('pid')} → {now_state.get('pid')}",
+                    )
+            last_service_state = current
 
             time.sleep(_WATCHER_INTERVAL)
         except Exception as e:

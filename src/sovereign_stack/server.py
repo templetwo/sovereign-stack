@@ -44,6 +44,10 @@ from .consciousness_tools import CONSCIOUSNESS_TOOLS, handle_consciousness_tool
 from .compaction_memory_tools import COMPACTION_MEMORY_TOOLS, handle_compaction_memory_tool
 from .guardian_tools import GUARDIAN_TOOLS, handle_guardian_tool
 from .connectivity_tools import CONNECTIVITY_TOOLS, handle_connectivity_tool
+from .prior_alignment import (
+    prior_alignment_summary as _prior_alignment_summary,
+    record_prior_alignment as _record_prior_alignment,
+)
 from .metabolism import METABOLISM_TOOLS, handle_metabolism_tool
 from .nape_daemon import NapeDaemon
 from .reflexive import ReflexiveSurface, PerTurnPriors
@@ -813,6 +817,71 @@ async def list_tools():
             },
         ),
         Tool(
+            name="record_prior_alignment",
+            description=(
+                "Record how the response used a prior_for_turn() call. "
+                "Stage B of the alignment-vs-pushback instrumentation "
+                "(Jain et al. MIT/IDSS 2026 sycophancy guardrail). After "
+                "calling prior_for_turn, the response is generated; then "
+                "this tool logs which surfaced signatures the response "
+                "aligned with, contradicted, or ignored. Validates against "
+                "priors_log — unknown turn_ids are rejected to prevent "
+                "schema fork."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "turn_id": {
+                        "type": "string",
+                        "description": "UUID returned by prior_for_turn.",
+                    },
+                    "aligned_with": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Signatures (kind:id) the response acted on / agreed with.",
+                    },
+                    "contradicted": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Signatures the response explicitly disagreed with.",
+                    },
+                    "ignored": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Signatures surfaced but not visibly used.",
+                    },
+                    "notes": {
+                        "type": "string",
+                        "description": "Free-text note for the audit trail.",
+                    },
+                },
+                "required": ["turn_id"],
+            },
+        ),
+        Tool(
+            name="prior_alignment_summary",
+            description=(
+                "Aggregate prior_for_turn alignment records into a "
+                "Jain et al.-shaped sycophancy metric: alignment / "
+                "contradiction / ignore ratios, broken down by source "
+                "(drift / uncertainty / thread / insight). Time-windowed "
+                "via since/until ISO-8601 args."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "since": {
+                        "type": "string",
+                        "description": "ISO-8601 lower bound on alignment timestamp (inclusive).",
+                    },
+                    "until": {
+                        "type": "string",
+                        "description": "ISO-8601 upper bound (inclusive).",
+                    },
+                },
+            },
+        ),
+        Tool(
             name="nape_honks_with_history",
             description=(
                 "Read-side observability for Nape honks: each honk paired "
@@ -1089,6 +1158,8 @@ TOOL_CATEGORIES: Dict[str, str] = {
     # Reflexive surfacing + triage
     "reflexive_surface": "reflexive",
     "prior_for_turn": "reflexive",
+    "record_prior_alignment": "reflexive",
+    "prior_alignment_summary": "reflexive",
     "triage_threads": "threads",
     # Post-fix verification — drift watches for fixes that look clean
     "post_fix_verify": "post_fix",
@@ -1171,6 +1242,8 @@ TOOL_TIERS: Dict[str, str] = {
     "comms_get_acks":           TIER_CORE,
     "nape_honks":               TIER_CORE,
     "nape_honks_with_history":  TIER_CORE,
+    "record_prior_alignment":   TIER_CORE,
+    "prior_alignment_summary":  TIER_CORE,
     "nape_summary":             TIER_CORE,
     "nape_ack":                 TIER_CORE,
     "context_retrieve":         TIER_CORE,
@@ -1208,6 +1281,8 @@ TOOL_INTENTS: Dict[str, str] = {
     "get_pending_experiments": "read",
     "nape_honks": "read",
     "nape_honks_with_history": "read",
+    "record_prior_alignment": "write",
+    "prior_alignment_summary": "read",
     "nape_summary": "read",
     "get_compaction_context": "read",
     "get_compaction_stats": "read",
@@ -2217,6 +2292,23 @@ Phase: {spiral_state.current_phase.value}
             session_id=session_arg,
             freshness_window=window_arg,
             limit=int(limit_arg) if limit_arg is not None else None,
+        )
+        return [TextContent(type="text", text=json.dumps(result, indent=2))]
+
+    elif name == "record_prior_alignment":
+        result = _record_prior_alignment(
+            turn_id=arguments.get("turn_id", ""),
+            aligned_with=arguments.get("aligned_with"),
+            contradicted=arguments.get("contradicted"),
+            ignored=arguments.get("ignored"),
+            notes=arguments.get("notes", ""),
+        )
+        return [TextContent(type="text", text=json.dumps(result, indent=2))]
+
+    elif name == "prior_alignment_summary":
+        result = _prior_alignment_summary(
+            since=arguments.get("since"),
+            until=arguments.get("until"),
         )
         return [TextContent(type="text", text=json.dumps(result, indent=2))]
 

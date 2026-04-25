@@ -425,6 +425,11 @@ class PerTurnPriors:
         Returns:
             {
               "block": str,              # formatted priors text (<= max_tokens)
+              "turn_id": str,            # UUID identifying THIS prior_for_turn
+                                          # call. Pass to record_prior_alignment
+                                          # to log how the model used these
+                                          # priors (Stage B alignment-vs-pushback
+                                          # instrumentation, Jain et al. 2026).
               "included_items": list,    # stable ids of what surfaced
               "skipped_stale": list,     # ids demoted out by freshness penalty
               "empty": bool,             # true if nothing worth surfacing
@@ -432,10 +437,12 @@ class PerTurnPriors:
               "sources": list,           # which buckets contributed
             }
         """
+        import uuid as _uuid
         k = max(1, min(int(k), 3))
         max_tokens = max(50, int(max_tokens))
         tags = [t.strip().lower() for t in (domain_tags or []) if t.strip()]
         stale = self._recent_surfaced_ids()
+        turn_id = str(_uuid.uuid4())
 
         sections: List[Dict[str, Any]] = []
         skipped: List[str] = []
@@ -508,9 +515,10 @@ class PerTurnPriors:
             # Still advance the freshness window so long stretches of empty
             # priors don't trap stale items in the sliding window forever.
             if not dry_run:
-                self._append_freshness_log([])
+                self._append_freshness_log([], turn_id=turn_id)
             return {
                 "block": "",
+                "turn_id": turn_id,
                 "included_items": [],
                 "skipped_stale": skipped,
                 "empty": True,
@@ -551,7 +559,7 @@ class PerTurnPriors:
             # Always append on non-dry-run so the freshness window slides
             # over calls, not over non-empty surfacings. Otherwise a stale
             # item stays stale forever during long stretches of empty priors.
-            self._append_freshness_log(included)
+            self._append_freshness_log(included, turn_id=turn_id)
 
         kind_to_source = {
             "honk": "drift",
@@ -570,6 +578,7 @@ class PerTurnPriors:
 
         return {
             "block": block,
+            "turn_id": turn_id,
             "included_items": included,
             "skipped_stale": skipped,
             "empty": False,
@@ -684,10 +693,17 @@ class PerTurnPriors:
                 continue
         return ids
 
-    def _append_freshness_log(self, included_items: List[str]) -> None:
+    def _append_freshness_log(
+        self,
+        included_items: List[str],
+        *,
+        turn_id: Optional[str] = None,
+    ) -> None:
         record = {
             "timestamp": datetime.utcnow().isoformat(),
             "included_items": included_items,
         }
+        if turn_id is not None:
+            record["turn_id"] = turn_id
         with self._log_path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(record) + "\n")
