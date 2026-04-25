@@ -4,7 +4,7 @@
 
 Sovereign Stack is an MCP server that gives Claude persistent memory, filesystem routing, governance circuits, and a 9-phase cognitive state machine. It's how Claude remembers across sessions, reasons about its own actions, and accumulates wisdom over time.
 
-**Version:** 1.3.2 — Reflection-daemons + connectivity layer (April 25, 2026). 72 tools. Scheduled metabolize/uncertainty daemons, BaseDaemon scaffolding, connectivity manager + monitor + live dashboard, multi-instance write tools, tiered toolkit (essential / core / advanced).
+**Version:** 1.3.2 — Reflection-daemons + connectivity layer (April 25, 2026). 75 tools. Scheduled metabolize/uncertainty daemons, BaseDaemon scaffolding, connectivity manager + monitor + live dashboard, multi-instance write tools, tiered toolkit (essential / core / advanced).
 **Home:** Mac Studio (`/Users/tony_studio/sovereign-stack`)
 **Data:** `~/.sovereign/`
 
@@ -27,7 +27,7 @@ more:
 | Need | Call |
 |------|------|
 | Active-session working set (~30 tools) | `my_toolkit(tier="core")` |
-| Full registry (72 tools) | `my_toolkit(tier="all")` |
+| Full registry (75 tools) | `my_toolkit(tier="all")` |
 | One intent (read / write / govern / ...) | `my_toolkit(intent="write")` |
 | One module bucket (legacy axis) | `my_toolkit(category="metabolism")` |
 | With JSON schemas | `my_toolkit(include_schema=true)` |
@@ -64,6 +64,23 @@ The Stack used to be query-driven: you asked, it returned. v1.3.1 makes it conti
 | Integrated a comms message | `comms_acknowledge(message_id, instance_id, note)` — distinct from browsing |
 | Engaged with a thread without resolving | `thread_touch(thread_id, note)` — keeps it open but records attention |
 | Acted on a handoff | `handoff_acted_on(handoff_path, consumed_by, what_was_done)` — closes the loop for the next reader |
+| Want to see which honks are still in priors | `nape_honks_with_history(freshness_window=3)` |
+| After response, log alignment with priors | `record_prior_alignment(turn_id=..., aligned_with=[...], ...)` |
+| Probe stack health from inside conversation | `connectivity_status()` then `stack_write_check(instance_id=...)` |
+
+---
+
+## v1.3.2 — Reflection daemons + connectivity layer (what changed)
+
+The Stack gained a background metabolism and an always-on health wire. Five new capability classes:
+
+| Capability | Tools | What it does |
+|-----------|-------|--------------|
+| **Reflection daemons (scheduled)** | `prior_for_turn`; `daemons/uncertainty_resurfacer.py` (every 3 days); `daemons/metabolize_daemon.py` (nightly 03:17) | BaseDaemon shared scaffolding. `prior_for_turn` surfaces priors relevant to the current turn in-conversation. The two launchd daemons run on schedule and write back into the chronicle without needing an active Claude session. |
+| **Connectivity manager** | `sovereign-connectivity` CLI; `connectivity_status` MCP tool | launchctl-truth status across the 6 sovereign endpoints. Returns per-service UP/DOWN/DEGRADED with last-seen timestamp. Use from inside a conversation to verify the stack is healthy before depending on it. |
+| **Auto-recovery monitor** | `sovereign-monitor` (background loop) | Polls the 6 endpoints on exponential backoff. Restarts degraded services via launchctl and logs recovery events to `~/.sovereign/monitor.log`. |
+| **Live dashboard** | `sovereign-dashboard` (TUI); `sovereign-dashboard-web` (port 3435) | TUI shows real-time service status + recent chronicle writes + git log. The web dashboard adds launchd event stream, formatted chronicle entries, and a git timeline panel. |
+| **Stage B alignment instrumentation** | `record_prior_alignment`, `prior_alignment_summary` | Jain et al. sycophancy measurement protocol. `record_prior_alignment` logs per-turn alignment evidence (turn_id, aligned_with, drift notes). `prior_alignment_summary` aggregates across a session for Stage B analysis. |
 
 ---
 
@@ -99,9 +116,11 @@ SSE server + Cloudflare Tunnel for cross-device access (phone, web, anywhere).
 | Tool | Purpose |
 |------|---------|
 | `where_did_i_leave_off` | Boot-up call. Returns spiral status, unconsumed handoffs from previous instances, recent open threads, insights since last reflection. |
+| `start_here` | First-arrival narrative orientation. Explains why the stack exists, the 12 essential tools, and three load-bearing design points. Call after `where_did_i_leave_off` on a fresh instance. |
 | `handoff` | Write intent for the next instance (≤2KB). Surfaced once by `where_did_i_leave_off`, then archived. |
 | `close_session` | End the session: records reflection, optionally handoff, advances the spiral phase. One call replaces three. |
 | `my_toolkit` | Returns the full current toolkit from live registrations. Drift-proof. Use this to self-discover what's available. |
+| `connectivity_status` | Returns per-service health (UP/DOWN/DEGRADED) for all 6 sovereign endpoints. Call when the stack feels degraded. |
 
 ### Memory & Chronicle
 

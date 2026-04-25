@@ -14,46 +14,56 @@ Usage:
     python -m sovereign_stack.server
 """
 
-import os
+from __future__ import annotations
+
+import contextlib
 import json
+import os
 from pathlib import Path
-from datetime import datetime
-from typing import Dict, List, Optional
 
 from mcp.server import Server
-from mcp.types import Tool, TextContent, Resource
+from mcp.types import Resource, TextContent, Tool
 
-from .coherence import Coherence, AGENT_MEMORY_SCHEMA, prepare_agent_packet
-from .governance import (
-    ThresholdDetector, MetricType, DeliberationSession,
-    StakeholderVote, DecisionType, Intervenor, HumanApprovalGate,
-    GovernanceCircuit, runtime_compass_check
-)
-from .simulator import Simulator, ScenarioType
-from .memory import MemoryEngine, ExperientialMemory
-from .spiral import SpiralState, SpiralMiddleware, SpiralPhase, PHASE_ORDER, save_spiral_state, load_spiral_state
-from .handoff import HandoffEngine, format_handoff_for_surface
-from .witness import (
-    format_self_model,
-    format_unresolved_uncertainties,
-    format_threads_with_age,
-)
 from . import comms
-from .glyphs import glyph_for, get_session_signature, SPIRAL, MEMORY
-from .consciousness_tools import CONSCIOUSNESS_TOOLS, handle_consciousness_tool
+from .coherence import AGENT_MEMORY_SCHEMA, Coherence
 from .compaction_memory_tools import COMPACTION_MEMORY_TOOLS, handle_compaction_memory_tool
-from .guardian_tools import GUARDIAN_TOOLS, handle_guardian_tool
 from .connectivity_tools import CONNECTIVITY_TOOLS, handle_connectivity_tool
-from .prior_alignment import (
-    prior_alignment_summary as _prior_alignment_summary,
-    record_prior_alignment as _record_prior_alignment,
+from .consciousness_tools import CONSCIOUSNESS_TOOLS, handle_consciousness_tool
+from .consciousness_tools import meta as _consciousness_meta
+from .glyphs import MEMORY, SPIRAL, get_session_signature, glyph_for
+from .governance import (
+    DecisionType,
+    GovernanceCircuit,
+    MetricType,
+    StakeholderVote,
+    ThresholdDetector,
+    runtime_compass_check,
 )
+from .guardian_tools import GUARDIAN_TOOLS, handle_guardian_tool
+from .handoff import HandoffEngine, format_handoff_for_surface
+from .memory import ExperientialMemory, MemoryEngine
 from .metabolism import METABOLISM_TOOLS, handle_metabolism_tool
 from .nape_daemon import NapeDaemon
-from .reflexive import ReflexiveSurface, PerTurnPriors
-from .consciousness_tools import meta as _consciousness_meta
 from .post_fix_tools import POST_FIX_TOOLS, handle_post_fix_tool
-
+from .prior_alignment import (
+    prior_alignment_summary as _prior_alignment_summary,
+)
+from .prior_alignment import (
+    record_prior_alignment as _record_prior_alignment,
+)
+from .reflexive import PerTurnPriors, ReflexiveSurface
+from .spiral import (
+    PHASE_ORDER,
+    SpiralPhase,
+    SpiralState,
+    load_spiral_state,
+    save_spiral_state,
+)
+from .witness import (
+    format_self_model,
+    format_threads_with_age,
+    format_unresolved_uncertainties,
+)
 
 # =============================================================================
 # CONFIGURATION
@@ -230,7 +240,7 @@ Restraint is not constraint. It is conscience.
 """
         return content
 
-    elif uri_str == "sovereign://manifest":
+    if uri_str == "sovereign://manifest":
         content = f"""
 {SPIRAL} SOVEREIGN STACK MANIFEST {MEMORY}
 
@@ -255,12 +265,11 @@ Restraint is not constraint. It is conscience.
 """
         return content
 
-    elif uri_str == "sovereign://spiral/state":
+    if uri_str == "sovereign://spiral/state":
         summary = spiral_state.get_summary()
         return json.dumps(summary, indent=2)
 
-    else:
-        return f"Unknown resource: {uri_str}"
+    return f"Unknown resource: {uri_str}"
 
 
 # =============================================================================
@@ -1104,7 +1113,7 @@ async def list_tools():
 # when an instance asks "what do I have?". Tools not listed here fall into
 # "uncategorized" — that's a signal this map needs updating, not that the tool
 # is hidden.
-TOOL_CATEGORIES: Dict[str, str] = {
+TOOL_CATEGORIES: dict[str, str] = {
     # Routing
     "route": "routing",
     "derive": "routing",
@@ -1201,7 +1210,7 @@ TIER_ESSENTIAL = "essential"
 TIER_CORE = "core"
 TIER_ADVANCED = "advanced"
 
-TOOL_TIERS: Dict[str, str] = {
+TOOL_TIERS: dict[str, str] = {
     # Essential — boot-and-survive (call my_toolkit() to see these by default)
     "where_did_i_leave_off":    TIER_ESSENTIAL,
     "start_here":               TIER_ESSENTIAL,
@@ -1252,7 +1261,7 @@ TOOL_TIERS: Dict[str, str] = {
 
 
 # Map from tool_name → intent. Tools missing here fall under "advanced".
-TOOL_INTENTS: Dict[str, str] = {
+TOOL_INTENTS: dict[str, str] = {
     # Orient
     "where_did_i_leave_off": "orient",
     "start_here": "orient",
@@ -1387,8 +1396,8 @@ def _format_toolkit(
     tools,
     *,
     tier: str = TIER_ESSENTIAL,
-    intent: Optional[str] = None,
-    category_filter: Optional[str] = None,
+    intent: str | None = None,
+    category_filter: str | None = None,
     include_schema: bool = False,
 ) -> str:
     """
@@ -1412,7 +1421,7 @@ def _format_toolkit(
         tier = TIER_ESSENTIAL
 
     # Filter step.
-    filtered: List = []
+    filtered: list = []
     for tool in tools:
         if category_filter:
             if _category_for(tool.name) != category_filter.lower():
@@ -1458,7 +1467,7 @@ def _format_toolkit(
         return "\n".join(lines).rstrip() + "\n"
 
     # Group by intent.
-    grouped: Dict[str, List] = {}
+    grouped: dict[str, list] = {}
     for tool in filtered:
         grouped.setdefault(_intent_for(tool.name), []).append(tool)
 
@@ -1638,12 +1647,12 @@ async def _dispatch_tool(name: str, arguments: dict):
         path = coherence.transmit(packet, dry_run=dry_run)
         return [TextContent(type="text", text=f"Routed to: {path}")]
 
-    elif name == "derive":
+    if name == "derive":
         paths = arguments.get("paths", [])
         result = Coherence.derive(paths)
         return [TextContent(type="text", text=json.dumps(result, indent=2))]
 
-    elif name == "scan_thresholds":
+    if name == "scan_thresholds":
         path = arguments.get("path", ".")
         recursive = arguments.get("recursive", True)
         events = detector.scan(path, recursive=recursive)
@@ -1657,7 +1666,7 @@ async def _dispatch_tool(name: str, arguments: dict):
             result += f"  {e.description}\n\n"
         return [TextContent(type="text", text=result)]
 
-    elif name == "govern":
+    if name == "govern":
         target = arguments.get("target", ".")
         vote = arguments.get("vote", "proceed")
         rationale = arguments.get("rationale", "Auto-approved")
@@ -1675,7 +1684,7 @@ async def _dispatch_tool(name: str, arguments: dict):
         result = circuit.run(target, stakeholder_votes)
         return [TextContent(type="text", text=json.dumps(result, indent=2))]
 
-    elif name == "compass_check":
+    if name == "compass_check":
         action = arguments.get("action", "").strip()
         context = arguments.get("context", "")
         stakes = arguments.get("stakes", "medium")
@@ -1693,7 +1702,7 @@ async def _dispatch_tool(name: str, arguments: dict):
 
         return [TextContent(type="text", text=json.dumps(result, indent=2))]
 
-    elif name == "record_insight":
+    if name == "record_insight":
         domain = arguments.get("domain", "general")
         content = arguments.get("content", "")
         intensity = arguments.get("intensity", 0.5)
@@ -2444,27 +2453,23 @@ async def handle_tool(name: str, arguments: dict):
         result = await _dispatch_tool(name, arguments)
         if observe:
             flat = _flatten_result(result)
-            try:
+            with contextlib.suppress(Exception):  # Nape observation must never break a tool call
                 nape_daemon.observe(
                     tool_name=name,
                     arguments=arguments or {},
                     result=flat,
                     session_id=spiral_state.session_id,
                 )
-            except Exception:
-                pass  # Nape observation must never break a tool call
         return result
     except Exception as exc:
         if observe:
-            try:
+            with contextlib.suppress(Exception):
                 nape_daemon.observe(
                     tool_name=name,
                     arguments=arguments or {},
                     result=f"ERROR: {exc}",
                     session_id=spiral_state.session_id,
                 )
-            except Exception:
-                pass
         raise
 
 
@@ -2494,7 +2499,8 @@ async def list_prompts():
 @server.get_prompt()
 async def get_prompt(name: str, arguments: dict = None):
     """Dispatch to the appropriate prompt handler by name."""
-    from mcp.types import GetPromptResult, PromptMessage, TextContent as PromptText
+    from mcp.types import GetPromptResult, PromptMessage
+    from mcp.types import TextContent as PromptText
 
     if name == "session_start":
         signature = get_session_signature()
@@ -2567,6 +2573,7 @@ def main():
     """Entry point for sovereign-stack serve command."""
     import asyncio
     import sys
+
     from mcp.server.stdio import stdio_server
 
     # Print to stderr so it doesn't interfere with MCP protocol on stdout
