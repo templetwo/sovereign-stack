@@ -221,3 +221,86 @@ class TestScoringExplanation:
         assert "related_insights" in result
         assert "total_candidates_scanned" in result
         assert "scoring_explanation" in result
+
+
+# ── Case 5: tag-required filtering (no-overlap drop) ────────────────────────
+
+
+class TestTagRequiredFiltering:
+    """When the caller provides domain_tags, items with zero tag overlap
+    must NOT surface — project_match alone is not enough.
+
+    This guards the 2026-04-25 finding from a first-hand stack probe:
+    stale Feb 2026 mistakes with off-topic `applies_to` were leaking into
+    results because their bodies mentioned the project name. Fix: items
+    are dropped when caller_tags is non-empty AND tag_overlap == 0.
+    """
+
+    def test_off_topic_thread_dropped_when_tags_provided(self, surface, memory):
+        memory.record_open_thread("Off-topic question", domain="other")
+        memory.record_open_thread("On-topic question", domain="entropy")
+
+        result = surface.surface(domain_tags=["entropy"])
+        threads = result["matched_open_threads"]
+        domains = [t.get("domain", "") for t in threads]
+
+        assert "other" not in domains, (
+            "Off-topic thread leaked through despite zero tag overlap"
+        )
+        assert any("entropy" in d for d in domains)
+
+    def test_off_topic_kept_when_caller_tags_empty(self, surface, memory):
+        """Empty caller_tags → no filter applied (every item has overlap=0
+        by definition; penalizing then would punish the 'show anything
+        recent' use case)."""
+        memory.record_open_thread("Recent off-topic", domain="other")
+
+        result = surface.surface(domain_tags=[])
+        threads = result["matched_open_threads"]
+        assert len(threads) >= 1, (
+            "Empty caller_tags must fall back to recency-only ranking, "
+            "not filter to nothing."
+        )
+
+    def test_project_match_alone_does_not_surface_off_topic(self, surface, memory):
+        """The exact bug from the first-hand probe: an off-topic item
+        whose BODY mentions the project name must not surface against
+        unrelated tags. Project match is a tie-breaker among matched
+        items, not a primary relevance signal."""
+        memory.record_open_thread(
+            "This thread mentions sovereign-stack but is about something else",
+            domain="cooking",
+        )
+        memory.record_open_thread(
+            "Real entropy question", domain="entropy",
+        )
+
+        result = surface.surface(
+            domain_tags=["entropy"], project="sovereign-stack",
+        )
+        threads = result["matched_open_threads"]
+
+        for t in threads:
+            assert t.get("domain") != "cooking", (
+                "Off-topic thread with project-name body should NOT surface; "
+                "tag_overlap=0 is disqualifying when caller provided tags."
+            )
+
+    def test_tag_overlap_exposed_in_result(self, surface, memory):
+        """_tag_overlap field should be on every returned item — debuggable
+        score breakdown without re-running the scorer."""
+        memory.record_open_thread(
+            "Reflection daemons question", domain="reflection-daemons,v1.3.2"
+        )
+
+        result = surface.surface(
+            domain_tags=["reflection-daemons", "v1.3.2"]
+        )
+        threads = result["matched_open_threads"]
+        assert len(threads) >= 1
+        for t in threads:
+            assert "_tag_overlap" in t, (
+                "_tag_overlap must be exposed on returned items so callers "
+                "can inspect why an item ranked where it did."
+            )
+            assert t["_tag_overlap"] > 0.0

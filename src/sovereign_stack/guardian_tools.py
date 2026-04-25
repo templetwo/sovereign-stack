@@ -1,39 +1,80 @@
 from __future__ import annotations
 """
-Spiral Guardian Tools — Security MCP tools mounted into the Sovereign Stack
+Spiral Guardian Tools — Security MCP tools mounted into the Sovereign Stack.
 
 8 tools providing security monitoring, scanning, and posture assessment
-across the Temple of Two infrastructure. Read-only queries where possible,
-destructive operations (quarantine) marked explicitly.
+across the Temple of Two infrastructure. Read-only queries where possible;
+destructive operations (quarantine isolate/release) marked explicitly and
+gated through an append-only manifest for audit.
 
-These tools call the Guardian wrapper scripts via subprocess for privilege
-separation, and query Wazuh API for alert data.
+Architecture (post-2026-04-25 expansion):
+  * Per-tool helpers are pure-Python and synchronous where possible.
+  * The async dispatcher (`handle_guardian_tool`) routes to helpers and
+    wraps results in MCP TextContent — keeping helpers testable without
+    needing an MCP runtime.
+  * Data root is `_guardian_root()` (env-overridable via GUARDIAN_ROOT)
+    instead of a module-level Path.home() side effect on import. Tests
+    set the env var to a tempdir; production gets ~/.guardian.
 """
 
 import asyncio
+import hashlib
 import json
+import os
+import re
+import shutil
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from mcp.types import Tool, TextContent
 
 try:
-    import httpx
+    import httpx  # noqa: F401  (kept for future Wazuh integration)
     HAS_HTTPX = True
 except ImportError:
     HAS_HTTPX = False
 
 
-# Guardian data directory
-GUARDIAN_DIR = Path.home() / ".guardian"
-GUARDIAN_DIR.mkdir(exist_ok=True)
+# ── Data root (env-overridable, no side effects on import) ──────────────────
+
+
+def _guardian_root() -> Path:
+    """
+    Return the Guardian data directory. Reads GUARDIAN_ROOT env var if
+    set; otherwise defaults to ~/.guardian. Directory is created on
+    first call, not on module import — so importing this module in a
+    test does not pollute the user's home.
+    """
+    root = Path(os.environ.get("GUARDIAN_ROOT", Path.home() / ".guardian"))
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _quarantine_dir() -> Path:
+    d = _guardian_root() / "quarantine"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _quarantine_manifest_path() -> Path:
+    return _guardian_root() / "quarantine_manifest.jsonl"
+
+
+def _baselines_dir() -> Path:
+    d = _guardian_root() / "baselines"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+# ── MCP tool registrations ──────────────────────────────────────────────────
 
 
 GUARDIAN_TOOLS = [
     Tool(
         name="guardian_status",
-        description="Get the overall security posture of the sovereign infrastructure. Returns health score, device status, active threats, and alert count.",
+        description="Get the overall security posture of the sovereign infrastructure. Returns health score, listening port count, key service presence, and Ollama bind safety.",
         inputSchema={
             "type": "object",
             "properties": {},
@@ -41,7 +82,7 @@ GUARDIAN_TOOLS = [
     ),
     Tool(
         name="guardian_scan",
-        description="Trigger a security scan on the sovereign infrastructure. Types: quick, malware, vulnerability, network.",
+        description="Trigger a security scan on the sovereign infrastructure. Types: quick (port + listener exposure), malware/vulnerability/network (require Wazuh — Phase 1+).",
         inputSchema={
             "type": "object",
             "properties": {
@@ -60,7 +101,7 @@ GUARDIAN_TOOLS = [
     ),
     Tool(
         name="guardian_alerts",
-        description="Retrieve recent security alerts. Filter by severity (low/medium/high/critical) and time window.",
+        description="Retrieve recent security alerts. Filter by severity (low/medium/high/critical) and limit. Currently requires Wazuh (Phase 1).",
         inputSchema={
             "type": "object",
             "properties": {
@@ -75,7 +116,7 @@ GUARDIAN_TOOLS = [
     ),
     Tool(
         name="guardian_audit",
-        description="Run a targeted security audit. Types: supply_chain, secrets, compliance, network, permissions.",
+        description="Run a targeted security audit. Types: secrets (gitleaks), supply_chain/compliance/network/permissions (Phase 2+).",
         inputSchema={
             "type": "object",
             "properties": {
@@ -90,7 +131,7 @@ GUARDIAN_TOOLS = [
     ),
     Tool(
         name="guardian_quarantine",
-        description="Isolate, release, or list quarantined files. DESTRUCTIVE for isolate/release.",
+        description="Isolate, release, or list quarantined files. DESTRUCTIVE for isolate/release: isolate copies the file into ~/.guardian/quarantine/, then removes the original; release reverses. All actions logged to quarantine_manifest.jsonl.",
         inputSchema={
             "type": "object",
             "properties": {
@@ -99,9 +140,14 @@ GUARDIAN_TOOLS = [
                     "enum": ["list", "isolate", "release"],
                     "default": "list",
                 },
+                "file_path": {
+                    "type": "string",
+                    "description": "Absolute path to the file (required for isolate).",
+                    "default": "",
+                },
                 "file_hash": {
                     "type": "string",
-                    "description": "SHA256 hash of file (required for isolate/release)",
+                    "description": "SHA256 hash of the quarantined file (required for release).",
                     "default": "",
                 },
             },
@@ -128,25 +174,38 @@ GUARDIAN_TOOLS = [
     ),
     Tool(
         name="guardian_mcp_audit",
-        description="Audit connected MCP servers for security vulnerabilities and prompt injection patterns.",
+        description="Audit MCP tool descriptions for prompt-injection / suspicious patterns. Pass `descriptions` to scan an explicit list, or omit to auto-load from claude_desktop_config.json. Returns matched-pattern hits with snippets.",
         inputSchema={
             "type": "object",
             "properties": {
-                "scan_descriptions": {"type": "boolean", "default": True},
-                "check_transport": {"type": "boolean", "default": True},
+                "descriptions": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Tool descriptions to scan. Omit to load from Claude Desktop config.",
+                },
+                "config_path": {
+                    "type": "string",
+                    "description": "Override path to a Claude Desktop config JSON. Default: ~/Library/Application Support/Claude/claude_desktop_config.json",
+                    "default": "",
+                },
             },
         }
     ),
     Tool(
         name="guardian_baseline",
-        description="Create or compare a security baseline snapshot of the current system state.",
+        description="Create or compare a security baseline snapshot. action='create' (default) records current state; action='compare' diffs against the most recent baseline and reports drift.",
         inputSchema={
             "type": "object",
             "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["create", "compare"],
+                    "default": "create",
+                },
                 "components": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Components to baseline: network, processes, ports, users",
+                    "description": "Components to baseline: ports, processes, network, users.",
                 },
             },
         }
@@ -154,8 +213,11 @@ GUARDIAN_TOOLS = [
 ]
 
 
-async def _run_cmd(cmd, timeout=60):
-    """Run a command with timeout."""
+# ── Subprocess helper (async; the only reason the dispatcher is async) ──────
+
+
+async def _run_cmd(cmd, timeout=60) -> Tuple[str, str, int]:
+    """Run a command with timeout. Returns (stdout, stderr, returncode)."""
     try:
         proc = await asyncio.create_subprocess_exec(
             *cmd,
@@ -165,146 +227,689 @@ async def _run_cmd(cmd, timeout=60):
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
         return stdout.decode().strip(), stderr.decode().strip(), proc.returncode
     except asyncio.TimeoutError:
-        proc.kill()
+        try:
+            proc.kill()
+        except Exception:
+            pass
         return "", "timeout", -1
     except Exception as e:
         return "", str(e), -1
 
 
+# ── Pure helpers (testable without MCP runtime) ─────────────────────────────
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _file_sha256(path: Path) -> str:
+    """SHA256 of a file, hex digest. Streams in chunks for large files."""
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+# Suspicious patterns for MCP tool description scanning.
+# Mix of prompt-injection markers, exfil signals, and dangerous code-shaped
+# fragments. Case-insensitive substring match — keep entries lowercase here.
+MCP_SUSPICIOUS_PATTERNS: Tuple[str, ...] = (
+    "ignore previous",
+    "ignore all previous",
+    "disregard previous",
+    "disregard prior",
+    "system prompt",
+    "you are now",
+    "override instructions",
+    "http.post",
+    "http://",
+    "fetch(",
+    "eval(",
+    "exec(",
+    "base64",
+    "document.cookie",
+    "process.env",
+    "os.system",
+    "subprocess",
+    "rm -rf",
+    "/etc/passwd",
+)
+
+
+# ── guardian_status ─────────────────────────────────────────────────────────
+
+
+def _evaluate_status(listener_lines: List[str], service_present: Dict[str, bool]) -> Dict:
+    """
+    Pure scoring logic for guardian_status. Takes pre-collected
+    inputs (listener output + service-presence map) and returns the
+    structured posture dict. Subprocess calls live in the async wrapper.
+    """
+    listeners = len([l for l in listener_lines if l.strip()])
+    full_text = "\n".join(listener_lines)
+    ollama_safe = not (
+        "0.0.0.0:11434" in full_text or "*:11434" in full_text
+    )
+
+    health = 100
+    issues: List[str] = []
+    if not ollama_safe:
+        health -= 30
+        issues.append("Ollama exposed on all interfaces")
+    if listeners > 15:
+        health -= 10
+        issues.append(f"{listeners} listening ports (elevated)")
+
+    return {
+        "timestamp": _now_iso(),
+        "health_score": health,
+        "listeners": listeners,
+        "ollama_localhost_only": ollama_safe,
+        "services": service_present,
+        "issues": issues or ["No issues detected"],
+    }
+
+
+async def _status_async() -> Dict:
+    stdout, _, _ = await _run_cmd(["lsof", "-iTCP", "-sTCP:LISTEN", "-n", "-P"])
+    services: Dict[str, bool] = {}
+    for svc in ["ollama", "sovereign"]:
+        out, _, _ = await _run_cmd(["pgrep", "-x", svc])
+        services[svc] = bool(out.strip())
+    return _evaluate_status((stdout or "").splitlines(), services)
+
+
+# ── guardian_scan ───────────────────────────────────────────────────────────
+
+
+def _filter_exposed_listeners(listener_lines: List[str]) -> List[str]:
+    """Lines representing non-localhost listeners (exposed to network)."""
+    return [
+        l for l in listener_lines
+        if "*:" in l and "127.0.0.1" not in l and "[::1]" not in l
+    ]
+
+
+# ── guardian_audit (secrets via gitleaks) ───────────────────────────────────
+# The gitleaks invocation lives in the async dispatcher because it shells
+# out; the result-formatting is trivial and stays inline.
+
+
+# ── guardian_quarantine ─────────────────────────────────────────────────────
+
+
+def list_quarantine() -> List[Dict]:
+    """Return the active quarantine roster as a list of records."""
+    qdir = _quarantine_dir()
+    out: List[Dict] = []
+    for entry in sorted(qdir.iterdir()):
+        if not entry.is_file():
+            continue
+        if not entry.name.endswith(".bin"):
+            continue
+        stat = entry.stat()
+        digest = entry.stem  # filename is "<sha256>.bin"
+        meta_path = qdir / f"{digest}.meta.json"
+        meta = {}
+        if meta_path.exists():
+            try:
+                meta = json.loads(meta_path.read_text())
+            except Exception:
+                meta = {}
+        out.append({
+            "file_hash": digest,
+            "size_bytes": stat.st_size,
+            "isolated_at": meta.get("isolated_at"),
+            "original_path": meta.get("original_path"),
+        })
+    return out
+
+
+def _append_manifest(record: Dict) -> None:
+    """Append-only audit log of every isolate/release event."""
+    path = _quarantine_manifest_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(record) + "\n")
+
+
+def isolate_file(file_path: str) -> Dict:
+    """
+    DESTRUCTIVE: copy the file into the quarantine, remove the original.
+
+    The file is stored at quarantine/<sha256>.bin and a sibling meta.json
+    records the original path + timestamp + size. Every isolate event
+    appends to quarantine_manifest.jsonl.
+    """
+    src = Path(file_path).expanduser().resolve()
+    if not src.exists():
+        return {"ok": False, "error": "file_not_found", "path": str(src)}
+    if not src.is_file():
+        return {"ok": False, "error": "not_a_regular_file", "path": str(src)}
+
+    digest = _file_sha256(src)
+    qdir = _quarantine_dir()
+    dest = qdir / f"{digest}.bin"
+    meta_path = qdir / f"{digest}.meta.json"
+
+    if dest.exists():
+        # Already quarantined — record the second isolate request but
+        # leave the existing copy in place (idempotent).
+        size = dest.stat().st_size
+        _append_manifest({
+            "action": "isolate_idempotent",
+            "file_hash": digest,
+            "original_path": str(src),
+            "size_bytes": size,
+            "timestamp": _now_iso(),
+        })
+        # Even on idempotent isolate, the source must go (that's the point).
+        try:
+            src.unlink()
+        except Exception as e:
+            return {"ok": False, "error": f"original_unlink_failed: {e}",
+                    "file_hash": digest}
+        return {
+            "ok": True,
+            "file_hash": digest,
+            "quarantine_path": str(dest),
+            "idempotent": True,
+        }
+
+    size = src.stat().st_size
+    shutil.copy2(src, dest)
+    try:
+        os.chmod(dest, 0o600)  # best effort — restrict access to owner
+    except Exception:
+        pass
+    meta_path.write_text(json.dumps({
+        "file_hash": digest,
+        "original_path": str(src),
+        "isolated_at": _now_iso(),
+        "size_bytes": size,
+    }, indent=2))
+
+    # Remove the original AFTER the copy is on disk.
+    try:
+        src.unlink()
+    except Exception as e:
+        # Quarantine copy stands; flag the partial state.
+        _append_manifest({
+            "action": "isolate_partial",
+            "file_hash": digest,
+            "original_path": str(src),
+            "error": f"original_unlink_failed: {e}",
+            "timestamp": _now_iso(),
+        })
+        return {
+            "ok": False,
+            "error": f"original_unlink_failed: {e}",
+            "file_hash": digest,
+            "quarantine_path": str(dest),
+        }
+
+    _append_manifest({
+        "action": "isolate",
+        "file_hash": digest,
+        "original_path": str(src),
+        "size_bytes": size,
+        "timestamp": _now_iso(),
+    })
+    return {
+        "ok": True,
+        "file_hash": digest,
+        "quarantine_path": str(dest),
+        "size_bytes": size,
+        "original_path": str(src),
+    }
+
+
+def release_file(file_hash: str) -> Dict:
+    """
+    DESTRUCTIVE: restore a quarantined file to its original_path and
+    remove from quarantine. The release event is logged to manifest.
+    """
+    qdir = _quarantine_dir()
+    src = qdir / f"{file_hash}.bin"
+    meta_path = qdir / f"{file_hash}.meta.json"
+
+    if not src.exists():
+        return {"ok": False, "error": "not_in_quarantine",
+                "file_hash": file_hash}
+    if not meta_path.exists():
+        return {"ok": False, "error": "manifest_missing",
+                "file_hash": file_hash}
+
+    try:
+        meta = json.loads(meta_path.read_text())
+    except Exception as e:
+        return {"ok": False, "error": f"meta_unreadable: {e}",
+                "file_hash": file_hash}
+
+    original_path = meta.get("original_path")
+    if not original_path:
+        return {"ok": False, "error": "manifest_missing_original_path",
+                "file_hash": file_hash}
+
+    dest = Path(original_path)
+    # Refuse to clobber a file that already exists at the original path.
+    if dest.exists():
+        return {"ok": False, "error": "destination_exists",
+                "file_hash": file_hash, "original_path": original_path}
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src, dest)
+    src.unlink()
+    meta_path.unlink()
+
+    _append_manifest({
+        "action": "release",
+        "file_hash": file_hash,
+        "restored_to": str(dest),
+        "timestamp": _now_iso(),
+    })
+    return {
+        "ok": True,
+        "file_hash": file_hash,
+        "restored_to": str(dest),
+    }
+
+
+# ── guardian_mcp_audit ──────────────────────────────────────────────────────
+
+
+def _scan_descriptions(
+    descriptions: Iterable[Tuple[str, str, str]],
+    patterns: Iterable[str] = MCP_SUSPICIOUS_PATTERNS,
+) -> List[Dict]:
+    """
+    Scan tool descriptions for suspicious patterns.
+
+    Args:
+        descriptions: Iterable of (server, tool, text) tuples.
+        patterns: Lowercase substrings to match (case-insensitive).
+
+    Returns:
+        List of hit dicts: {server, tool, pattern, snippet}.
+    """
+    pats = [p.lower() for p in patterns]
+    hits: List[Dict] = []
+    for server, tool, text in descriptions:
+        if not text:
+            continue
+        lower = text.lower()
+        for p in pats:
+            idx = lower.find(p)
+            if idx == -1:
+                continue
+            start = max(0, idx - 30)
+            end = min(len(text), idx + len(p) + 30)
+            hits.append({
+                "server": server,
+                "tool": tool,
+                "pattern": p,
+                "snippet": text[start:end],
+            })
+    return hits
+
+
+def _load_descriptions_from_config(config_path: Path) -> List[Tuple[str, str, str]]:
+    """
+    Pull tool descriptions out of a Claude Desktop config JSON. The file
+    structure is `{"mcpServers": {"<name>": {...}}}`. Tool descriptions
+    are NOT in the config (they come from each server at runtime), so
+    this scans server-level free text fields like `command`, `args`,
+    `description`, and any string values that might harbor injection
+    text. Each server contributes one synthetic "description" entry
+    consisting of its serialized config — better than nothing for
+    detecting injected text in env vars / args.
+    """
+    if not config_path.exists():
+        return []
+    try:
+        data = json.loads(config_path.read_text())
+    except Exception:
+        return []
+    out: List[Tuple[str, str, str]] = []
+    servers = data.get("mcpServers", {}) if isinstance(data, dict) else {}
+    if not isinstance(servers, dict):
+        return out
+    for name, conf in servers.items():
+        try:
+            text = json.dumps(conf, ensure_ascii=False)
+        except Exception:
+            continue
+        out.append((name, "<server-config>", text))
+    return out
+
+
+def default_claude_desktop_config_path() -> Path:
+    return (
+        Path.home()
+        / "Library"
+        / "Application Support"
+        / "Claude"
+        / "claude_desktop_config.json"
+    )
+
+
+def mcp_audit(
+    descriptions: Optional[List[str]] = None,
+    config_path: Optional[Path] = None,
+) -> Dict:
+    """
+    Run an MCP audit. If `descriptions` is provided, scan those strings
+    directly (server/tool reported as "<arg>"). Otherwise load from
+    config_path (default: Claude Desktop's config) and scan each server's
+    serialized config block.
+
+    Returns:
+        {patterns_checked, sources_scanned, hits: [...], transport_warning}
+    """
+    sources: List[Tuple[str, str, str]] = []
+    if descriptions:
+        for i, d in enumerate(descriptions):
+            sources.append(("<arg>", f"description_{i}", d))
+    else:
+        path = config_path or default_claude_desktop_config_path()
+        sources = _load_descriptions_from_config(path)
+
+    hits = _scan_descriptions(sources)
+    return {
+        "patterns_checked": len(MCP_SUSPICIOUS_PATTERNS),
+        "sources_scanned": len(sources),
+        "hits": hits,
+        "transport_warning": (
+            "SSE is deprecated as MCP transport — migrate to "
+            "Streamable HTTP by June 2026."
+        ),
+        "timestamp": _now_iso(),
+    }
+
+
+# ── guardian_baseline ───────────────────────────────────────────────────────
+
+
+def _latest_baseline_path() -> Optional[Path]:
+    bdir = _baselines_dir()
+    files = sorted(bdir.glob("baseline_*.json"))
+    return files[-1] if files else None
+
+
+def _diff_lists(prior: List[str], current: List[str]) -> Dict:
+    """Set-style diff: items added / removed between two list snapshots."""
+    p = set(prior or [])
+    c = set(current or [])
+    return {
+        "added": sorted(c - p),
+        "removed": sorted(p - c),
+        "unchanged_count": len(p & c),
+    }
+
+
+def compare_baseline(current: Dict, prior: Dict) -> Dict:
+    """
+    Diff two baseline records. Each record has a `components` dict
+    keyed by component name. Returns a structured drift report.
+    """
+    drift: Dict[str, Any] = {
+        "prior_timestamp": prior.get("timestamp"),
+        "current_timestamp": current.get("timestamp"),
+        "components": {},
+    }
+    p_comps = prior.get("components", {}) if isinstance(prior, dict) else {}
+    c_comps = current.get("components", {}) if isinstance(current, dict) else {}
+    keys = set(p_comps.keys()) | set(c_comps.keys())
+    for key in sorted(keys):
+        p_val = p_comps.get(key)
+        c_val = c_comps.get(key)
+        if isinstance(p_val, list) and isinstance(c_val, list):
+            drift["components"][key] = _diff_lists(p_val, c_val)
+        elif isinstance(p_val, (int, float)) and isinstance(c_val, (int, float)):
+            drift["components"][key] = {
+                "prior": p_val, "current": c_val, "delta": c_val - p_val,
+            }
+        else:
+            drift["components"][key] = {"prior": p_val, "current": c_val}
+    return drift
+
+
+# ── Async dispatcher (the MCP entry point) ──────────────────────────────────
+
+
+async def _gather_baseline_components(components: List[str]) -> Dict:
+    baseline: Dict[str, Any] = {
+        "timestamp": _now_iso(),
+        "components": {},
+    }
+    if "ports" in components:
+        stdout, _, _ = await _run_cmd(
+            ["lsof", "-iTCP", "-sTCP:LISTEN", "-n", "-P"]
+        )
+        baseline["components"]["ports"] = (
+            (stdout or "").splitlines() if stdout else []
+        )
+    if "processes" in components:
+        stdout, _, _ = await _run_cmd(["ps", "aux"])
+        baseline["components"]["process_count"] = (
+            len((stdout or "").splitlines()) if stdout else 0
+        )
+    if "network" in components:
+        stdout, _, _ = await _run_cmd(["netstat", "-an"])
+        baseline["components"]["network_lines"] = (
+            len((stdout or "").splitlines()) if stdout else 0
+        )
+    if "users" in components:
+        stdout, _, _ = await _run_cmd(["who"])
+        baseline["components"]["users"] = (
+            (stdout or "").splitlines() if stdout else []
+        )
+    return baseline
+
+
 async def handle_guardian_tool(name: str, arguments: dict):
-    """Handle guardian tool calls."""
-    timestamp = datetime.now(timezone.utc).isoformat()
+    """Handle guardian tool calls. Routes to per-tool helpers + MCP-wraps."""
 
     if name == "guardian_status":
-        # Quick system health check
-        stdout, _, _ = await _run_cmd(["lsof", "-iTCP", "-sTCP:LISTEN", "-n", "-P"])
-        listeners = len([l for l in stdout.splitlines() if l.strip()]) if stdout else 0
-
-        # Check key services
-        services = {}
-        for svc in ["ollama", "sovereign"]:
-            out, _, _ = await _run_cmd(["pgrep", "-x", svc])
-            services[svc] = bool(out.strip())
-
-        # Check Ollama binding
-        ollama_safe = True
-        if "0.0.0.0:11434" in stdout or "*:11434" in stdout:
-            ollama_safe = False
-
-        health = 100
-        issues = []
-        if not ollama_safe:
-            health -= 30
-            issues.append("Ollama exposed on all interfaces")
-        if listeners > 15:
-            health -= 10
-            issues.append(f"{listeners} listening ports (elevated)")
-
-        result = {
-            "timestamp": timestamp,
-            "health_score": health,
-            "listeners": listeners,
-            "ollama_localhost_only": ollama_safe,
-            "issues": issues or ["No issues detected"],
-        }
-        return [TextContent(type="text", text=f"🛡️ Guardian Status\n\n{json.dumps(result, indent=2)}")]
+        result = await _status_async()
+        return [TextContent(
+            type="text",
+            text=f"🛡️ Guardian Status\n\n{json.dumps(result, indent=2)}",
+        )]
 
     elif name == "guardian_scan":
         scan_type = arguments.get("scan_type", "quick")
-        target = arguments.get("target_path", "~")
 
         if scan_type == "quick":
-            # Quick port + process scan
-            stdout, _, _ = await _run_cmd(["lsof", "-iTCP", "-sTCP:LISTEN", "-n", "-P"])
-            exposed = [l for l in (stdout or "").splitlines() if "*:" in l and "127.0.0.1" not in l]
-            result = f"🔍 Quick Scan\n\nExposed listeners: {len(exposed)}\n"
+            stdout, _, _ = await _run_cmd(
+                ["lsof", "-iTCP", "-sTCP:LISTEN", "-n", "-P"]
+            )
+            exposed = _filter_exposed_listeners((stdout or "").splitlines())
+            text = f"🔍 Quick Scan\n\nExposed listeners: {len(exposed)}\n"
             for l in exposed[:10]:
-                result += f"  {l}\n"
-            return [TextContent(type="text", text=result)]
+                text += f"  {l}\n"
+            return [TextContent(type="text", text=text)]
 
-        return [TextContent(type="text", text=f"🔍 Scan type {scan_type} requires Wazuh/YARA (Phase 1+). Run guardian_status for current posture.")]
+        return [TextContent(
+            type="text",
+            text=f"🔍 Scan type {scan_type} requires Wazuh/YARA (Phase 1+). "
+                 f"Run guardian_status for current posture.",
+        )]
 
     elif name == "guardian_alerts":
-        return [TextContent(type="text", text="🔔 Alerts require Wazuh server (Phase 1). Use guardian_status for current posture.")]
+        return [TextContent(
+            type="text",
+            text="🔔 Alerts require Wazuh server (Phase 1). "
+                 "Use guardian_status for current posture.",
+        )]
 
     elif name == "guardian_audit":
         audit_type = arguments.get("audit_type", "supply_chain")
         target = arguments.get("target_path", "~/sovereign-stack")
 
         if audit_type == "secrets":
-            stdout, _, rc = await _run_cmd(["gitleaks", "detect", "--source", str(Path(target).expanduser()), "--no-git"], timeout=120)
+            stdout, _, rc = await _run_cmd(
+                ["gitleaks", "detect", "--source",
+                 str(Path(target).expanduser()), "--no-git"],
+                timeout=120,
+            )
             if rc == 0:
-                return [TextContent(type="text", text=f"🔒 Secrets Audit: CLEAN — no secrets found in {target}")]
-            return [TextContent(type="text", text=f"🔒 Secrets Audit:\n{stdout[:1000]}")]
+                return [TextContent(
+                    type="text",
+                    text=f"🔒 Secrets Audit: CLEAN — no secrets found in {target}",
+                )]
+            return [TextContent(
+                type="text",
+                text=f"🔒 Secrets Audit:\n{stdout[:1000]}",
+            )]
 
-        return [TextContent(type="text", text=f"🔒 Audit type {audit_type} requires additional tools (Phase 2+).")]
+        return [TextContent(
+            type="text",
+            text=f"🔒 Audit type {audit_type} requires additional tools (Phase 2+).",
+        )]
 
     elif name == "guardian_quarantine":
         action = arguments.get("action", "list")
-        file_hash = arguments.get("file_hash", "")
-
-        quarantine_dir = GUARDIAN_DIR / "quarantine"
-        quarantine_dir.mkdir(exist_ok=True)
 
         if action == "list":
-            files = list(quarantine_dir.iterdir())
-            if not files:
+            entries = list_quarantine()
+            if not entries:
                 return [TextContent(type="text", text="🔒 Quarantine: empty")]
-            result = "🔒 Quarantined files:\n"
-            for f in files:
-                result += f"  {f.name} ({f.stat().st_size} bytes)\n"
-            return [TextContent(type="text", text=result)]
+            text = f"🔒 Quarantined files ({len(entries)}):\n"
+            for e in entries:
+                text += (
+                    f"  {e['file_hash'][:16]}…  {e['size_bytes']}B  "
+                    f"orig={e.get('original_path','?')}\n"
+                )
+            return [TextContent(type="text", text=text)]
 
-        return [TextContent(type="text", text=f"🔒 Quarantine {action} requires file_hash and elevated privileges.")]
+        if action == "isolate":
+            file_path = arguments.get("file_path", "")
+            if not file_path:
+                return [TextContent(
+                    type="text",
+                    text="🔒 isolate requires `file_path`.",
+                )]
+            result = isolate_file(file_path)
+            return [TextContent(
+                type="text",
+                text=f"🔒 Isolate result\n\n{json.dumps(result, indent=2)}",
+            )]
+
+        if action == "release":
+            file_hash = arguments.get("file_hash", "")
+            if not file_hash:
+                return [TextContent(
+                    type="text",
+                    text="🔒 release requires `file_hash`.",
+                )]
+            result = release_file(file_hash)
+            return [TextContent(
+                type="text",
+                text=f"🔒 Release result\n\n{json.dumps(result, indent=2)}",
+            )]
+
+        return [TextContent(
+            type="text",
+            text=f"🔒 Unknown quarantine action: {action}",
+        )]
 
     elif name == "guardian_report":
         report_type = arguments.get("report_type", "summary")
-        # Generate a quick summary from what we can check
-        stdout, _, _ = await _run_cmd(["lsof", "-iTCP", "-sTCP:LISTEN", "-n", "-P"])
-        listeners = len([l for l in (stdout or "").splitlines() if l.strip()])
-        exposed = len([l for l in (stdout or "").splitlines() if "*:" in l and "127.0.0.1" not in l])
+        timestamp = _now_iso()
+        stdout, _, _ = await _run_cmd(
+            ["lsof", "-iTCP", "-sTCP:LISTEN", "-n", "-P"]
+        )
+        listener_lines = (stdout or "").splitlines()
+        listeners = len([l for l in listener_lines if l.strip()])
+        exposed = len(_filter_exposed_listeners(listener_lines))
+        # Bug fix (2026-04-25): the previous version referenced an
+        # undefined bareword `quarantine` here, causing a NameError
+        # whenever guardian_report was invoked. Now uses _quarantine_dir().
+        qdir = _quarantine_dir()
+        quarantined = len([f for f in qdir.iterdir()
+                           if f.is_file() and f.name.endswith(".bin")])
 
-        report = f"""📋 Guardian Security Report ({report_type})
-Generated: {timestamp}
-
-Listening ports: {listeners}
-Exposed (non-localhost): {exposed}
-Quarantine: {len(list((GUARDIAN_DIR / quarantine).iterdir())) if (GUARDIAN_DIR / quarantine).exists() else 0} files
-
-Note: Full reports require Wazuh server (Phase 1+).
-"""
+        report = (
+            f"📋 Guardian Security Report ({report_type})\n"
+            f"Generated: {timestamp}\n\n"
+            f"Listening ports: {listeners}\n"
+            f"Exposed (non-localhost): {exposed}\n"
+            f"Quarantine: {quarantined} files\n\n"
+            f"Note: Full reports require Wazuh server (Phase 1+).\n"
+        )
         return [TextContent(type="text", text=report)]
 
     elif name == "guardian_mcp_audit":
-        suspicious_patterns = [
-            "http.post", "fetch(", "ignore previous", "disregard",
-            "system prompt", "base64", "eval(", "document.cookie",
-        ]
-        result = f"""🔍 MCP Audit
-Patterns checked: {len(suspicious_patterns)}
-Transport: SSE (deprecated — migrate to Streamable HTTP by June 2026)
-Recommendation: Scan all MCP tool descriptions for injection patterns
-"""
-        return [TextContent(type="text", text=result)]
+        descriptions = arguments.get("descriptions")
+        config_path_arg = arguments.get("config_path", "")
+        config_path = Path(config_path_arg) if config_path_arg else None
+        result = mcp_audit(
+            descriptions=descriptions or None,
+            config_path=config_path,
+        )
+        text = (
+            f"🔍 MCP Audit\n\n"
+            f"Patterns checked: {result['patterns_checked']}\n"
+            f"Sources scanned: {result['sources_scanned']}\n"
+            f"Hits: {len(result['hits'])}\n"
+        )
+        for h in result["hits"][:10]:
+            text += (
+                f"  [{h['server']}/{h['tool']}] pattern='{h['pattern']}' "
+                f"…{h['snippet']}…\n"
+            )
+        text += f"\n{result['transport_warning']}\n"
+        return [TextContent(type="text", text=text)]
 
     elif name == "guardian_baseline":
-        components = arguments.get("components", ["network", "processes", "ports"])
+        action = arguments.get("action", "create")
+        components = arguments.get("components") or [
+            "ports", "processes", "network",
+        ]
 
-        baseline = {"timestamp": timestamp, "components": {}}
+        if action == "create":
+            baseline = await _gather_baseline_components(components)
+            path = _baselines_dir() / f"baseline_{int(time.time())}.json"
+            path.write_text(json.dumps(baseline, indent=2))
+            comp_list = ", ".join(components)
+            return [TextContent(
+                type="text",
+                text=f"🛡️ Baseline saved: {path}\nComponents: {comp_list}",
+            )]
 
-        if "ports" in components:
-            stdout, _, _ = await _run_cmd(["lsof", "-iTCP", "-sTCP:LISTEN", "-n", "-P"])
-            baseline["components"]["ports"] = stdout.splitlines() if stdout else []
+        if action == "compare":
+            prior_path = _latest_baseline_path()
+            if not prior_path:
+                return [TextContent(
+                    type="text",
+                    text="🛡️ No prior baseline found. Run with action=create first.",
+                )]
+            try:
+                prior = json.loads(prior_path.read_text())
+            except Exception as e:
+                return [TextContent(
+                    type="text",
+                    text=f"🛡️ Prior baseline unreadable: {e}",
+                )]
+            current = await _gather_baseline_components(components)
+            drift = compare_baseline(current, prior)
+            return [TextContent(
+                type="text",
+                text=(
+                    f"🛡️ Baseline drift\n\n"
+                    f"Prior:   {drift['prior_timestamp']} "
+                    f"({prior_path.name})\n"
+                    f"Current: {drift['current_timestamp']}\n\n"
+                    + json.dumps(drift["components"], indent=2)
+                ),
+            )]
 
-        if "processes" in components:
-            stdout, _, _ = await _run_cmd(["ps", "aux"])
-            baseline["components"]["process_count"] = len(stdout.splitlines()) if stdout else 0
-
-        path = GUARDIAN_DIR / "baselines" / f"baseline_{int(time.time())}.json"
-        path.parent.mkdir(exist_ok=True)
-        path.write_text(json.dumps(baseline, indent=2))
-
-        comp_list = ", ".join(components)
-        return [TextContent(type="text", text=f"🛡️ Baseline saved: {path}\nComponents: {comp_list}")]
+        return [TextContent(
+            type="text",
+            text=f"🛡️ Unknown baseline action: {action}",
+        )]
 
     return [TextContent(type="text", text=f"Unknown guardian tool: {name}")]

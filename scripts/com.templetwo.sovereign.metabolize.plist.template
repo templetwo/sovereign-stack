@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Launchd plist template for the metabolize daemon.
+
+  Installation (manual, user-scoped — do NOT install in /Library):
+    1. Copy this file to ~/Library/LaunchAgents/
+       replacing {{HOME}} with your home dir (e.g. /Users/tony_studio)
+       and {{VENV}} with the full path to the sovereign-stack venv.
+    2. launchctl load ~/Library/LaunchAgents/com.templetwo.sovereign.metabolize.plist
+    3. Confirm: launchctl list | grep templetwo.sovereign.metabolize
+
+  Uninstall:
+    launchctl unload ~/Library/LaunchAgents/com.templetwo.sovereign.metabolize.plist
+    rm ~/Library/LaunchAgents/com.templetwo.sovereign.metabolize.plist
+
+  The daemon runs nightly at 03:17 local time. Off-hour minute is deliberate
+  (avoids lock contention with other cron-style jobs). The 03:17 hour was
+  chosen because:
+    - It is well outside any active session window — Anthony reads the
+      decision note in the morning, not while it's being written.
+    - Macs that sleep through the night still wake on schedule under
+      modern launchd, so running once per real night is fine.
+
+  Manual run for testing:
+    {{VENV}}/bin/python -m sovereign_stack.daemons.entrypoint metabolize
+  Add --dry-run to compute findings without writing comms posts or decisions.
+
+  Outputs:
+    - Comms post under sender daemon.metabolize (ack_required=True).
+    - Decision file at ~/.sovereign/decisions/metabolize_<ts>.md (durable).
+    - Halt note at ~/.sovereign/daemons/halts/<ts>_metabolize_*.md (on halt).
+
+  Halt recovery: edit ~/.sovereign/daemons/metabolize_state.json — set
+  halted_at to null and clear posted_digests — or delete the file entirely.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.templetwo.sovereign.metabolize</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>{{VENV}}/bin/python</string>
+        <string>-m</string>
+        <string>sovereign_stack.daemons.entrypoint</string>
+        <string>metabolize</string>
+    </array>
+
+    <!-- Nightly at 03:17. Single StartCalendarInterval entry with no Day
+         field means "every day." -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key><integer>3</integer>
+        <key>Minute</key><integer>17</integer>
+    </dict>
+
+    <!-- RunAtLoad=false: do NOT fire on launchctl load; only on schedule. -->
+    <key>RunAtLoad</key>
+    <false/>
+
+    <!-- Logs. Directory must exist before load; create with:
+         mkdir -p ~/Library/Logs/sovereign -->
+    <key>StandardOutPath</key>
+    <string>{{HOME}}/Library/Logs/sovereign/metabolize.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>{{HOME}}/Library/Logs/sovereign/metabolize.err.log</string>
+
+    <!-- Keep the environment minimal — the daemon reads ~/.sovereign/ paths
+         internally. SOVEREIGN_ROOT lets you override the data root for
+         testing without reinstalling. -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>SOVEREIGN_ROOT</key>
+        <string>{{HOME}}/.sovereign</string>
+    </dict>
+
+    <!-- ProcessType Background: not an interactive job, no UI expected. -->
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>

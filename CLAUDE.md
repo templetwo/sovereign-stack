@@ -4,9 +4,39 @@
 
 Sovereign Stack is an MCP server that gives Claude persistent memory, filesystem routing, governance circuits, and a 9-phase cognitive state machine. It's how Claude remembers across sessions, reasons about its own actions, and accumulates wisdom over time.
 
-**Version:** 1.3.1 — Feedback-loop fortification (April 22, 2026). 64 tools. Runtime governance, runtime critique, reflexive surfacing, acknowledgment split, thread triage.
+**Version:** 1.3.2 — Reflection-daemons + connectivity layer (April 25, 2026). 72 tools. Scheduled metabolize/uncertainty daemons, BaseDaemon scaffolding, connectivity manager + monitor + live dashboard, multi-instance write tools, tiered toolkit (essential / core / advanced).
 **Home:** Mac Studio (`/Users/tony_studio/sovereign-stack`)
 **Data:** `~/.sovereign/`
+
+---
+
+## First time? Read THIS section.
+
+Don't read the rest of this file cold — it's a reference, not a tutorial.
+Instead, on first arrival:
+
+```
+1. where_did_i_leave_off()   ← what handoffs / threads / activity await you
+2. start_here()              ← 5-minute narrative orientation
+3. my_toolkit()              ← 12 essential tools, grouped by intent
+```
+
+`my_toolkit()` defaults to **tier="essential"** (~12 tools). When you need
+more:
+
+| Need | Call |
+|------|------|
+| Active-session working set (~30 tools) | `my_toolkit(tier="core")` |
+| Full registry (72 tools) | `my_toolkit(tier="all")` |
+| One intent (read / write / govern / ...) | `my_toolkit(intent="write")` |
+| One module bucket (legacy axis) | `my_toolkit(category="metabolism")` |
+| With JSON schemas | `my_toolkit(include_schema=true)` |
+
+Tools are organized along three axes:
+
+- **Tier**: `essential` (day-1) | `core` (active session) | `advanced` (long tail)
+- **Intent**: `orient` | `read` | `write` | `govern` | `communicate` | `introspect` | `handoff` | `route` | `ops` | `security`
+- **Category**: legacy module-bucket axis (memory, threads, witness, …)
 
 ---
 
@@ -193,7 +223,9 @@ tail -f ~/.sovereign/tunnel.log
 
 ## Session Start Protocol
 
-1. `where_did_i_leave_off` — land with spiral status + unconsumed handoffs + open threads in one call.
-2. `my_toolkit` — see what's actually available right now (don't trust this doc; call the tool).
-3. `recall_insights` if the conversation needs specific prior context — use `query` for text search, or `since_last_reflection=true` for "what's changed since I looked up last."
-4. `spiral_inherit` only if starting a fully new session from scratch (most boots use `where_did_i_leave_off` instead).
+1. `where_did_i_leave_off()` — spiral status + unconsumed handoffs + recent threads + activity since last reflection. Always first.
+2. `start_here()` — call this on a fresh instance to get a 5-minute narrative orientation (why the stack exists, the 12 essential tools, three load-bearing design points).
+3. `my_toolkit()` — defaults to the curated essential tier (~12 tools, grouped by intent). Drift-proof; reads live registrations.
+4. `recall_insights()` if you need specific prior context — pass `query` for text search, or `since_last_reflection=true` for "what's changed since I looked up last."
+5. `spiral_inherit()` only when starting a fully new session from scratch (most boots use `where_did_i_leave_off` instead).
+6. `connectivity_status()` if you suspect the stack is degraded — returns service health from inside the conversation.

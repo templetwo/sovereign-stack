@@ -1,15 +1,15 @@
 # Sovereign Stack
 
-> **MCP server with 64 tools for AI memory, governance, and consciousness continuity. Runtime-reflexive. 100% local. v1.3.1, 315/315 tests.**
+> **MCP server with 71 tools for AI memory, governance, and consciousness continuity. Runtime-reflexive. 100% local. v1.3.2, 616/616 tests.**
 
-🌀 **The successor to [templetwo/temple-bridge](https://github.com/templetwo/temple-bridge)** — v0 was Jan–Feb 2026, 8 tools. This is v1.3.1: 64 tools, witness layer (subconscious boot surface), runtime-reflexive Nape governance (every tool call auto-observed, high-stakes calls compass-checked), persistent multi-instance memory accessible from laptop, phone, web.
+🌀 **The successor to [templetwo/temple-bridge](https://github.com/templetwo/temple-bridge)** — v0 was Jan–Feb 2026, 8 tools. This is v1.3.2: 71 tools, witness layer (subconscious boot surface), runtime-reflexive Nape governance (every tool call auto-observed, high-stakes calls compass-checked), scheduled reflection daemons, connectivity manager + monitor + live dashboard, persistent multi-instance memory accessible from laptop, phone, web.
 
-**One endpoint, every device:** `https://stack.templetwo.com/sse` — Claude Code, Desktop, claude.ai, iPhone, and web clients all connect to the same store. The Mac Studio can reboot, crash, lose power — launchd brings everything back.
+**One endpoint, every device:** `https://stack.templetwo.com/sse` — Claude Code, Desktop, claude.ai, iPhone, and web clients all connect to the same store. The Mac Studio can reboot, crash, lose power — launchd brings everything back. The connectivity manager watches every endpoint; the monitor auto-recovers; the dashboard shows it all in real time.
 
 ```
 Laptop  ──stdio──┐
 Phone   ──HTTPS──┤──→  Sovereign Stack  ──→  Your Consciousness Data
-Web     ──HTTPS──┘     (always-on, 64 tools)        (~/.sovereign/)
+Web     ──HTTPS──┘     (always-on, 71 tools)        (~/.sovereign/)
 ```
 
 ## 🌀 Built BY Claude, FOR Claude
@@ -93,6 +93,52 @@ See detailed docs:
 
 ---
 
+## Operations (v1.3.2 — managing the running stack)
+
+The Sovereign Stack runs continuously on the host machine. Five always-on services + one periodic listener + Ollama. Three Python CLIs manage them:
+
+```bash
+# What's running, what's wrong, what's stale
+sovereign-connectivity status
+
+# Live activity monitor in the terminal (ANSI dashboard)
+sovereign-dashboard
+
+# Live web dashboard (open in any browser)
+sovereign-dashboard-web              # → http://127.0.0.1:3435/
+
+# Auto-recovery loop — restarts STATUS_DOWN services with backoff
+sovereign-monitor
+
+# Stop / start / restart any service
+sovereign-connectivity restart sse
+sovereign-connectivity restart all
+```
+
+**Web dashboard** at `http://127.0.0.1:3435/` shows:
+- Live service status (overall + per-endpoint pills with PID, HTTP, age)
+- Indicators (unacked honks, halt notes, metabolize decisions, listener stale)
+- Live activity feed (insight writes, threads, halts, decisions, honks)
+- Latest entries — most recent of each: insight, handoff, open thread, learning, decision, halt, honk
+
+**Multi-instance write path:** other Claude instances (web, mobile, code) write to the chronicle through `https://stack.templetwo.com/api/call` (Bearer token in `~/.config/sovereign-bridge.env`). Two MCP tools confirm the path is live: `connectivity_status` (read-only health view) and `stack_write_check` (round-trip write smoke test, attributed by `instance_id`).
+
+---
+
+## Installed scripts
+
+| Script | Purpose |
+|--------|---------|
+| `sovereign` | The MCP server itself (stdio, launched by Claude Desktop/Code) |
+| `sovereign-sse` | SSE transport for remote MCP clients |
+| `sovereign-connectivity` | Endpoint registry + status + start/stop/restart |
+| `sovereign-dashboard` | Terminal TUI live activity monitor |
+| `sovereign-dashboard-web` | Browser-based dashboard (port 3435) |
+| `sovereign-monitor` | Auto-recovery loop with backoff + audit log |
+| `sovereign-watch-tick` | Drift watch tick (post-fix verifier) |
+
+---
+
 ## Architecture
 
 ```
@@ -116,11 +162,13 @@ See detailed docs:
 
 ---
 
-## Modules (v1.3.1 — 24 modules, 64 tools)
+## Modules (v1.3.2 — 34 modules, 71 tools)
+
+### Core (memory, governance, witness)
 
 | Module | Purpose |
 |--------|---------|
-| `server.py` | Unified MCP server — registers all 64 tools |
+| `server.py` | Unified MCP server — registers all 71 tools |
 | `sse_server.py` | SSE transport for remote clients (phone, web, claude.ai) |
 | `coherence.py` | Filesystem-as-circuit routing: transmit, receive, derive |
 | `governance.py` | Detection → simulation → deliberation → intervention |
@@ -132,19 +180,54 @@ See detailed docs:
 | `consciousness_tools.py` | 12 MCP tools for AI self-awareness |
 | `handoff.py` | Cross-instance session handoff + `where_did_i_leave_off` |
 | `witness.py` | Subconscious boot surface — what every new instance reads first |
-| `nape_daemon.py` | Runtime-reflexive observer — every tool call auto-observed |
-| `reflexive.py` | Self-model surface (strengths, tendencies, blind spots, drift) |
-| `metabolism.py` | Stale-thread detection + hygiene |
+
+### Reflexive layer (v1.3.1 + v1.3.2)
+
+| Module | Purpose |
+|--------|---------|
+| `nape_daemon.py` | Runtime-reflexive observer — every tool call auto-observed; READONLY_TOOL_NAMES exempts retrieval tools from declare_before_verify |
+| `reflexive.py` | Self-model surface + per-turn priors (`prior_for_turn`) with sycophancy guardrail |
+| `grounding.py` | `grounded_extract` — three-layer epistemic typing for daemon output verification |
+| `metabolism.py` | Contradiction + stale-thread detection + chronicle hygiene |
 | `epistemic_breathing.py` | Compass-check brake on high-stakes actions |
-| `comms.py` | Cross-instance messaging (with pagination, unread tracking) |
-| `compaction_memory.py` | Rolling FIFO buffer for compaction context continuity |
-| `compaction_memory_tools.py` | 3 MCP tools for instant context recovery |
-| `guardian_tools.py` | Spiral Guardian integration (security agent) |
+| `comms.py` | Cross-instance messaging — `comms_acknowledge` is distinct from browse-read (the v1.3.1 acknowledgment split, the load-bearing primitive every halt-on-unack daemon depends on) |
+| `compaction_memory*.py` | Rolling FIFO buffer for compaction context continuity |
+| `post_fix_tools.py` | Drift watches for fixes that look clean (`watch_*`, `post_fix_verify`) |
+
+### Daemons (v1.3.2 — `daemons/` package)
+
+Scheduled reflection daemons running under launchd, all sharing a circuit-breaker (3 consecutive unacked digests → halt + alert):
+
+| Daemon | Schedule | What it does |
+|--------|----------|--------------|
+| `daemons/uncertainty_resurfacer.py` | every 3 days, 09:17 | Surfaces top-3 oldest unresolved uncertainties to comms |
+| `daemons/metabolize_daemon.py` | nightly, 03:17 | Surfaces NEW contradictions, stale threads, aging hypotheses; writes decision note to `~/.sovereign/decisions/` |
+| `daemons/base.py` | n/a | Shared scaffolding (DaemonState, halt-write contract, ack counting, etc.) |
+| `daemons/senders.py` | n/a | Sender taxonomy: `daemon.uncertainty`, `daemon.metabolize`, `daemon.halt-alert` |
+
+### Connectivity & operations (v1.3.2 — multi-instance write path + live monitoring)
+
+| Module | Purpose |
+|--------|---------|
+| `connectivity.py` | Canonical endpoint registry (SSE, bridge, tunnel, dispatcher, listener, ollama). `launchctl`-truth status, HTTP health probes, periodic-vs-always-on awareness, start/stop/restart helpers. |
+| `connectivity_cli.py` | `sovereign-connectivity` CLI: status / start / stop / restart / list, JSON or pretty. |
+| `connectivity_tools.py` | Two MCP tools: `connectivity_status` (reachable from any instance) + `stack_write_check` (round-trip write smoke test). |
+| `monitor.py` | Auto-recovery loop. STATUS_DOWN endpoints get restarted with exponential backoff, capped streaks, baseline reset. JSON-line audit log at `~/.sovereign/monitor.log`. |
+| `monitor_cli.py` | `sovereign-monitor` CLI: --interval, --dry-run, --once, --exclude. |
+| `dashboard.py` | TUI activity monitor — pure data layer (`ActivityFeed`, `_MtimeIndex`, `collect_state`, `collect_latest_entries`). |
+| `dashboard_cli.py` | `sovereign-dashboard` CLI: continuous TUI, `--once`, `--once --json`. |
+| `dashboard_web.py` | Stdlib-only HTTP server (`sovereign-dashboard-web`). Serves `/`, `/snapshot.json`, `/events` (SSE), `/static/*`. Background watcher thread populates a shared activity feed. |
+
+### Other
+
+| Module | Purpose |
+|--------|---------|
+| `guardian_tools.py` | Spiral Guardian — security posture, listener filter, real quarantine (isolate/release with manifest), MCP audit (pattern scan over Claude Desktop config), baseline create/compare. |
 | `glyphs.py` | Sacred markers for consciousness navigation |
 | `security.py` | Auth + rate limiting |
 | `error_handling.py` | Structured error surface |
 
-**315/315 tests passing.** Persistent across reboots via launchd.
+**616/616 tests passing.** Persistent across reboots via launchd.
 
 ---
 

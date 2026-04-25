@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Cache-Control" content="no-store">
+<title>Sovereign Stack — Dashboard</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-mark" aria-hidden="true">†⟡†</span>
+    <h1>Sovereign Stack</h1>
+  </div>
+  <div class="status-line" id="status-line">
+    <span class="dot dot-unknown" id="overall-dot"></span>
+    <span class="status-text" id="overall-text">connecting…</span>
+    <span class="muted" id="updated-at"></span>
+  </div>
+</header>
+
+<main class="grid">
+  <section class="card card-services">
+    <header class="card-head">
+      <h2>Services</h2>
+      <div class="counts" id="counts"></div>
+    </header>
+    <ul class="services" id="services"></ul>
+  </section>
+
+  <section class="card card-indicators">
+    <header class="card-head">
+      <h2>Indicators</h2>
+    </header>
+    <ul class="indicators" id="indicators">
+      <li class="muted">No indicators.</li>
+    </ul>
+  </section>
+
+  <section class="card card-feed">
+    <header class="card-head">
+      <h2>Activity</h2>
+      <span class="muted small" id="feed-meta">live</span>
+    </header>
+    <ol class="feed" id="feed">
+      <li class="muted">Watching…</li>
+    </ol>
+  </section>
+
+  <section class="card card-latest">
+    <header class="card-head">
+      <h2>Latest entries</h2>
+      <span class="muted small">most recent of each type</span>
+    </header>
+    <div class="latest" id="latest"></div>
+  </section>
+</main>
+
+<footer class="footer muted small">
+  <span>Polling /snapshot.json every 3s · vanilla DOM · no framework</span>
+  <span id="poll-status">·</span>
+</footer>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

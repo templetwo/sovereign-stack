@@ -59,6 +59,65 @@ VERIFY_TOOL_NAMES: frozenset = frozenset({
     "comms_recall",
 })
 
+# Read-only retrieval / introspection tools whose RESULTS naturally contain
+# completion-language about OTHER things (handoffs, insights, threads) but
+# do NOT represent the calling instance declaring its own work complete.
+# Exempted from declare_before_verify detection — surfacing a stored insight
+# whose body says "shipped" or "resolved" is not the instance declaring
+# completion of the current turn's work.
+#
+# Identified during a 2026-04-25 first-hand stack probe: prior_for_turn,
+# reflexive_surface, triage_threads, and similar info-gathering tools
+# every fired sharp honks because their results echoed words like
+# "resolved" / "shipped" / "completed" from the chronicle records they
+# returned. Pattern detection was technically correct but contextually
+# noise — these tools ARE the verification, not declarations of completion.
+READONLY_TOOL_NAMES: frozenset = frozenset({
+    # Per-turn / boot reflexes
+    "prior_for_turn",
+    "where_did_i_leave_off",
+    "my_toolkit",
+    "start_here",
+    # Surface / triage
+    "reflexive_surface",
+    "triage_threads",
+    # Status / introspection
+    "spiral_status",
+    "self_model",
+    "guardian_status",
+    "guardian_report",
+    "guardian_alerts",
+    "guardian_audit",
+    "guardian_mcp_audit",
+    # Compaction / context
+    "get_compaction_context",
+    "get_compaction_stats",
+    "get_growth_summary",
+    "get_my_patterns",
+    "get_unresolved_uncertainties",
+    "get_pending_experiments",
+    # Comms read-side
+    "comms_unread_bodies",
+    "comms_channels",
+    "comms_recall",
+    "comms_get_acks",
+    # Nape introspection
+    "nape_honks",
+    "nape_summary",
+    # Watch / post-fix introspection
+    "watch_status",
+    "post_fix_verify",
+    # Other read-only retrieval (also in VERIFY_TOOL_NAMES — they count
+    # as verifies AND should not self-honk as the trigger tool).
+    "recall_insights",
+    "check_mistakes",
+    "get_open_threads",
+    "get_thread_touches",
+    "thread_get_touches",
+    "get_inheritable_context",
+    "handoff_acted_on_records",
+})
+
 # Words in a tool result that suggest the instance is declaring completion.
 # These are checked case-insensitively in the string representation of result.
 DECLARE_WORDS: frozenset = frozenset({
@@ -108,6 +167,7 @@ PATTERN_LEVELS: Dict[str, str] = {
     "repeated_mistake":         "uneasy",
     "stale_context":            "low",      # Phase 2 — detector deferred
     "clean_verify_declare":     "satisfied",
+    "post_fix_drift":           "uneasy",   # Emitted by post_fix_tools when a watch diverges from baseline.
 }
 
 # How many recent observations to consider as the sliding window for each check.
@@ -297,6 +357,41 @@ class NapeDaemon:
 
         return honks
 
+    def emit_external_honk(
+        self,
+        session_id: str,
+        pattern: str,
+        trigger_tool: str,
+        observation: str,
+        timestamp: Optional[str] = None,
+    ) -> Dict:
+        """
+        Persist a honk that was detected by an external subsystem (not by
+        Nape's own sliding-window detectors).
+
+        Use this for signals that don't fit the observe()-plus-detector shape
+        — e.g. a `post_fix_tools` watch finds that a sample has diverged from
+        its baseline. The honk still flows through honks.jsonl so it surfaces
+        via nape_honks / nape_ack like any other drift signal.
+
+        The pattern must be a key in PATTERN_LEVELS; unknown patterns get
+        level="low" as a safe default (matching _build_honk).
+        """
+        if not session_id:
+            raise ValueError("session_id must be a non-empty string")
+        if not pattern:
+            raise ValueError("pattern must be a non-empty string")
+        ts = timestamp or _now_iso()
+        honk = self._build_honk(
+            session_id=session_id,
+            pattern=pattern,
+            trigger_tool=trigger_tool,
+            observation=observation,
+            timestamp=ts,
+        )
+        _append_jsonl(self._honks_path, honk)
+        return honk
+
     def ack(self, honk_id: str, note: str) -> Dict:
         """
         Acknowledge a honk, marking it as addressed.
@@ -398,8 +493,18 @@ class NapeDaemon:
 
         Pattern: sharp honk.
         Fires when: result_str contains any DECLARE_WORD and none of the
-        previous 3 tool calls were VERIFY_TOOL_NAMES.
+        previous 3 tool calls were VERIFY_TOOL_NAMES — UNLESS the trigger
+        tool itself is in READONLY_TOOL_NAMES, in which case the detection
+        is skipped entirely. Read-only retrieval tools surface stored
+        completion-language about other things; they are not the instance
+        declaring its own work complete.
         """
+        # Read-only / info-gathering tools cannot "declare completion" —
+        # their results echo content from the chronicle, not the current
+        # turn's claims. Skip detection entirely for these.
+        if latest.get("tool_name") in READONLY_TOOL_NAMES:
+            return []
+
         result_str = latest.get("result_str", "").lower()
 
         # Check whether any declare word appears in this result.

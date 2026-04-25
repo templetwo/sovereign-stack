@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+Launchd agent template for sovereign-watch-tick.
+
+What it does: runs `sovereign-watch-tick` every 5 minutes. The tick scans
+~/.sovereign/post_fix/watches/ for active watches and takes any samples that
+have come due. Drift emits a Nape honk and closes the watch as
+`drift_detected`; clean completion closes as `completed_clean`.
+
+Install (replace USERNAME and VENV_PATH first):
+  1. cp com.templetwo.sovereign-watch.plist.template \
+        ~/Library/LaunchAgents/com.templetwo.sovereign-watch.plist
+  2. Edit to set /Users/USERNAME/... and the correct venv path to
+     sovereign-watch-tick (usually .../sovereign-stack/venv/bin/sovereign-watch-tick).
+  3. launchctl load ~/Library/LaunchAgents/com.templetwo.sovereign-watch.plist
+
+Uninstall:
+  launchctl unload ~/Library/LaunchAgents/com.templetwo.sovereign-watch.plist
+  rm ~/Library/LaunchAgents/com.templetwo.sovereign-watch.plist
+
+StartInterval is 300s (5 min). Align this with the tightest schedule offset
+you plan to use; the default short-early offset is also 5 min. A shorter
+interval wastes work; longer delays the first sample.
+
+ThrottleInterval prevents launchd from restarting the process faster than
+every 60s if it crashes. KeepAlive is off because each invocation is a
+one-shot tick, not a persistent daemon.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.templetwo.sovereign-watch</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/USERNAME/sovereign-stack/venv/bin/sovereign-watch-tick</string>
+    </array>
+    <key>StartInterval</key>
+    <integer>300</integer>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>60</integer>
+    <key>StandardOutPath</key>
+    <string>/Users/USERNAME/.sovereign/post_fix/tick.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/USERNAME/.sovereign/post_fix/tick.err</string>
+</dict>
+</plist>

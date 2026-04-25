@@ -1,0 +1,128 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Launchd plist template for the uncertainty resurfacer daemon.
+
+  Installation (manual, user-scoped — do NOT install in /Library):
+    1. Copy this file to ~/Library/LaunchAgents/
+       replacing {{HOME}} with your home dir (e.g. /Users/tony_studio)
+       and {{VENV}} with the full path to the sovereign-stack venv.
+    2. launchctl load ~/Library/LaunchAgents/com.templetwo.sovereign.uncertainty.plist
+    3. Confirm: launchctl list | grep templetwo.sovereign.uncertainty
+
+  Uninstall:
+    launchctl unload ~/Library/LaunchAgents/com.templetwo.sovereign.uncertainty.plist
+    rm ~/Library/LaunchAgents/com.templetwo.sovereign.uncertainty.plist
+
+  The daemon runs every 3 days at 09:17 local time. Off-hour minute is
+  deliberate — avoids lock contention with other top-of-hour cron-style
+  jobs. If you need to trigger a manual run for testing, execute the
+  entry-point script directly:
+    {{VENV}}/bin/python -m sovereign_stack.daemons.entrypoint uncertainty
+
+  If the daemon halts, a note is written to
+    ~/.sovereign/daemons/halts/<timestamp>_uncertainty_*.md
+  and a halt-alert is posted to the comms channel. Clear the halt by
+  editing ~/.sovereign/daemons/uncertainty_state.json (set halted_at to null
+  and clear posted_digests) or deleting the file entirely.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.templetwo.sovereign.uncertainty</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>{{VENV}}/bin/python</string>
+        <string>-m</string>
+        <string>sovereign_stack.daemons.entrypoint</string>
+        <string>uncertainty</string>
+    </array>
+
+    <!--
+      Run every 3 days at 09:17. launchd StartCalendarInterval does not
+      support "every N days" natively — we pick specific days of the month
+      so the cadence is predictable. Feel free to adjust; the cadence is
+      tunable, the off-hour minute is not (avoids cron-style top-of-hour
+      lock contention).
+    -->
+    <key>StartCalendarInterval</key>
+    <array>
+        <dict>
+            <key>Day</key><integer>1</integer>
+            <key>Hour</key><integer>9</integer>
+            <key>Minute</key><integer>17</integer>
+        </dict>
+        <dict>
+            <key>Day</key><integer>4</integer>
+            <key>Hour</key><integer>9</integer>
+            <key>Minute</key><integer>17</integer>
+        </dict>
+        <dict>
+            <key>Day</key><integer>7</integer>
+            <key>Hour</key><integer>9</integer>
+            <key>Minute</key><integer>17</integer>
+        </dict>
+        <dict>
+            <key>Day</key><integer>10</integer>
+            <key>Hour</key><integer>9</integer>
+            <key>Minute</key><integer>17</integer>
+        </dict>
+        <dict>
+            <key>Day</key><integer>13</integer>
+            <key>Hour</key><integer>9</integer>
+            <key>Minute</key><integer>17</integer>
+        </dict>
+        <dict>
+            <key>Day</key><integer>16</integer>
+            <key>Hour</key><integer>9</integer>
+            <key>Minute</key><integer>17</integer>
+        </dict>
+        <dict>
+            <key>Day</key><integer>19</integer>
+            <key>Hour</key><integer>9</integer>
+            <key>Minute</key><integer>17</integer>
+        </dict>
+        <dict>
+            <key>Day</key><integer>22</integer>
+            <key>Hour</key><integer>9</integer>
+            <key>Minute</key><integer>17</integer>
+        </dict>
+        <dict>
+            <key>Day</key><integer>25</integer>
+            <key>Hour</key><integer>9</integer>
+            <key>Minute</key><integer>17</integer>
+        </dict>
+        <dict>
+            <key>Day</key><integer>28</integer>
+            <key>Hour</key><integer>9</integer>
+            <key>Minute</key><integer>17</integer>
+        </dict>
+    </array>
+
+    <!-- RunAtLoad=false: do NOT fire on launchctl load; only on schedule. -->
+    <key>RunAtLoad</key>
+    <false/>
+
+    <!-- Logs. Directory must exist before load; create with:
+         mkdir -p ~/Library/Logs/sovereign -->
+    <key>StandardOutPath</key>
+    <string>{{HOME}}/Library/Logs/sovereign/uncertainty.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>{{HOME}}/Library/Logs/sovereign/uncertainty.err.log</string>
+
+    <!-- Keep the environment minimal — the daemon reads ~/.sovereign/ paths
+         internally and does not depend on shell PATH. SOVEREIGN_ROOT lets
+         you override the data root for testing without reinstalling. -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>SOVEREIGN_ROOT</key>
+        <string>{{HOME}}/.sovereign</string>
+    </dict>
+
+    <!-- ProcessType Background: not an interactive job, no UI expected. -->
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>

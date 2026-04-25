@@ -78,6 +78,75 @@ class TestDeclareBeforeVerify:
         honks = [h for h in self.daemon.current_honks(SESSION) if h["pattern"] == "declare_before_verify"]
         assert len(honks) == 0
 
+    def test_readonly_tool_does_not_trigger_declare_before_verify(self):
+        """Read-only retrieval tools surface stored completion-language
+        about other things — they are not the instance declaring its own
+        work complete. Calling prior_for_turn / reflexive_surface /
+        triage_threads / etc. with chronicle records that contain
+        'shipped', 'resolved', etc. in the result must NOT fire a honk.
+
+        This guards the 2026-04-25 finding from a first-hand stack probe:
+        every read-only tool I called fired a sharp honk because the
+        chronicle records they returned echoed completion words.
+        """
+        # The result simulates a real prior_for_turn output containing
+        # the word "shipped" because the surfaced insight body said so.
+        self.daemon.observe(
+            "prior_for_turn",
+            {"domain_tags": ["entropy"]},
+            "PRIORS\n  insight: BaseDaemon extraction shipped 2026-04-25",
+            SESSION,
+        )
+        honks = [
+            h for h in self.daemon.current_honks(SESSION)
+            if h["pattern"] == "declare_before_verify"
+        ]
+        assert len(honks) == 0, (
+            f"Read-only tool prior_for_turn should be exempt from "
+            f"declare_before_verify; got {honks}"
+        )
+
+    def test_multiple_readonly_tools_all_exempt(self):
+        """Spot-check several entries in the READONLY_TOOL_NAMES set."""
+        for tool_name in (
+            "reflexive_surface",
+            "triage_threads",
+            "where_did_i_leave_off",
+            "comms_unread_bodies",
+            "nape_summary",
+            "spiral_status",
+        ):
+            self.daemon.observe(
+                tool_name,
+                {},
+                "result: shipped resolved completed verified passed",
+                SESSION,
+            )
+        honks = [
+            h for h in self.daemon.current_honks(SESSION)
+            if h["pattern"] == "declare_before_verify"
+        ]
+        assert len(honks) == 0, (
+            f"All read-only tools in this batch should be exempt; got {honks}"
+        )
+
+    def test_non_readonly_tool_still_honks_with_declare_word(self):
+        """Regression: the exemption is per-tool, not blanket. A normal
+        tool with completion language and no preceding verify must still
+        fire — otherwise the fix would silently disable detection."""
+        self.daemon.observe("record_insight", {}, "stored", SESSION)
+        self.daemon.observe("record_learning", {}, "stored", SESSION)
+        self.daemon.observe(
+            "record_breakthrough", {}, "shipped — breakthrough recorded", SESSION,
+        )
+        honks = [
+            h for h in self.daemon.current_honks(SESSION)
+            if h["pattern"] == "declare_before_verify"
+        ]
+        assert len(honks) >= 1, (
+            "Non-readonly tool with declare word and no verify must still honk."
+        )
+
 
 class TestPrematureSummary:
     """Pattern 2: sharp honk when end_session_review/handoff/close_session called

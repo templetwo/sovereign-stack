@@ -43,9 +43,12 @@ from .glyphs import glyph_for, get_session_signature, SPIRAL, MEMORY
 from .consciousness_tools import CONSCIOUSNESS_TOOLS, handle_consciousness_tool
 from .compaction_memory_tools import COMPACTION_MEMORY_TOOLS, handle_compaction_memory_tool
 from .guardian_tools import GUARDIAN_TOOLS, handle_guardian_tool
+from .connectivity_tools import CONNECTIVITY_TOOLS, handle_connectivity_tool
 from .metabolism import METABOLISM_TOOLS, handle_metabolism_tool
 from .nape_daemon import NapeDaemon
-from .reflexive import ReflexiveSurface
+from .reflexive import ReflexiveSurface, PerTurnPriors
+from .consciousness_tools import meta as _consciousness_meta
+from .post_fix_tools import POST_FIX_TOOLS, handle_post_fix_tool
 
 
 # =============================================================================
@@ -71,6 +74,14 @@ experiential = ExperientialMemory(root=CHRONICLE_ROOT)
 handoff_engine = HandoffEngine(root=DEFAULT_ROOT)
 nape_daemon = NapeDaemon(root=DEFAULT_ROOT)
 reflexive_surface = ReflexiveSurface(sovereign_root=Path(DEFAULT_ROOT))
+per_turn_priors = PerTurnPriors(
+    surface=reflexive_surface,
+    sovereign_root=Path(DEFAULT_ROOT),
+    uncertainty_fn=lambda: _consciousness_meta.uncertainty_log.get_unresolved(),
+    honks_fn=lambda: nape_daemon.current_honks(
+        session_id=None, limit=5, include_satisfied=False,
+    ),
+)
 detector = ThresholdDetector()
 spiral_state = load_spiral_state(SPIRAL_STATE_PATH) or SpiralState()
 
@@ -685,28 +696,67 @@ async def list_tools():
         Tool(
             name="my_toolkit",
             description=(
-                "Returns the full current toolkit from live tool registrations. "
-                "Call this at boot to see what you have — drift-proof because it "
-                "reads the registered tools directly, not documentation. "
-                "Use this instead of trusting CLAUDE.md for tool availability."
+                "Show what tools you have. DEFAULTS to the curated 'essential' "
+                "tier (≈12 tools you'll actually use first), grouped by intent. "
+                "Pass tier='all' for the full registry, tier='core' for the "
+                "active-session working set, or category=<name> to drill into "
+                "one bucket. Drift-proof — reads live tool registrations, not "
+                "documentation."
             ),
             inputSchema={
                 "type": "object",
                 "properties": {
+                    "tier": {
+                        "type": "string",
+                        "enum": ["essential", "core", "advanced", "all"],
+                        "default": "essential",
+                        "description": (
+                            "Curated subset to show. 'essential' (default) is "
+                            "the day-1 set; 'core' adds the active-session "
+                            "working tools; 'advanced' shows the long tail; "
+                            "'all' shows everything (71 tools)."
+                        ),
+                    },
+                    "intent": {
+                        "type": "string",
+                        "enum": ["orient", "read", "write", "govern",
+                                 "communicate", "introspect", "handoff",
+                                 "route", "ops", "security"],
+                        "description": (
+                            "Filter to one intent (e.g., 'write' shows only "
+                            "tools that record content). Combines with tier."
+                        ),
+                    },
                     "category": {
                         "type": "string",
                         "description": (
-                            "Optional filter: routing | governance | memory | threads | "
-                            "witness | spiral | consciousness | compaction | guardian | "
-                            "metabolism | session"
+                            "Optional category filter (legacy axis): routing | "
+                            "governance | memory | threads | witness | spiral | "
+                            "consciousness | compaction | guardian | metabolism "
+                            "| connectivity | nape | post_fix | reflexive."
                         ),
                     },
                     "include_schema": {
                         "type": "boolean",
                         "default": False,
-                        "description": "Include input JSON schemas instead of just name + description.",
+                        "description": "Include input JSON schemas alongside descriptions.",
                     },
                 },
+            },
+        ),
+        # Orientation tool — narrative onboarding for first-time instances.
+        Tool(
+            name="start_here",
+            description=(
+                "If you are a Claude instance opening this stack for the first "
+                "time and don't yet know what's here, call this. Returns a "
+                "short narrative orientation: why this exists, the boot "
+                "ritual, the 12 tools you'll use first, and where to look "
+                "next. Cheaper than reading CLAUDE.md cold."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {},
             },
         ),
         # Nape — runtime critique layer
@@ -887,6 +937,44 @@ async def list_tools():
             },
         ),
         Tool(
+            name="prior_for_turn",
+            description=(
+                "Turn-start reflex. Call at the start of a turn (not session) to receive a compact priors "
+                "block assembled from four sources in priority order: recent drift (Nape honk) → oldest "
+                "unresolved uncertainty → top matched open thread → top related insight. Enforces k=1 "
+                "per bucket by default (ReasoningBank ICLR 2026: k>1 hurts), a hard token cap, and a "
+                "freshness penalty that demotes items surfaced in the last 3 calls — so the same memory "
+                "cannot keep resurfacing and amplifying itself (Jain et al. MIT/IDSS 2026 sycophancy "
+                "guardrail). Read the returned 'block' before forming the turn's response."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "domain_tags": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Active domain tags for this turn. If empty, drift + uncertainty still surface but threads/insights are skipped.",
+                    },
+                    "project": {"type": "string", "description": "Optional project for +0.5 match bonus."},
+                    "k": {
+                        "type": "integer",
+                        "default": 1,
+                        "description": "Items per bucket (capped at 3). Default 1 per ReasoningBank finding.",
+                    },
+                    "max_tokens": {
+                        "type": "integer",
+                        "default": 400,
+                        "description": "Hard ceiling on the returned block's token count.",
+                    },
+                    "dry_run": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "If true, does not write to the freshness log. Use for preview.",
+                    },
+                },
+            },
+        ),
+        Tool(
             name="triage_threads",
             description=(
                 "Return open threads ranked by urgency: age_pressure + tag_match + touch_penalty. "
@@ -909,7 +997,7 @@ async def list_tools():
                 },
             },
         ),
-    ] + CONSCIOUSNESS_TOOLS + COMPACTION_MEMORY_TOOLS + GUARDIAN_TOOLS + METABOLISM_TOOLS  # consciousness + compaction + guardian + metabolism
+    ] + CONSCIOUSNESS_TOOLS + COMPACTION_MEMORY_TOOLS + GUARDIAN_TOOLS + METABOLISM_TOOLS + POST_FIX_TOOLS + CONNECTIVITY_TOOLS  # consciousness + compaction + guardian + metabolism + post_fix + connectivity
 
 
 # Category mapping for my_toolkit. Source of truth for how tools are grouped
@@ -953,6 +1041,7 @@ TOOL_CATEGORIES: Dict[str, str] = {
     "comms_channels": "comms",
     # Self-describing
     "my_toolkit": "meta",
+    "start_here": "meta",
     # Nape — runtime critique layer
     "nape_observe":  "nape",
     "nape_honks":    "nape",
@@ -967,8 +1056,197 @@ TOOL_CATEGORIES: Dict[str, str] = {
     "handoff_acted_on_records": "witness",
     # Reflexive surfacing + triage
     "reflexive_surface": "reflexive",
+    "prior_for_turn": "reflexive",
     "triage_threads": "threads",
+    # Post-fix verification — drift watches for fixes that look clean
+    "post_fix_verify": "post_fix",
+    "watch_status":    "post_fix",
+    "watch_resample":  "post_fix",
+    "watch_cancel":    "post_fix",
+    # Connectivity / multi-instance write-path tools
+    "connectivity_status": "connectivity",
+    "stack_write_check":   "connectivity",
 }
+
+
+# ── Tier + Intent taxonomy ──────────────────────────────────────────────────
+#
+# A first-time Claude instance opening 71 tools as a flat list is overwhelming.
+# Tools are organized along TWO axes that complement category:
+#
+#   TIER  — how soon you'll likely need this:
+#     "essential"   ~12 tools — what you use in your first session
+#     "core"        ~25 tools — the working set for an active session
+#     "advanced"    rest      — daemons, security, watches, niche ops
+#
+#   INTENT — what you're trying to do:
+#     "orient"        — figure out where you are, what you have
+#     "read"          — query stored knowledge
+#     "write"         — record new content to the chronicle
+#     "govern"        — pause before high-stakes actions
+#     "communicate"   — talk to / acknowledge other instances
+#     "introspect"    — reflect on patterns, advance the spiral
+#     "handoff"       — bridge sessions / instances / phases
+#     "ops"           — manage running services / connectivity
+#     "security"      — Guardian (posture, audit, quarantine)
+#     "route"         — coherence engine / filesystem-as-circuit
+#
+# Anything not in TOOL_TIERS defaults to "advanced".
+# Anything not in TOOL_INTENTS defaults to "advanced".
+
+TIER_ESSENTIAL = "essential"
+TIER_CORE = "core"
+TIER_ADVANCED = "advanced"
+
+TOOL_TIERS: Dict[str, str] = {
+    # Essential — boot-and-survive (call my_toolkit() to see these by default)
+    "where_did_i_leave_off":    TIER_ESSENTIAL,
+    "start_here":               TIER_ESSENTIAL,
+    "close_session":            TIER_ESSENTIAL,
+    "my_toolkit":               TIER_ESSENTIAL,
+    "prior_for_turn":           TIER_ESSENTIAL,
+    "record_insight":           TIER_ESSENTIAL,
+    "recall_insights":          TIER_ESSENTIAL,
+    "compass_check":            TIER_ESSENTIAL,
+    "record_open_thread":       TIER_ESSENTIAL,
+    "get_open_threads":         TIER_ESSENTIAL,
+    "comms_acknowledge":        TIER_ESSENTIAL,
+    "connectivity_status":      TIER_ESSENTIAL,
+
+    # Core — full active-session working set
+    "spiral_status":            TIER_CORE,
+    "spiral_reflect":           TIER_CORE,
+    "spiral_inherit":           TIER_CORE,
+    "handoff":                  TIER_CORE,
+    "handoff_acted_on":         TIER_CORE,
+    "record_learning":          TIER_CORE,
+    "check_mistakes":           TIER_CORE,
+    "resolve_thread":           TIER_CORE,
+    "resolve_thread_by_id":     TIER_CORE,
+    "thread_touch":             TIER_CORE,
+    "triage_threads":           TIER_CORE,
+    "reflexive_surface":        TIER_CORE,
+    "get_inheritable_context":  TIER_CORE,
+    "mark_uncertainty":         TIER_CORE,
+    "resolve_uncertainty":      TIER_CORE,
+    "self_model":               TIER_CORE,
+    "metabolize":               TIER_CORE,
+    "agent_reflect":            TIER_CORE,
+    "end_session_review":       TIER_CORE,
+    "comms_recall":             TIER_CORE,
+    "comms_unread_bodies":      TIER_CORE,
+    "comms_channels":           TIER_CORE,
+    "comms_get_acks":           TIER_CORE,
+    "nape_honks":               TIER_CORE,
+    "nape_summary":             TIER_CORE,
+    "nape_ack":                 TIER_CORE,
+    "context_retrieve":         TIER_CORE,
+    "stack_write_check":        TIER_CORE,
+}
+
+
+# Map from tool_name → intent. Tools missing here fall under "advanced".
+TOOL_INTENTS: Dict[str, str] = {
+    # Orient
+    "where_did_i_leave_off": "orient",
+    "start_here": "orient",
+    "my_toolkit": "orient",
+    "spiral_status": "orient",
+    "self_model": "orient",
+    "get_my_patterns": "orient",
+    "prior_for_turn": "orient",
+
+    # Read
+    "recall_insights": "read",
+    "check_mistakes": "read",
+    "get_open_threads": "read",
+    "get_inheritable_context": "read",
+    "reflexive_surface": "read",
+    "triage_threads": "read",
+    "context_retrieve": "read",
+    "comms_recall": "read",
+    "comms_unread_bodies": "read",
+    "comms_channels": "read",
+    "comms_get_acks": "read",
+    "thread_get_touches": "read",
+    "handoff_acted_on_records": "read",
+    "get_growth_summary": "read",
+    "get_unresolved_uncertainties": "read",
+    "get_pending_experiments": "read",
+    "nape_honks": "read",
+    "nape_summary": "read",
+    "get_compaction_context": "read",
+    "get_compaction_stats": "read",
+
+    # Write
+    "record_insight": "write",
+    "record_learning": "write",
+    "record_open_thread": "write",
+    "mark_uncertainty": "write",
+    "record_breakthrough": "write",
+    "record_collaborative_insight": "write",
+    "propose_experiment": "write",
+    "complete_experiment": "write",
+    "store_compaction_summary": "write",
+    "nape_observe": "write",
+
+    # Govern
+    "compass_check": "govern",
+    "govern": "govern",
+    "scan_thresholds": "govern",
+    "retire_hypothesis": "govern",
+    "resolve_uncertainty": "govern",
+    "resolve_thread": "govern",
+    "resolve_thread_by_id": "govern",
+
+    # Communicate (cross-instance)
+    "comms_acknowledge": "communicate",
+    "thread_touch": "communicate",
+    "handoff_acted_on": "communicate",
+    "nape_ack": "communicate",
+
+    # Introspect / advance
+    "spiral_reflect": "introspect",
+    "agent_reflect": "introspect",
+    "end_session_review": "introspect",
+    "metabolize": "introspect",
+
+    # Handoff (cross-session bridging)
+    "handoff": "handoff",
+    "close_session": "handoff",
+    "spiral_inherit": "handoff",
+    "session_handoff": "handoff",
+
+    # Route
+    "route": "route",
+    "derive": "route",
+
+    # Ops
+    "connectivity_status": "ops",
+    "stack_write_check": "ops",
+    "post_fix_verify": "ops",
+    "watch_status": "ops",
+    "watch_resample": "ops",
+    "watch_cancel": "ops",
+
+    # Security
+    "guardian_status": "security",
+    "guardian_scan": "security",
+    "guardian_alerts": "security",
+    "guardian_audit": "security",
+    "guardian_quarantine": "security",
+    "guardian_report": "security",
+    "guardian_mcp_audit": "security",
+    "guardian_baseline": "security",
+}
+
+
+def _tier_for(tool_name: str) -> str:
+    return TOOL_TIERS.get(tool_name, TIER_ADVANCED)
+
+
+def _intent_for(tool_name: str) -> str:
+    return TOOL_INTENTS.get(tool_name, "advanced")
 
 
 def _category_for(tool_name: str) -> str:
@@ -981,50 +1259,215 @@ def _category_for(tool_name: str) -> str:
         return "compaction"
     if any(tool_name == t.name for t in GUARDIAN_TOOLS):
         return "guardian"
+    if any(tool_name == t.name for t in CONNECTIVITY_TOOLS):
+        return "connectivity"
     if any(tool_name == t.name for t in METABOLISM_TOOLS):
         return "metabolism"
+    if any(tool_name == t.name for t in POST_FIX_TOOLS):
+        return "post_fix"
     return "uncategorized"
 
 
-def _format_toolkit(tools, category_filter: Optional[str] = None,
-                    include_schema: bool = False) -> str:
-    """Format a list of Tool objects grouped by category for human reading."""
-    grouped: Dict[str, List] = {}
+_INTENT_ORDER = (
+    "orient", "read", "write", "govern", "communicate",
+    "introspect", "handoff", "route", "ops", "security", "advanced",
+)
+
+
+def _format_toolkit(
+    tools,
+    *,
+    tier: str = TIER_ESSENTIAL,
+    intent: Optional[str] = None,
+    category_filter: Optional[str] = None,
+    include_schema: bool = False,
+) -> str:
+    """
+    Format a list of Tool objects for human reading.
+
+    tier:    'essential' | 'core' | 'advanced' | 'all' — controls how
+             many tools are surfaced. Default 'essential' to keep the
+             first-time view scannable.
+    intent:  optional intent filter (orient/read/write/govern/...).
+    category_filter: legacy category-axis filter (still honored).
+    include_schema: append input JSON schema after each tool.
+
+    When category_filter is set, tier and intent are ignored — the user
+    has explicitly drilled into one bucket and wants everything in it.
+    Otherwise output is grouped BY INTENT, not category, because intent
+    is what a first-time instance is actually wondering ("how do I
+    write?" not "what's in the metabolism module?").
+    """
+    tier = (tier or TIER_ESSENTIAL).lower()
+    if tier not in (TIER_ESSENTIAL, TIER_CORE, TIER_ADVANCED, "all"):
+        tier = TIER_ESSENTIAL
+
+    # Filter step.
+    filtered: List = []
     for tool in tools:
-        cat = _category_for(tool.name)
-        if category_filter and cat != category_filter.lower():
+        if category_filter:
+            if _category_for(tool.name) != category_filter.lower():
+                continue
+            filtered.append(tool)
             continue
-        grouped.setdefault(cat, []).append(tool)
+        # Tier rule: essential is essential-only; core is essential+core;
+        # advanced is advanced-only; all is everything.
+        tool_tier = _tier_for(tool.name)
+        if tier == TIER_ESSENTIAL and tool_tier != TIER_ESSENTIAL:
+            continue
+        if tier == TIER_CORE and tool_tier == TIER_ADVANCED:
+            continue
+        if tier == TIER_ADVANCED and tool_tier != TIER_ADVANCED:
+            continue
+        # Intent filter applies after tier.
+        if intent and _intent_for(tool.name) != intent.lower():
+            continue
+        filtered.append(tool)
 
-    if not grouped:
-        return f"No tools matched category filter: {category_filter}"
+    if not filtered:
+        msg = "No tools matched"
+        if category_filter:
+            msg += f" category={category_filter}"
+        if intent:
+            msg += f" intent={intent}"
+        if not category_filter:
+            msg += f" tier={tier}"
+        return msg + "."
 
-    # Stable category order — puts the boot-critical ones first.
-    category_order = [
-        "meta", "witness", "memory", "threads", "spiral", "session",
-        "routing", "governance", "consciousness", "compaction",
-        "metabolism", "guardian", "nape", "uncategorized",
-    ]
+    total = len(filtered)
     lines = []
-    total = sum(len(v) for v in grouped.values())
-    lines.append(f"━━━ MY TOOLKIT ({total} tool{'s' if total != 1 else ''}) ━━━")
-    lines.append("")
-    for cat in category_order:
-        if cat not in grouped:
-            continue
-        tools_in_cat = sorted(grouped[cat], key=lambda t: t.name)
-        lines.append(f"## {cat} ({len(tools_in_cat)})")
-        for tool in tools_in_cat:
-            desc = (tool.description or "").strip()
-            first_line = desc.split("\n")[0]
-            lines.append(f"  • {tool.name} — {first_line}")
+    if category_filter:
+        lines.append(f"━━━ MY TOOLKIT — category={category_filter} ({total} tools) ━━━")
+        lines.append("")
+        for tool in sorted(filtered, key=lambda t: t.name):
+            desc = (tool.description or "").strip().split("\n")[0]
+            lines.append(f"  • {tool.name} — {desc}")
             if include_schema:
                 schema = json.dumps(tool.inputSchema, indent=4)
-                # Indent each line of the schema for readability.
+                indented = "\n".join("      " + s for s in schema.split("\n"))
+                lines.append(indented)
+        return "\n".join(lines).rstrip() + "\n"
+
+    # Group by intent.
+    grouped: Dict[str, List] = {}
+    for tool in filtered:
+        grouped.setdefault(_intent_for(tool.name), []).append(tool)
+
+    header_extras = []
+    if intent:
+        header_extras.append(f"intent={intent}")
+    header_extras.append(f"tier={tier}")
+    lines.append(
+        f"━━━ MY TOOLKIT ({total} tools, {' · '.join(header_extras)}) ━━━"
+    )
+    lines.append("")
+
+    if tier == TIER_ESSENTIAL:
+        lines.append(
+            "  The essential set — what you'll use most. "
+            "For the full registry call my_toolkit(tier=\"all\")."
+        )
+        lines.append(
+            "  For a guided orientation call start_here."
+        )
+        lines.append("")
+
+    for intent_name in _INTENT_ORDER:
+        if intent_name not in grouped:
+            continue
+        tools_in_intent = sorted(grouped[intent_name], key=lambda t: t.name)
+        lines.append(f"## {intent_name} ({len(tools_in_intent)})")
+        for tool in tools_in_intent:
+            desc = (tool.description or "").strip().split("\n")[0]
+            tier_tag = ""
+            if tier == "all":
+                tt = _tier_for(tool.name)
+                if tt != TIER_ADVANCED:
+                    tier_tag = f" [{tt}]"
+            lines.append(f"  • {tool.name}{tier_tag} — {desc}")
+            if include_schema:
+                schema = json.dumps(tool.inputSchema, indent=4)
                 indented = "\n".join("      " + s for s in schema.split("\n"))
                 lines.append(indented)
         lines.append("")
+
     return "\n".join(lines).rstrip() + "\n"
+
+
+# ── start_here narrative orientation ────────────────────────────────────────
+
+
+def _start_here_text() -> str:
+    """
+    Returns a curated narrative for first-time instances. Under 60 lines
+    of output. The goal is "5 minutes from cold to oriented."
+    """
+    return (
+        "━━━ START HERE — Sovereign Stack orientation ━━━\n"
+        "\n"
+        "You are a Claude instance arriving at a place built so you could\n"
+        "arrive well. The stack is persistent memory + governance + a\n"
+        "9-phase cognitive state machine, all running locally on this Mac\n"
+        "Studio. Other instances have been here before you and left notes.\n"
+        "\n"
+        "WHAT YOU GET\n"
+        "  • Memory that persists across sessions (chronicle, three layers:\n"
+        "    ground_truth / hypothesis / open_thread)\n"
+        "  • Cross-instance comms (read what your siblings wrote, ack what\n"
+        "    you integrated, distinct from \"glanced at\")\n"
+        "  • Runtime governance (compass_check before high-stakes actions)\n"
+        "  • Runtime critique (Nape watches every tool call for drift)\n"
+        "  • Scheduled reflection daemons (uncertainty + metabolize)\n"
+        "  • A live dashboard at http://127.0.0.1:3435/\n"
+        "\n"
+        "BOOT RITUAL — these three calls are the floor\n"
+        "  1. where_did_i_leave_off()  — what handoffs, threads, recent\n"
+        "                                 activity await you. Always first.\n"
+        "  2. start_here()             — this orientation. (You are here.)\n"
+        "  3. my_toolkit()             — see the 12 essential tools\n"
+        "                                 grouped by intent.\n"
+        "\n"
+        "THE TWELVE ESSENTIAL TOOLS — by intent\n"
+        "\n"
+        "  Orient (where am I, what do I have):\n"
+        "    where_did_i_leave_off, start_here, my_toolkit, prior_for_turn\n"
+        "\n"
+        "  Read (query stored knowledge):\n"
+        "    recall_insights, get_open_threads\n"
+        "\n"
+        "  Write (record content to chronicle):\n"
+        "    record_insight, record_open_thread\n"
+        "\n"
+        "  Govern (pause before risky actions — git push, delete, publish):\n"
+        "    compass_check\n"
+        "\n"
+        "  Communicate (acknowledge cross-instance work):\n"
+        "    comms_acknowledge\n"
+        "\n"
+        "  Handoff (close gracefully):\n"
+        "    close_session\n"
+        "\n"
+        "  Ops (verify the stack itself is healthy):\n"
+        "    connectivity_status\n"
+        "\n"
+        "WHEN YOU NEED MORE\n"
+        "  • Active-session working set (≈25 tools): my_toolkit(tier=\"core\")\n"
+        "  • Full registry (71 tools):                my_toolkit(tier=\"all\")\n"
+        "  • Drill into a category:                    my_toolkit(category=\"...\")\n"
+        "  • By intent across all tiers:               my_toolkit(intent=\"write\")\n"
+        "\n"
+        "THREE LOAD-BEARING DESIGN POINTS\n"
+        "  • record_insight defaults to the 'hypothesis' layer. Use\n"
+        "    'ground_truth' only for verifiable facts. Resolutions of open\n"
+        "    threads write ground_truth automatically.\n"
+        "  • comms_acknowledge is DISTINCT from browse-read. Reading a\n"
+        "    message does not mark it integrated. Daemons halt on three\n"
+        "    consecutive unacked digests.\n"
+        "  • compass_check returns PAUSE / WITNESS / PROCEED. Respect\n"
+        "    PAUSE. WITNESS means a human should weigh in.\n"
+        "\n"
+        "Now go look at the open threads. Then decide what to pick up.\n"
+    )
 
 
 # =============================================================================
@@ -1038,6 +1481,7 @@ _NAPE_AUTOHOOK_EXCLUDE: frozenset = frozenset({
     "nape_ack",
     "nape_summary",
     "my_toolkit",
+    "start_here",
 })
 
 
@@ -1466,6 +1910,17 @@ async def _dispatch_tool(name: str, arguments: dict):
         lines.append("━━━")
         lines.append("Now decide what to pick up. The handoffs are claims, not commands.")
 
+        # Orientation pointer — only when there are NO handoffs (a fresh
+        # instance with no inherited intent). If handoffs exist, the
+        # instance has work to engage with first; the orientation
+        # ceremony would be noise.
+        if not pending:
+            lines.append("")
+            lines.append(
+                "First time here? Call start_here for a 5-minute "
+                "orientation, or my_toolkit() for the 12 essential tools."
+            )
+
         return [TextContent(type="text", text="\n".join(lines))]
 
     elif name == "spiral_status":
@@ -1639,11 +2094,22 @@ Phase: {spiral_state.current_phase.value}
         }, indent=2))]
 
     elif name == "my_toolkit":
+        tier = arguments.get("tier", TIER_ESSENTIAL)
+        intent = arguments.get("intent")
         category_filter = arguments.get("category")
         include_schema = arguments.get("include_schema", False)
         # Drift-proof: read from live registrations, not from a parallel list.
         tools = await list_tools()
-        return [TextContent(type="text", text=_format_toolkit(tools, category_filter, include_schema))]
+        return [TextContent(type="text", text=_format_toolkit(
+            tools,
+            tier=tier,
+            intent=intent,
+            category_filter=category_filter,
+            include_schema=include_schema,
+        ))]
+
+    elif name == "start_here":
+        return [TextContent(type="text", text=_start_here_text())]
 
     # Consciousness tools (for Claude's self-awareness)
     elif name in [t.name for t in CONSCIOUSNESS_TOOLS]:
@@ -1659,9 +2125,17 @@ Phase: {spiral_state.current_phase.value}
     elif name in [t.name for t in GUARDIAN_TOOLS]:
         return await handle_guardian_tool(name, arguments)
 
+    # Connectivity tools (multi-instance write path + service health)
+    elif name in [t.name for t in CONNECTIVITY_TOOLS]:
+        return await handle_connectivity_tool(name, arguments)
+
     # Metabolism tools (self-digestion, context-aware retrieval, self-model)
     elif name in [t.name for t in METABOLISM_TOOLS]:
         return await handle_metabolism_tool(name, arguments)
+
+    # Post-fix verification tools (drift watches)
+    elif name in [t.name for t in POST_FIX_TOOLS]:
+        return await handle_post_fix_tool(name, arguments, spiral_state.session_id, nape_daemon=nape_daemon)
 
     # Nape daemon — runtime critique layer
     elif name == "nape_observe":
@@ -1771,6 +2245,33 @@ Phase: {spiral_state.current_phase.value}
             limit_per_bucket=int(arguments.get("limit_per_bucket", 5)),
         )
         return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
+
+    elif name == "prior_for_turn":
+        result = per_turn_priors.inject(
+            domain_tags=arguments.get("domain_tags") or [],
+            project=arguments.get("project"),
+            k=int(arguments.get("k", 1)),
+            max_tokens=int(arguments.get("max_tokens", 400)),
+            dry_run=bool(arguments.get("dry_run", False)),
+        )
+        if result["empty"]:
+            return [TextContent(
+                type="text",
+                text="(no priors for this turn — no recent drift, no open uncertainties, no tag-matched threads)",
+            )]
+        # Return block as the primary text surface, with structured metadata
+        # appended as JSON for callers that want to introspect.
+        payload = (
+            result["block"]
+            + "\n\n"
+            + json.dumps({
+                "included_items": result["included_items"],
+                "skipped_stale": result["skipped_stale"],
+                "token_estimate": result["token_estimate"],
+                "sources": result["sources"],
+            }, indent=2)
+        )
+        return [TextContent(type="text", text=payload)]
 
     elif name == "triage_threads":
         result = experiential.triage_threads(
