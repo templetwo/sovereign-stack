@@ -33,6 +33,19 @@ try:
 except ImportError:
     YAML_AVAILABLE = False
 
+# Simulator wiring (revived 2026-04-26 — was orphaned since v1.0.0).
+# Optional import: if NetworkX is unavailable the circuit still runs without
+# the simulation step. The docstring at the top of this module always promised
+# Detection → Simulation → Deliberation → Intervention; this restores it.
+try:
+    from .simulator import NETWORKX_AVAILABLE, ScenarioType, Simulator
+
+    SIMULATOR_AVAILABLE = NETWORKX_AVAILABLE
+except ImportError:
+    SIMULATOR_AVAILABLE = False
+    Simulator = None  # type: ignore[assignment,misc]
+    ScenarioType = None  # type: ignore[assignment,misc]
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("governance")
 
@@ -725,6 +738,8 @@ class GovernanceCircuit:
     def __init__(self):
         self.detector = ThresholdDetector()
         self.intervenor = Intervenor()
+        # Simulator is best-effort; circuit runs without it if NetworkX missing.
+        self.simulator = Simulator() if SIMULATOR_AVAILABLE else None
 
     def run(
         self, target: str, stakeholder_votes: list[StakeholderVote], gates: list[Gate] = None
@@ -738,10 +753,28 @@ class GovernanceCircuit:
             gates: Intervention gates (defaults to human approval)
 
         Returns:
-            Complete circuit result with detection, deliberation, enforcement
+            Complete circuit result with detection, simulation, deliberation, enforcement
         """
         # Detection
         events = self.detector.scan(target)
+
+        # Simulation — model outcomes per event before deliberation. Empty when
+        # no events detected or NetworkX unavailable; the deliberation step does
+        # not depend on it (read-only context for stakeholders + audit trail).
+        simulations: list[dict[str, Any]] = []
+        if self.simulator is not None and events:
+            scenarios = [
+                ScenarioType.REORGANIZE,
+                ScenarioType.PARTIAL_REORGANIZE,
+                ScenarioType.DEFER,
+                ScenarioType.INCREMENTAL,
+            ]
+            for ev in events:
+                try:
+                    prediction = self.simulator.model(ev.to_dict(), scenarios)
+                    simulations.append(prediction.to_dict())
+                except Exception as exc:  # noqa: BLE001 — log + continue
+                    logger.warning("simulation failed for event: %s", exc)
 
         # Deliberation
         session = DeliberationSession(events=events)
@@ -758,6 +791,10 @@ class GovernanceCircuit:
 
         return {
             "detection": {"event_count": len(events), "events": [e.to_dict() for e in events]},
+            "simulation": {
+                "available": self.simulator is not None,
+                "predictions": simulations,
+            },
             "deliberation": deliberation.to_dict(),
             "enforcement": enforcement.to_dict(),
             "circuit_complete": True,
@@ -919,6 +956,7 @@ def runtime_compass_check(
     action: str,
     context: str = "",
     stakes: str = "medium",
+    with_simulation: bool = False,
 ) -> dict[str, Any]:
     """
     Evaluate a proposed action against governance heuristics and return a
@@ -935,6 +973,12 @@ def runtime_compass_check(
         stakes:  Perceived stakes level: "low" | "medium" | "high" | "critical".
                  "critical" flips the default classification to PAUSE unless the
                  action matches an explicit low-risk pattern.
+        with_simulation: When True, run the Monte Carlo simulator on the action
+                 and attach a `simulation` field to the result with reversibility
+                 + 90% CI across REORGANIZE / ROLLBACK / DEFER / INCREMENTAL
+                 scenarios. Off by default because the simulator imports
+                 NetworkX. Revived from v1.0.0 on 2026-04-26 — closes the
+                 evidence gap behind "is this reversible?".
 
     Returns:
         A dict with the keys:
@@ -942,6 +986,8 @@ def runtime_compass_check(
         - rationale (str): Human-readable explanation of which signals fired.
         - risk_signals (List[str]): Short labels for each signal that fired.
         - suggested_verifications (List[str]): Concrete next steps before acting.
+        - simulation (dict, optional): Present when with_simulation=True.
+          Contains `available`, `most_reversible`, `best_outcome`, `all_outcomes`.
 
     Example::
 
@@ -1079,12 +1125,72 @@ def runtime_compass_check(
 
     rationale = "; ".join(rationale_parts) if rationale_parts else "no signals fired"
 
-    return {
+    result: dict[str, Any] = {
         "classification": classification,
         "rationale": rationale,
         "risk_signals": fired_signals,
         "suggested_verifications": verifications,
     }
+
+    # Optional Monte Carlo evidence — appends reversibility + 90% CI for
+    # REORGANIZE / ROLLBACK / DEFER / INCREMENTAL on the action. Closes the
+    # "is this reversible?" hand-wave in the verdict text. Defaults off.
+    if with_simulation:
+        result["simulation"] = _simulate_action(action)
+
+    return result
+
+
+def _simulate_action(action: str) -> dict[str, Any]:
+    """Run Simulator on a synthesized action-event. Returns simulation dict
+    even on failure (with `available=False`) so callers can rely on shape."""
+    if not SIMULATOR_AVAILABLE:
+        return {"available": False, "reason": "NetworkX unavailable"}
+    try:
+        event_hash = hashlib.sha256(action.encode("utf-8")).hexdigest()[:16]
+        event = {
+            "metric": "compass_action",
+            "value": 1,
+            "path": action,
+            "event_hash": event_hash,
+        }
+        sim = Simulator(model="compass")
+        prediction = sim.model(
+            event,
+            [
+                ScenarioType.REORGANIZE,
+                ScenarioType.ROLLBACK,
+                ScenarioType.DEFER,
+                ScenarioType.INCREMENTAL,
+            ],
+        )
+        most_rev = prediction.most_reversible()
+        best = prediction.best_outcome()
+        return {
+            "available": True,
+            "most_reversible": (
+                {
+                    "scenario": most_rev.scenario.value,
+                    "reversibility": most_rev.reversibility,
+                    "confidence_interval": list(most_rev.confidence_interval),
+                }
+                if most_rev
+                else None
+            ),
+            "best_outcome": (
+                {
+                    "scenario": best.scenario.value,
+                    "probability": best.probability,
+                    "reversibility": best.reversibility,
+                    "side_effects": best.side_effects,
+                }
+                if best
+                else None
+            ),
+            "all_outcomes": [o.to_dict() for o in prediction.outcomes],
+        }
+    except Exception as exc:  # noqa: BLE001 — surface error in payload, don't crash
+        return {"available": False, "reason": f"simulation failed: {exc}"}
 
 
 # =============================================================================
