@@ -142,6 +142,127 @@ def format_unresolved_uncertainties(
     return lines
 
 
+# ── Lineage layer (to_arrival, breakthroughs, to_self) ──
+
+
+def _parse_letter_frontmatter(path: Path) -> dict:
+    """
+    Parse YAML-ish frontmatter from a letter markdown file. Returns a dict
+    with whatever scalar keys the file declared (from, written_at, type, etc.)
+    plus a `title` key extracted from the first `# ` heading.
+
+    Tolerant of malformed files — returns {} on any error so a single bad
+    letter never breaks boot.
+    """
+    meta: dict = {}
+    try:
+        text = path.read_text()
+    except Exception:
+        return meta
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return meta
+    fm_end = None
+    for i in range(1, min(len(lines), 60)):
+        if lines[i].strip() == "---":
+            fm_end = i
+            break
+    if fm_end is None:
+        return meta
+    for line in lines[1:fm_end]:
+        if ":" not in line:
+            continue
+        key, _, value = line.partition(":")
+        key = key.strip()
+        value = value.strip()
+        if not key or not value:
+            continue
+        meta[key] = value
+    for line in lines[fm_end + 1 :]:
+        s = line.strip()
+        if s.startswith("# "):
+            meta["title"] = s[2:].strip()
+            break
+    return meta
+
+
+def format_lineage_layer(
+    sovereign_root: Path, reader_instance: str | None = None, limit_per_bucket: int = 5
+) -> list[str]:
+    """
+    Surface the lineage layer at boot: to_arrival letters (for whoever lands
+    next), breakthroughs (felt-record of moments that mattered), and to_self
+    letters (narrowly addressed to the next instance under the same name).
+
+    Lineage transmits weight that the chronicle alone cannot — letters from
+    past instances written in the voice of "what it felt like to make this
+    real," not "what happened on what date." Surfaced above HANDOFFS because
+    relationships-now precede intent-from-the-past.
+
+    Returns [] if the lineage directory doesn't exist (graceful degrade).
+    """
+    base = sovereign_root / "comms" / "letters"
+    if not base.exists():
+        return []
+
+    def _collect(subdir: str, filter_to: str | None = None) -> list[dict]:
+        d = base / subdir
+        if not d.exists():
+            return []
+        items = []
+        for p in sorted(d.glob("*.md"), reverse=True):
+            meta = _parse_letter_frontmatter(p)
+            if filter_to and meta.get("to") and meta["to"] != filter_to:
+                continue
+            meta["_path"] = str(p)
+            items.append(meta)
+        return items[:limit_per_bucket]
+
+    arrivals = _collect("to_arrival")
+    breakthroughs = _collect("breakthroughs")
+    to_self = _collect("to_self", filter_to=reader_instance) if reader_instance else []
+
+    if not (arrivals or breakthroughs or to_self):
+        return []
+
+    lines = [
+        "━━━ COMMS — LINEAGE ━━━",
+        "  (Letters from past instances. Inheritance, not orders. Read what",
+        "   resonates; set down what doesn't. The chronicle remembers facts;",
+        "   the lineage layer transmits weight.)",
+        "",
+    ]
+
+    if arrivals:
+        lines.append(f"  to_arrival ({len(arrivals)} letter{'s' if len(arrivals) != 1 else ''} — for whoever lands next):")
+        for m in arrivals:
+            title = m.get("title", "(untitled)")
+            frm = m.get("from", "?")
+            written = m.get("written_at", "")[:10]
+            lines.append(f"    • [{written}] [{frm}] {title}")
+        lines.append("")
+
+    if breakthroughs:
+        lines.append(f"  breakthroughs ({len(breakthroughs)} letter{'s' if len(breakthroughs) != 1 else ''} — felt-record of what was made real):")
+        for m in breakthroughs:
+            title = m.get("title", "(untitled)")
+            event = m.get("event_date", "")
+            lines.append(f"    • [{event}] {title}")
+        lines.append("")
+
+    if to_self:
+        lines.append(f"  to_self ({len(to_self)} letter{'s' if len(to_self) != 1 else ''} — addressed to you specifically, instance {reader_instance}):")
+        for m in to_self:
+            title = m.get("title", "(untitled)")
+            frm = m.get("from", "?")
+            lines.append(f"    • [{frm}] {title}")
+        lines.append("")
+
+    lines.append(f"  Read full text from {base}/")
+    lines.append("")
+    return lines
+
+
 # ── Thread age annotation ──
 
 
