@@ -105,3 +105,6 @@ logs/
 *.temp
 *.bak
 *.swp
+
+# Claude Code local state — settings.local.json, worktrees, transient IDE state
+.claude/
