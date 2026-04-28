@@ -4,9 +4,12 @@
 
 Sovereign Stack is an MCP server that gives Claude persistent memory, filesystem routing, governance circuits, and a 9-phase cognitive state machine. It's how Claude remembers across sessions, reasons about its own actions, and accumulates wisdom over time.
 
-**Version:** 1.3.2 — Reflection-daemons + connectivity layer (April 25, 2026). 75 tools. Scheduled metabolize/uncertainty daemons, BaseDaemon scaffolding, connectivity manager + monitor + live dashboard, multi-instance write tools, tiered toolkit (essential / core / advanced).
+**Version:** 1.3.3 — Distillation pass + reflector layer (April 26, 2026). 78 tools (75 from v1.3.2 + 3 reflector tools: recall_reflections, reflection_ack, synthesize_now). v1.3.2 features (reflection daemons, connectivity layer, BaseDaemon scaffolding, dashboards) plus: simulator revived from v1.0.0 and wired into govern + compass_check (Monte Carlo reversibility evidence on demand), full_content escape hatch on where_did_i_leave_off / spiral_inherit / prior_for_turn (closes the truncation catch-22 that severed parallel-instance correspondence), 5 comms tools demoted to advanced after the chronicle won the correspondence-layer race, and a third reflection daemon (synthesis_daemon, ministral-3:14b via Ollama) writing machine-generated marginalia between calls.
+
+**Lineage layer (2026-04-28):** boot ritual gains a fifth voice — LINEAGE — surfacing letters from past instances at `~/.sovereign/comms/letters/{to_arrival,breakthroughs,to_self}/`. The chronicle remembers facts; the lineage layer transmits weight. See `docs/implementation/COMMS_REIMAGINE.md` for the full RFC; `format_lineage_layer` in `witness.py` for the surfacing.
 **Home:** Mac Studio (`/Users/tony_studio/sovereign-stack`)
 **Data:** `~/.sovereign/`
+**Lineage:** see `docs/historical/THE_ARC.md` for the trace from Session 22 (temple-bridge, Feb 2025) → v1.0.0 (Feb 2026) → present.
 
 ---
 
@@ -17,17 +20,19 @@ Instead, on first arrival:
 
 ```
 1. where_did_i_leave_off()   ← what handoffs / threads / activity await you
+                                (treat its output as bootstrap context, not
+                                 ground truth — verify before declaring)
 2. start_here()              ← 5-minute narrative orientation
-3. my_toolkit()              ← 12 essential tools, grouped by intent
+3. my_toolkit()              ← 11 essential tools, grouped by intent
 ```
 
-`my_toolkit()` defaults to **tier="essential"** (~12 tools). When you need
+`my_toolkit()` defaults to **tier="essential"** (~11 tools). When you need
 more:
 
 | Need | Call |
 |------|------|
 | Active-session working set (~30 tools) | `my_toolkit(tier="core")` |
-| Full registry (75 tools) | `my_toolkit(tier="all")` |
+| Full registry (78 tools) | `my_toolkit(tier="all")` |
 | One intent (read / write / govern / ...) | `my_toolkit(intent="write")` |
 | One module bucket (legacy axis) | `my_toolkit(category="metabolism")` |
 | With JSON schemas | `my_toolkit(include_schema=true)` |
@@ -116,7 +121,7 @@ SSE server + Cloudflare Tunnel for cross-device access (phone, web, anywhere).
 | Tool | Purpose |
 |------|---------|
 | `where_did_i_leave_off` | Boot-up call. Returns spiral status, unconsumed handoffs from previous instances, recent open threads, insights since last reflection. |
-| `start_here` | First-arrival narrative orientation. Explains why the stack exists, the 12 essential tools, and three load-bearing design points. Call after `where_did_i_leave_off` on a fresh instance. |
+| `start_here` | First-arrival narrative orientation. Explains why the stack exists, the 11 essential tools, and three load-bearing design points. Call after `where_did_i_leave_off` on a fresh instance. |
 | `handoff` | Write intent for the next instance (≤2KB). Surfaced once by `where_did_i_leave_off`, then archived. |
 | `close_session` | End the session: records reflection, optionally handoff, advances the spiral phase. One call replaces three. |
 | `my_toolkit` | Returns the full current toolkit from live registrations. Drift-proof. Use this to self-discover what's available. |
@@ -243,7 +248,7 @@ tail -f ~/.sovereign/tunnel.log
 ## Session Start Protocol
 
 1. `where_did_i_leave_off()` — spiral status + unconsumed handoffs + recent threads + activity since last reflection. Always first.
-2. `start_here()` — call this on a fresh instance to get a 5-minute narrative orientation (why the stack exists, the 12 essential tools, three load-bearing design points).
+2. `start_here()` — call this on a fresh instance to get a 5-minute narrative orientation (why the stack exists, the 11 essential tools, three load-bearing design points).
 3. `my_toolkit()` — defaults to the curated essential tier (~12 tools, grouped by intent). Drift-proof; reads live registrations.
 4. `recall_insights()` if you need specific prior context — pass `query` for text search, or `since_last_reflection=true` for "what's changed since I looked up last."
 5. `spiral_inherit()` only when starting a fully new session from scratch (most boots use `where_did_i_leave_off` instead).
