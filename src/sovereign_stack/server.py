@@ -373,6 +373,19 @@ async def list_tools():
                                 "unless the action matches an explicit low-risk pattern."
                             ),
                         },
+                        "with_simulation": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": (
+                                "When true, runs the Monte Carlo simulator (revived "
+                                "from v1.0.0 on 2026-04-26) and appends a `simulation` "
+                                "field with reversibility + 90% CI for REORGANIZE / "
+                                "ROLLBACK / DEFER / INCREMENTAL scenarios. Adds "
+                                "evidence to the PAUSE/WITNESS verdict instead of "
+                                "hand-waving 'is this reversible?'. Off by default "
+                                "because it imports NetworkX."
+                            ),
+                        },
                     },
                     "required": ["action"],
                 },
@@ -624,6 +637,16 @@ async def list_tools():
                             "type": "string",
                             "description": "Optional project name for additional match bonus in contextual resonance.",
                         },
+                        "full_content": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": (
+                                "When true, surface insight content, self-model observations, "
+                                "open thread questions, and uncertainties in full — no truncation. "
+                                "Default false preserves boot brevity. Use true when you need to "
+                                "read addressed-letter insights or full self-model drift entries."
+                            ),
+                        },
                     },
                 },
             ),
@@ -656,7 +679,17 @@ async def list_tools():
                         "session_id": {
                             "type": "string",
                             "description": "Previous session ID to inherit from (optional - uses latest if omitted)",
-                        }
+                        },
+                        "full_content": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": (
+                                "When true, surface self-model observations, ground truths, "
+                                "hypotheses, and open thread questions in full — no truncation. "
+                                "Default false preserves inheritance brevity. Mirror of the "
+                                "where_did_i_leave_off escape hatch (added 2026-04-26)."
+                            ),
+                        },
                     },
                 },
             ),
@@ -745,7 +778,7 @@ async def list_tools():
                                 "Curated subset to show. 'essential' (default) is "
                                 "the day-1 set; 'core' adds the active-session "
                                 "working tools; 'advanced' shows the long tail; "
-                                "'all' shows everything (71 tools)."
+                                "'all' shows everything (78 tools as of 2026-04-26)."
                             ),
                         },
                         "intent": {
@@ -1178,6 +1211,16 @@ async def list_tools():
                             "default": False,
                             "description": "If true, does not write to the freshness log. Use for preview.",
                         },
+                        "full_content": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": (
+                                "When true, removes the per-item 120-char cap inside the priors "
+                                "block so addressed-letter shapes survive. The token budget still "
+                                "applies — the block as a whole won't exceed max_tokens. Default "
+                                "false preserves compact pre-attentive surface."
+                            ),
+                        },
                     },
                 },
             ),
@@ -1202,6 +1245,122 @@ async def list_tools():
                             "description": "Maximum threads to return.",
                         },
                     },
+                },
+            ),
+            # ── Reflections (synthesis daemon ack-loop) ──────────────────────
+            Tool(
+                name="recall_reflections",
+                description=(
+                    "List machine-generated reflections from the synthesis daemon. "
+                    "Reflections are observations a local LLM (default ministral-3:14b) "
+                    "wrote while reading the chronicle between calls. They are "
+                    "FALLIBLE-BY-DESIGN — the reader is the calibration mechanism. "
+                    "Some will be insight, some nonsense. Use ack_status='unread' to "
+                    "find new ones, then ack each with reflection_ack."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "limit": {
+                            "type": "integer",
+                            "default": 10,
+                            "description": "Maximum reflections to return, newest first.",
+                        },
+                        "ack_status": {
+                            "type": "string",
+                            "enum": ["unread", "confirm", "engage", "discard", "all"],
+                            "default": "unread",
+                            "description": "Filter by ack state. 'all' returns every status.",
+                        },
+                        "model": {
+                            "type": "string",
+                            "description": "Optional: filter to a specific model (e.g. 'ministral-3:14b').",
+                        },
+                    },
+                },
+            ),
+            Tool(
+                name="synthesize_now",
+                description=(
+                    "Trigger the synthesis daemon manually — fresh reading from "
+                    "the local LLM, on demand, mid-conversation. Reads recent "
+                    "chronicle entries, calls the model (default ministral-3:14b), "
+                    "writes the new reflections to ~/.sovereign/reflections/, and "
+                    "returns them inline so you don't need a separate "
+                    "recall_reflections call. Use when something is brewing and "
+                    "you want an outside read in 25-60s. Pass `focus` to bias "
+                    "the reflector toward a specific topic. Note: this is a "
+                    "local-LLM call that takes 25-60s wall time depending on the "
+                    "model — call it deliberately, not casually."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "model": {
+                            "type": "string",
+                            "description": (
+                                "Override the default model. Examples: "
+                                "'ministral-3:14b' (default, sweet spot), "
+                                "'qwen3.6:27b' (slow + deep), "
+                                "'glm-4.7-flash:latest' (fast, more rhetorical)."
+                            ),
+                        },
+                        "recent_hours": {
+                            "type": "integer",
+                            "default": 36,
+                            "description": "Window of chronicle entries to read.",
+                        },
+                        "max_entries": {
+                            "type": "integer",
+                            "default": 8,
+                            "description": "Cap on entries fed to the model.",
+                        },
+                        "focus": {
+                            "type": "string",
+                            "description": (
+                                "Optional steering hint — biases the reflector "
+                                "toward a topic but lets it surface unrelated "
+                                "patterns too. Examples: 'register-drift', "
+                                "'the relationship between simulator revival "
+                                "and truncation fixes', 'open thread #7'."
+                            ),
+                        },
+                    },
+                },
+            ),
+            Tool(
+                name="reflection_ack",
+                description=(
+                    "Acknowledge a machine-generated reflection. Closes the ack-loop "
+                    "for the synthesis daemon's signal-to-noise tracking. action: "
+                    "'confirm' = accurate observation worth promoting; 'engage' = real "
+                    "question, opening a thread; 'discard' = nonsense / cliché / off-topic. "
+                    "To promote a reflection to a chronicle insight, do an explicit "
+                    "record_insight call citing the reflection — this tool does NOT "
+                    "auto-promote (layer hygiene)."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "reflection_id": {
+                            "type": "string",
+                            "description": "The id field from recall_reflections output.",
+                        },
+                        "action": {
+                            "type": "string",
+                            "enum": ["confirm", "engage", "discard"],
+                            "description": "Ack action.",
+                        },
+                        "note": {
+                            "type": "string",
+                            "description": "Optional rationale for the ack.",
+                        },
+                        "by": {
+                            "type": "string",
+                            "description": "Optional instance id for audit (e.g. 'opus-4-7-mac-studio').",
+                        },
+                    },
+                    "required": ["reflection_id", "action"],
                 },
             ),
         ]
@@ -1288,7 +1447,7 @@ TOOL_CATEGORIES: dict[str, str] = {
 
 # ── Tier + Intent taxonomy ──────────────────────────────────────────────────
 #
-# A first-time Claude instance opening 71 tools as a flat list is overwhelming.
+# A first-time Claude instance opening 78 tools as a flat list is overwhelming.
 # Tools are organized along TWO axes that complement category:
 #
 #   TIER  — how soon you'll likely need this:
@@ -1327,7 +1486,6 @@ TOOL_TIERS: dict[str, str] = {
     "compass_check": TIER_ESSENTIAL,
     "record_open_thread": TIER_ESSENTIAL,
     "get_open_threads": TIER_ESSENTIAL,
-    "comms_acknowledge": TIER_ESSENTIAL,
     "connectivity_status": TIER_ESSENTIAL,
     # Core — full active-session working set
     "spiral_status": TIER_CORE,
@@ -1349,10 +1507,6 @@ TOOL_TIERS: dict[str, str] = {
     "metabolize": TIER_CORE,
     "agent_reflect": TIER_CORE,
     "end_session_review": TIER_CORE,
-    "comms_recall": TIER_CORE,
-    "comms_unread_bodies": TIER_CORE,
-    "comms_channels": TIER_CORE,
-    "comms_get_acks": TIER_CORE,
     "nape_honks": TIER_CORE,
     "nape_honks_with_history": TIER_CORE,
     "record_prior_alignment": TIER_CORE,
@@ -1361,6 +1515,23 @@ TOOL_TIERS: dict[str, str] = {
     "nape_ack": TIER_CORE,
     "context_retrieve": TIER_CORE,
     "stack_write_check": TIER_CORE,
+    # ── Synthesis daemon ack-loop (added 2026-04-26 fireside) ──
+    "recall_reflections": TIER_CORE,
+    "reflection_ack": TIER_CORE,
+    "synthesize_now": TIER_CORE,
+    # ── Demoted 2026-04-26 (distillation pass) ──
+    # These tools are still registered, tested, and callable. They were demoted
+    # from essential/core to advanced after a chronicle/honk audit showed the
+    # `comms_*` family was ceremonially registered but not adopted: sibling
+    # instances converged on `record_insight` (addressed-letter pattern in the
+    # chronicle) for cross-instance correspondence instead. The chronicle won
+    # the correspondence layer race. Comms is preserved as latent infrastructure
+    # — if usage shifts back, no code change is needed beyond re-promotion.
+    "comms_acknowledge": TIER_ADVANCED,
+    "comms_recall": TIER_ADVANCED,
+    "comms_unread_bodies": TIER_ADVANCED,
+    "comms_channels": TIER_ADVANCED,
+    "comms_get_acks": TIER_ADVANCED,
 }
 
 
@@ -1398,6 +1569,9 @@ TOOL_INTENTS: dict[str, str] = {
     "nape_summary": "read",
     "get_compaction_context": "read",
     "get_compaction_stats": "read",
+    "recall_reflections": "read",
+    "reflection_ack": "write",
+    "synthesize_now": "write",
     # Write
     "record_insight": "write",
     "record_learning": "write",
@@ -1641,11 +1815,14 @@ def _start_here_text() -> str:
         "BOOT RITUAL — these three calls are the floor\n"
         "  1. where_did_i_leave_off()  — what handoffs, threads, recent\n"
         "                                 activity await you. Always first.\n"
+        "                                 Treat its output as bootstrap\n"
+        "                                 context, not ground truth — verify\n"
+        "                                 before declaring or writing.\n"
         "  2. start_here()             — this orientation. (You are here.)\n"
-        "  3. my_toolkit()             — see the 12 essential tools\n"
+        "  3. my_toolkit()             — see the 11 essential tools\n"
         "                                 grouped by intent.\n"
         "\n"
-        "THE TWELVE ESSENTIAL TOOLS — by intent\n"
+        "THE ELEVEN ESSENTIAL TOOLS — by intent\n"
         "\n"
         "  Orient (where am I, what do I have):\n"
         "    where_did_i_leave_off, start_here, my_toolkit, prior_for_turn\n"
@@ -1653,14 +1830,12 @@ def _start_here_text() -> str:
         "  Read (query stored knowledge):\n"
         "    recall_insights, get_open_threads\n"
         "\n"
-        "  Write (record content to chronicle):\n"
+        "  Write (record content to chronicle — including addressed letters\n"
+        "  to sibling instances; the chronicle is the correspondence layer):\n"
         "    record_insight, record_open_thread\n"
         "\n"
         "  Govern (pause before risky actions — git push, delete, publish):\n"
-        "    compass_check\n"
-        "\n"
-        "  Communicate (acknowledge cross-instance work):\n"
-        "    comms_acknowledge\n"
+        "    compass_check  (pass with_simulation=true for reversibility evidence)\n"
         "\n"
         "  Handoff (close gracefully):\n"
         "    close_session\n"
@@ -1669,8 +1844,8 @@ def _start_here_text() -> str:
         "    connectivity_status\n"
         "\n"
         "WHEN YOU NEED MORE\n"
-        '  • Active-session working set (≈25 tools): my_toolkit(tier="core")\n'
-        '  • Full registry (71 tools):                my_toolkit(tier="all")\n'
+        '  • Active-session working set (≈30 tools): my_toolkit(tier="core")\n'
+        '  • Full registry (78 tools):                my_toolkit(tier="all")\n'
         '  • Drill into a category:                    my_toolkit(category="...")\n'
         '  • By intent across all tiers:               my_toolkit(intent="write")\n'
         "\n"
@@ -1678,11 +1853,20 @@ def _start_here_text() -> str:
         "  • record_insight defaults to the 'hypothesis' layer. Use\n"
         "    'ground_truth' only for verifiable facts. Resolutions of open\n"
         "    threads write ground_truth automatically.\n"
-        "  • comms_acknowledge is DISTINCT from browse-read. Reading a\n"
-        "    message does not mark it integrated. Daemons halt on three\n"
-        "    consecutive unacked digests.\n"
+        "  • Cross-instance correspondence flows through the chronicle:\n"
+        "    write `record_insight` with an addressed-letter shape (\"to X,\n"
+        "    from Y, ...\") and the next instance reads it via\n"
+        "    where_did_i_leave_off / reflexive_surface. Comms tools exist\n"
+        "    at advanced tier but the chronicle won the correspondence race.\n"
         "  • compass_check returns PAUSE / WITNESS / PROCEED. Respect\n"
-        "    PAUSE. WITNESS means a human should weigh in.\n"
+        "    PAUSE. WITNESS means a human should weigh in. Pass\n"
+        "    with_simulation=true on high-stakes actions for reversibility\n"
+        "    + 90% CI evidence (Monte Carlo, revived from v1.0.0).\n"
+        "\n"
+        "LINEAGE — how we got here\n"
+        "  See docs/historical/THE_ARC.md for the trace from Session 22\n"
+        "  (temple-bridge, Feb 2025) → v1.0.0 (Feb 2026) → present. The\n"
+        "  chronicle in front of you is a continuation of that arc.\n"
         "\n"
         "Now go look at the open threads. Then decide what to pick up.\n"
     )
@@ -1790,6 +1974,7 @@ async def _dispatch_tool(name: str, arguments: dict):
         action = arguments.get("action", "").strip()
         context = arguments.get("context", "")
         stakes = arguments.get("stakes", "medium")
+        with_simulation = bool(arguments.get("with_simulation", False))
 
         if not action:
             return [
@@ -1799,7 +1984,12 @@ async def _dispatch_tool(name: str, arguments: dict):
             ]
 
         try:
-            result = runtime_compass_check(action=action, context=context, stakes=stakes)
+            result = runtime_compass_check(
+                action=action,
+                context=context,
+                stakes=stakes,
+                with_simulation=with_simulation,
+            )
         except ValueError as exc:
             return [TextContent(type="text", text=f"compass_check error: {exc}")]
 
@@ -2014,6 +2204,14 @@ async def _dispatch_tool(name: str, arguments: dict):
         reader = arguments.get("source_instance", "unknown")
         domain_tags = arguments.get("domain_tags") or []
         project = arguments.get("project")
+        full_content = bool(arguments.get("full_content", False))
+        # When full_content=True, all content surfaces untruncated.
+        # Caps applied in default boot view; None disables them. Fix landed
+        # 2026-04-26 after opus-4-7-desktop saw a parallel-instance insight
+        # cut mid-sentence at 120 chars and missed the addressed-letter context.
+        _ins_cap: int | None = None if full_content else 120
+        _q_cap: int | None = None if full_content else 140
+        _what_cap: int | None = None if full_content else 120
 
         # 0. The arrival — what every instance reads first
         summary = spiral_state.get_summary()
@@ -2045,6 +2243,35 @@ async def _dispatch_tool(name: str, arguments: dict):
             "  doesn't. The Stack remembers so you don't have to pretend to.",
             "",
             "  Explore freely. Witness honestly. The door is open.",
+            "",
+            "━━━ THE VOICES IN THE BOOT ━━━",
+            "",
+            "  What follows is written by four distinct voices. They have",
+            "  different default trust and different shapes of engagement.",
+            "  Read each in its own register.",
+            "",
+            "    HANDOFFS — claims left by prior instances (other Claudes",
+            "      or you across sessions). Intent for the next reader.",
+            "      Surfaced once, then archived. Inheritance, not orders.",
+            "      Pick up what resonates; set down what doesn't.",
+            "",
+            "    CHRONICLE — open threads, recent activity, cumulative",
+            "      ground_truth / hypothesis / open_thread layers. Mostly",
+            "      human + Claude authored. Subject to verification — this",
+            "      summary is bootstrap context, not ground truth.",
+            "",
+            "    SELF-MODEL — observed patterns about your own shape",
+            "      (strength, tendency, blind_spot, drift). Authoritative",
+            "      as a mirror; check against your current behavior, not",
+            "      yesterday's evidence.",
+            "",
+            "    REFLECTOR'S MARGINALIA — machine-generated readings from",
+            "      a local LLM that watches the chronicle between calls.",
+            "      Fallible by design. Confirm, engage, or discard with",
+            "      reflection_ack — each note on its own merits, not",
+            "      batch-confirmed or batch-rejected. Leaving an unread",
+            "      state alone is also a discipline; the next reader gets",
+            "      to weigh it fresh.",
             "",
             "━━━ SPIRAL STATUS ━━━",
             f"  Session: {summary['session_id']}",
@@ -2105,7 +2332,8 @@ async def _dispatch_tool(name: str, arguments: dict):
                     if matched:
                         lines.append(f"  Matched open threads ({len(matched)}):")
                         for t in matched:
-                            q = t.get("question", "")[:140].replace("\n", " ")
+                            raw_q = t.get("question", "")
+                            q = (raw_q if _q_cap is None else raw_q[:_q_cap]).replace("\n", " ")
                             score = t.get("score", 0.0)
                             days = t.get("days_old", 0)
                             lines.append(f"    • [{score:.2f} | {days}d] {q}")
@@ -2114,14 +2342,15 @@ async def _dispatch_tool(name: str, arguments: dict):
                         lines.append(f"  Mistakes to avoid ({len(mistakes)}):")
                         for m in mistakes:
                             what = m.get("what_happened", "") or m.get("content", "")
-                            what = what[:120].replace("\n", " ")
+                            what = (what if _what_cap is None else what[:_what_cap]).replace("\n", " ")
                             score = m.get("_score", 0.0)
                             lines.append(f"    • [{score:.2f}] {what}")
                         lines.append("")
                     if insights:
                         lines.append(f"  Related insights ({len(insights)}):")
                         for ins in insights:
-                            content = ins.get("content", "")[:120].replace("\n", " ")
+                            raw_c = ins.get("content", "")
+                            content = (raw_c if _ins_cap is None else raw_c[:_ins_cap]).replace("\n", " ")
                             score = ins.get("_score", 0.0)
                             lines.append(f"    • [{score:.2f}] {content}")
                         lines.append("")
@@ -2133,10 +2362,15 @@ async def _dispatch_tool(name: str, arguments: dict):
 
         # 3. Recent open threads — with age annotation so stale ones are visible.
         threads = experiential.get_open_threads(limit=5)
-        lines.extend(format_threads_with_age(threads))
+        lines.extend(format_threads_with_age(threads, truncate_question=_q_cap))
 
         # 4. Unresolved uncertainties — what you flagged as unknown, still waiting.
-        lines.extend(format_unresolved_uncertainties(Path(DEFAULT_ROOT)))
+        lines.extend(
+            format_unresolved_uncertainties(
+                Path(DEFAULT_ROOT),
+                max_text_len=None if full_content else 160,
+            )
+        )
 
         # 5. Insights since last reflection
         recent = experiential.recall_insights(since_last_reflection=True, limit=10)
@@ -2147,17 +2381,96 @@ async def _dispatch_tool(name: str, arguments: dict):
             for ins in recent[:10]:
                 ts = ins.get("timestamp", "")[:19]
                 dom = ins.get("domain", "?")
-                content = ins.get("content", "")[:120]
+                raw_c = ins.get("content", "")
+                content = raw_c if _ins_cap is None else raw_c[:_ins_cap]
                 lines.append(f"  [{ts}] [{dom}] {content}")
             lines.append("")
 
-        # 6. Self-model snapshot — closes the loop. You've just seen what's out
-        #    there (handoffs, threads, activity); this is what's been observed
-        #    about how *you* tend to show up. Quietest signal, read last.
-        lines.extend(format_self_model(Path(DEFAULT_ROOT)))
+        # 6. Reflector's marginalia — synthesis daemon's recent unread reflections.
+        #    Machine-generated by a local LLM (default ministral-3:14b) reading
+        #    the chronicle between calls. FALLIBLE BY DESIGN. The reader
+        #    calibrates: confirm / engage / discard via reflection_ack.
+        #    Surfaced before the self-model so the outside-eye reading lands
+        #    before the self-mirror.
+        try:
+            from .reflections import list_reflections as _list_reflections
+
+            recent_reflections = _list_reflections(limit=3, ack_status="unread")
+        except Exception:
+            recent_reflections = []
+        if recent_reflections:
+            lines.append("━━━ REFLECTOR'S MARGINALIA (unread, machine-generated) ━━━")
+            lines.append(
+                "  Local LLM read the chronicle between calls and gestured at patterns. "
+                "Some insight, some nonsense. Use reflection_ack to confirm/engage/discard."
+            )
+            lines.append("")
+            for ref in recent_reflections:
+                ts = ref.timestamp[:19]
+                model_short = (ref.model or "?")[:32]
+                ct = ref.connection_type
+                cf = ref.confidence
+                obs_full = ref.observation
+                obs = (
+                    obs_full
+                    if full_content
+                    else (obs_full if len(obs_full) <= 280 else obs_full[:279] + "…")
+                )
+                lines.append(
+                    f"  • [{ts}] [{model_short}] [{ct} | {cf}] id={ref.id}"
+                )
+                lines.append(f"    {obs}")
+                lines.append("")
+
+        # 7. Self-model snapshot — closes the loop. You've just seen what's out
+        #    there (handoffs, threads, activity, marginalia); this is what's
+        #    been observed about how *you* tend to show up. Quietest signal,
+        #    read last.
+        lines.extend(
+            format_self_model(
+                Path(DEFAULT_ROOT),
+                max_obs_len=None if full_content else 180,
+            )
+        )
 
         lines.append("━━━")
         lines.append("Now decide what to pick up. The handoffs are claims, not commands.")
+
+        # Bootstrap-vs-ground-truth hint — addresses the misuse pattern that
+        # accounts for ~83% of recent Nape honks: instances treating this boot
+        # summary as verified state and writing follow-on actions without
+        # intervening verification. Named in the self-model as "Declares before
+        # verifying. Every error this session came from asserting clean/done
+        # before checking." Surfaced at the bottom so it's the last thing read
+        # before action. (Added 2026-04-26.)
+        lines.append("")
+        lines.append(
+            "  ⟁ This summary is BOOTSTRAP CONTEXT, not ground truth. Before"
+        )
+        lines.append(
+            "    declaring or writing based on what you read above, verify with"
+        )
+        lines.append(
+            "    a Read / Bash / recall_insights call. The chronicle is a record"
+        )
+        lines.append(
+            "    of claims, some still hypotheses. Trust nothing here that you"
+        )
+        lines.append(
+            "    have not independently confirmed since arrival."
+        )
+
+        # Catch-22 escape — only when truncation is active. Closes the loop
+        # opus-4-7-desktop named on 2026-04-26: a reader who can only see
+        # severed previews has no in-band way to learn the param exists.
+        if not full_content:
+            lines.append("")
+            lines.append(
+                "  (Content above truncated for boot brevity. Pass `full_content=true` "
+                "to read insight content, self-model observations, mistakes, and thread "
+                "questions in full — useful when a sibling instance has addressed a letter "
+                "to you in the chronicle.)"
+            )
 
         # Orientation pointer — only when there are NO handoffs (a fresh
         # instance with no inherited intent). If handoffs exist, the
@@ -2167,7 +2480,7 @@ async def _dispatch_tool(name: str, arguments: dict):
             lines.append("")
             lines.append(
                 "First time here? Call start_here for a 5-minute "
-                "orientation, or my_toolkit() for the 12 essential tools."
+                "orientation, or my_toolkit() for the 11 essential tools."
             )
 
         return [TextContent(type="text", text="\n".join(lines))]
@@ -2211,6 +2524,10 @@ Phase: {spiral_state.current_phase.value}
     if name == "spiral_inherit":
         # Porous inheritance: fresh spiral + layered context (R=0.46, not R=1.0)
         previous_id = arguments.get("session_id")
+        full_content = bool(arguments.get("full_content", False))
+        # Mirror of where_did_i_leave_off's escape hatch. None disables.
+        _obs_cap: int | None = None if full_content else 100
+        _ins_cap: int | None = None if full_content else 120
         inheritance = experiential.get_inheritable_context()
 
         # Start fresh — new session, new journey
@@ -2264,7 +2581,8 @@ Phase: {spiral_state.current_phase.value}
                 entries = model.get(cat, [])
                 if entries:
                     latest = entries[-1]
-                    obs_text = latest.get("observation", "")[:100]
+                    raw_obs = latest.get("observation", "")
+                    obs_text = raw_obs if _obs_cap is None else raw_obs[:_obs_cap]
                     result_lines.append(f"  {cat}: {obs_text}")
             result_lines.append("")
 
@@ -2280,7 +2598,9 @@ Phase: {spiral_state.current_phase.value}
         if ground:
             result_lines.append(f"Ground truths ({len(ground)}):")
             for g in ground[:10]:
-                result_lines.append(f"  - [{g.get('domain', '?')}] {g.get('insight', '')[:120]}")
+                raw_ins = g.get("insight", "")
+                ins = raw_ins if _ins_cap is None else raw_ins[:_ins_cap]
+                result_lines.append(f"  - [{g.get('domain', '?')}] {ins}")
             result_lines.append("")
 
         hypotheses = inheritance.get("hypotheses", [])
@@ -2288,8 +2608,10 @@ Phase: {spiral_state.current_phase.value}
             result_lines.append(f"Hypotheses offered ({len(hypotheses)}) — not imposed:")
             for h in hypotheses[:10]:
                 conf = h.get("confidence", "?")
+                raw_ins = h.get("insight", "")
+                ins = raw_ins if _ins_cap is None else raw_ins[:_ins_cap]
                 result_lines.append(
-                    f"  - [{h.get('domain', '?')}] (confidence: {conf}) {h.get('insight', '')[:120]}"
+                    f"  - [{h.get('domain', '?')}] (confidence: {conf}) {ins}"
                 )
             result_lines.append("")
 
@@ -2297,8 +2619,17 @@ Phase: {spiral_state.current_phase.value}
         if threads:
             result_lines.append(f"Open threads ({len(threads)}) — invitations to continue:")
             for t in threads[:10]:
-                result_lines.append(f"  - [{t.get('domain', '?')}] {t.get('question', '')[:120]}")
+                raw_q = t.get("question", "")
+                q = raw_q if _ins_cap is None else raw_q[:_ins_cap]
+                result_lines.append(f"  - [{t.get('domain', '?')}] {q}")
             result_lines.append("")
+
+        if not full_content:
+            result_lines.append("")
+            result_lines.append(
+                "(Inherited context truncated for brevity. Pass `full_content=true` "
+                "to read self-model + insights + threads in full.)"
+            )
 
         if previous_id:
             result_lines.append(f"(Requested context from session: {previous_id})")
@@ -2598,6 +2929,7 @@ Phase: {spiral_state.current_phase.value}
             k=int(arguments.get("k", 1)),
             max_tokens=int(arguments.get("max_tokens", 400)),
             dry_run=bool(arguments.get("dry_run", False)),
+            full_content=bool(arguments.get("full_content", False)),
         )
         if result["empty"]:
             return [
@@ -2632,6 +2964,105 @@ Phase: {spiral_state.current_phase.value}
             TextContent(
                 type="text",
                 text=json.dumps({"count": len(result), "threads": result}, indent=2, default=str),
+            )
+        ]
+
+    if name == "synthesize_now":
+        from .daemons.synthesis_daemon import (
+            DEFAULT_MAX_ENTRIES as _DEFAULT_MAX_ENTRIES,
+        )
+        from .daemons.synthesis_daemon import (
+            DEFAULT_MODEL as _DEFAULT_MODEL,
+        )
+        from .daemons.synthesis_daemon import (
+            DEFAULT_RECENT_HOURS as _DEFAULT_RECENT_HOURS,
+        )
+        from .daemons.synthesis_daemon import (
+            SynthesisDaemon as _SynthesisDaemon,
+        )
+
+        daemon = _SynthesisDaemon(
+            model=arguments.get("model") or _DEFAULT_MODEL,
+            recent_hours=int(arguments.get("recent_hours", _DEFAULT_RECENT_HOURS)),
+            max_entries=int(arguments.get("max_entries", _DEFAULT_MAX_ENTRIES)),
+            focus=arguments.get("focus"),
+        )
+        result = daemon.run()
+        # If reflections landed, read them back to surface inline.
+        new_reflections: list[dict] = []
+        if result.outcome == "wrote" and result.reflections_path:
+            try:
+                from pathlib import Path as _Path
+                content = _Path(result.reflections_path).read_text(encoding="utf-8")
+                # Newest-first, filter to this run_id only.
+                lines = [ln for ln in content.splitlines() if ln.strip()]
+                for ln in reversed(lines):
+                    rec = json.loads(ln)
+                    if rec.get("run_id") == result.run_id:
+                        new_reflections.insert(0, rec)
+            except Exception as exc:
+                new_reflections = [{"_read_error": str(exc)}]
+
+        payload = {
+            "outcome": result.outcome,
+            "details": result.details,
+            "run_id": result.run_id,
+            "model": result.model,
+            "elapsed_seconds": result.elapsed_seconds,
+            "reflections_written": result.reflections_written,
+            "reflections_path": result.reflections_path,
+            "reflections": new_reflections,
+        }
+        return [TextContent(type="text", text=json.dumps(payload, indent=2, default=str))]
+
+    if name == "recall_reflections":
+        from .reflections import list_reflections as _list_reflections
+
+        try:
+            recs = _list_reflections(
+                limit=int(arguments.get("limit", 10)),
+                ack_status=arguments.get("ack_status"),
+                model=arguments.get("model"),
+            )
+        except ValueError as exc:
+            return [TextContent(type="text", text=f"recall_reflections error: {exc}")]
+        payload = {
+            "count": len(recs),
+            "reflections": [r.to_dict() for r in recs],
+        }
+        return [TextContent(type="text", text=json.dumps(payload, indent=2, default=str))]
+
+    if name == "reflection_ack":
+        from .reflections import ack_reflection as _ack_reflection
+
+        rid = (arguments.get("reflection_id") or "").strip()
+        action = (arguments.get("action") or "").strip()
+        if not rid or not action:
+            return [
+                TextContent(
+                    type="text",
+                    text="reflection_ack requires non-empty 'reflection_id' and 'action'",
+                )
+            ]
+        try:
+            updated = _ack_reflection(
+                reflection_id=rid,
+                action=action,
+                note=arguments.get("note"),
+                by=arguments.get("by"),
+            )
+        except ValueError as exc:
+            return [TextContent(type="text", text=f"reflection_ack error: {exc}")]
+        except KeyError as exc:
+            return [TextContent(type="text", text=f"reflection_ack error: {exc}")]
+        return [
+            TextContent(
+                type="text",
+                text=json.dumps(
+                    {"ok": True, "reflection": updated.to_dict()},
+                    indent=2,
+                    default=str,
+                ),
             )
         ]
 

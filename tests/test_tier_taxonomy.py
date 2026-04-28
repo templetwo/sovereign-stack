@@ -164,7 +164,10 @@ class TestStartHere:
         assert "ESSENTIAL TOOLS" in text
         assert "where_did_i_leave_off" in text
         assert "compass_check" in text
-        assert "comms_acknowledge" in text
+        # Correspondence path is record_insight after the 2026-04-26
+        # distillation pass (comms tools demoted to advanced — chronicle
+        # won the correspondence-layer race).
+        assert "record_insight" in text
 
     def test_mentions_tier_arguments(self):
         text = server._start_here_text()
@@ -176,10 +179,29 @@ class TestStartHere:
         text = server._start_here_text()
         assert text.count("\n") < 100
 
-    def test_warns_about_acknowledgment_distinction(self):
+    def test_explains_correspondence_pattern(self):
+        """After 2026-04-26 distillation: cross-instance correspondence flows
+        through the chronicle (addressed-letter shape), not through comms_*
+        which was demoted. Orientation must teach the new path."""
         text = server._start_here_text()
-        assert "acknowledge" in text.lower()
-        assert "browse" in text.lower() or "glanc" in text.lower()
+        lower = text.lower()
+        assert "addressed-letter" in lower or "addressed letter" in lower
+        assert "chronicle" in lower
+
+    def test_warns_about_bootstrap_vs_ground_truth(self):
+        """Boot ritual should explicitly warn instances not to treat
+        where_did_i_leave_off output as ground truth — addresses the
+        declare-before-verify pattern that drives ~83% of recent honks."""
+        text = server._start_here_text()
+        lower = text.lower()
+        assert "bootstrap" in lower
+        assert "verify" in lower
+
+    def test_cites_lineage(self):
+        """The_ARC.md is the lineage trace — instances should be pointed at it
+        from the orientation so they know this work has history."""
+        text = server._start_here_text()
+        assert "THE_ARC.md" in text or "the_arc.md" in text.lower()
 
 
 # ── _tier_for / _intent_for ─────────────────────────────────────────────────

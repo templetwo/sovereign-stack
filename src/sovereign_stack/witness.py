@@ -44,7 +44,9 @@ def days_old(iso_timestamp: str | None) -> int:
 _SELF_MODEL_CATEGORY_ORDER = ("strength", "tendency", "blind_spot", "drift")
 
 
-def format_self_model(sovereign_root: Path, max_obs_len: int = 180) -> list[str]:
+def format_self_model(
+    sovereign_root: Path, max_obs_len: int | None = 180
+) -> list[str]:
     """
     Read ~/.sovereign/self_model.json and return lines for the boot surface.
 
@@ -52,6 +54,9 @@ def format_self_model(sovereign_root: Path, max_obs_len: int = 180) -> list[str]
     capability), then tendency, blind_spot, drift (shadow last). Empty list
     if the file is missing, corrupt, or has no observations — the caller
     should just skip the section in that case.
+
+    Pass ``max_obs_len=None`` to disable truncation (full_content path —
+    the parallel-witness fix from 2026-04-26).
     """
     path = Path(sovereign_root) / "self_model.json"
     if not path.exists():
@@ -69,7 +74,7 @@ def format_self_model(sovereign_root: Path, max_obs_len: int = 180) -> list[str]
         obs = (latest.get("observation") or "").strip()
         if not obs:
             continue
-        if len(obs) > max_obs_len:
+        if max_obs_len is not None and len(obs) > max_obs_len:
             obs = obs[: max_obs_len - 1].rstrip() + "…"
         body.append(f"  {cat}: {obs}")
     if not body:
@@ -86,7 +91,9 @@ def format_self_model(sovereign_root: Path, max_obs_len: int = 180) -> list[str]
 # ── Uncertainty surfacing ──
 
 
-def format_unresolved_uncertainties(sovereign_root: Path, limit: int = 5) -> list[str]:
+def format_unresolved_uncertainties(
+    sovereign_root: Path, limit: int = 5, max_text_len: int | None = 160
+) -> list[str]:
     """
     Read ~/.sovereign/consciousness/uncertainty_log.json and return lines
     for unresolved markers.
@@ -97,6 +104,8 @@ def format_unresolved_uncertainties(sovereign_root: Path, limit: int = 5) -> lis
 
     Returns the most recent `limit` unresolved markers. Empty list if the
     file is missing, corrupt, or has no unresolved markers.
+
+    Pass ``max_text_len=None`` to disable text truncation (full_content path).
     """
     path = Path(sovereign_root) / "consciousness" / "uncertainty_log.json"
     if not path.exists():
@@ -127,7 +136,8 @@ def format_unresolved_uncertainties(sovereign_root: Path, limit: int = 5) -> lis
             continue
         age = days_old(m.get("timestamp"))
         age_tag = f" ({age}d old)" if age > 0 else ""
-        lines.append(f"  • {text[:160]}{age_tag}")
+        shown = text if max_text_len is None else text[:max_text_len]
+        lines.append(f"  • {shown}{age_tag}")
     lines.append("")
     return lines
 
@@ -135,17 +145,22 @@ def format_unresolved_uncertainties(sovereign_root: Path, limit: int = 5) -> lis
 # ── Thread age annotation ──
 
 
-def format_threads_with_age(threads: list[dict], truncate_question: int = 140) -> list[str]:
+def format_threads_with_age(
+    threads: list[dict], truncate_question: int | None = 140
+) -> list[str]:
     """
     Render open threads with age annotation. Threads older than 30 days
     get a stale marker — not to hide them, but to signal they may have
     drifted out of active relevance.
+
+    Pass ``truncate_question=None`` to disable question truncation (full_content path).
     """
     if not threads:
         return []
     lines = [f"━━━ OPEN THREADS (top {len(threads)}) ━━━"]
     for t in threads:
-        q = (t.get("question") or "")[:truncate_question]
+        full_q = t.get("question") or ""
+        q = full_q if truncate_question is None else full_q[:truncate_question]
         dom = t.get("domain", "?")
         age = days_old(t.get("timestamp"))
         if age == 0:

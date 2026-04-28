@@ -422,6 +422,7 @@ class PerTurnPriors:
         k: int = DEFAULT_K,
         max_tokens: int = DEFAULT_MAX_TOKENS,
         dry_run: bool = False,
+        full_content: bool = False,
     ) -> dict[str, Any]:
         """
         Assemble the priors block for this turn.
@@ -453,6 +454,11 @@ class PerTurnPriors:
             }
         """
         import uuid as _uuid
+
+        # Stash full_content for the format helpers below. Token budget still
+        # applies — overflow truncation at section 569 stays in force — but the
+        # per-item [:120] cap is removed so addressed-letter shapes survive.
+        self._full_content = bool(full_content)
 
         k = max(1, min(int(k), 3))
         max_tokens = max(50, int(max_tokens))
@@ -621,19 +627,22 @@ class PerTurnPriors:
         return f"drift: [{level} | nape] {pattern}{trig} ({when})"
 
     def _format_uncertainty(self, unc: dict) -> str:
-        what = str(unc.get("what", ""))[:120].replace("\n", " ")
+        raw = str(unc.get("what", ""))
+        what = (raw if getattr(self, "_full_content", False) else raw[:120]).replace("\n", " ")
         days = _days_old(unc.get("timestamp"))
         return f"uncertainty: [{days}d] {what}"
 
     def _format_thread(self, thread: dict) -> str:
-        q = str(thread.get("question", ""))[:120].replace("\n", " ")
+        raw = str(thread.get("question", ""))
+        q = (raw if getattr(self, "_full_content", False) else raw[:120]).replace("\n", " ")
         score = thread.get("score", thread.get("_score", 0.0))
         days = thread.get("days_old", _days_old(thread.get("timestamp")))
         domain = str(thread.get("domain", ""))[:40]
         return f"thread: [{score:.2f} | {days}d | {domain}] {q}"
 
     def _format_insight(self, ins: dict) -> str:
-        content = str(ins.get("content", ""))[:120].replace("\n", " ")
+        raw = str(ins.get("content", ""))
+        content = (raw if getattr(self, "_full_content", False) else raw[:120]).replace("\n", " ")
         score = ins.get("_score", 0.0)
         days = _days_old(ins.get("timestamp"))
         return f"insight: [{score:.2f} | {days}d] {content}"
