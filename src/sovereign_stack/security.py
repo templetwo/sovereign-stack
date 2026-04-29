@@ -20,7 +20,7 @@ import secrets
 import time
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import Lock
 from typing import Any
@@ -319,15 +319,15 @@ class Session:
     created_at: datetime
     expires_at: datetime
     data: dict[str, Any] = field(default_factory=dict)
-    last_activity: datetime = field(default_factory=datetime.utcnow)
+    last_activity: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     def is_expired(self) -> bool:
         """Check if session has expired."""
-        return datetime.utcnow() > self.expires_at
+        return datetime.now(timezone.utc) > self.expires_at
 
     def refresh(self, ttl_seconds: int = 3600) -> None:
         """Refresh session expiry."""
-        self.last_activity = datetime.utcnow()
+        self.last_activity = datetime.now(timezone.utc)
         self.expires_at = self.last_activity + timedelta(seconds=ttl_seconds)
 
 
@@ -358,7 +358,7 @@ class SessionManager:
             Cryptographically secure session ID
         """
         session_id = self._generate_secure_id()
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
 
         session = Session(
             session_id=session_id,
@@ -483,7 +483,7 @@ class SecurityError(Exception):
         super().__init__(message)
         self.message = message
         self.details = details or {}
-        self.timestamp = datetime.utcnow().isoformat()
+        self.timestamp = datetime.now(timezone.utc).isoformat()
 
         # Log security event
         logger.error(
@@ -537,7 +537,7 @@ class PersistentAuditLog:
         Returns:
             Entry hash
         """
-        timestamp = datetime.utcnow().isoformat()
+        timestamp = datetime.now(timezone.utc).isoformat()
 
         # Create entry
         entry = {

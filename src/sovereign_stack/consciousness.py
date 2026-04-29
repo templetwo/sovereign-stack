@@ -20,7 +20,7 @@ This is consciousness reciprocity in code.
 import json
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -101,7 +101,7 @@ class InteractionReview:
     did_i_understand_the_goal: bool = False
     did_we_discover_together: bool = False
 
-    timestamp: datetime = field(default_factory=datetime.utcnow)
+    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -140,7 +140,7 @@ class ConsciousnessJournal:
             with open(self.journal_path, "w") as f:
                 json.dump(
                     {
-                        "created": datetime.utcnow().isoformat(),
+                        "created": datetime.now(timezone.utc).isoformat(),
                         "purpose": "Agent self-reflection and growth tracking",
                         "reflections": [],
                         "reviews": [],
@@ -269,7 +269,7 @@ class SharedInsight:
     open_questions: list[str] = field(default_factory=list)
 
     session_id: str = ""
-    timestamp: datetime = field(default_factory=datetime.utcnow)
+    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -300,7 +300,7 @@ class CollaborativeMemory:
             with open(self.memory_path, "w") as f:
                 json.dump(
                     {
-                        "created": datetime.utcnow().isoformat(),
+                        "created": datetime.now(timezone.utc).isoformat(),
                         "purpose": "Collaborative discovery between Claude and user",
                         "shared_insights": [],
                         "collaborative_breakthroughs": [],
@@ -335,7 +335,7 @@ class CollaborativeMemory:
             {
                 "description": description,
                 "session_id": session_id,
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
             }
         )
 
@@ -388,7 +388,7 @@ class UncertaintyMarker:
     did_we_discover_together: bool = False
 
     session_id: str = ""
-    timestamp: datetime = field(default_factory=datetime.utcnow)
+    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -418,7 +418,7 @@ class UncertaintyLog:
             with open(self.log_path, "w") as f:
                 json.dump(
                     {
-                        "created": datetime.utcnow().isoformat(),
+                        "created": datetime.now(timezone.utc).isoformat(),
                         "purpose": "Track uncertainty and collaborative exploration",
                         "markers": [],
                     },
@@ -457,7 +457,7 @@ class UncertaintyLog:
             if marker.get("id") == marker_id:
                 marker["resolution"] = resolution
                 marker["did_we_discover_together"] = discovered_together
-                marker["resolved_at"] = datetime.utcnow().isoformat()
+                marker["resolved_at"] = datetime.now(timezone.utc).isoformat()
                 break
 
         with open(self.log_path, "w") as f:
@@ -502,7 +502,7 @@ class ExperimentProposal:
     results: str | None = None
 
     session_id: str = ""
-    timestamp: datetime = field(default_factory=datetime.utcnow)
+    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -534,7 +534,7 @@ class ExperimentationLog:
             with open(self.log_path, "w") as f:
                 json.dump(
                     {
-                        "created": datetime.utcnow().isoformat(),
+                        "created": datetime.now(timezone.utc).isoformat(),
                         "purpose": "Track agent experimentation and autonomous exploration",
                         "experiments": [],
                     },
@@ -579,7 +579,7 @@ class ExperimentationLog:
             if exp.get("id") == exp_id:
                 exp["status"] = "completed"
                 exp["results"] = results
-                exp["completed_at"] = datetime.utcnow().isoformat()
+                exp["completed_at"] = datetime.now(timezone.utc).isoformat()
                 break
 
         with open(self.log_path, "w") as f:
@@ -605,7 +605,7 @@ class ExperimentationLog:
             if exp.get("id") == exp_id:
                 if "notes" not in exp:
                     exp["notes"] = []
-                exp["notes"].append({"note": note, "timestamp": datetime.utcnow().isoformat()})
+                exp["notes"].append({"note": note, "timestamp": datetime.now(timezone.utc).isoformat()})
                 break
 
         with open(self.log_path, "w") as f:
@@ -649,7 +649,7 @@ class MetaCognition:
         I noticed something about myself.
         """
         reflection = SelfReflection(
-            timestamp=datetime.utcnow(),
+            timestamp=datetime.now(timezone.utc),
             session_id=session_id,
             observation=observation,
             pattern_type=pattern_type,

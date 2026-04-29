@@ -22,7 +22,7 @@ Verifies the contract documented in the handoff from opus-4-7-web (2026-04-25):
 import json
 import shutil
 import tempfile
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -57,7 +57,7 @@ def memory(sovereign_root):
 
 
 def _now_iso(offset_seconds: int = 0) -> str:
-    return (datetime.utcnow() + timedelta(seconds=offset_seconds)).isoformat()
+    return (datetime.now(timezone.utc) + timedelta(seconds=offset_seconds)).isoformat()
 
 
 def _make_priors(surface, root, uncertainty=None, honks=None):

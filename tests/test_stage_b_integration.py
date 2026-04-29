@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import shutil
 import tempfile
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -25,7 +25,7 @@ from sovereign_stack.reflexive import PerTurnPriors, ReflexiveSurface
 
 
 def _now_iso(offset_seconds: int = 0) -> str:
-    return (datetime.utcnow() + timedelta(seconds=offset_seconds)).isoformat()
+    return (datetime.now(timezone.utc) + timedelta(seconds=offset_seconds)).isoformat()
 
 
 def _sharp_honk(honk_id: str = "h1") -> list[dict]:

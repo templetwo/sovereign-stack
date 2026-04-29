@@ -9,7 +9,7 @@ This creates high-fidelity short-term memory that survives compaction.
 
 import json
 from dataclasses import asdict, dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -70,7 +70,7 @@ class CompactionMemoryBuffer:
         """Persist buffer to disk"""
         data = {
             "summaries": [s.to_dict() for s in self.summaries],
-            "last_updated": datetime.utcnow().isoformat(),
+            "last_updated": datetime.now(timezone.utc).isoformat(),
         }
 
         with open(self.buffer_file, "w") as f:
@@ -98,7 +98,7 @@ class CompactionMemoryBuffer:
 
         # Create new summary
         new_summary = CompactionSummary(
-            timestamp=datetime.utcnow().isoformat(),
+            timestamp=datetime.now(timezone.utc).isoformat(),
             summary_text=summary_text,
             session_id=session_id,
             compaction_number=compaction_number,

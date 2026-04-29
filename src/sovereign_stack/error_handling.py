@@ -18,7 +18,7 @@ import time
 from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, TypeVar
 
@@ -62,7 +62,7 @@ class ErrorContext:
     severity: ErrorSeverity
     operation: str
     details: dict[str, Any]
-    timestamp: datetime = field(default_factory=datetime.utcnow)
+    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     stack_trace: str | None = None
     recovery_suggestion: str | None = None
 
@@ -420,7 +420,7 @@ class CircuitBreaker:
     def _on_failure(self) -> None:
         """Handle failed operation."""
         self.failure_count += 1
-        self.last_failure_time = datetime.utcnow()
+        self.last_failure_time = datetime.now(timezone.utc)
 
         if self.state == CircuitState.HALF_OPEN:
             self.state = CircuitState.OPEN
@@ -434,7 +434,7 @@ class CircuitBreaker:
         if not self.last_failure_time:
             return True
 
-        elapsed = (datetime.utcnow() - self.last_failure_time).total_seconds()
+        elapsed = (datetime.now(timezone.utc) - self.last_failure_time).total_seconds()
         return elapsed >= self.config.recovery_timeout
 
     def reset(self) -> None:

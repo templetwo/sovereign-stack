@@ -36,15 +36,15 @@ silent_subprocess(monkeypatch)
 
 frozen_now(monkeypatch)
     Monkeypatches ``datetime.datetime`` in the ``datetime`` module so that
-    ``datetime.now()`` and ``datetime.utcnow()`` always return the same
-    stable instant (2026-04-24 12:00:00 UTC).  Useful for tests that
-    write timestamps and compare them to expected strings.
+    ``datetime.now()`` always returns the same stable instant
+    (2026-04-24 12:00:00 UTC).  Useful for tests that write timestamps
+    and compare them to expected strings.
 
     Usage::
 
         def test_stamped(frozen_now):
-            from datetime import datetime
-            assert datetime.utcnow().year == 2026
+            from datetime import datetime, timezone
+            assert datetime.now(timezone.utc).year == 2026
 """
 
 from __future__ import annotations

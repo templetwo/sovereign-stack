@@ -27,7 +27,7 @@ memory profiles).
 import json
 import re
 from collections.abc import Callable
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -672,7 +672,7 @@ class PerTurnPriors:
         # honk source is unavailable — degrade gracefully rather than surface noise.
         except Exception:
             return None
-        cutoff = datetime.utcnow().timestamp() - self.HONK_WINDOW_SECONDS
+        cutoff = datetime.now(timezone.utc).timestamp() - self.HONK_WINDOW_SECONDS
         for h in honks:
             if h.get("level") not in ("uneasy", "sharp", "low"):
                 continue
@@ -737,7 +737,7 @@ class PerTurnPriors:
         turn_id: str | None = None,
     ) -> None:
         record = {
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "included_items": included_items,
         }
         if turn_id is not None:
