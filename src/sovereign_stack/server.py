@@ -568,7 +568,10 @@ async def list_tools():
                     "(record_insight + spiral_reflect + handoff). This is the ceremony-killer: "
                     "lowering friction on the reflection ritual until it's cheaper to do than to skip. "
                     "Also advances the spiral phase forward one step — side-effect that keeps the phase "
-                    "counter moving even on tired sessions."
+                    "counter moving even on tired sessions. "
+                    "NOTE: close_session does NOT rotate the session_id. The session_id remains the "
+                    "same on the next boot. To start a genuinely new session with a fresh session_id, "
+                    "call spiral_inherit explicitly after closing."
                 ),
                 inputSchema={
                     "type": "object",
@@ -2209,7 +2212,11 @@ async def _dispatch_tool(name: str, arguments: dict):
             f"  Instance: {source_instance}\n"
             f"  Thread: {thread}\n\n"
         )
-        return [TextContent(type="text", text=signature + "\n".join(results))]
+        rotation_note = (
+            "\n\n⚠ session_id not rotated — this session_id carries into the next boot.\n"
+            "  Call spiral_inherit() to start a genuinely new session with a fresh session_id."
+        )
+        return [TextContent(type="text", text=signature + "\n".join(results) + rotation_note)]
 
     if name == "where_did_i_leave_off":
         thread_filter = arguments.get("thread")
