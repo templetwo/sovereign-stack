@@ -337,25 +337,34 @@ def check_status(
 
     # ── HTTP probe (downgrade on failure, do not upgrade) ──
     if endpoint.health_url:
-        probe = _http_probe(endpoint.health_url)
-        status.http_status = probe["http_status"]
-        if probe["error"]:
-            status.http_error = probe["error"]
-            status.http_ok = False
-        elif probe["http_status"] and 200 <= probe["http_status"] < 300:
-            if endpoint.health_match:
-                status.http_ok = endpoint.health_match in probe["body"]
-                if not status.http_ok:
-                    status.notes.append(f"health body missing match {endpoint.health_match!r}")
-            else:
-                status.http_ok = True
+        # Self-probe guard: if the PID of this service matches our own
+        # process, the responding tool call proves liveness. Probing our
+        # own HTTP port via blocking urllib inside an async event loop
+        # deadlocks — urlopen blocks the thread, the loop can't serve
+        # the /health request, timeout, DEGRADED. Skip and trust launchctl.
+        if status.pid is not None and status.pid == os.getpid():
+            status.http_ok = True
+            status.notes.append("self-probe skipped — tool response proves liveness")
         else:
-            status.http_ok = False
+            probe = _http_probe(endpoint.health_url)
+            status.http_status = probe["http_status"]
+            if probe["error"]:
+                status.http_error = probe["error"]
+                status.http_ok = False
+            elif probe["http_status"] and 200 <= probe["http_status"] < 300:
+                if endpoint.health_match:
+                    status.http_ok = endpoint.health_match in probe["body"]
+                    if not status.http_ok:
+                        status.notes.append(f"health body missing match {endpoint.health_match!r}")
+                else:
+                    status.http_ok = True
+            else:
+                status.http_ok = False
 
-        # Failure on an otherwise-OK service -> degraded.
-        if status.http_ok is False and status.status == STATUS_OK:
-            status.status = STATUS_DEGRADED
-            status.notes.append("launchctl OK but health probe failed")
+            # Failure on an otherwise-OK service -> degraded.
+            if status.http_ok is False and status.status == STATUS_OK:
+                status.status = STATUS_DEGRADED
+                status.notes.append("launchctl OK but health probe failed")
 
     return status
 

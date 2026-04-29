@@ -13,6 +13,7 @@ Tools:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from datetime import datetime, timezone
@@ -118,9 +119,14 @@ def _format_pretty(agg: dict) -> str:
     return "\n".join(lines)
 
 
-def _do_connectivity_status(arguments: dict) -> str:
+async def _do_connectivity_status(arguments: dict) -> str:
     fmt = (arguments or {}).get("format", "pretty")
-    statuses = connectivity.check_all()
+    # Run blocking urllib probes in a thread-pool executor so they do not
+    # freeze the asyncio event loop. Without this, probing any external
+    # localhost service from inside the SSE handler stalls the SSE stream
+    # and causes timeout false-positives (even though the target is healthy).
+    loop = asyncio.get_event_loop()
+    statuses = await loop.run_in_executor(None, connectivity.check_all)
     agg = connectivity.aggregate(statuses)
     if fmt == "json":
         return json.dumps(agg, indent=2)
@@ -222,7 +228,7 @@ async def handle_connectivity_tool(name: str, arguments: dict):
     arguments = arguments or {}
 
     if name == "connectivity_status":
-        text = _do_connectivity_status(arguments)
+        text = await _do_connectivity_status(arguments)
         return [TextContent(type="text", text=text)]
 
     if name == "stack_write_check":

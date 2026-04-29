@@ -279,6 +279,50 @@ class TestCheckStatusAlwaysOn:
         assert s.status == STATUS_DEGRADED
         assert s.http_ok is False
 
+    def test_self_probe_skipped_when_pid_matches_own_process(self):
+        """When the service PID == our PID, skip the HTTP probe entirely.
+
+        Probing our own port via blocking urllib inside an async event loop
+        deadlocks. The fact that this tool call is executing proves the
+        service is alive — no HTTP round-trip needed.
+        """
+        import os
+
+        my_pid = os.getpid()
+        ep = self._ep(health_url="http://127.0.0.1:3434/health", health_match="healthy")
+        with (
+            patch.object(
+                conn,
+                "_launchctl_print_text",
+                return_value=f"state = running\npid = {my_pid}\n",
+            ),
+            patch.object(conn, "_http_probe") as mock_probe,
+        ):
+            s = check_status(ep)
+        mock_probe.assert_not_called()
+        assert s.status == STATUS_OK
+        assert s.http_ok is True
+        assert any("self-probe skipped" in n for n in s.notes)
+
+    def test_non_self_probe_still_runs_http_check(self):
+        """When the service PID != our PID, the HTTP probe runs normally."""
+        ep = self._ep(health_url="http://127.0.0.1:3434/health")
+        with (
+            patch.object(
+                conn,
+                "_launchctl_print_text",
+                return_value="state = running\npid = 99999\n",
+            ),
+            patch.object(
+                conn,
+                "_http_probe",
+                return_value={"http_status": None, "body": "", "error": "url_error: refused"},
+            ) as mock_probe,
+        ):
+            s = check_status(ep)
+        mock_probe.assert_called_once()
+        assert s.status == STATUS_DEGRADED
+
 
 # ── check_status: periodic logic ────────────────────────────────────────────
 
