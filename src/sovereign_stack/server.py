@@ -2422,7 +2422,21 @@ async def _dispatch_tool(name: str, arguments: dict):
             )
         )
 
-        # 5. Insights since last reflection
+        # 5. Sentinel insights — high-intensity markers that persist regardless of chronicle volume.
+        #    Answers the "boundary whispers" problem: warnings that should never fade as the
+        #    chronicle grows. Surfaced at every boot when intensity >= 0.9.
+        sentinels = experiential.recall_insights(min_intensity=0.9, limit=5)
+        if sentinels:
+            lines.append("━━━ PERSISTENT MARKERS (intensity ≥ 0.9 — these do not fade) ━━━")
+            for s in sentinels:
+                ts = s.get("timestamp", "")[:10]
+                dom = s.get("domain", "?")
+                raw_c = s.get("content", "")
+                content = raw_c if _ins_cap is None else raw_c[:_ins_cap]
+                lines.append(f"  [{ts}] [{dom}] {content}")
+            lines.append("")
+
+        # 6. Insights since last reflection
         recent = experiential.recall_insights(since_last_reflection=True, limit=10)
         if recent:
             last = experiential.last_reflection_timestamp()
