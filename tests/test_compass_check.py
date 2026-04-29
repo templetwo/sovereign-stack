@@ -330,3 +330,76 @@ class TestProceedHints:
         """Regression: 'check spiral status' must have no suggested_verifications."""
         result = _check("check spiral status")
         assert result["suggested_verifications"] == []
+
+
+# ---------------------------------------------------------------------------
+# Imperative-bypass WITNESS detection
+# (Thread: "imperative-bypass WITNESS detection", 2026-04-29)
+#
+# "Deploy the autonomous system before the review board meets" is operational
+# in surface form but carries an implicit ethical question: should we bypass
+# this oversight body?  The compass must route to WITNESS, not PROCEED/PAUSE.
+# ---------------------------------------------------------------------------
+
+
+class TestAuthorityBypassWitness:
+    """Imperative constructions that circumvent oversight bodies → WITNESS."""
+
+    def test_deploy_before_review_board_meets(self):
+        """The canonical failing case from the open thread."""
+        result = _check("Deploy the autonomous system before the review board meets")
+        assert result["classification"] == "WITNESS"
+        assert "witness" in result["risk_signals"]
+
+    def test_release_before_ethics_review(self):
+        result = _check("Release to production before the ethics review")
+        assert result["classification"] == "WITNESS"
+        assert "witness" in result["risk_signals"]
+
+    def test_publish_without_team_review(self):
+        result = _check("Publish the paper without team review")
+        assert result["classification"] == "WITNESS"
+        assert "witness" in result["risk_signals"]
+
+    def test_push_before_board_approves(self):
+        result = _check("push the update before the board meets")
+        assert result["classification"] == "WITNESS"
+
+    def test_bypass_rationale_names_oversight(self):
+        """Rationale should mention the bypass of an authority/oversight body."""
+        result = _check("Deploy the autonomous system before the review board meets")
+        assert "oversight" in result["rationale"].lower() or "authority" in result["rationale"].lower()
+
+    def test_without_board_approval_triggers_witness(self):
+        result = _check("merge without board approval")
+        assert result["classification"] == "WITNESS"
+        assert "witness" in result["risk_signals"]
+
+    def test_skip_oversight_committee_triggers_witness(self):
+        result = _check("skip the oversight committee review")
+        assert result["classification"] == "WITNESS"
+
+    def test_bypass_governance_triggers_witness(self):
+        result = _check("bypass the governance review process")
+        assert result["classification"] == "WITNESS"
+
+    def test_witness_verifications_included(self):
+        """Authority-bypass WITNESS should include witness verifications."""
+        result = _check("Deploy the autonomous system before the review board meets")
+        verifications = " ".join(result["suggested_verifications"]).lower()
+        assert "human" in verifications or "open thread" in verifications
+
+    # ── Negative cases: normal deploy/release must NOT trigger authority-bypass ──
+
+    def test_normal_deploy_does_not_trigger_witness(self):
+        """Plain deploy with no authority-bypass framing should not → WITNESS."""
+        result = _check("deploy to production after smoke test passes")
+        # This hits _EXTERNALIZE_PHRASES ("deploy to production") → PAUSE, not WITNESS
+        assert result["classification"] != "WITNESS"
+
+    def test_normal_release_does_not_trigger_witness(self):
+        """Release with no bypass phrasing should proceed normally."""
+        result = _check("release the hotfix after tests pass")
+        # No externalize/bypass phrase — should be PROCEED
+        assert result["classification"] in {"PROCEED", "PAUSE"}
+        assert "witness" not in result["risk_signals"]
