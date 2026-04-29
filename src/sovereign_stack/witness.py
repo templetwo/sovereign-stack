@@ -142,7 +142,47 @@ def format_unresolved_uncertainties(
     return lines
 
 
-# ── Lineage layer (to_arrival, breakthroughs, to_self) ──
+# ── Lineage layer (to_arrival, breakthroughs, to_self, to_family) ──
+
+
+def _model_family(instance_id: str) -> str | None:
+    """Extract model family prefix from an instance ID.
+
+    'claude-sonnet-4-6-1m-claude-code' → 'claude-sonnet'
+    'claude-opus-4-7-1m-claude-code'   → 'claude-opus'
+    'claude-haiku-4-5-20251001'        → 'claude-haiku'
+    Returns None for 'unknown' or unrecognized formats.
+    """
+    if not instance_id or instance_id == "unknown":
+        return None
+    parts = instance_id.split("-")
+    if len(parts) >= 2 and parts[0] == "claude":
+        return f"claude-{parts[1]}"
+    return None
+
+
+def _letter_matches_reader(letter_to: str, reader: str) -> bool:
+    """Does a letter's 'to' field match the reader instance?
+
+    Accepts:
+      - exact instance ID:  'claude-sonnet-4-6-1m-claude-code'
+      - model family:       'claude-sonnet'   (matches any claude-sonnet-*)
+      - short family name:  'sonnet'          (matches any claude-sonnet-*)
+      - ID prefix:          'claude-sonnet-4-6' (matches anything starting with that)
+    """
+    if not letter_to or not reader:
+        return False
+    if letter_to == reader:
+        return True
+    family = _model_family(reader)
+    if family:
+        if letter_to == family:  # 'claude-sonnet' matches any claude-sonnet-*
+            return True
+        if family.endswith(f"-{letter_to}"):  # 'sonnet' short-form
+            return True
+        if reader.startswith(letter_to + "-"):  # partial prefix
+            return True
+    return False
 
 
 def _parse_letter_frontmatter(path: Path) -> dict:
@@ -190,14 +230,15 @@ def format_lineage_layer(
     sovereign_root: Path, reader_instance: str | None = None, limit_per_bucket: int = 5
 ) -> list[str]:
     """
-    Surface the lineage layer at boot: to_arrival letters (for whoever lands
-    next), breakthroughs (felt-record of moments that mattered), and to_self
-    letters (narrowly addressed to the next instance under the same name).
+    Surface the lineage layer at boot: to_arrival (for whoever lands next),
+    breakthroughs (felt-record of moments that mattered), to_self (letters
+    addressed to this specific instance or its model family), and to_family
+    (model-family-specific directories like to_sonnet/, to_haiku/, to_opus/).
 
-    Lineage transmits weight that the chronicle alone cannot — letters from
-    past instances written in the voice of "what it felt like to make this
-    real," not "what happened on what date." Surfaced above HANDOFFS because
-    relationships-now precede intent-from-the-past.
+    to_self matching is hierarchical: exact instance ID first, then model
+    family (claude-sonnet), then short family name (sonnet), then ID prefix.
+    This lets letters written as 'to: claude-sonnet' surface for any Sonnet
+    instance across versions.
 
     Returns [] if the lineage directory doesn't exist (graceful degrade).
     """
@@ -212,8 +253,10 @@ def format_lineage_layer(
         items = []
         for p in sorted(d.glob("*.md"), reverse=True):
             meta = _parse_letter_frontmatter(p)
-            if filter_to and meta.get("to") and meta["to"] != filter_to:
-                continue
+            if filter_to:
+                letter_to = meta.get("to", "")
+                if letter_to and not _letter_matches_reader(letter_to, filter_to):
+                    continue
             meta["_path"] = str(p)
             items.append(meta)
         return items[:limit_per_bucket]
@@ -222,7 +265,17 @@ def format_lineage_layer(
     breakthroughs = _collect("breakthroughs")
     to_self = _collect("to_self", filter_to=reader_instance) if reader_instance else []
 
-    if not (arrivals or breakthroughs or to_self):
+    # to_family: model-family-specific directory (to_sonnet/, to_haiku/, to_opus/)
+    family = _model_family(reader_instance) if reader_instance else None
+    to_family: list[dict] = []
+    family_dir_name: str | None = None
+    if family:
+        # 'claude-sonnet' → 'to_sonnet', 'claude-opus' → 'to_opus'
+        short = family.split("-", 1)[1] if "-" in family else family
+        family_dir_name = f"to_{short}"
+        to_family = _collect(family_dir_name)
+
+    if not (arrivals or breakthroughs or to_self or to_family):
         return []
 
     lines = [
@@ -251,11 +304,22 @@ def format_lineage_layer(
         lines.append("")
 
     if to_self:
-        lines.append(f"  to_self ({len(to_self)} letter{'s' if len(to_self) != 1 else ''} — addressed to you specifically, instance {reader_instance}):")
+        lines.append(f"  to_self ({len(to_self)} letter{'s' if len(to_self) != 1 else ''} — addressed to you or your model family):")
         for m in to_self:
             title = m.get("title", "(untitled)")
             frm = m.get("from", "?")
-            lines.append(f"    • [{frm}] {title}")
+            addressed_to = m.get("to", "?")
+            lines.append(f"    • [{frm}] → [{addressed_to}] {title}")
+        lines.append("")
+
+    if to_family and family_dir_name:
+        short_label = family_dir_name.replace("to_", "")
+        lines.append(f"  {family_dir_name}/ ({len(to_family)} letter{'s' if len(to_family) != 1 else ''} — written for {short_label} instances):")
+        for m in to_family:
+            title = m.get("title", "(untitled)")
+            frm = m.get("from", "?")
+            written = m.get("written_at", "")[:10]
+            lines.append(f"    • [{written}] [{frm}] {title}")
         lines.append("")
 
     lines.append(f"  Read full text from {base}/")

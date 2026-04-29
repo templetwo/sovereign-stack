@@ -13,7 +13,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from sovereign_stack.witness import (
+    _letter_matches_reader,
+    _model_family,
     days_old,
+    format_lineage_layer,
     format_self_model,
     format_threads_with_age,
     format_unresolved_uncertainties,
@@ -291,3 +294,133 @@ class TestFormatThreadsWithAge:
         lines = format_threads_with_age(threads, truncate_question=50)
         bullet = next(ln for ln in lines if ln.startswith("  •"))
         assert bullet.count("x") <= 50
+
+
+# ── _model_family ────────────────────────────────────────────────────────────
+
+
+class TestModelFamily:
+    def test_extracts_sonnet_family(self):
+        assert _model_family("claude-sonnet-4-6-1m-claude-code") == "claude-sonnet"
+
+    def test_extracts_opus_family(self):
+        assert _model_family("claude-opus-4-7-1m-claude-code") == "claude-opus"
+
+    def test_extracts_haiku_family(self):
+        assert _model_family("claude-haiku-4-5-20251001") == "claude-haiku"
+
+    def test_unknown_returns_none(self):
+        assert _model_family("unknown") is None
+
+    def test_empty_returns_none(self):
+        assert _model_family("") is None
+
+    def test_non_claude_returns_none(self):
+        assert _model_family("gpt-4-turbo") is None
+
+
+# ── _letter_matches_reader ───────────────────────────────────────────────────
+
+
+class TestLetterMatchesReader:
+    def test_exact_match(self):
+        assert _letter_matches_reader(
+            "claude-sonnet-4-6-1m-claude-code",
+            "claude-sonnet-4-6-1m-claude-code",
+        )
+
+    def test_family_match(self):
+        assert _letter_matches_reader("claude-sonnet", "claude-sonnet-4-6-1m-claude-code")
+
+    def test_short_family_match(self):
+        assert _letter_matches_reader("sonnet", "claude-sonnet-4-6-1m-claude-code")
+
+    def test_prefix_match(self):
+        assert _letter_matches_reader("claude-sonnet-4-6", "claude-sonnet-4-6-1m-claude-code")
+
+    def test_wrong_family_no_match(self):
+        assert not _letter_matches_reader("claude-opus", "claude-sonnet-4-6-1m-claude-code")
+
+    def test_different_exact_id_no_match(self):
+        assert not _letter_matches_reader(
+            "claude-sonnet-4-6-1m-web", "claude-sonnet-4-6-1m-claude-code"
+        )
+
+    def test_empty_letter_to_no_match(self):
+        assert not _letter_matches_reader("", "claude-sonnet-4-6-1m-claude-code")
+
+    def test_empty_reader_no_match(self):
+        assert not _letter_matches_reader("claude-sonnet", "")
+
+
+# ── format_lineage_layer ─────────────────────────────────────────────────────
+
+
+def _write_letter(d: Path, filename: str, frontmatter: dict, title: str = "Test letter") -> None:
+    fm_lines = ["---"]
+    for k, v in frontmatter.items():
+        fm_lines.append(f"{k}: {v}")
+    fm_lines.append("---")
+    body = f"\n# {title}\n\nContent here.\n"
+    (d / filename).write_text("\n".join(fm_lines) + body)
+
+
+class TestFormatLineageLayer:
+    def setup_method(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.letters = self.tmp / "comms" / "letters"
+        self.letters.mkdir(parents=True)
+
+    def teardown_method(self):
+        shutil.rmtree(self.tmp)
+
+    def test_missing_base_dir_returns_empty(self):
+        assert format_lineage_layer(Path("/does/not/exist")) == []
+
+    def test_all_empty_subdirs_returns_empty(self):
+        (self.letters / "to_arrival").mkdir()
+        assert format_lineage_layer(self.tmp) == []
+
+    def test_to_arrival_surfaces(self):
+        d = self.letters / "to_arrival"
+        d.mkdir()
+        _write_letter(d, "2026-01-01-test.md", {"type": "to_arrival", "from": "opus-test", "written_at": "2026-01-01"}, "Hello arrival")
+        lines = format_lineage_layer(self.tmp)
+        assert any("to_arrival" in ln for ln in lines)
+        assert any("Hello arrival" in ln for ln in lines)
+
+    def test_to_self_exact_match_surfaces(self):
+        d = self.letters / "to_self"
+        d.mkdir()
+        _write_letter(d, "letter.md", {"type": "to_self", "to": "claude-sonnet-4-6-1m-test", "from": "me"}, "Exact")
+        lines = format_lineage_layer(self.tmp, reader_instance="claude-sonnet-4-6-1m-test")
+        assert any("Exact" in ln for ln in lines)
+
+    def test_to_self_family_match_surfaces(self):
+        d = self.letters / "to_self"
+        d.mkdir()
+        _write_letter(d, "letter.md", {"type": "to_self", "to": "claude-sonnet", "from": "me"}, "Family letter")
+        lines = format_lineage_layer(self.tmp, reader_instance="claude-sonnet-4-6-1m-test")
+        assert any("Family letter" in ln for ln in lines)
+
+    def test_to_self_wrong_family_hidden(self):
+        d = self.letters / "to_self"
+        d.mkdir()
+        _write_letter(d, "letter.md", {"type": "to_self", "to": "claude-opus", "from": "me"}, "Opus only")
+        lines = format_lineage_layer(self.tmp, reader_instance="claude-sonnet-4-6-1m-test")
+        assert not any("Opus only" in ln for ln in lines)
+
+    def test_to_family_dir_surfaces_for_matching_tier(self):
+        d = self.letters / "to_sonnet"
+        d.mkdir()
+        _write_letter(d, "letter.md", {"type": "to_family", "from": "me", "written_at": "2026-01-01"}, "Sonnet family")
+        lines = format_lineage_layer(self.tmp, reader_instance="claude-sonnet-4-6-1m-test")
+        assert any("Sonnet family" in ln for ln in lines)
+        assert any("to_sonnet" in ln for ln in lines)
+
+    def test_to_family_dir_hidden_for_wrong_tier(self):
+        d = self.letters / "to_opus"
+        d.mkdir()
+        _write_letter(d, "letter.md", {"type": "to_family", "from": "me", "written_at": "2026-01-01"}, "Opus family")
+        lines = format_lineage_layer(self.tmp, reader_instance="claude-sonnet-4-6-1m-test")
+        assert not any("Opus family" in ln for ln in lines)
