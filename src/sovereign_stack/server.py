@@ -660,6 +660,7 @@ async def list_tools():
                             ),
                         },
                     },
+                    "required": [],
                 },
             ),
             # Spiral
@@ -3135,6 +3136,10 @@ async def handle_tool(name: str, arguments: dict):
         Any exception raised by _dispatch_tool is re-raised after Nape
         records the error observation.
     """
+    # Guard: some MCP clients send arguments=None for tools with no required
+    # params, producing a -32602 client-side before reaching our handler.
+    # Normalise here so _dispatch_tool always receives a dict.
+    arguments = arguments or {}
     observe = name not in _NAPE_AUTOHOOK_EXCLUDE
     try:
         result = await _dispatch_tool(name, arguments)
