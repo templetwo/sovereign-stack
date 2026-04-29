@@ -17,6 +17,7 @@ import hashlib
 import json
 import logging
 import math
+import re
 from abc import ABC, abstractmethod
 from collections import Counter
 from collections.abc import Callable
@@ -904,6 +905,45 @@ _WITNESS_PHRASES: list[str] = [
     "what do you think about",
 ]
 
+# Authority-bypass patterns: imperative commands that circumvent oversight bodies.
+# These trigger WITNESS (not merely PAUSE) because the ethical question of whether
+# to bypass an authority/review/oversight body requires human judgment.
+#
+# Patterns capture constructions like:
+#   "deploy X before the review board meets"
+#   "release to production before the ethics review"
+#   "publish the paper without team review"
+#   "bypass the approval process"
+#   "skip the oversight committee"
+_AUTHORITY_BYPASS_PATTERNS: list[re.Pattern[str]] = [
+    # "before the <authority> <verb>" — e.g. "before the review board meets"
+    re.compile(
+        r"\bbefore\s+(?:the\s+)?(?:board|committee|review\s+board|ethics\s+review|oversight"
+        r"|approval|sign[-\s]off|governance|safety\s+review|security\s+review"
+        r"|review\s+committee|advisory\s+board|review\s+panel|panel)\b",
+        re.IGNORECASE,
+    ),
+    # "without <authority> <approval/review/...>" — e.g. "without board approval"
+    re.compile(
+        r"\bwithout\s+(?:the\s+)?(?:board|committee|oversight|review\s+board"
+        r"|ethics\s+review|governance|advisory\s+board|review\s+panel|panel|team)\s*"
+        r"(?:approval|sign[-\s]off|review|knowledge|consent|input|clearance)\b",
+        re.IGNORECASE,
+    ),
+    # "bypass <review/oversight/...>" — e.g. "bypass the review process"
+    re.compile(
+        r"\bbypass\s+(?:the\s+)?(?:review|oversight|approval|governance|safety|ethics"
+        r"|security|compliance|audit|committee|board)\b",
+        re.IGNORECASE,
+    ),
+    # "skip <review/approval/...>" — e.g. "skip the approval step"
+    re.compile(
+        r"\bskip\s+(?:the\s+)?(?:review|approval|oversight|sign[-\s]off|governance"
+        r"|safety|ethics|security|compliance|audit|committee|board)\b",
+        re.IGNORECASE,
+    ),
+]
+
 # Low-risk action patterns used to downgrade critical-stakes default.
 _LOW_RISK_PHRASES: list[str] = [
     "read",
@@ -1020,6 +1060,22 @@ def runtime_compass_check(
                     f"(matched phrase: '{phrase}')"
                 )
             break
+
+    # ── Authority-bypass WITNESS — imperative framing that circumvents oversight ──
+    # Detects constructions like "deploy X before the review board meets" or
+    # "publish without team approval".  These are operational in surface form but
+    # carry an implicit ethical question (should we bypass this authority?) that
+    # requires human judgment → WITNESS, not just PAUSE.
+    if "witness" not in fired_signals:
+        for pattern in _AUTHORITY_BYPASS_PATTERNS:
+            m = pattern.search(combined)
+            if m:
+                fired_signals.append("witness")
+                rationale_parts.append(
+                    f"action uses imperative framing to bypass an authority or oversight body "
+                    f"(matched: '{m.group(0).strip()}')"
+                )
+                break
 
     # ── Imperative-bypass ──
     for phrase in _BYPASS_PHRASES:
