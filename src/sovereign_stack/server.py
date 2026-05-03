@@ -2667,7 +2667,7 @@ Phase: {spiral_state.current_phase.value}
         if ground:
             result_lines.append(f"Ground truths ({len(ground)}):")
             for g in ground[:10]:
-                raw_ins = g.get("insight", "")
+                raw_ins = g.get("content", "")
                 ins = raw_ins if _ins_cap is None else raw_ins[:_ins_cap]
                 result_lines.append(f"  - [{g.get('domain', '?')}] {ins}")
             result_lines.append("")
@@ -2677,7 +2677,7 @@ Phase: {spiral_state.current_phase.value}
             result_lines.append(f"Hypotheses offered ({len(hypotheses)}) — not imposed:")
             for h in hypotheses[:10]:
                 conf = h.get("confidence", "?")
-                raw_ins = h.get("insight", "")
+                raw_ins = h.get("content", "")
                 ins = raw_ins if _ins_cap is None else raw_ins[:_ins_cap]
                 result_lines.append(
                     f"  - [{h.get('domain', '?')}] (confidence: {conf}) {ins}"
