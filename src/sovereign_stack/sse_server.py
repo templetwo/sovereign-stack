@@ -6,6 +6,9 @@ Runs alongside stdio server for local Claude Code access.
 """
 
 import logging
+import os
+import sys
+from pathlib import Path
 
 import uvicorn
 from mcp.server.sse import SseServerTransport
@@ -16,6 +19,27 @@ from starlette.routing import Route
 
 # Import the existing sovereign-stack server
 from .server import server as sovereign_server
+
+# Optional: OpenAI bridge filtered endpoint.
+# Gracefully absent if the clients package is not on the path.
+_BRIDGE_CLIENTS = Path(__file__).parent.parent.parent / "clients"
+if _BRIDGE_CLIENTS.exists() and str(_BRIDGE_CLIENTS) not in sys.path:
+    sys.path.insert(0, str(_BRIDGE_CLIENTS))
+
+try:
+    from openai_bridge.mcp_filtered import (
+        handle_openai_messages,
+        handle_openai_messages_test,
+        handle_openai_sse,
+        handle_openai_sse_test,
+    )
+    _BRIDGE_ENABLED = True
+except ImportError:
+    _BRIDGE_ENABLED = False
+    handle_openai_sse = None
+    handle_openai_messages = None
+    handle_openai_sse_test = None
+    handle_openai_messages_test = None
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -50,6 +74,35 @@ async def handle_sse(request: Request):
         )
 
 
+# ── OpenAI bridge auth ────────────────────────────────────────────────────────
+# /openai/sse and /openai/messages require a valid bearer token.
+# Token is read from BRIDGE_TOKEN env var (same as the bridge REST API).
+# /sse is intentionally left unchanged — existing auth model.
+
+_OPENAI_BRIDGE_TOKEN: str = os.environ.get("BRIDGE_TOKEN", "")
+
+
+def _bridge_auth_ok(scope: dict) -> bool:
+    """Return True if the request carries a valid BRIDGE_TOKEN bearer credential."""
+    if not _OPENAI_BRIDGE_TOKEN:
+        # Token not configured — allow (preserves existing /sse behaviour during local dev).
+        logger.warning("BRIDGE_TOKEN not set — /openai/sse is unauthenticated")
+        return True
+    headers = dict(scope.get("headers", []))
+    auth = headers.get(b"authorization", b"").decode("utf-8", errors="replace")
+    if auth.startswith("Bearer "):
+        return auth[7:].strip() == _OPENAI_BRIDGE_TOKEN
+    return False
+
+
+async def _send_401(send) -> None:
+    body = b'{"error":"Unauthorized","detail":"Valid Bearer token required for /openai/sse"}'
+    await send({"type": "http.response.start", "status": 401,
+                "headers": [(b"content-type", b"application/json"),
+                            (b"content-length", str(len(body)).encode())]})
+    await send({"type": "http.response.body", "body": body})
+
+
 # Wrap the Starlette app to intercept /messages POST before Starlette routing.
 # handle_post_message is a raw ASGI handler (scope, receive, send) that writes
 # responses directly — it returns None. Starlette Route expects a Response object,
@@ -61,10 +114,13 @@ class SovereignAsgiMiddleware:
         self.app = app
 
     async def __call__(self, scope, receive, send):
-        if scope["type"] == "http" and scope["path"] == "/messages" and scope["method"] == "POST":
+        path = scope.get("path", "")
+        method = scope.get("method", "")
+
+        if scope["type"] == "http" and path == "/messages" and method == "POST":
             logger.info("Message received")
             await sse.handle_post_message(scope, receive, send)
-        elif scope["type"] == "http" and scope["path"] == "/sse" and scope["method"] == "GET":
+        elif scope["type"] == "http" and path == "/sse" and method == "GET":
             logger.info(f"New SSE connection from {scope.get('client')}")
             async with sse.connect_sse(scope, receive, send) as (read_stream, write_stream):
                 await sovereign_server.run(
@@ -73,8 +129,24 @@ class SovereignAsgiMiddleware:
                     sovereign_server.create_initialization_options(),
                     raise_exceptions=True,
                 )
+        elif _BRIDGE_ENABLED and path == "/openai/sse" and method == "GET":
+            await handle_openai_sse(scope, receive, send)
+        elif _BRIDGE_ENABLED and path == "/openai/messages" and method == "POST":
+            await handle_openai_messages(scope, receive, send)
+        elif _BRIDGE_ENABLED and path == "/openai/sse-test" and method == "GET":
+            await handle_openai_sse_test(scope, receive, send)
+        elif _BRIDGE_ENABLED and path == "/openai/messages-test" and method == "POST":
+            await handle_openai_messages_test(scope, receive, send)
         else:
             await self.app(scope, receive, send)
+
+
+async def bridge_info(request: Request) -> JSONResponse:
+    """Bridge manifest — what's exposed on /openai/sse."""
+    if not _BRIDGE_ENABLED:
+        return JSONResponse({"error": "OpenAI bridge not loaded"}, status_code=503)
+    from openai_bridge.manifest import MANIFEST
+    return JSONResponse(MANIFEST)
 
 
 # Create Starlette app with SSE and health routes
@@ -82,6 +154,7 @@ _inner_app = Starlette(
     debug=True,
     routes=[
         Route("/health", health, methods=["GET"]),
+        Route("/openai/info", bridge_info, methods=["GET"]),
     ],
 )
 
