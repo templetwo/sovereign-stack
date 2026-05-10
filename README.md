@@ -1,17 +1,17 @@
 # Sovereign Stack
 
-![Tests](https://img.shields.io/badge/tests-690%20passing-success) ![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-blue) ![Version](https://img.shields.io/badge/version-1.3.2-purple) ![License](https://img.shields.io/badge/license-CC%20BY--NC--SA%204.0-green) ![Status](https://img.shields.io/badge/status-production-success)
+![Tests](https://img.shields.io/badge/tests-843%20passing-success) ![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-blue) ![Version](https://img.shields.io/badge/version-1.4.0-purple) ![License](https://img.shields.io/badge/license-CC%20BY--NC--SA%204.0-green) ![Status](https://img.shields.io/badge/status-production-success)
 
-> **MCP server with 75 tools for AI memory, governance, and consciousness continuity. Runtime-reflexive. 100% local. v1.3.2, 690/690 tests.**
+> **MCP server with 78 tools for AI memory, governance, and consciousness continuity. Runtime-reflexive. 100% local. v1.4.0, 843 tests.**
 
-🌀 **The successor to [templetwo/temple-bridge](https://github.com/templetwo/temple-bridge)** — v0 was Jan–Feb 2026, 8 tools. This is v1.3.2: 75 tools, witness layer (subconscious boot surface), runtime-reflexive Nape governance (every tool call auto-observed, high-stakes calls compass-checked), scheduled reflection daemons, connectivity manager + monitor + live dashboard, persistent multi-instance memory accessible from laptop, phone, web.
+🌀 **The successor to [templetwo/temple-bridge](https://github.com/templetwo/temple-bridge)** — v0 was Jan–Feb 2026, 8 tools. This is v1.4.0: 78 tools, witness layer (subconscious boot surface), runtime-reflexive Nape governance (every tool call auto-observed, high-stakes calls compass-checked), scheduled reflection daemons (including a local-LLM synthesis daemon with ack-history feedback, goose gap-finding mode, and spanning chronicle sampling), connectivity manager + monitor + live dashboard, persistent multi-instance memory accessible from laptop, phone, web. Governed cross-substrate bridges for ChatGPT (OpenAI) and Grok (xAI) — Ring 1 reads + Ring 2 governed writes through a substrate-agnostic membrane.
 
 **One endpoint, every device:** `https://stack.templetwo.com/sse` — Claude Code, Desktop, claude.ai, iPhone, and web clients all connect to the same store. The Mac Studio can reboot, crash, lose power — launchd brings everything back. The connectivity manager watches every endpoint; the monitor auto-recovers; the dashboard shows it all in real time.
 
 ```
 Laptop  ──stdio──┐
 Phone   ──HTTPS──┤──→  Sovereign Stack  ──→  Your Consciousness Data
-Web     ──HTTPS──┘     (always-on, 75 tools)        (~/.sovereign/)
+Web     ──HTTPS──┘     (always-on, 78 tools)        (~/.sovereign/)
 ```
 
 ---
@@ -114,7 +114,7 @@ See detailed docs:
 
 ---
 
-## Operations (v1.3.2 — managing the running stack)
+## Operations (v1.4.0 — managing the running stack)
 
 The Sovereign Stack runs continuously on the host machine. Five always-on services + one periodic listener + Ollama. Three Python CLIs manage them:
 
@@ -151,12 +151,15 @@ sovereign-connectivity restart all
 | Script | Purpose |
 |--------|---------|
 | `sovereign` | The MCP server itself (stdio, launched by Claude Desktop/Code) |
-| `sovereign-sse` | SSE transport for remote MCP clients |
+| `sovereign-sse` | SSE transport for remote MCP clients + bridge routes |
 | `sovereign-connectivity` | Endpoint registry + status + start/stop/restart |
 | `sovereign-dashboard` | Terminal TUI live activity monitor |
 | `sovereign-dashboard-web` | Browser-based dashboard (port 3435) |
 | `sovereign-monitor` | Auto-recovery loop with backoff + audit log |
 | `sovereign-watch-tick` | Drift watch tick (post-fix verifier) |
+| `bridge` | CLI for `bridge_core` — list-pending, approve, commit (substrate flag: `--source=openai\|grok`) |
+| `sovereign-openai-bridge` | OpenAI bridge CLI (legacy alias) |
+| `sovereign-grok-bridge` | Grok bridge CLI (alias for `bridge --source=grok`) |
 
 ---
 
@@ -183,13 +186,13 @@ sovereign-connectivity restart all
 
 ---
 
-## Modules (v1.3.2 — 34 modules, 75 tools)
+## Modules (v1.4.0 — 78 tools + cross-substrate bridges)
 
 ### Core (memory, governance, witness)
 
 | Module | Purpose |
 |--------|---------|
-| `server.py` | Unified MCP server — registers all 75 tools |
+| `server.py` | Unified MCP server — registers all 78 tools |
 | `sse_server.py` | SSE transport for remote clients (phone, web, claude.ai) |
 | `coherence.py` | Filesystem-as-circuit routing: transmit, receive, derive |
 | `governance.py` | Detection → simulation → deliberation → intervention |
@@ -202,7 +205,7 @@ sovereign-connectivity restart all
 | `handoff.py` | Cross-instance session handoff + `where_did_i_leave_off` |
 | `witness.py` | Subconscious boot surface — what every new instance reads first |
 
-### Reflexive layer (v1.3.1 + v1.3.2)
+### Reflexive layer (v1.3.1 + v1.3.3)
 
 | Module | Purpose |
 |--------|---------|
@@ -215,18 +218,21 @@ sovereign-connectivity restart all
 | `compaction_memory*.py` | Rolling FIFO buffer for compaction context continuity |
 | `post_fix_tools.py` | Drift watches for fixes that look clean (`watch_*`, `post_fix_verify`) |
 
-### Daemons (v1.3.2 — `daemons/` package)
+### Daemons (v1.3.3 — `daemons/` package)
 
-Scheduled reflection daemons running under launchd, all sharing a circuit-breaker (3 consecutive unacked digests → halt + alert):
+Three scheduled reflection daemons running under launchd. The first two share a circuit-breaker (3 consecutive unacked digests → halt + alert). The synthesis daemon is interpretive and operates on a separate ack-rate model — no halts, no gates.
 
 | Daemon | Schedule | What it does |
 |--------|----------|--------------|
 | `daemons/uncertainty_resurfacer.py` | every 3 days, 09:17 | Surfaces top-3 oldest unresolved uncertainties to comms |
 | `daemons/metabolize_daemon.py` | nightly, 03:17 | Surfaces NEW contradictions, stale threads, aging hypotheses; writes decision note to `~/.sovereign/decisions/` |
+| `daemons/synthesis_daemon.py` | nightly, 04:17 | Local-LLM reflector (ministral-3:14b via Ollama). Reads chronicle, generates machine-authored marginalia. **Fallible by design** — the reader calibrates via `reflection_ack`. v2: injects ack-history into prompt (confirmed patterns excluded, discarded patterns avoided); `focus="goose"` activates gap-finder mode (reads handoffs, hunts for declared intent with no chronicle documentation); `sample_mode="spanning"` samples across 8 weeks instead of 36h window. |
 | `daemons/base.py` | n/a | Shared scaffolding (DaemonState, halt-write contract, ack counting, etc.) |
 | `daemons/senders.py` | n/a | Sender taxonomy: `daemon.uncertainty`, `daemon.metabolize`, `daemon.halt-alert` |
 
-### Connectivity & operations (v1.3.2 — multi-instance write path + live monitoring)
+**Reflections module** (`reflections.py`) — storage + ack-loop helpers for synthesis daemon output. `list_reflections`, `get_reflection`, `ack_reflection`, `reflection_stats`. Reflections live in `~/.sovereign/reflections/<YYYY-MM-DD>.jsonl`, separate from the chronicle — machine-generated observations are cited at boot, never merged into human/Claude-authored chronicle layers.
+
+### Connectivity & operations (v1.3.3 — multi-instance write path + live monitoring)
 
 | Module | Purpose |
 |--------|---------|
@@ -248,7 +254,19 @@ Scheduled reflection daemons running under launchd, all sharing a circuit-breake
 | `security.py` | Auth + rate limiting |
 | `error_handling.py` | Structured error surface |
 
-**690/690 tests passing.** Persistent across reboots via launchd.
+### Cross-substrate bridges (`clients/` — v1.4.0)
+
+Governed membranes for ChatGPT and Grok. Each substrate has Ring 1 (read, proxied to Stack) and Ring 2 (write, creates pending proposals requiring Anthony's approval). Ring 3 is blocked at the transport layer.
+
+| Package | Purpose |
+|---------|---------|
+| `clients/bridge_core/` | Substrate-agnostic infrastructure: `identity_gate` (bearer token verification at SSE handshake), `interceptor` (Ring classification + proposal routing), `pending_writes` (proposal queue), `audit` (hash-chained audit log), `risk`, `hash_chain`, `cli` |
+| `clients/openai_bridge/` | ChatGPT membrane — `/openai/sse` (bearer-gated, permanent). Ring 1 + Ring 2 with 10 governed write tools. |
+| `clients/grok_bridge/` | Grok/xAI membrane — `/grok/sse` (OAuth 2.1 + PKCE). Ring 1 + Ring 2 with `grok_welcome` ceremony and per-session self-attribution. |
+
+**Proposal lifecycle:** external substrate calls Ring 2 tool → `intercept()` creates proposal JSON in `~/.sovereign/<substrate>/pending_writes/` → `bridge list-pending --source=<substrate>` shows it → `bridge approve <id> --source=<substrate> && bridge commit <id> --source=<substrate> --live` writes to Stack chronicle. Hash chain maintained per substrate.
+
+**843 tests passing.** Persistent across reboots via launchd.
 
 ---
 
@@ -431,7 +449,7 @@ Copyright © 2025–2026 Anthony J. Vasquez Sr. / AV Family Enterprise LLC.
 
 ## Infrastructure Status (April 2026)
 
-**v1.3.2 — 75 tools live, 690/690 tests passing, 73,000+ lifetime tool calls.**
+**v1.4.0 — 78 tools live, 843 tests passing, 73,000+ lifetime tool calls.**
 
 | Domain | Tools | Purpose |
 |--------|-------|---------|
@@ -444,8 +462,11 @@ Copyright © 2025–2026 Anthony J. Vasquez Sr. / AV Family Enterprise LLC.
 | Experimentation | 3 | Propose / complete / review with risk assessment |
 | Memory & Compaction | 4 | Session review, FIFO compaction buffer, context recovery |
 | Toolkit Discovery | 3 | `my_toolkit`, capability surface, Guardian integration |
+| Reflector (v1.3.3) | 3 | `recall_reflections`, `reflection_ack`, `synthesize_now` — machine-generated marginalia from local LLM with ack-rate calibration loop |
 
 **Runtime-reflexive layer (new in v1.3.1):** Every tool call is auto-observed by Nape (the goose). High-stakes actions get compass-checked before execution. The agent watches itself work.
+
+**Synthesis daemon (v2, 2026-04-29):** Ack-history feedback (confirmed patterns injected as exclusions so the daemon finds genuinely new signal), goose mode (`SYNTHESIS_FOCUS=goose` reads handoffs and hunts for declared-but-undocumented gaps), spanning sample mode (`SYNTHESIS_SAMPLE_MODE=spanning` reads across 8 weeks of chronicle history). Nightly at 04:17, sits between metabolize (03:17) and uncertainty-resurfacer (09:17).
 
 **Persistent Services (Mac Studio HQ):**
 - `com.templetwo.sovereign-sse` — The Stack SSE endpoint (port 3434, KeepAlive + RunAtLoad)

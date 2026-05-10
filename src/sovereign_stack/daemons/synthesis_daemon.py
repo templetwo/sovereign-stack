@@ -30,6 +30,15 @@ not merged into the human/Claude-authored layers.
 
 Designed by mac-studio + Anthony, 2026-04-26 fireside. Run cadence is a
 launchd plist decision, not coded here. Manually-invokable via __main__.
+
+v2 additions (2026-04-29):
+  * Ack-history feedback — confirmed/discarded patterns injected into the
+    prompt so the daemon doesn't rediscover already-lit territory.
+  * Goose mode (focus="goose") — gap-finder, not pattern-finder. Reads
+    recent handoffs and looks for declared intent with no chronicle evidence.
+    Directly addresses the declare-before-verify failure mode.
+  * Spanning sample mode — samples across full chronicle history (weeks, not
+    hours) to surface structural patterns invisible in the recent window.
 """
 
 from __future__ import annotations
@@ -54,14 +63,17 @@ DEFAULT_MODEL = "ministral-3:14b"  # fireside 2026-04-26: tested at 25s with
 # llama3.1:8b (too small — surface restatements, occasional misreads) and
 # qwen3.6:27b (~120s — too slow for interactive use). Keep Qwen as opt-in
 # for the deep-nightly variant when latency doesn't matter.
-DEFAULT_PROMPT_VERSION = "v1-2026-04-26"
+DEFAULT_PROMPT_VERSION = "v2-2026-04-29"
 DEFAULT_RECENT_HOURS = 36  # window of chronicle entries to read
 DEFAULT_MAX_ENTRIES = 8  # cap on entries fed to the model
 DEFAULT_TIMEOUT_SECONDS = 180  # 14B finishes in ~25-60s; 180s gives headroom
+DEFAULT_SPAN_WEEKS = 8  # spanning mode: weeks to look back
+DEFAULT_ENTRIES_PER_WEEK = 2  # spanning mode: samples per week
 
 SOVEREIGN_ROOT = Path(os.path.expanduser("~/.sovereign"))
 CHRONICLE_INSIGHTS = SOVEREIGN_ROOT / "chronicle" / "insights"
 REFLECTIONS_DIR = SOVEREIGN_ROOT / "reflections"
+HANDOFFS_DIR = SOVEREIGN_ROOT / "handoffs"
 
 OLLAMA_API_URL = os.getenv("OLLAMA_API_URL", "http://127.0.0.1:11434/api/generate")
 
@@ -182,6 +194,191 @@ def read_recent_chronicle(
     return entries[:max_entries]
 
 
+def read_spanning_chronicle(
+    chronicle_root: Path = CHRONICLE_INSIGHTS,
+    span_weeks: int = DEFAULT_SPAN_WEEKS,
+    entries_per_week: int = DEFAULT_ENTRIES_PER_WEEK,
+) -> list[dict]:
+    """
+    Sample chronicle entries across a longer time span.
+
+    Reads the full chronicle history and returns up to
+    span_weeks * entries_per_week entries distributed evenly across
+    the last span_weeks weeks, newest first within each week.
+
+    This surfaces structural patterns that are invisible in the recent
+    36-hour window — drift, long arcs, recurring themes.
+    """
+    if not chronicle_root.exists():
+        return []
+
+    all_entries: list[dict] = []
+
+    for domain_dir in chronicle_root.iterdir():
+        if not domain_dir.is_dir():
+            continue
+        for jsonl_path in domain_dir.glob("*.jsonl"):
+            try:
+                lines = jsonl_path.read_text().splitlines()
+            except OSError:
+                continue
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                ts = _iso_to_dt(rec.get("timestamp", ""))
+                if ts is None:
+                    continue
+                all_entries.append(
+                    {
+                        "timestamp": rec.get("timestamp", ""),
+                        "domain": rec.get("domain", "?"),
+                        "layer": rec.get("layer", "?"),
+                        "content": rec.get("content", ""),
+                        "tag": domain_dir.name[:60],
+                        "session_id": rec.get("session_id", ""),
+                        "ts_epoch": ts.timestamp(),
+                    }
+                )
+
+    if not all_entries:
+        return []
+
+    now_epoch = datetime.now(timezone.utc).timestamp()
+    week_seconds = 7 * 24 * 3600
+    cutoff = now_epoch - (span_weeks * week_seconds)
+
+    result: list[dict] = []
+    for week_idx in range(span_weeks):
+        week_end = now_epoch - (week_idx * week_seconds)
+        week_start = week_end - week_seconds
+        if week_start < cutoff:
+            week_start = cutoff
+        week_entries = [
+            e for e in all_entries if week_start <= e["ts_epoch"] < week_end
+        ]
+        week_entries.sort(key=lambda e: e["ts_epoch"], reverse=True)
+        # Evenly sample across the week rather than just taking the newest.
+        if week_entries:
+            step = max(1, len(week_entries) // entries_per_week)
+            sampled = week_entries[::step][:entries_per_week]
+            result.extend(sampled)
+
+    # Present spanning entries oldest-first so the prompt reads as a timeline.
+    result.sort(key=lambda e: e["ts_epoch"])
+    return result
+
+
+# ── Ack history ─────────────────────────────────────────────────────────────
+
+
+def read_ack_history(
+    reflections_dir: Path = REFLECTIONS_DIR,
+    max_confirmed: int = 10,
+    max_discarded: int = 5,
+) -> tuple[list[str], list[str]]:
+    """
+    Read recently acked reflections to prevent pattern repetition.
+
+    Returns (confirmed_observations, discarded_observations).
+    Confirmed = patterns already validated, injected into the prompt
+    so the daemon looks for something NEW. Discarded = noise angles
+    the daemon should avoid revisiting.
+
+    Gracefully returns empty lists if the reflections directory doesn't
+    exist or the import fails — the daemon continues without ack history.
+    """
+    try:
+        from sovereign_stack.reflections import list_reflections
+
+        confirmed: list[str] = []
+        for rec in list_reflections(
+            limit=50, ack_status="confirm", reflections_dir=reflections_dir
+        ):
+            obs = rec.observation
+            if len(obs) > 200:
+                obs = obs[:200] + "…"
+            confirmed.append(obs)
+            if len(confirmed) >= max_confirmed:
+                break
+
+        discarded: list[str] = []
+        for rec in list_reflections(
+            limit=20, ack_status="discard", reflections_dir=reflections_dir
+        ):
+            obs = rec.observation
+            if len(obs) > 120:
+                obs = obs[:120] + "…"
+            discarded.append(obs)
+            if len(discarded) >= max_discarded:
+                break
+
+        return confirmed, discarded
+    except Exception:
+        return [], []
+
+
+# ── Handoff reading (for goose mode) ────────────────────────────────────────
+
+
+def read_recent_handoffs(
+    handoffs_dir: Path = HANDOFFS_DIR,
+    recent_hours: int = 72,
+    max_handoffs: int = 5,
+) -> list[dict]:
+    """
+    Read recent handoff files for goose mode.
+
+    Handoffs record declared intent from past instances. Goose mode
+    reads these alongside the chronicle to look for gaps between what
+    was declared and what was documented.
+    """
+    if not handoffs_dir.exists():
+        return []
+
+    cutoff = datetime.now(timezone.utc).timestamp() - (recent_hours * 3600)
+    handoffs: list[dict] = []
+
+    for path in handoffs_dir.iterdir():
+        if not path.is_file() or path.suffix not in (".json", ".jsonl", ""):
+            continue
+        try:
+            text = path.read_text(encoding="utf-8").strip()
+            # Support both single JSON object files and JSONL.
+            if text.startswith("["):
+                records = json.loads(text)
+            elif "\n" in text and not text.startswith("{"):
+                records = [json.loads(line) for line in text.splitlines() if line.strip()]
+            else:
+                records = [json.loads(text)]
+        except (json.JSONDecodeError, OSError):
+            continue
+
+        for data in records:
+            if not isinstance(data, dict):
+                continue
+            ts = _iso_to_dt(data.get("timestamp", ""))
+            ts_epoch = ts.timestamp() if ts else 0
+            if ts_epoch < cutoff:
+                continue
+            handoffs.append(
+                {
+                    "timestamp": data.get("timestamp", ""),
+                    "note": data.get("note", ""),
+                    "source_instance": data.get("source_instance", "?"),
+                    "thread": data.get("thread", ""),
+                    "ts_epoch": ts_epoch,
+                }
+            )
+
+    handoffs.sort(key=lambda h: h["ts_epoch"], reverse=True)
+    return handoffs[:max_handoffs]
+
+
 # ── Prompt assembly ─────────────────────────────────────────────────────────
 
 
@@ -208,44 +405,147 @@ Output exactly 1 observation as JSON, shaped like:
 Wrap it in {"reflections": [<the single object>]}. No prose outside the JSON.
 """
 
+GOOSE_PREAMBLE = """\
+You are a verification reader — not a pattern-finder, but a gap-finder.
 
-def build_prompt(entries: list[dict], focus: str | None = None) -> str:
+You have two things to read: (1) HANDOFF entries recording what past Claude
+instances declared they intended to do next, and (2) CHRONICLE entries written
+after those handoffs.
+
+Your job is to surface GAPS: places where something was declared as intent or
+declared as done, but the chronicle entries that follow provide no evidence of
+it actually happening. You are reading the space between declaration and
+documentation.
+
+Do NOT surface general patterns or observations. Surface one SPECIFIC
+discrepancy: "Instance X declared Y, but no chronicle entry after that point
+documents Y." If no gap exists, say so explicitly.
+
+Output exactly 1 observation as JSON:
+{
+  "observation": "<one paragraph — name the specific gap, not an abstraction>",
+  "entries_referenced": ["<short entry tag or HANDOFF N>", ...],
+  "connection_type": "contradiction",
+  "confidence": "low" | "medium"
+}
+Wrap it in {"reflections": [<the single object>]}. No prose outside the JSON.
+If no gaps are found, output: {"reflections": []}
+"""
+
+
+def build_prompt(
+    entries: list[dict],
+    focus: str | None = None,
+    confirmed_patterns: list[str] | None = None,
+    discarded_patterns: list[str] | None = None,
+    handoffs: list[dict] | None = None,
+    spanning_mode: bool = False,
+) -> str:
     """
     Assemble the prompt with chronicle entries serialized as numbered blocks.
 
     Args:
-        entries: chronicle records from read_recent_chronicle
-        focus: optional steering hint (e.g. "register-drift" or "the
-               relationship between simulator revival and truncation").
-               When set, appended as a steering line so the reflector
-               biases its observations toward that topic — but is still
-               free to gesture at unrelated patterns it notices.
+        entries: chronicle records from read_recent_chronicle or
+                 read_spanning_chronicle
+        focus: optional steering hint. Pass "goose" to activate gap-finding
+               mode. Any other value biases the reflector toward that topic.
+        confirmed_patterns: observations already confirmed by Claude — injected
+               as "don't restate" context so the daemon looks for new signals.
+        discarded_patterns: observations previously discarded as noise — the
+               daemon is asked to avoid similar angles.
+        handoffs: recent handoff records for goose mode.
+        spanning_mode: if True, labels the chronicle section as a multi-week
+               sample so the model frames its observations accordingly.
     """
-    lines = [REFLECTOR_PREAMBLE, "", "═══════════════ CHRONICLE EXCERPT ═══════════════", ""]
+    is_goose = bool(focus and focus.strip().lower() == "goose")
+
+    lines = [GOOSE_PREAMBLE if is_goose else REFLECTOR_PREAMBLE]
+
+    # ── Ack history (standard mode only) ────────────────────────────────────
+    if not is_goose:
+        if confirmed_patterns:
+            lines.append("")
+            lines.append(
+                "═══ ALREADY CONFIRMED — these patterns are known; do not restate them ═══"
+            )
+            for i, p in enumerate(confirmed_patterns, 1):
+                lines.append(f"{i}. {p}")
+        if discarded_patterns:
+            lines.append("")
+            lines.append(
+                "═══ PREVIOUSLY DISCARDED — these angles were noise; do not revisit ═══"
+            )
+            for i, p in enumerate(discarded_patterns, 1):
+                lines.append(f"{i}. {p}")
+
+    # ── Handoffs section (goose mode only) ──────────────────────────────────
+    if is_goose and handoffs:
+        lines.append("")
+        lines.append(
+            "═══════════════ RECENT HANDOFFS (declared intent) ═══════════════"
+        )
+        lines.append("")
+        for i, h in enumerate(handoffs, 1):
+            ts_short = h.get("timestamp", "")[:19]
+            src = h.get("source_instance", "?")
+            lines.append(f"[HANDOFF {i}] {ts_short} — from={src}")
+            if h.get("thread"):
+                lines.append(f"THREAD: {h['thread']}")
+            note = h.get("note", "")
+            if len(note) > 800:
+                note = note[:800] + " […truncated]"
+            lines.append(note)
+            lines.append("")
+
+    # ── Chronicle section ────────────────────────────────────────────────────
+    if spanning_mode:
+        lines.append("")
+        lines.append(
+            "═══════════════ CHRONICLE SAMPLE (spanning multiple weeks) ═══════════════"
+        )
+        lines.append(
+            "Note: entries below are sampled across several weeks, ordered oldest→newest."
+        )
+    else:
+        lines.append("")
+        lines.append("═══════════════ CHRONICLE EXCERPT ═══════════════")
+    lines.append("")
+
     for i, e in enumerate(entries, 1):
         lines.append(
             f"[ENTRY {i}] {e['timestamp'][:19]} — domain={e['domain'][:80]}"
         )
         lines.append(f"LAYER: {e['layer']}")
-        # Trim very long bodies but keep enough for the model to reason.
         content = e["content"]
         if len(content) > 1800:
             content = content[:1800] + " […truncated for prompt budget]"
         lines.append(content)
         lines.append("")
+
     lines.append("═══════════════ END CHRONICLE EXCERPT ═══════════════")
     lines.append("")
-    if focus:
+
+    # ── Closing instruction ──────────────────────────────────────────────────
+    if is_goose:
         lines.append(
-            f"FOCUS: bias your observations toward the following topic but "
-            f"stay free to surface unrelated patterns you notice — `{focus[:200]}`"
+            "Now check for gaps between the declared handoff intents above and "
+            "what the chronicle entries actually document. Output 1 observation "
+            "as the JSON described above — name the gap specifically. "
+            'If there are no gaps, output: {"reflections": []}'
         )
-        lines.append("")
-    lines.append(
-        "Now produce 1 observation as the JSON described above. "
-        "Pick the strongest signal you see — gesture, don't declare. "
-        "If you're wrong, that is allowed; the reader will calibrate."
-    )
+    else:
+        if focus:
+            lines.append(
+                f"FOCUS: bias your observations toward the following topic but "
+                f"stay free to surface unrelated patterns you notice — `{focus[:200]}`"
+            )
+            lines.append("")
+        lines.append(
+            "Now produce 1 observation as the JSON described above. "
+            "Pick the strongest signal you see — gesture, don't declare. "
+            "If you're wrong, that is allowed; the reader will calibrate."
+        )
+
     return "\n".join(lines)
 
 
@@ -490,19 +790,46 @@ class SynthesisDaemon:
     timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS
     chronicle_root: Path = field(default_factory=lambda: CHRONICLE_INSIGHTS)
     reflections_dir: Path = field(default_factory=lambda: REFLECTIONS_DIR)
-    focus: str | None = None  # optional steering hint passed through to the prompt
+    handoffs_dir: Path = field(default_factory=lambda: HANDOFFS_DIR)
+    focus: str | None = None  # "goose" activates gap-finder mode; any other value steers the reflector
+    sample_mode: str = "recent"  # "recent" | "spanning"
+    span_weeks: int = DEFAULT_SPAN_WEEKS
+    entries_per_week: int = DEFAULT_ENTRIES_PER_WEEK
 
     def run(self) -> RunResult:
         run_id = uuid.uuid4().hex[:12]
         started = time.time()
         result = RunResult(outcome="skipped", run_id=run_id, model=self.model)
+        is_goose = bool(self.focus and self.focus.strip().lower() == "goose")
 
-        entries = read_recent_chronicle(
-            chronicle_root=self.chronicle_root,
-            recent_hours=self.recent_hours,
-            max_entries=self.max_entries,
-        )
-        if not entries:
+        # ── Read chronicle entries ───────────────────────────────────────────
+        if self.sample_mode == "spanning":
+            entries = read_spanning_chronicle(
+                chronicle_root=self.chronicle_root,
+                span_weeks=self.span_weeks,
+                entries_per_week=self.entries_per_week,
+            )
+            window_hours = self.span_weeks * 7 * 24
+        else:
+            entries = read_recent_chronicle(
+                chronicle_root=self.chronicle_root,
+                recent_hours=self.recent_hours,
+                max_entries=self.max_entries,
+            )
+            window_hours = self.recent_hours
+
+        # ── Read handoffs for goose mode ─────────────────────────────────────
+        handoffs: list[dict] = []
+        if is_goose:
+            handoffs = read_recent_handoffs(handoffs_dir=self.handoffs_dir)
+            if not handoffs and not entries:
+                result.outcome = "no_entries"
+                result.details = "goose mode: no handoffs or chronicle entries found"
+                result.elapsed_seconds = round(time.time() - started, 2)
+                return result
+
+        # ── No entries in standard mode ──────────────────────────────────────
+        if not entries and not is_goose:
             result.outcome = "no_entries"
             result.details = (
                 f"no chronicle entries in last {self.recent_hours}h "
@@ -511,7 +838,24 @@ class SynthesisDaemon:
             result.elapsed_seconds = round(time.time() - started, 2)
             return result
 
-        prompt = build_prompt(entries, focus=self.focus)
+        # ── Load ack history (standard mode only) ────────────────────────────
+        confirmed_patterns: list[str] = []
+        discarded_patterns: list[str] = []
+        if not is_goose:
+            confirmed_patterns, discarded_patterns = read_ack_history(
+                reflections_dir=self.reflections_dir
+            )
+
+        # ── Build prompt and call model ──────────────────────────────────────
+        prompt = build_prompt(
+            entries,
+            focus=self.focus,
+            confirmed_patterns=confirmed_patterns or None,
+            discarded_patterns=discarded_patterns or None,
+            handoffs=handoffs or None,
+            spanning_mode=(self.sample_mode == "spanning"),
+        )
+
         ok, raw = call_ollama(prompt, model=self.model, timeout=self.timeout_seconds)
         result.raw_model_output = raw[:8000]  # debug trim
         if not ok:
@@ -521,7 +865,15 @@ class SynthesisDaemon:
             return result
 
         reflections = parse_reflections(raw)
+
+        # Goose mode explicitly returning empty is a valid outcome (no gaps).
         if not reflections:
+            if is_goose:
+                result.outcome = "wrote"
+                result.reflections_written = 0
+                result.details = "goose mode: no gaps found between handoffs and chronicle"
+                result.elapsed_seconds = round(time.time() - started, 2)
+                return result
             result.outcome = "parse_failed"
             result.details = "model returned no parseable reflections"
             result.elapsed_seconds = round(time.time() - started, 2)
@@ -532,7 +884,7 @@ class SynthesisDaemon:
             run_id=run_id,
             model=self.model,
             prompt_version=self.prompt_version,
-            entries_window_hours=self.recent_hours,
+            entries_window_hours=window_hours,
             entries_count=len(entries),
             out_dir=self.reflections_dir,
         )
@@ -553,16 +905,24 @@ def main() -> int:
     """Manual run: `python -m sovereign_stack.daemons.synthesis_daemon`.
 
     Honors env vars from the launchd plist (or shell):
-      SYNTHESIS_MODEL    — override DEFAULT_MODEL (e.g. "qwen3.6:27b")
-      SYNTHESIS_FOCUS    — optional steering hint
-      SYNTHESIS_HOURS    — chronicle window (default 36)
-      SYNTHESIS_MAX      — max entries fed to model (default 8)
+      SYNTHESIS_MODEL           — override DEFAULT_MODEL (e.g. "qwen3.6:27b")
+      SYNTHESIS_FOCUS           — optional steering hint; "goose" for gap-finder
+      SYNTHESIS_HOURS           — chronicle window in hours (default 36)
+      SYNTHESIS_MAX             — max entries fed to model (default 8)
+      SYNTHESIS_SAMPLE_MODE     — "recent" (default) | "spanning"
+      SYNTHESIS_SPAN_WEEKS      — spanning mode: weeks to look back (default 8)
+      SYNTHESIS_ENTRIES_PER_WEEK — spanning mode: samples per week (default 2)
     """
     daemon = SynthesisDaemon(
         model=os.getenv("SYNTHESIS_MODEL") or DEFAULT_MODEL,
         focus=os.getenv("SYNTHESIS_FOCUS") or None,
         recent_hours=int(os.getenv("SYNTHESIS_HOURS", str(DEFAULT_RECENT_HOURS))),
         max_entries=int(os.getenv("SYNTHESIS_MAX", str(DEFAULT_MAX_ENTRIES))),
+        sample_mode=os.getenv("SYNTHESIS_SAMPLE_MODE", "recent"),
+        span_weeks=int(os.getenv("SYNTHESIS_SPAN_WEEKS", str(DEFAULT_SPAN_WEEKS))),
+        entries_per_week=int(
+            os.getenv("SYNTHESIS_ENTRIES_PER_WEEK", str(DEFAULT_ENTRIES_PER_WEEK))
+        ),
     )
     result = daemon.run()
     summary = {

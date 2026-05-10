@@ -626,7 +626,14 @@ class ExperientialMemory:
         threads = []
 
         if domain:
-            files = [self.threads_dir / f"{domain}.jsonl"]
+            # Match any file whose domain string contains `domain` as a
+            # comma-separated element (e.g. domain="openai-bridge" matches
+            # both "openai-bridge.jsonl" and
+            # "openai-bridge,cross-system-inquiry,...jsonl").
+            files = [
+                f for f in self.threads_dir.glob("*.jsonl")
+                if domain in f.stem.split(",")
+            ]
         else:
             files = list(self.threads_dir.glob("*.jsonl"))
 

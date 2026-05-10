@@ -185,24 +185,18 @@ class TestAckDistinctFromReadBy:
     def test_ack_is_distinct_from_read_by(self, tmp_sovereign):
         daemon, comms = make_daemon(tmp_sovereign)
 
-        # Post three digests. Between each, simulate a browse-read
-        # (populating read_by) but NEVER call acknowledge().
+        # Post CONSECUTIVE_UNACKED_THRESHOLD digests. Between each, simulate
+        # a browse-read (populating read_by) but NEVER call acknowledge().
         posts_made = []
-        # Sub-threshold first post should succeed.
-        r = daemon.run()
-        assert r.outcome == OUTCOME_POSTED
-        posts_made.append(r.posted_message_id)
-        comms.mark_read_by(r.posted_message_id, "claude-iphone")
-
-        r = daemon.run()
-        assert r.outcome == OUTCOME_POSTED
-        posts_made.append(r.posted_message_id)
-        comms.mark_read_by(r.posted_message_id, "claude-desktop")
-
-        r = daemon.run()
-        assert r.outcome == OUTCOME_POSTED
-        posts_made.append(r.posted_message_id)
-        comms.mark_read_by(r.posted_message_id, "claude-code-macbook")
+        instance_ids = [
+            "claude-iphone", "claude-desktop", "claude-code-macbook",
+            "claude-sonnet-hq", "claude-opus-hq", "claude-web", "claude-code-mbp",
+        ]
+        for i in range(CONSECUTIVE_UNACKED_THRESHOLD):
+            r = daemon.run()
+            assert r.outcome == OUTCOME_POSTED
+            posts_made.append(r.posted_message_id)
+            comms.mark_read_by(r.posted_message_id, instance_ids[i % len(instance_ids)])
 
         # Every post has been "read" (read_by populated on each), but NONE
         # has been acknowledged via comms.acknowledge(). The next run MUST

@@ -7,6 +7,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.4.0] - 2026-05-09
+
+### Cross-substrate bridges + synthesis daemon v2 + circuit breaker fix — 78 tools, 843/843 tests
+
+Four capabilities land in this release: governed membranes for ChatGPT and Grok,
+synthesis daemon v2 with ack-history feedback, and the halt circuit breaker fix
+that had silently made daemon halts impossible since the threshold was raised from 3→7.
+
+### Added — Cross-substrate bridges (`clients/`)
+- **`clients/bridge_core/`** — Substrate-agnostic governance infrastructure extracted
+  from openai_bridge. Parameterized via `BridgeContext`. Shared by openai and grok.
+  Modules: `identity_gate` (bearer/OAuth token verification at SSE handshake),
+  `interceptor` (Ring classification + proposal routing), `pending_writes` (proposal
+  queue with proposal_id, ring, risk_level), `audit` (hash-chained per-substrate),
+  `risk`, `hash_chain`, `cli` (`bridge --source=<substrate>` for approve/commit).
+- **`clients/openai_bridge/`** — ChatGPT governed membrane. `/openai/sse` (bearer-token
+  gated, permanent). `/openai/messages` (also bearer-gated). Ring 1 reads proxied
+  to Stack; Ring 2 creates pending proposals. Phase 3.5 test endpoint expired and
+  disabled. 10 Ring 2 tools (propose_insight, propose_learning, record_open_thread,
+  comms_acknowledge, handoff, store_compaction_summary, reflection_ack,
+  self_model[update], thread_touch, end_bridge_session).
+- **`clients/grok_bridge/`** — Grok/xAI governed membrane. `/grok/sse` with OAuth 2.1
+  + PKCE shim (required by xAI Custom Connector). OAuth endpoints: authorize, token,
+  AS metadata (RFC 8414), protected-resource metadata (RFC 9728). Ring 1 + Ring 2
+  (RING_2_ENABLED=True). `grok_welcome` ceremony with substrate-specific onboarding.
+  Per-session self-attribution via payload. Identity gate via `bridge_core.verify_at_door`.
+
+### Fixed — Circuit breaker halt gate (base.py)
+- `POSTED_DIGESTS_RETAINED` was 5, `CONSECUTIVE_UNACKED_THRESHOLD` was 7.
+  The state trimmed to 5 entries before accumulating 7, so `_count_recent_unacked`
+  always returned 0 and daemon halts were mathematically impossible. Fixed:
+  `POSTED_DIGESTS_RETAINED = CONSECUTIVE_UNACKED_THRESHOLD + 3` (now 10).
+- Updated `test_ack_is_distinct_from_read_by` in both daemon test files to post
+  `CONSECUTIVE_UNACKED_THRESHOLD` times before expecting halt (was 3, now 7).
+- Updated `TestHalt` digest sequences in metabolize daemon tests from 4 digests
+  to 10 (needed at least 7 for the halt loop to complete without `no_findings`).
+
+### Fixed — `/openai/sse` bearer-token gate not enforced
+- `_bridge_auth_ok` was defined in `sse_server.py` but never called. The permanent
+  `/openai/sse` endpoint was effectively unauthenticated. Fixed: middleware now
+  calls `_bridge_auth_ok` before routing to `handle_openai_sse` and
+  `handle_openai_messages`. Both GET (SSE handshake) and POST (messages) are gated.
+
+### Fixed — `get_open_threads` domain filter brittle exact-match
+- Domain filter matched only `{domain}.jsonl` files. Threads tagged with multiple
+  domains (e.g. `openai-bridge,cross-system-inquiry,interpretability,...`) were
+  invisible to single-domain queries. Fixed: filter now splits the filename stem
+  on comma and matches if any element equals the requested domain.
+
+### Changed — Synthesis daemon v2 (2026-04-29)
+- **Ack-history feedback:** `read_ack_history()` injects confirmed + discarded
+  reflections into the prompt so the model finds genuinely new signal.
+- **Goose mode:** `SYNTHESIS_FOCUS=goose` reads handoffs instead of chronicle and
+  hunts for declared-intent-with-no-chronicle-evidence (the declare-before-verify gap).
+- **Spanning sample mode:** `SYNTHESIS_SAMPLE_MODE=spanning` samples across 8 weeks
+  of chronicle history (2 entries/week) for long-term pattern discovery.
+- Prompt version bumped from `v1-2026-04-26` → `v2-2026-04-29`.
+
+---
+
 ## [1.3.2] - 2026-04-25
 
 ### Reflection daemons + connectivity layer + tiered toolkit — 75 tools, 651/651 tests

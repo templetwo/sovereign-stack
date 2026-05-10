@@ -105,7 +105,7 @@ class DaemonState:
 # ── Shared tunables ─────────────────────────────────────────────────────────
 
 CONSECUTIVE_UNACKED_THRESHOLD = 7
-POSTED_DIGESTS_RETAINED = 5
+POSTED_DIGESTS_RETAINED = CONSECUTIVE_UNACKED_THRESHOLD + 3  # must exceed threshold
 DEFAULT_CHANNEL = "general"
 
 

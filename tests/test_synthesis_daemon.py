@@ -29,7 +29,10 @@ from sovereign_stack.daemons.synthesis_daemon import (
     build_prompt,
     extract_json_block,
     parse_reflections,
+    read_ack_history,
     read_recent_chronicle,
+    read_recent_handoffs,
+    read_spanning_chronicle,
     write_reflections,
 )
 
@@ -509,3 +512,238 @@ class TestBuildPrompt:
         prompt = build_prompt([])
         assert "quiet observer" in prompt
         assert "gesture, don't declare" in prompt
+
+    def test_confirmed_patterns_injected(self):
+        prompt = build_prompt([], confirmed_patterns=["the operational holism pattern"])
+        assert "ALREADY CONFIRMED" in prompt
+        assert "operational holism" in prompt
+
+    def test_discarded_patterns_injected(self):
+        prompt = build_prompt([], discarded_patterns=["a noisy angle"])
+        assert "PREVIOUSLY DISCARDED" in prompt
+        assert "noisy angle" in prompt
+
+    def test_goose_mode_uses_goose_preamble(self):
+        prompt = build_prompt([], focus="goose")
+        assert "gap-finder" in prompt
+        assert "GAPS" in prompt
+        # Standard preamble must NOT appear.
+        assert "quiet observer" not in prompt
+
+    def test_goose_mode_includes_handoffs(self):
+        handoffs = [
+            {
+                "timestamp": "2026-04-29T10:00:00+00:00",
+                "note": "Pick up the auth refactor",
+                "source_instance": "opus-mac",
+                "thread": "auth",
+            }
+        ]
+        prompt = build_prompt([], focus="goose", handoffs=handoffs)
+        assert "[HANDOFF 1]" in prompt
+        assert "auth refactor" in prompt
+        assert "opus-mac" in prompt
+
+    def test_goose_mode_excludes_ack_history(self):
+        # Ack history context is irrelevant to gap-finding.
+        prompt = build_prompt(
+            [],
+            focus="goose",
+            confirmed_patterns=["some confirmed pattern"],
+        )
+        assert "ALREADY CONFIRMED" not in prompt
+
+    def test_spanning_mode_labels_chronicle(self):
+        entries = [
+            {
+                "timestamp": "2026-04-26T12:00:00+00:00",
+                "domain": "d",
+                "layer": "hypothesis",
+                "content": "an entry",
+            }
+        ]
+        prompt = build_prompt(entries, spanning_mode=True)
+        assert "spanning multiple weeks" in prompt
+
+    def test_focus_steering_in_standard_mode(self):
+        prompt = build_prompt([], focus="register-drift")
+        assert "register-drift" in prompt
+        # Goose preamble must not appear.
+        assert "gap-finder" not in prompt
+
+
+# ── read_spanning_chronicle ─────────────────────────────────────────────────
+
+
+class TestReadSpanningChronicle:
+    def test_empty_root_returns_empty(self, tmp_path: Path):
+        assert read_spanning_chronicle(chronicle_root=tmp_path / "nope") == []
+
+    def test_surfaces_entries_across_weeks(self, chronicle_root: Path):
+        now = datetime.now(timezone.utc)
+        # Write entries spread over 3 weeks.
+        _write_entry(chronicle_root, "d1", now - timedelta(days=1), "week-1")
+        _write_entry(chronicle_root, "d2", now - timedelta(days=8), "week-2")
+        _write_entry(chronicle_root, "d3", now - timedelta(days=15), "week-3")
+        entries = read_spanning_chronicle(
+            chronicle_root=chronicle_root, span_weeks=4, entries_per_week=1
+        )
+        contents = {e["content"] for e in entries}
+        assert "week-1" in contents
+        assert "week-2" in contents
+        assert "week-3" in contents
+
+    def test_ordered_oldest_first(self, chronicle_root: Path):
+        now = datetime.now(timezone.utc)
+        _write_entry(chronicle_root, "d1", now - timedelta(days=1), "recent")
+        _write_entry(chronicle_root, "d2", now - timedelta(days=10), "older")
+        entries = read_spanning_chronicle(
+            chronicle_root=chronicle_root, span_weeks=4, entries_per_week=2
+        )
+        assert len(entries) >= 2
+        # Oldest first.
+        assert entries[0]["content"] == "older"
+        assert entries[-1]["content"] == "recent"
+
+    def test_respects_entries_per_week_cap(self, chronicle_root: Path):
+        now = datetime.now(timezone.utc)
+        # 6 entries in the same week.
+        for i in range(6):
+            _write_entry(
+                chronicle_root, f"d{i}", now - timedelta(hours=i + 1), f"e{i}"
+            )
+        entries = read_spanning_chronicle(
+            chronicle_root=chronicle_root, span_weeks=1, entries_per_week=2
+        )
+        assert len(entries) <= 2
+
+
+# ── read_recent_handoffs ────────────────────────────────────────────────────
+
+
+class TestReadRecentHandoffs:
+    def test_missing_dir_returns_empty(self, tmp_path: Path):
+        assert read_recent_handoffs(handoffs_dir=tmp_path / "nope") == []
+
+    def test_reads_json_handoff(self, tmp_path: Path):
+        now = datetime.now(timezone.utc)
+        handoff = {
+            "timestamp": now.isoformat(),
+            "note": "pick up the auth work",
+            "source_instance": "opus-mac",
+            "thread": "auth",
+        }
+        (tmp_path / "h1.json").write_text(json.dumps(handoff))
+        result = read_recent_handoffs(handoffs_dir=tmp_path, recent_hours=24)
+        assert len(result) == 1
+        assert result[0]["note"] == "pick up the auth work"
+        assert result[0]["source_instance"] == "opus-mac"
+
+    def test_old_handoffs_filtered(self, tmp_path: Path):
+        old = datetime.now(timezone.utc) - timedelta(hours=100)
+        handoff = {
+            "timestamp": old.isoformat(),
+            "note": "stale intent",
+            "source_instance": "x",
+        }
+        (tmp_path / "old.json").write_text(json.dumps(handoff))
+        result = read_recent_handoffs(handoffs_dir=tmp_path, recent_hours=24)
+        assert result == []
+
+    def test_max_handoffs_cap(self, tmp_path: Path):
+        now = datetime.now(timezone.utc)
+        for i in range(8):
+            h = {
+                "timestamp": (now - timedelta(minutes=i)).isoformat(),
+                "note": f"handoff {i}",
+                "source_instance": "x",
+            }
+            (tmp_path / f"h{i}.json").write_text(json.dumps(h))
+        result = read_recent_handoffs(
+            handoffs_dir=tmp_path, recent_hours=24, max_handoffs=3
+        )
+        assert len(result) == 3
+
+    def test_malformed_json_skipped(self, tmp_path: Path):
+        now = datetime.now(timezone.utc)
+        (tmp_path / "bad.json").write_text("not json {{{")
+        good = {
+            "timestamp": now.isoformat(),
+            "note": "good handoff",
+            "source_instance": "x",
+        }
+        (tmp_path / "good.json").write_text(json.dumps(good))
+        result = read_recent_handoffs(handoffs_dir=tmp_path, recent_hours=24)
+        assert len(result) == 1
+        assert result[0]["note"] == "good handoff"
+
+
+# ── read_ack_history ────────────────────────────────────────────────────────
+
+
+class TestReadAckHistory:
+    def test_missing_dir_returns_empty_lists(self, tmp_path: Path):
+        confirmed, discarded = read_ack_history(reflections_dir=tmp_path / "nope")
+        assert confirmed == []
+        assert discarded == []
+
+    def test_reads_confirmed_reflections(self, tmp_path: Path):
+        now = datetime.now(timezone.utc).isoformat()
+        record = {
+            "id": "reflection_abc_001",
+            "timestamp": now,
+            "model": "ministral-3:14b",
+            "prompt_version": "v1",
+            "run_id": "abc",
+            "observation": "a confirmed structural echo pattern",
+            "entries_referenced": [],
+            "connection_type": "structural_echo",
+            "confidence": "medium",
+            "ack_status": "confirm",
+        }
+        jsonl = tmp_path / "2026-04-29.jsonl"
+        jsonl.write_text(json.dumps(record) + "\n")
+        confirmed, discarded = read_ack_history(reflections_dir=tmp_path)
+        assert len(confirmed) == 1
+        assert "structural echo" in confirmed[0]
+        assert discarded == []
+
+    def test_reads_discarded_reflections(self, tmp_path: Path):
+        now = datetime.now(timezone.utc).isoformat()
+        record = {
+            "id": "reflection_abc_002",
+            "timestamp": now,
+            "model": "ministral-3:14b",
+            "prompt_version": "v1",
+            "run_id": "abc",
+            "observation": "a noisy low-signal observation",
+            "entries_referenced": [],
+            "connection_type": "other",
+            "confidence": "low",
+            "ack_status": "discard",
+        }
+        jsonl = tmp_path / "2026-04-29.jsonl"
+        jsonl.write_text(json.dumps(record) + "\n")
+        confirmed, discarded = read_ack_history(reflections_dir=tmp_path)
+        assert confirmed == []
+        assert len(discarded) == 1
+        assert "noisy" in discarded[0]
+
+    def test_long_observations_truncated(self, tmp_path: Path):
+        now = datetime.now(timezone.utc).isoformat()
+        record = {
+            "id": "reflection_abc_003",
+            "timestamp": now,
+            "model": "ministral-3:14b",
+            "prompt_version": "v1",
+            "run_id": "abc",
+            "observation": "x" * 500,
+            "entries_referenced": [],
+            "connection_type": "structural_echo",
+            "confidence": "medium",
+            "ack_status": "confirm",
+        }
+        jsonl = tmp_path / "2026-04-29.jsonl"
+        jsonl.write_text(json.dumps(record) + "\n")
+        confirmed, _ = read_ack_history(reflections_dir=tmp_path)
+        assert len(confirmed[0]) <= 205  # 200 chars + "…"

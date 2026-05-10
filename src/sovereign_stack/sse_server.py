@@ -157,9 +157,15 @@ class SovereignAsgiMiddleware:
                     raise_exceptions=True,
                 )
         elif _BRIDGE_ENABLED and path == "/openai/sse" and method == "GET":
-            await handle_openai_sse(scope, receive, send)
+            if not _bridge_auth_ok(scope):
+                await _send_401(send)
+            else:
+                await handle_openai_sse(scope, receive, send)
         elif _BRIDGE_ENABLED and path == "/openai/messages" and method == "POST":
-            await handle_openai_messages(scope, receive, send)
+            if not _bridge_auth_ok(scope):
+                await _send_401(send)
+            else:
+                await handle_openai_messages(scope, receive, send)
         elif _BRIDGE_ENABLED and path == "/openai/sse-test" and method == "GET":
             await handle_openai_sse_test(scope, receive, send)
         elif _BRIDGE_ENABLED and path == "/openai/messages-test" and method == "POST":

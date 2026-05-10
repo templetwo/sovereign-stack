@@ -233,15 +233,20 @@ class TestAckDistinctFromReadBy:
     def test_ack_is_distinct_from_read_by(self, tmp_sovereign):
         # Sequence with always-fresh fingerprints so the delta filter
         # never blocks a post and we exercise the ack circuit cleanly.
-        digests = [_digest(suffix=s) for s in "abcd"]
+        # Needs at least CONSECUTIVE_UNACKED_THRESHOLD digests.
+        digests = [_digest(suffix=s) for s in "abcdefghij"]
         daemon, comms = make_daemon(tmp_sovereign, digest_sequence=digests)
 
-        for label in ("claude-iphone", "claude-desktop", "claude-code-macbook"):
+        instance_ids = [
+            "claude-iphone", "claude-desktop", "claude-code-macbook",
+            "claude-sonnet-hq", "claude-opus-hq", "claude-web", "claude-code-mbp",
+        ]
+        for i in range(CONSECUTIVE_UNACKED_THRESHOLD):
             r = daemon.run()
             assert r.outcome == OUTCOME_POSTED
-            comms.mark_read_by(r.posted_message_id, label)
+            comms.mark_read_by(r.posted_message_id, instance_ids[i % len(instance_ids)])
 
-        # Three posts read but never acked — next run halts.
+        # All posts were read but never acked — next run halts.
         r = daemon.run()
         assert r.outcome == OUTCOME_HALTED, (
             "read_by glances are NOT acks. If this fails, the circuit breaker is broken."
@@ -301,7 +306,7 @@ class TestGroundingGate:
 
 class TestHalt:
     def test_three_unacked_triggers_halt(self, tmp_sovereign):
-        digests = [_digest(suffix=s) for s in "abcd"]
+        digests = [_digest(suffix=s) for s in "abcdefghij"]
         daemon, _ = make_daemon(tmp_sovereign, digest_sequence=digests)
         for _ in range(CONSECUTIVE_UNACKED_THRESHOLD):
             daemon.run()
@@ -311,7 +316,7 @@ class TestHalt:
         assert Path(r.halt_path).exists()
 
     def test_halt_file_contains_all_four_required_fields(self, tmp_sovereign):
-        digests = [_digest(suffix=s) for s in "abcd"]
+        digests = [_digest(suffix=s) for s in "abcdefghij"]
         daemon, _ = make_daemon(tmp_sovereign, digest_sequence=digests)
         for _ in range(CONSECUTIVE_UNACKED_THRESHOLD):
             daemon.run()
@@ -325,7 +330,7 @@ class TestHalt:
         assert "To resolve" in body
 
     def test_halt_posts_alert_to_comms(self, tmp_sovereign):
-        digests = [_digest(suffix=s) for s in "abcd"]
+        digests = [_digest(suffix=s) for s in "abcdefghij"]
         daemon, comms = make_daemon(tmp_sovereign, digest_sequence=digests)
         for _ in range(CONSECUTIVE_UNACKED_THRESHOLD):
             daemon.run()
@@ -335,7 +340,7 @@ class TestHalt:
         assert "daemon.metabolize halted" in halt_alerts[0]["content"]
 
     def test_ack_before_threshold_prevents_halt(self, tmp_sovereign):
-        digests = [_digest(suffix=s) for s in "abcd"]
+        digests = [_digest(suffix=s) for s in "abcdefghij"]
         daemon, comms = make_daemon(tmp_sovereign, digest_sequence=digests)
         daemon.run()
         daemon.run()
@@ -346,7 +351,7 @@ class TestHalt:
         assert r.outcome == OUTCOME_POSTED, "An ack within the window must reset the unacked count."
 
     def test_halt_persists_across_runs(self, tmp_sovereign):
-        digests = [_digest(suffix=s) for s in "abcd"]
+        digests = [_digest(suffix=s) for s in "abcdefghij"]
         daemon, _ = make_daemon(tmp_sovereign, digest_sequence=digests)
         for _ in range(CONSECUTIVE_UNACKED_THRESHOLD):
             daemon.run()
