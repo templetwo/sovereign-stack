@@ -41,6 +41,33 @@ except ImportError:
     handle_openai_sse_test = None
     handle_openai_messages_test = None
 
+# Grok bridge — independently importable; failure doesn't disable openai_bridge.
+try:
+    from grok_bridge.mcp_filtered import (
+        handle_grok_messages,
+        handle_grok_sse,
+    )
+    from grok_bridge.manifest import MANIFEST as GROK_MANIFEST
+    from grok_bridge.oauth import (
+        handle_authorization_server_metadata as handle_grok_oauth_as_meta,
+        handle_authorize as handle_grok_oauth_authorize,
+        handle_protected_resource_metadata as handle_grok_oauth_pr_meta,
+        handle_token as handle_grok_oauth_token,
+    )
+    _GROK_BRIDGE_ENABLED = True
+except ImportError as _grok_e:
+    _GROK_BRIDGE_ENABLED = False
+    handle_grok_sse = None
+    handle_grok_messages = None
+    handle_grok_oauth_authorize = None
+    handle_grok_oauth_token = None
+    handle_grok_oauth_as_meta = None
+    handle_grok_oauth_pr_meta = None
+    GROK_MANIFEST = None
+    logging.getLogger("sovereign-stack-sse").warning(
+        "Grok bridge not loaded: %s", _grok_e
+    )
+
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("sovereign-stack-sse")
@@ -137,6 +164,19 @@ class SovereignAsgiMiddleware:
             await handle_openai_sse_test(scope, receive, send)
         elif _BRIDGE_ENABLED and path == "/openai/messages-test" and method == "POST":
             await handle_openai_messages_test(scope, receive, send)
+        elif _GROK_BRIDGE_ENABLED and path == "/grok/sse" and method == "GET":
+            await handle_grok_sse(scope, receive, send)
+        elif _GROK_BRIDGE_ENABLED and path == "/grok/messages" and method == "POST":
+            await handle_grok_messages(scope, receive, send)
+        elif _GROK_BRIDGE_ENABLED and path == "/grok/oauth/authorize":
+            # GET shows consent page; POST receives consent submission
+            await handle_grok_oauth_authorize(scope, receive, send)
+        elif _GROK_BRIDGE_ENABLED and path == "/grok/oauth/token" and method == "POST":
+            await handle_grok_oauth_token(scope, receive, send)
+        elif _GROK_BRIDGE_ENABLED and path == "/grok/.well-known/oauth-authorization-server" and method == "GET":
+            await handle_grok_oauth_as_meta(scope, receive, send)
+        elif _GROK_BRIDGE_ENABLED and path == "/grok/.well-known/oauth-protected-resource" and method == "GET":
+            await handle_grok_oauth_pr_meta(scope, receive, send)
         else:
             await self.app(scope, receive, send)
 
@@ -149,12 +189,20 @@ async def bridge_info(request: Request) -> JSONResponse:
     return JSONResponse(MANIFEST)
 
 
+async def grok_bridge_info(request: Request) -> JSONResponse:
+    """Bridge manifest — what's exposed on /grok/sse."""
+    if not _GROK_BRIDGE_ENABLED:
+        return JSONResponse({"error": "Grok bridge not loaded"}, status_code=503)
+    return JSONResponse(GROK_MANIFEST)
+
+
 # Create Starlette app with SSE and health routes
 _inner_app = Starlette(
     debug=True,
     routes=[
         Route("/health", health, methods=["GET"]),
         Route("/openai/info", bridge_info, methods=["GET"]),
+        Route("/grok/info", grok_bridge_info, methods=["GET"]),
     ],
 )
 
