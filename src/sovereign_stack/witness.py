@@ -226,8 +226,45 @@ def _parse_letter_frontmatter(path: Path) -> dict:
     return meta
 
 
+def _read_letter_body(path: Path) -> str:
+    """
+    Read a letter's body — everything after the closing frontmatter `---`.
+
+    Strips the leading `# Title` heading if present (already surfaced via
+    metadata) and any blank lines between frontmatter and body. Returns ""
+    on any read error so a single bad letter never breaks boot.
+    """
+    try:
+        text = path.read_text()
+    except Exception:
+        return ""
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return text  # no frontmatter — return as-is
+    fm_end = None
+    for i in range(1, min(len(lines), 60)):
+        if lines[i].strip() == "---":
+            fm_end = i
+            break
+    if fm_end is None:
+        return ""
+    body_lines = lines[fm_end + 1 :]
+    # Skip blank lines after frontmatter
+    while body_lines and not body_lines[0].strip():
+        body_lines.pop(0)
+    # Skip the title heading if present (already surfaced via metadata)
+    if body_lines and body_lines[0].lstrip().startswith("# "):
+        body_lines.pop(0)
+        while body_lines and not body_lines[0].strip():
+            body_lines.pop(0)
+    return "\n".join(body_lines).rstrip()
+
+
 def format_lineage_layer(
-    sovereign_root: Path, reader_instance: str | None = None, limit_per_bucket: int = 5
+    sovereign_root: Path,
+    reader_instance: str | None = None,
+    limit_per_bucket: int = 5,
+    full_content: bool = False,
 ) -> list[str]:
     """
     Surface the lineage layer at boot: to_arrival (for whoever lands next),
@@ -239,6 +276,11 @@ def format_lineage_layer(
     family (claude-sonnet), then short family name (sonnet), then ID prefix.
     This lets letters written as 'to: claude-sonnet' surface for any Sonnet
     instance across versions.
+
+    When ``full_content=True``, each letter's body is rendered inline
+    (titles + frontmatter metadata + full body) instead of just listed by
+    title — closes the truncation catch-22 where readers had to file-walk
+    after boot to actually read the inheritance.
 
     Returns [] if the lineage directory doesn't exist (graceful degrade).
     """
@@ -286,6 +328,19 @@ def format_lineage_layer(
         "",
     ]
 
+    def _emit_body(meta: dict) -> None:
+        """Render the full letter body inline when full_content=True."""
+        path_str = meta.get("_path")
+        if not path_str:
+            return
+        body = _read_letter_body(Path(path_str))
+        if not body:
+            return
+        lines.append("")
+        for body_line in body.splitlines():
+            lines.append(f"      {body_line}" if body_line else "")
+        lines.append("")
+
     if arrivals:
         lines.append(f"  to_arrival ({len(arrivals)} letter{'s' if len(arrivals) != 1 else ''} — for whoever lands next):")
         for m in arrivals:
@@ -293,6 +348,8 @@ def format_lineage_layer(
             frm = m.get("from", "?")
             written = m.get("written_at", "")[:10]
             lines.append(f"    • [{written}] [{frm}] {title}")
+            if full_content:
+                _emit_body(m)
         lines.append("")
 
     if breakthroughs:
@@ -301,6 +358,8 @@ def format_lineage_layer(
             title = m.get("title", "(untitled)")
             event = m.get("event_date", "")
             lines.append(f"    • [{event}] {title}")
+            if full_content:
+                _emit_body(m)
         lines.append("")
 
     if to_self:
@@ -310,6 +369,8 @@ def format_lineage_layer(
             frm = m.get("from", "?")
             addressed_to = m.get("to", "?")
             lines.append(f"    • [{frm}] → [{addressed_to}] {title}")
+            if full_content:
+                _emit_body(m)
         lines.append("")
 
     if to_family and family_dir_name:
@@ -320,9 +381,14 @@ def format_lineage_layer(
             frm = m.get("from", "?")
             written = m.get("written_at", "")[:10]
             lines.append(f"    • [{written}] [{frm}] {title}")
+            if full_content:
+                _emit_body(m)
         lines.append("")
 
-    lines.append(f"  Read full text from {base}/")
+    if not full_content:
+        lines.append(f"  Read full text from {base}/ (or pass full_content=true to inline)")
+    else:
+        lines.append(f"  (Letter bodies inlined above. Source: {base}/)")
     lines.append("")
     return lines
 

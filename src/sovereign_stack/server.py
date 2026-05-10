@@ -2325,7 +2325,10 @@ async def _dispatch_tool(name: str, arguments: dict):
         #      (felt-record), to_self (narrowly addressed by instance_id).
         try:
             lineage_lines = format_lineage_layer(
-                Path(DEFAULT_ROOT), reader_instance=reader, limit_per_bucket=5
+                Path(DEFAULT_ROOT),
+                reader_instance=reader,
+                limit_per_bucket=5,
+                full_content=full_content,
             )
             lines.extend(lineage_lines)
         except Exception as exc:

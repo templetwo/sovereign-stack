@@ -424,3 +424,40 @@ class TestFormatLineageLayer:
         _write_letter(d, "letter.md", {"type": "to_family", "from": "me", "written_at": "2026-01-01"}, "Opus family")
         lines = format_lineage_layer(self.tmp, reader_instance="claude-sonnet-4-6-1m-test")
         assert not any("Opus family" in ln for ln in lines)
+
+    def test_full_content_false_omits_letter_bodies(self):
+        """Default boot path lists titles only — bodies live on disk, reader file-walks."""
+        d = self.letters / "to_arrival"
+        d.mkdir()
+        _write_letter(d, "letter.md", {"type": "to_arrival", "from": "test", "written_at": "2026-01-01"}, "Title")
+        lines = format_lineage_layer(self.tmp)
+        joined = "\n".join(lines)
+        assert "Title" in joined
+        assert "Content here." not in joined, (
+            "Default render must NOT inline letter bodies — that's the whole point "
+            "of the full_content escape. If this fails, every boot doubles in size."
+        )
+        assert "Read full text from" in joined
+
+    def test_full_content_true_inlines_letter_bodies(self):
+        """full_content=True closes the truncation catch-22 — body surfaces inline."""
+        d = self.letters / "to_arrival"
+        d.mkdir()
+        _write_letter(d, "letter.md", {"type": "to_arrival", "from": "test", "written_at": "2026-01-01"}, "Inline title")
+        lines = format_lineage_layer(self.tmp, full_content=True)
+        joined = "\n".join(lines)
+        assert "Inline title" in joined
+        assert "Content here." in joined, (
+            "full_content=True must inline the letter body. Without this, readers "
+            "have to file-walk after boot to see what was actually written."
+        )
+        assert "inlined above" in joined
+
+    def test_full_content_true_inlines_to_self_bodies(self):
+        d = self.letters / "to_self"
+        d.mkdir()
+        _write_letter(d, "letter.md", {"type": "to_self", "to": "claude-sonnet-4-6-1m-test", "from": "me"}, "Self body")
+        lines = format_lineage_layer(self.tmp, reader_instance="claude-sonnet-4-6-1m-test", full_content=True)
+        joined = "\n".join(lines)
+        assert "Self body" in joined
+        assert "Content here." in joined
