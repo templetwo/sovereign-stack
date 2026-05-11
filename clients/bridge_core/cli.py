@@ -345,6 +345,108 @@ def commit(ctx, proposal_id: str, live: bool):
         sys.exit(1)
 
 
+# ── submit-text (text-relay path) ─────────────────────────────────────────────
+
+@cli.command("submit-text")
+@click.option(
+    "--from-file",
+    type=click.Path(exists=True, dir_okay=False),
+    default=None,
+    help="Read raw text from this file instead of stdin.",
+)
+@click.option(
+    "--relayed-by",
+    default="anthony@cli",
+    help="Identity of the human relaying the text (recorded in relay_attribution).",
+)
+@click.pass_context
+def submit_text(ctx, from_file, relayed_by):
+    """
+    Relay a chat-text Ring 2 proposal into the bridge's pending_writes queue.
+
+    Input must contain a <RING2_PROPOSAL_V1>{...}</RING2_PROPOSAL_V1> fence.
+    Reads from stdin by default; --from-file overrides.
+
+    Outcome routes to one of four sibling queues under the bridge state dir:
+      pending_writes/            valid proposal awaiting approval
+      relay_malformed/           bad JSON / unclosed fence
+      relay_unsupported/         tool not in Ring 2 set
+      relay_validation_failed/   proposal failed downstream validation
+
+    Fences inside ``` markdown blocks are silently ignored.
+    """
+    source = ctx.obj["source"]
+    if source != "grok":
+        raise click.ClickException(
+            f"submit-text is not yet implemented for --source={source} (grok only in v1)"
+        )
+
+    # Defer imports until invoked.
+    from bridge_core import get_context, relay_text
+
+    if from_file:
+        raw = Path(from_file).read_text()
+    else:
+        raw = click.get_text_stream("stdin").read()
+
+    if not raw.strip():
+        raise click.ClickException("no input received (stdin was empty)")
+
+    # Substrate identity follows the existing --source → substrate convention
+    # established by _SubstrateOps (source='grok' → substrate='grok-xai').
+    bridge_ctx = get_context("grok-xai")
+    result = relay_text(bridge_ctx, raw, relayed_by=relayed_by)
+
+    if result.outcome == "proposal_created":
+        click.echo(click.style(
+            f"\nPROPOSAL CREATED: {_short(result.proposal_id)}  [{result.tool}]",
+            fg="bright_green", bold=True,
+        ))
+        click.echo(f"  queue:       pending_writes/")
+        click.echo(f"  relayed_by:  {relayed_by}")
+        click.echo()
+        click.echo(
+            f"  Next: bridge --source={source} show {result.proposal_id[:8]}"
+        )
+        click.echo(
+            f"        bridge --source={source} approve {result.proposal_id[:8]}"
+        )
+        return
+
+    if result.outcome == "ignored":
+        click.echo(click.style(
+            "IGNORED — fence inside ``` markdown block; no proposal created.",
+            fg="yellow",
+        ))
+        return
+
+    if result.outcome == "no_fence":
+        click.echo(click.style(
+            "NO FENCE — input contained no <RING2_PROPOSAL_V1> tag.",
+            fg="yellow",
+        ), err=True)
+        if result.error:
+            click.echo(f"  detail: {result.error}", err=True)
+        sys.exit(2)
+
+    label_color = {
+        "malformed":         ("MALFORMED",         "red"),
+        "unsupported":       ("UNSUPPORTED TOOL",  "magenta"),
+        "validation_failed": ("VALIDATION FAILED", "bright_red"),
+    }
+    label, color = label_color.get(result.outcome, (result.outcome.upper(), "red"))
+
+    click.echo(click.style(f"\n{label} — proposal NOT created.", fg=color, bold=True), err=True)
+    click.echo(f"  queue:   {result.queue}/", err=True)
+    if result.tool:
+        click.echo(f"  tool:    {result.tool}", err=True)
+    if result.queue_file:
+        click.echo(f"  file:    {result.queue_file.name}", err=True)
+    if result.error:
+        click.echo(f"  reason:  {result.error}", err=True)
+    sys.exit(1)
+
+
 # ── audit-tail / verify-chain ─────────────────────────────────────────────────
 
 @cli.command("audit-tail")

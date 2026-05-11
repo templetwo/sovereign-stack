@@ -59,6 +59,11 @@ class Proposal:
     revision_notes: str | None = None
     commit_result: dict | None = None
 
+    # Set only on proposals created via the text-relay path (bridge submit-text).
+    # SSE-path proposals leave this None. Field is included in audit_hash, so it
+    # is tamper-evident — but it is never mutated after creation.
+    relay_attribution: dict | None = None
+
     prev_hash: str | None = None
     audit_hash: str = ""
 
@@ -117,6 +122,7 @@ def create_pending_write(
     session_id: str | None = None,
     compass_check_result: str | None = None,
     compass_check_rationale: str | None = None,
+    relay_attribution: dict | None = None,
     dry_run: bool = False,
 ) -> Proposal:
     """Create a Ring 2 write proposal under the substrate's pending_writes_dir."""
@@ -149,6 +155,7 @@ def create_pending_write(
         compass_check_result=compass_check_result,
         compass_check_rationale=compass_check_rationale,
         status="pending",
+        relay_attribution=relay_attribution,
         prev_hash=prev_hash,
         audit_hash="",
     )

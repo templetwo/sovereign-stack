@@ -15,6 +15,7 @@ tool-calling capabilities register additional transports without refactor.
 
 from .audit import AuditEvent, append_audit_event, read_audit_trail
 from .context import BridgeContext, get_context, known_contexts, register_context
+from .dispatch import pop_bridge_metadata
 from .hash_chain import (
     get_last_audit_hash,
     hash_object,
@@ -49,6 +50,7 @@ from .pending_writes import (
     validate_pending_write,
 )
 from .risk import RiskLevel, risk_classify
+from .text_relay import RelayResult, relay_text
 
 __all__ = [
     # Identity gate
@@ -70,4 +72,6 @@ __all__ = [
     "RiskLevel", "risk_classify",
     # Interceptor
     "InterceptResult", "classify_tool", "intercept", "pending_summary",
+    # Dispatch / text relay
+    "pop_bridge_metadata", "RelayResult", "relay_text",
 ]

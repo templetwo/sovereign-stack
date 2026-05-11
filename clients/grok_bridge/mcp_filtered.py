@@ -18,13 +18,13 @@ BEFORE the MCP connection is established. Rejected connections receive
 """
 
 import logging
-import uuid
 
 from bridge_core import (
     AuditEvent,
     append_audit_event,
     get_context,
     intercept,
+    pop_bridge_metadata,
     send_401,
     verify_at_door,
 )
@@ -115,24 +115,19 @@ async def handle_bridge_tool(name: str, arguments: dict):
             )]
 
         # Ring 2 enabled — route through bridge_core interceptor.
-        # Pop bridge-layer metadata before passing args to the proposal.
-        compass_check_result = arguments.pop("compass_check_result", None)
-        compass_check_rationale = arguments.pop("compass_check_rationale", None)
-        # Per Grok's spec: session_id is Grok-asserted in payload (not server-verified).
-        session_id = arguments.pop("session_id", None) or str(uuid.uuid4())
-        # source_instance defaults to grok-xai (substrate-level identity).
-        # Grok may attach a hybrid sub-id like grok-xai-20260509-001 if they want.
-        source_instance = arguments.pop("source_instance", None) or SUBSTRATE
+        # Pop bridge-layer metadata via the shared helper so SSE-path and
+        # text-relay path stay structurally consistent.
+        meta = pop_bridge_metadata(arguments, substrate=SUBSTRATE)
 
         ctx = get_context(SUBSTRATE)
         result = intercept(
             ctx,
             tool_name=name,
             args=arguments,
-            source_instance=source_instance,
-            session_id=session_id,
-            compass_check_result=compass_check_result,
-            compass_check_rationale=compass_check_rationale,
+            source_instance=meta["source_instance"],
+            session_id=meta["session_id"],
+            compass_check_result=meta["compass_check_result"],
+            compass_check_rationale=meta["compass_check_rationale"],
         )
 
         # Audit the intercept outcome
@@ -140,7 +135,7 @@ async def handle_bridge_tool(name: str, arguments: dict):
             ctx,
             AuditEvent.PROPOSAL_CREATED if result.allowed else AuditEvent.VALIDATION_FAILED,
             proposal_id=result.proposal.proposal_id if result.proposal else "none",
-            actor=source_instance,
+            actor=meta["source_instance"],
             details={"tool": name, "ring": result.ring, "error": result.error},
         )
 
