@@ -36,6 +36,12 @@ def _split_bundled_question(question: str) -> list[str]:
 
     Bundle detection requires at least two items starting with (1) — a lone
     parenthetical like "(see below)" never triggers a split.
+
+    Inline enumerations are excluded: if items are separated by comma or
+    semicolon (e.g. "path: (1) ship, (2) defer, (3) abandon"), the list is
+    treated as enumeration-within-context and returned as a single question.
+    Atomic bundles use sentence-terminators or whitespace as separators
+    (e.g. "Items: (1) Revoke token. (2) Rotate key. (3) Install gitleaks.").
     """
     matches = list(_BUNDLE_ITEM_RE.finditer(question))
     if len(matches) < 2:
@@ -43,6 +49,15 @@ def _split_bundled_question(question: str) -> list[str]:
     nums = [int(m.group(1)) for m in matches]
     if nums[0] != 1 or nums != list(range(1, len(nums) + 1)):
         return [question]
+
+    # Inline enumeration check: if items are separated by `, ` or `; `, the
+    # numbered list is enumeration-within-context, not a bundle of independent
+    # questions. Each item then ends mid-clause rather than at a sentence
+    # boundary, so treat the whole question as atomic.
+    for i in range(len(matches) - 1):
+        between = question[matches[i].end() : matches[i + 1].start()].rstrip()
+        if between and between[-1] in ",;":
+            return [question]
 
     # Carve out a lead-in (text before "(1)") that becomes a shared context prefix.
     lead = question[: matches[0].start()].strip()

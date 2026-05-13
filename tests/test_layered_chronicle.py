@@ -283,6 +283,34 @@ class TestLayeredChronicle:
         threads = self.chronicle.get_open_threads(domain="no_split2")
         assert len(threads) == 1
 
+    def test_comma_separated_inline_enumeration_does_not_atomize(self):
+        """Comma-separated inline enumeration stays as one question (not a bundle).
+
+        Regression for 2026-05-13: a single open question with inline numbered
+        resolution paths separated by commas was being split into three duplicate
+        threads sharing an identical lead-in.
+        """
+        self.chronicle.record_open_thread(
+            question=(
+                "Proposed resolution path: (1) pull data into stack, "
+                "(2) cross-link via tag, (3) treat as ongoing research thread."
+            ),
+            domain="enum_comma",
+            session_id="t",
+        )
+        threads = self.chronicle.get_open_threads(domain="enum_comma")
+        assert len(threads) == 1
+
+    def test_semicolon_separated_inline_enumeration_does_not_atomize(self):
+        """Semicolon-separated inline enumeration stays as one question."""
+        self.chronicle.record_open_thread(
+            question="Options: (1) ship now; (2) defer; (3) abandon.",
+            domain="enum_semi",
+            session_id="t",
+        )
+        threads = self.chronicle.get_open_threads(domain="enum_semi")
+        assert len(threads) == 1
+
     def test_every_thread_gets_thread_id(self):
         """New threads have a stable thread_id field from record time."""
         self.chronicle.record_open_thread(
