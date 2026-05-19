@@ -26,6 +26,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from .context_builder import build_scribe_chronicle_context
 from .encounter import write_encounter_note
 from .redactor import redact
 from .session import ScribeSession, ScribeSessionStore
@@ -133,13 +134,34 @@ def boot_spawn(
     ttl_minutes: int = 240,
 ) -> ScribeSession:
     """Spawn a ScribeSession at boot time. Always succeeds — does not
-    attempt the Haiku call. Use greet_session() separately to call Haiku."""
+    attempt the Haiku call. Use greet_session() separately to call Haiku.
+
+    The scribe gets a FULL-CONTENT chronicle context (via
+    build_scribe_chronicle_context), not the caller's possibly-truncated
+    boot_text. This addresses the 2026-05-19 iPhone-seat finding that
+    the scribe was inheriting the caller's truncated view and silently
+    failing on content that had been clipped at 120 chars in the boot.
+
+    The boot_text is kept as boot_context_summary (a 200-char hint) so
+    the scribe knows what the caller saw, but its working surface is
+    the full chronicle slice.
+    """
     summary = _summarize_boot(boot_text)
+    try:
+        chronicle_ctx = build_scribe_chronicle_context()
+    except Exception as exc:
+        # Never let context-build failure break boot. Fall back to the
+        # caller's boot_text so the scribe at least has SOMETHING.
+        logger.warning(
+            "scribe: full-context build failed (%s); falling back to boot_text",
+            exc,
+        )
+        chronicle_ctx = boot_text
     session = ScribeSession.create(
         parent_instance=parent_instance,
         boot_context_summary=summary,
         ttl_minutes=ttl_minutes,
-        chronicle_context=boot_text,
+        chronicle_context=chronicle_ctx,
     )
     _scribe_store.register(session)
     return session
