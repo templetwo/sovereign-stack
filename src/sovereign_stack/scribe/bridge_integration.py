@@ -30,6 +30,7 @@ from .context_builder import build_scribe_chronicle_context
 from .encounter import write_encounter_note
 from .redactor import redact
 from .session import ScribeSession, ScribeSessionStore
+from .tools import anthropic_tool_definitions, dispatch_tool
 
 logger = logging.getLogger(__name__)
 
@@ -354,6 +355,9 @@ def ask_scribe(session_id: Optional[str], message: str) -> str:
             conversation_history=history,
             user_message=redacted.text,
             chronicle_context=session.chronicle_context,
+            tools=anthropic_tool_definitions(),
+            tool_dispatch=dispatch_tool,
+            max_tool_iterations=5,
         )
     except Exception as exc:
         return f"ask_scribe error: {type(exc).__name__}: {exc}"

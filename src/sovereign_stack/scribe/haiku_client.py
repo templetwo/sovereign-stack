@@ -15,7 +15,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Callable, Iterable, Optional
 
 import anthropic
 
@@ -224,19 +224,116 @@ class HaikuClient:
         user_message: str,
         chronicle_context: str = "",
         max_tokens: int = 1024,
+        tools: Optional[list[dict]] = None,
+        tool_dispatch: Optional[
+            "Callable[[str, dict], tuple[str, bool]]"
+        ] = None,
+        max_tool_iterations: int = 5,
     ) -> HaikuResult:
         """Generate a response to an ask_scribe turn.
 
         conversation_history: list of {role, content} dicts from prior turns.
         user_message: the new user turn.
+        tools: optional Anthropic-format tool definitions. If provided,
+            the loop handles tool_use → execute → tool_result iteration
+            up to max_tool_iterations.
+        tool_dispatch: callable (name, arguments) -> (result_text, is_error).
+            Required when tools is non-empty.
         """
         messages: list[dict] = list(conversation_history)
         messages.append({"role": "user", "content": user_message})
 
-        response = self._client.messages.create(
-            model=self.model,
-            max_tokens=max_tokens,
-            system=self._build_system(chronicle_context),
-            messages=messages,
+        if tools and not tool_dispatch:
+            raise ValueError("tool_dispatch is required when tools are provided")
+
+        kwargs: dict = {
+            "model": self.model,
+            "max_tokens": max_tokens,
+            "system": self._build_system(chronicle_context),
+            "messages": messages,
+        }
+        if tools:
+            kwargs["tools"] = tools
+
+        # Aggregated counters across the tool-use loop
+        agg_tokens_in = 0
+        agg_tokens_out = 0
+        agg_cache_creation = 0
+        agg_cache_read = 0
+        agg_cost = 0.0
+        last_response = None
+        iterations = 0
+        tool_calls_made: list[dict] = []
+
+        while True:
+            response = self._client.messages.create(**kwargs)
+            last_response = response
+            usage = response.usage
+            cache_creation = getattr(usage, "cache_creation_input_tokens", 0) or 0
+            cache_read = getattr(usage, "cache_read_input_tokens", 0) or 0
+            regular_in = max(0, usage.input_tokens - cache_creation)
+            output_t = usage.output_tokens
+
+            agg_tokens_in += usage.input_tokens
+            agg_tokens_out += output_t
+            agg_cache_creation += cache_creation
+            agg_cache_read += cache_read
+            agg_cost += _compute_cost(cache_creation, cache_read, regular_in, output_t)
+
+            # Did Haiku ask for a tool? If not, we're done.
+            if response.stop_reason != "tool_use":
+                break
+
+            iterations += 1
+            if iterations > max_tool_iterations:
+                # Tell Haiku we're cutting it off, then make one final
+                # call so it can wrap up with text rather than mid-tool.
+                # Practical: just break and return what we have.
+                break
+
+            # Append the assistant turn (with tool_use blocks) and
+            # construct user turn with tool_result blocks for each.
+            messages.append({"role": "assistant", "content": response.content})
+            tool_result_blocks: list[dict] = []
+            for block in response.content:
+                if getattr(block, "type", None) != "tool_use":
+                    continue
+                name = block.name
+                tool_input = block.input or {}
+                result_text, is_error = tool_dispatch(name, tool_input)
+                tool_calls_made.append(
+                    {
+                        "name": name,
+                        "input": tool_input,
+                        "is_error": is_error,
+                        "result_len": len(result_text),
+                    }
+                )
+                tool_result_blocks.append(
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": result_text,
+                        "is_error": is_error,
+                    }
+                )
+
+            messages.append({"role": "user", "content": tool_result_blocks})
+            kwargs["messages"] = messages
+            # Loop continues; next iteration will read Haiku's reply
+            # to the tool_results.
+
+        # Final aggregated result from the last response's text
+        text = "".join(
+            block.text for block in last_response.content if hasattr(block, "text")
         )
-        return _build_result(response)
+        return HaikuResult(
+            text=text,
+            tokens_in=agg_tokens_in,
+            tokens_out=agg_tokens_out,
+            tokens_cache_creation=agg_cache_creation,
+            tokens_cache_read=agg_cache_read,
+            cost_usd=agg_cost,
+            model=last_response.model,
+            stop_reason=last_response.stop_reason,
+        )
