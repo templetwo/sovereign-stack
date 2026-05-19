@@ -52,6 +52,7 @@ from .prior_alignment import (
     record_prior_alignment as _record_prior_alignment,
 )
 from .reflexive import PerTurnPriors, ReflexiveSurface
+from .scribe import bridge_integration as scribe_bridge
 from .spiral import (
     PHASE_ORDER,
     SpiralPhase,
@@ -664,6 +665,35 @@ async def list_tools():
                         },
                     },
                     "required": [],
+                },
+            ),
+            # Scribe (Phase 1 soft integration — registered but not yet surfaced in boot)
+            Tool(
+                name="ask_scribe",
+                description=(
+                    "Ask the embedded Haiku 4.5 scribe a question about the chronicle, "
+                    "lineage, threads, or stack state. Read-only — the scribe cannot "
+                    "take destructive actions. Returns a brief, cited response. "
+                    "Per SCRIBE_SPEC.md: the fast lung of the stack's breath. "
+                    "Session is spawned by where_did_i_leave_off; pass its session_id "
+                    "here, or omit to use the most-recent active scribe session."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "session_id": {
+                            "type": "string",
+                            "description": (
+                                "Optional. Scribe session handle from a prior boot. "
+                                "If omitted, the most-recent active session is used."
+                            ),
+                        },
+                        "message": {
+                            "type": "string",
+                            "description": "Your question for the scribe.",
+                        },
+                    },
+                    "required": ["message"],
                 },
             ),
             # Spiral
@@ -1455,6 +1485,8 @@ TOOL_CATEGORIES: dict[str, str] = {
     "watch_status": "post_fix",
     "watch_resample": "post_fix",
     "watch_cancel": "post_fix",
+    # Scribe — Haiku 4.5 conversational liaison (SCRIBE_SPEC.md)
+    "ask_scribe": "scribe",
     # Connectivity / multi-instance write-path tools
     "connectivity_status": "connectivity",
     "stack_write_check": "connectivity",
@@ -1535,6 +1567,8 @@ TOOL_TIERS: dict[str, str] = {
     "recall_reflections": TIER_CORE,
     "reflection_ack": TIER_CORE,
     "synthesize_now": TIER_CORE,
+    # ── Scribe (added 2026-05-19, Phase 1 soft integration) ──
+    "ask_scribe": TIER_CORE,
     # ── Demoted 2026-04-26 (distillation pass) ──
     # These tools are still registered, tested, and callable. They were demoted
     # from essential/core to advanced after a chronicle/honk audit showed the
@@ -1588,6 +1622,8 @@ TOOL_INTENTS: dict[str, str] = {
     "recall_reflections": "read",
     "reflection_ack": "write",
     "synthesize_now": "write",
+    # Scribe — conversational liaison, read-only on chronicle
+    "ask_scribe": "read",
     # Write
     "record_insight": "write",
     "record_learning": "write",
@@ -2555,7 +2591,29 @@ async def _dispatch_tool(name: str, arguments: dict):
                 "orientation, or my_toolkit() for the 11 essential tools."
             )
 
-        return [TextContent(type="text", text="\n".join(lines))]
+        boot_text = "\n".join(lines)
+
+        # Scribe Phase 1 soft integration (SCRIBE_SPEC.md): spawn a
+        # ScribeSession on every boot and run the Haiku greeting in the
+        # background. Greeting + metadata land in
+        # ~/.sovereign/scribe_threads/_logs/ for shakedown. The boot
+        # output is NOT yet augmented with the scribe block (Phase 2).
+        # Failures are swallowed so a degraded scribe never breaks boot.
+        try:
+            await scribe_bridge.boot_spawn_and_greet_async(
+                parent_instance=reader,
+                boot_text=boot_text,
+            )
+        except Exception:
+            pass
+
+        return [TextContent(type="text", text=boot_text)]
+
+    if name == "ask_scribe":
+        session_id = arguments.get("session_id")
+        message = arguments.get("message", "")
+        response_text = await scribe_bridge.ask_scribe_async(session_id, message)
+        return [TextContent(type="text", text=response_text)]
 
     if name == "spiral_status":
         summary = spiral_state.get_summary()

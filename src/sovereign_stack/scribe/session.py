@@ -74,6 +74,11 @@ class ScribeSession:
     turns: list[ScribeTurn] = field(default_factory=list)
     closed: bool = False
     archived_at: Optional[str] = None
+    # Full chronicle context (typically the joined boot ritual text) — sent
+    # to Haiku as a cache-controlled system block so multi-turn sessions
+    # reuse it cheaply. Stored on the session so ask_scribe turns can pass
+    # the same context the boot used.
+    chronicle_context: str = ""
 
     # ----- Lifecycle ---------------------------------------------------
 
@@ -83,6 +88,7 @@ class ScribeSession:
         parent_instance: Optional[str] = None,
         boot_context_summary: str = "",
         ttl_minutes: int = DEFAULT_TTL_MINUTES,
+        chronicle_context: str = "",
     ) -> "ScribeSession":
         now = _now_iso()
         return cls(
@@ -92,6 +98,7 @@ class ScribeSession:
             created_at=now,
             last_message_at=now,
             ttl_minutes=ttl_minutes,
+            chronicle_context=chronicle_context,
         )
 
     @property
