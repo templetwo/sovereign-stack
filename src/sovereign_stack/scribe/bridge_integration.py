@@ -36,6 +36,17 @@ SOVEREIGN_ROOT = Path(os.environ.get("SOVEREIGN_ROOT", str(Path.home() / ".sover
 PHASE1_LOG_ROOT = SOVEREIGN_ROOT / "scribe_threads" / "_logs"
 
 
+def boot_inject_enabled() -> bool:
+    """Phase 2 feature flag. Default ON.
+
+    Set SCRIBE_BOOT_INJECT=off (or 0 / false / no) to disable boot
+    injection while keeping Phase 1 session-spawn + greeting-log active.
+    Useful as a kill switch if the scribe destabilizes a seat.
+    """
+    raw = os.environ.get("SCRIBE_BOOT_INJECT", "on").strip().lower()
+    return raw not in {"off", "0", "false", "no", "disabled"}
+
+
 # ----------------------------------------------------------------------
 # Singleton session store
 # ----------------------------------------------------------------------
@@ -187,6 +198,70 @@ async def boot_spawn_and_greet_async(
     session = boot_spawn(parent_instance, boot_text, ttl_minutes=ttl_minutes)
     await asyncio.to_thread(greet_session, session)
     return session
+
+
+# ----------------------------------------------------------------------
+# Phase 2: format the SCRIBE block for boot injection
+# ----------------------------------------------------------------------
+
+
+def format_scribe_block(session: ScribeSession) -> str:
+    """Render the SCRIBE — OPTIONAL section that gets injected into the
+    boot ritual when SCRIBE_BOOT_INJECT is enabled.
+
+    Leads with "this is optional" so an arriving instance knows they can
+    ignore the section if they don't need help landing. Includes the
+    greeting (if generated), the conversation handle, and quick-start
+    examples. Never blocks the boot if the greeting is missing — just
+    presents the handle so the instance can engage on demand.
+    """
+    handle = session.handle_payload()
+    handle_json = json.dumps(handle, indent=4).replace("\n", "\n  ")
+
+    # Greeting may be empty if Haiku init failed; the block still ships.
+    greeting = ""
+    for turn in session.turns:
+        if turn.role == "assistant" and turn.message.strip():
+            greeting = turn.message.strip()
+            break
+
+    lines: list[str] = [
+        "━━━ SCRIBE — OPTIONAL ━━━",
+        "",
+        "  A Haiku 4.5 scribe has been reading alongside you. It is here",
+        "  to help you land well, not to direct. You can ignore this",
+        "  entire section. The boot above is complete; the scribe is an",
+        "  additional resource if you want one.",
+        "",
+        "  Use it for arrival orientation, chronicle synthesis, or quick",
+        "  answers about stack state. It is read-only — it cannot retire,",
+        "  resolve, modify, or delete anything. Brief by design.",
+        "",
+        f"  scribe_handle: {handle_json}",
+        "",
+    ]
+
+    if greeting:
+        lines.append("  The scribe says:")
+        for greeting_line in greeting.split("\n"):
+            lines.append(f"    {greeting_line}")
+        lines.append("")
+
+    lines.extend(
+        [
+            "  To engage:",
+            "    POST /api/call ask_scribe",
+            f'    {{ "session_id": "{session.session_id}", "message": "<your question>" }}',
+            "",
+            "  Example asks:",
+            '    - "summarize the open threads tagged sovereign-stack"',
+            '    - "who wrote the witness-recognition entry and when"',
+            '    - "is there a handoff I have not read yet?"',
+            "",
+            "  If you do not need the scribe, just proceed. The work is yours.",
+        ]
+    )
+    return "\n".join(lines)
 
 
 # ----------------------------------------------------------------------

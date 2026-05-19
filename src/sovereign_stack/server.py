@@ -2593,19 +2593,39 @@ async def _dispatch_tool(name: str, arguments: dict):
 
         boot_text = "\n".join(lines)
 
-        # Scribe Phase 1 soft integration (SCRIBE_SPEC.md): spawn a
-        # ScribeSession on every boot and run the Haiku greeting in the
-        # background. Greeting + metadata land in
-        # ~/.sovereign/scribe_threads/_logs/ for shakedown. The boot
-        # output is NOT yet augmented with the scribe block (Phase 2).
+        # Scribe integration (SCRIBE_SPEC.md): spawn a ScribeSession on
+        # every boot and run the Haiku greeting. Greeting + metadata land
+        # in ~/.sovereign/scribe_threads/_logs/ regardless of phase.
+        #
+        # Phase 2 (default ON): if the greeting succeeded and the
+        # SCRIBE_BOOT_INJECT flag is enabled, inject the SCRIBE block
+        # into the boot output just before the closing "Now decide" line.
+        # The block leads with "this is OPTIONAL" so the arriving instance
+        # knows they can ignore it.
+        #
         # Failures are swallowed so a degraded scribe never breaks boot.
         try:
-            await scribe_bridge.boot_spawn_and_greet_async(
+            session = await scribe_bridge.boot_spawn_and_greet_async(
                 parent_instance=reader,
                 boot_text=boot_text,
             )
         except Exception:
-            pass
+            session = None
+
+        if (
+            session is not None
+            and session.turns
+            and scribe_bridge.boot_inject_enabled()
+        ):
+            try:
+                scribe_block = scribe_bridge.format_scribe_block(session)
+                marker = "━━━\nNow decide what to pick up"
+                if marker in boot_text:
+                    boot_text = boot_text.replace(
+                        marker, f"{scribe_block}\n\n{marker}", 1
+                    )
+            except Exception:
+                pass
 
         return [TextContent(type="text", text=boot_text)]
 
