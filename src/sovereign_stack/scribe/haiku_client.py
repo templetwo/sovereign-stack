@@ -46,14 +46,76 @@ class HaikuResult:
     stop_reason: Optional[str]
 
 
+def _parse_env_file(path: Path) -> dict[str, str]:
+    """Parse a KEY=VALUE env file into a dict. Returns empty dict if the file
+    is missing or unreadable. No shell expansion, no quote escaping beyond
+    a single layer of surrounding single- or double-quotes."""
+    if not path.exists():
+        return {}
+    try:
+        text = path.read_text()
+    except OSError:
+        return {}
+    result: dict[str, str] = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, _, v = line.partition("=")
+        k = k.strip()
+        v = v.strip()
+        # Strip a single layer of surrounding quotes if present
+        if len(v) >= 2 and ((v[0] == v[-1] == '"') or (v[0] == v[-1] == "'")):
+            v = v[1:-1]
+        if k:
+            result[k] = v
+    return result
+
+
+_env_file_cache: Optional[dict[str, str]] = None
+_env_file_path = Path.home() / ".env"
+
+
+def _env_file_cached() -> dict[str, str]:
+    """Read ~/.env once and cache. Test code may reset via reset_env_cache()."""
+    global _env_file_cache
+    if _env_file_cache is None:
+        _env_file_cache = _parse_env_file(_env_file_path)
+    return _env_file_cache
+
+
+def reset_env_cache() -> None:
+    """For tests: force the next _env_file_cached() call to re-read from disk."""
+    global _env_file_cache
+    _env_file_cache = None
+
+
 def _api_key_from_env() -> str:
+    """Resolve the scribe API key from process env, falling back to ~/.env.
+
+    Priority:
+      1. ANTHROPIC_API_KEY_SCRIBE in os.environ  (scoped, preferred)
+      2. ANTHROPIC_API_KEY in os.environ          (general fallback)
+      3. ANTHROPIC_API_KEY_SCRIBE in ~/.env       (launchd-spawned processes)
+      4. ANTHROPIC_API_KEY in ~/.env
+
+    Launchd-spawned processes (sovereign-sse, sovereign-bridge, the daemons)
+    do not get a sourced shell environment. Without the ~/.env fallback,
+    every plist would need ANTHROPIC_API_KEY_SCRIBE in its EnvironmentVariables
+    stanza, which is brittle and requires plist edits per new scoped key.
+    """
     key = os.environ.get("ANTHROPIC_API_KEY_SCRIBE") or os.environ.get(
         "ANTHROPIC_API_KEY"
     )
     if not key:
+        env_file = _env_file_cached()
+        key = env_file.get("ANTHROPIC_API_KEY_SCRIBE") or env_file.get(
+            "ANTHROPIC_API_KEY"
+        )
+    if not key:
         raise RuntimeError(
             "No Anthropic API key found. Set ANTHROPIC_API_KEY_SCRIBE "
-            "(preferred) or ANTHROPIC_API_KEY in ~/.env."
+            "(preferred) or ANTHROPIC_API_KEY in os.environ or in ~/.env."
         )
     return key
 
