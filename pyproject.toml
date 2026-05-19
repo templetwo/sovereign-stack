@@ -35,6 +35,7 @@ dependencies = [
     "sse-starlette>=1.6.0",
     "click>=8.0",
     "httpx>=0.24.0",
+    "anthropic>=0.100",
 ]
 
 [project.urls]
