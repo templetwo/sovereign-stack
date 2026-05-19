@@ -479,8 +479,11 @@ async def handle_metabolism_tool(name, arguments):
                 for gt in ground_truths:
                     g_content = gt.get("content", "")
                     overlap = _keyword_overlap(h_content, g_content)
-                    if overlap > 0.3:
-                        # High overlap between hypothesis and ground truth — potential contradiction
+                    if overlap > 0.45:
+                        # High overlap between hypothesis and ground truth — potential contradiction.
+                        # Raised from 0.3 -> 0.45 on 2026-05-18 (Wave 1 substrate fix, GAMEPLAN.md):
+                        # CODA April 20 entry was firing as false-positive against 5 unrelated entries
+                        # every night due to common-vocabulary overlap at the lower threshold.
                         digest["contradictions"].append(
                             {
                                 "hypothesis_domain": hyp.get("_domain_dir", "?"),
