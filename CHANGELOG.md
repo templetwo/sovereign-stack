@@ -7,6 +7,91 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.5.0] - 2026-05-19
+
+### Breath architecture: the fast lung — 79 tools, 944 passing
+
+The Sovereign Stack gains its first conversational lung: a per-instance
+Haiku 4.5 scribe spawned on every `where_did_i_leave_off` call. The
+chronicle now speaks back when spoken to.
+
+This release introduces the **breath architecture** as a structural
+frame: three rhythms (fast = scribe per-call, medium = dispatcher
+per-event, slow = daemons scheduled) on a coherent Haiku 4.5 minor-
+cognitive layer. Opus stays the conversation seat. Sonnet stays the
+deep-mode escalation reserve. The medium lung (Haiku dispatcher) is
+specced and queued for Wave 2; this release ships only the fast lung.
+
+### Added — Scribe (the fast lung)
+- **`ask_scribe`** MCP tool (TIER_CORE, intent=read, category=scribe).
+  Read-only conversational liaison over the chronicle. Pass `session_id`
+  from the boot's SCRIBE handle or omit to use the most-recent active
+  session. Returns a brief, cited response with a stats footer (turn
+  count, tokens in/out, cache reads, per-turn and session-total cost).
+- **`src/sovereign_stack/scribe/`** module:
+  - `redactor.py` — pattern-based credential redaction (Bearer tokens,
+    `sk-`/`pk-`/`api-` key shapes, env-credential assignments, long hex,
+    sensitive filesystem paths, private key blocks). Returns counts for
+    observability. Load-bearing per `SCRIBE_SPEC.md`.
+  - `session.py` — `ScribeSession` dataclass with TTL + cost accounting;
+    `ScribeSessionStore` (thread-safe) with TTL eviction + JSONL archive
+    to `~/.sovereign/scribe_threads/<date>/<session>.jsonl`.
+  - `haiku_client.py` — Anthropic SDK wrapper with prompt-cache markers
+    on system + chronicle base blocks. Cost-aware (Haiku 4.5 pricing).
+    Resolves `ANTHROPIC_API_KEY_SCRIBE` (preferred) or `ANTHROPIC_API_KEY`
+    from `os.environ`, falling back to `~/.env` for launchd-spawned
+    processes.
+  - `encounter.py` — small chronicle writes attributed to
+    `scribe-haiku-4-5` describing the scribe's own conversations
+    (intensity 0.3, layer ground_truth, domain `scribe,encounter,<parent>`).
+  - `bridge_integration.py` — module-level session-store singleton,
+    lazy Haiku client init, async boot-spawn + greeting, `ask_scribe`
+    handler with redaction, `format_scribe_block()` for boot injection,
+    `boot_inject_enabled()` flag (default ON, `SCRIBE_BOOT_INJECT=off`
+    kills injection while keeping logs).
+  - `prompts/system.md` — voice spec: brief, cited, honest about
+    uncertainty, never impersonates, never expands redacted placeholders,
+    never invents tool names, never invents specifics, no paths in greetings.
+
+### Added — Boot ritual
+- **SCRIBE — OPTIONAL** section in `where_did_i_leave_off` output, injected
+  just before the closing "Now decide what to pick up" line. Leads with
+  "here to help you land well, not to direct" — explicitly optional.
+  Includes scribe handle JSON, a 2-3 sentence Haiku-generated greeting,
+  and engagement instructions. Kill switch via `SCRIBE_BOOT_INJECT`.
+
+### Added — Documentation
+- `docs/implementation/SCRIBE_SPEC.md` — full spec for the scribe.
+- `docs/implementation/DISPATCHER_HAIKU.md` — addendum to
+  `DISPATCHER_REIMAGINE.md` swapping the routing model to Haiku 4.5
+  with Sonnet as escalation reserve. Queued for Wave 2.
+- `docs/GAMEPLAN.md` — three-axis frame: judgment / retrieval / integration.
+  Seven sequenced waves, decisions queued for Anthony.
+
+### Fixed — Substrate (Wave 1)
+- `metabolism.py` contradiction threshold raised from 0.3 → 0.45
+  (`if overlap > 0.45:` at metabolism.py:482). The CODA April 20 entry
+  was firing as a false-positive contradiction every night against 5
+  unrelated entries. Fresh-process verification: detection drops from
+  2190 → 84 (96% reduction).
+- Chronicle hygiene: 9 domain directories renamed to strip whitespace
+  around commas (`consciousness, claude-corner` → `consciousness,claude-corner`).
+  Cloudflare-503 hypothesis retired (tunnel is operational). One long-named
+  directory (where a leaked argument became the directory name) moved to
+  `_quarantine_2026-05-18/`.
+
+### Tests
+- 944 passing (up from 843 in v1.4.0). 78 new scribe tests:
+  redactor (38), session lifecycle (23), encounter notes (17), env-file
+  fallback (18).
+
+### Decisions queued
+- Wave 2: Dispatcher Phase 0 substrate (no-LLM scaffolding per
+  `DISPATCHER_HAIKU.md`). Pending three sub-questions: API key location,
+  daily budget cap, first workload.
+
+---
+
 ## [1.4.0] - 2026-05-09
 
 ### Cross-substrate bridges + synthesis daemon v2 + circuit breaker fix — 78 tools, 843/843 tests
