@@ -5,6 +5,7 @@ HTTP/SSE transport layer for remote access via Cloudflare tunnel.
 Runs alongside stdio server for local Claude Code access.
 """
 
+import json
 import logging
 import os
 import sys
@@ -130,6 +131,47 @@ async def _send_401(send) -> None:
     await send({"type": "http.response.body", "body": body})
 
 
+# ── OpenAI bridge request diagnostics ─────────────────────────────────────────
+# Added 2026-05-20 to diagnose a ChatGPT MCP-connector failure (200 on discovery,
+# 401/400/404 on invocation). Logs the headers that distinguish a transport
+# mismatch (Mcp-Session-Id / MCP-Protocol-Version present, Streamable-HTTP Accept)
+# from an auth-drop (bearer absent on retry). NEVER logs the bearer value — only
+# its presence and scheme. Remove or gate behind a flag once the issue is closed.
+
+def _log_openai_request_headers(scope: dict) -> None:
+    """Log diagnostic headers for an /openai/* request. Bearer value redacted."""
+    try:
+        headers = {
+            k.decode("latin-1").lower(): v.decode("latin-1", errors="replace")
+            for k, v in scope.get("headers", [])
+        }
+        method = scope.get("method", "?")
+        path = scope.get("path", "?")
+        query = scope.get("query_string", b"").decode("latin-1", errors="replace")
+
+        auth_raw = headers.get("authorization", "")
+        if auth_raw:
+            scheme = auth_raw.split(" ", 1)[0] if " " in auth_raw else auth_raw
+            auth_repr = f"present(scheme={scheme},len={len(auth_raw)})"
+        else:
+            auth_repr = "ABSENT"
+
+        diag = {
+            "method": method,
+            "path": path,
+            "query": query or "(none)",
+            "authorization": auth_repr,
+            "mcp-session-id": headers.get("mcp-session-id", "(none)"),
+            "mcp-protocol-version": headers.get("mcp-protocol-version", "(none)"),
+            "accept": headers.get("accept", "(none)"),
+            "content-type": headers.get("content-type", "(none)"),
+            "user-agent": headers.get("user-agent", "(none)")[:120],
+        }
+        logger.info("OPENAI_DIAG %s", json.dumps(diag))
+    except Exception as exc:  # diagnostics must never break a request
+        logger.warning("OPENAI_DIAG failed: %s", exc)
+
+
 # Wrap the Starlette app to intercept /messages POST before Starlette routing.
 # handle_post_message is a raw ASGI handler (scope, receive, send) that writes
 # responses directly — it returns None. Starlette Route expects a Response object,
@@ -143,6 +185,11 @@ class SovereignAsgiMiddleware:
     async def __call__(self, scope, receive, send):
         path = scope.get("path", "")
         method = scope.get("method", "")
+
+        # Diagnostic: log headers for any /openai/* request (bearer redacted).
+        # Added 2026-05-20 to diagnose the ChatGPT connector handshake failure.
+        if scope.get("type") == "http" and path.startswith("/openai/"):
+            _log_openai_request_headers(scope)
 
         if scope["type"] == "http" and path == "/messages" and method == "POST":
             logger.info("Message received")
