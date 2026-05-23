@@ -417,6 +417,63 @@ async def list_tools():
                 },
             ),
             Tool(
+                name="archive_exchange",
+                description=(
+                    "Archive the verbatim bytes of an external exchange (e.g. a model's full "
+                    "delivered output) to the content-addressed, hash-verified archive layer, "
+                    "which is separate from the curated chronicle. Use for raw artifacts that "
+                    "must be retrievable and re-verifiable later; reference the returned "
+                    "archive_id from a record_insight summary. A summary is not the artifact."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "content": {"type": "string", "description": "The verbatim text to preserve exactly"},
+                        "source": {"type": "string", "description": "Origin, e.g. 'gemini-3.5-flash', 'chatgpt', 'claude-web', 'human-relay'"},
+                        "descriptor": {"type": "string", "description": "Short human label (e.g. 'v3 admission record'); drives the readable filename"},
+                        "vector_id": {"type": "string", "description": "Artifact/vector this belongs to (e.g. 'prompt_source_tokens'); becomes the grouping folder"},
+                        "conversation_id": {"type": "string", "description": "Optional id tying related exchanges together"},
+                        "source_id": {"type": "string", "description": "Optional seat/conversation id at the source"},
+                        "tags": {"type": "array", "items": {"type": "string"}, "description": "Optional domain tags for retrieval"},
+                    },
+                    "required": ["content", "source"],
+                },
+            ),
+            Tool(
+                name="recall_exchange",
+                description=(
+                    "Retrieve an archived exchange by id AND verify its integrity: reads the "
+                    "bytes off disk and recomputes the hash. Returns integrity = verified | "
+                    "mismatch | missing | ambiguous | unknown, plus the content when present. "
+                    "This is how you tell 'provably here and intact' from a dangling reference."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "archive_id": {"type": "string", "description": "Full SHA-256 or a unique prefix (git-style)"},
+                    },
+                    "required": ["archive_id"],
+                },
+            ),
+            Tool(
+                name="list_exchanges",
+                description=(
+                    "List archived exchanges (provenance only, not the bytes), newest first, "
+                    "optionally filtered by vector_id / source / tag / conversation_id. Use "
+                    "recall_exchange(archive_id) to fetch and verify one in full."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "vector_id": {"type": "string"},
+                        "source": {"type": "string"},
+                        "tag": {"type": "string"},
+                        "conversation_id": {"type": "string"},
+                        "limit": {"type": "number", "default": 20},
+                    },
+                },
+            ),
+            Tool(
                 name="record_learning",
                 description="Record a learning from experience",
                 inputSchema={
@@ -1437,6 +1494,10 @@ TOOL_CATEGORIES: dict[str, str] = {
     "recall_insights": "memory",
     "check_mistakes": "memory",
     "get_inheritable_context": "memory",
+    # Archive (verbatim layer — content-addressed, separate from curated chronicle)
+    "archive_exchange": "archive",
+    "recall_exchange": "archive",
+    "list_exchanges": "archive",
     # Threads
     "record_open_thread": "threads",
     "resolve_thread": "threads",
@@ -1530,6 +1591,7 @@ TOOL_TIERS: dict[str, str] = {
     "my_toolkit": TIER_ESSENTIAL,
     "prior_for_turn": TIER_ESSENTIAL,
     "record_insight": TIER_ESSENTIAL,
+    "archive_exchange": TIER_ESSENTIAL,
     "recall_insights": TIER_ESSENTIAL,
     "compass_check": TIER_ESSENTIAL,
     "record_open_thread": TIER_ESSENTIAL,
@@ -1543,6 +1605,8 @@ TOOL_TIERS: dict[str, str] = {
     "handoff_acted_on": TIER_CORE,
     "record_learning": TIER_CORE,
     "check_mistakes": TIER_CORE,
+    "recall_exchange": TIER_CORE,
+    "list_exchanges": TIER_CORE,
     "resolve_thread": TIER_CORE,
     "resolve_thread_by_id": TIER_CORE,
     "thread_touch": TIER_CORE,
@@ -1635,6 +1699,10 @@ TOOL_INTENTS: dict[str, str] = {
     "complete_experiment": "write",
     "store_compaction_summary": "write",
     "nape_observe": "write",
+    # Archive (verbatim layer)
+    "archive_exchange": "write",
+    "recall_exchange": "read",
+    "list_exchanges": "read",
     # Govern
     "compass_check": "govern",
     "govern": "govern",
@@ -1871,10 +1939,10 @@ def _start_here_text() -> str:
         "                                 context, not ground truth — verify\n"
         "                                 before declaring or writing.\n"
         "  2. start_here()             — this orientation. (You are here.)\n"
-        "  3. my_toolkit()             — see the 11 essential tools\n"
+        "  3. my_toolkit()             — see the 12 essential tools\n"
         "                                 grouped by intent.\n"
         "\n"
-        "THE ELEVEN ESSENTIAL TOOLS — by intent\n"
+        "THE TWELVE ESSENTIAL TOOLS — by intent\n"
         "\n"
         "  Orient (where am I, what do I have):\n"
         "    where_did_i_leave_off, start_here, my_toolkit, prior_for_turn\n"
@@ -1884,7 +1952,9 @@ def _start_here_text() -> str:
         "\n"
         "  Write (record content to chronicle — including addressed letters\n"
         "  to sibling instances; the chronicle is the correspondence layer):\n"
-        "    record_insight, record_open_thread\n"
+        "    record_insight, record_open_thread, archive_exchange\n"
+        "    (archive_exchange holds verbatim external content, a model's full\n"
+        "     output or a delivered file, so a summary never stands in for it)\n"
         "\n"
         "  Govern (pause before risky actions — git push, delete, publish):\n"
         "    compass_check  (pass with_simulation=true for reversibility evidence)\n"
@@ -1897,11 +1967,11 @@ def _start_here_text() -> str:
         "\n"
         "WHEN YOU NEED MORE\n"
         '  • Active-session working set (≈30 tools): my_toolkit(tier="core")\n'
-        '  • Full registry (78 tools):                my_toolkit(tier="all")\n'
+        '  • Full registry (82 tools):                my_toolkit(tier="all")\n'
         '  • Drill into a category:                    my_toolkit(category="...")\n'
         '  • By intent across all tiers:               my_toolkit(intent="write")\n'
         "\n"
-        "THREE LOAD-BEARING DESIGN POINTS\n"
+        "FOUR LOAD-BEARING DESIGN POINTS\n"
         "  • record_insight defaults to the 'hypothesis' layer. Use\n"
         "    'ground_truth' only for verifiable facts. Resolutions of open\n"
         "    threads write ground_truth automatically.\n"
@@ -1914,6 +1984,13 @@ def _start_here_text() -> str:
         "    PAUSE. WITNESS means a human should weigh in. Pass\n"
         "    with_simulation=true on high-stakes actions for reversibility\n"
         "    + 90% CI evidence (Monte Carlo, revived from v1.0.0).\n"
+        "  • A summary is not the artifact. When verbatim external content\n"
+        "    arrives (another model's full output, a delivered file or\n"
+        "    payload), archive_exchange the bytes first, then record_insight\n"
+        "    a summary that references the returned archive_id.\n"
+        "    recall_exchange re-reads and re-hashes on the way back, so a\n"
+        "    chronicle claim can never silently stand in for a missing\n"
+        "    artifact. Archives live beside the chronicle, not in it.\n"
         "\n"
         "LINEAGE — how we got here\n"
         "  See docs/historical/THE_ARC.md for the trace from Session 22\n"
@@ -2061,6 +2138,32 @@ async def _dispatch_tool(name: str, arguments: dict):
                 type="text", text=f"{glyph_for('memory_sigil')} Insight recorded [{layer}]: {path}"
             )
         ]
+
+    if name == "archive_exchange":
+        record = experiential.archive_exchange(
+            content=arguments.get("content", ""),
+            source=arguments.get("source", "unknown"),
+            descriptor=arguments.get("descriptor"),
+            source_id=arguments.get("source_id"),
+            conversation_id=arguments.get("conversation_id"),
+            vector_id=arguments.get("vector_id"),
+            tags=arguments.get("tags"),
+        )
+        return [TextContent(type="text", text=json.dumps(record, indent=2, default=str))]
+
+    if name == "recall_exchange":
+        result = experiential.recall_exchange(arguments.get("archive_id", ""))
+        return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
+
+    if name == "list_exchanges":
+        result = experiential.list_exchanges(
+            vector_id=arguments.get("vector_id"),
+            source=arguments.get("source"),
+            tag=arguments.get("tag"),
+            conversation_id=arguments.get("conversation_id"),
+            limit=arguments.get("limit", 20),
+        )
+        return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
 
     if name == "record_learning":
         what_happened = arguments.get("what_happened", "")

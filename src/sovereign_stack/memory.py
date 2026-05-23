@@ -327,6 +327,11 @@ class ExperientialMemory:
         self.transformations_dir = self.root / "transformations"
         self.threads_dir = self.root / "open_threads"
         self.thread_touches_file = self.root / "thread_touches.jsonl"
+        # Verbatim archive layer: content-addressed, hash-verified storage of
+        # external exchanges, kept separate from curated insights so chronicle
+        # signal-to-noise is preserved. Chronicle entries reference archives by id.
+        self.archives_dir = self.root / "archives"
+        self.archives_index = self.archives_dir / "index.jsonl"
 
         # Create directories
         for d in [
@@ -334,6 +339,7 @@ class ExperientialMemory:
             self.learnings_dir,
             self.transformations_dir,
             self.threads_dir,
+            self.archives_dir,
         ]:
             d.mkdir(parents=True, exist_ok=True)
 
@@ -1080,6 +1086,215 @@ class ExperientialMemory:
 
         entries.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
         return entries[:limit]
+
+    # -------------------------------------------------------------------------
+    # Verbatim archive layer (content-addressed, hash-verified)
+    #
+    # archive_exchange / recall_exchange / list_exchanges store the actual
+    # bytes of an external exchange so a chronicle insight can reference the
+    # artifact by id instead of substituting a summary for it. recall_exchange
+    # re-reads the bytes and recomputes the hash, so callers can tell
+    # "provably here and intact" from "the index points at a ghost".
+    #
+    # On-disk layout is human-legible by design (descriptors, not bare ids):
+    #   archives/{vector_id}/{date}_{source}_{descriptor}__{short-hash}.txt
+    # The full sha256 remains the canonical archive_id in the index, so
+    # integrity checks never depend on the readable filename.
+    # -------------------------------------------------------------------------
+
+    @staticmethod
+    def _slugify(text: str, maxlen: int = 48) -> str:
+        """Filesystem-safe, human-readable: lowercase alnum/underscore, else hyphen."""
+        slug = re.sub(r"[^a-z0-9_]+", "-", str(text).lower()).strip("-_")
+        return slug[:maxlen].rstrip("-_") or "x"
+
+    def archive_exchange(
+        self,
+        content: str,
+        source: str,
+        descriptor: str = None,
+        source_id: str = None,
+        conversation_id: str = None,
+        vector_id: str = None,
+        tags: list = None,
+        session_id: str = None,
+        **metadata,
+    ) -> dict:
+        """
+        Archive a verbatim external exchange (e.g. a model's full delivered
+        output), content-addressed by SHA-256, separate from curated insights.
+
+        Unlike record_insight (a curated claim), this stores the bytes
+        themselves so they can be retrieved and re-verified later. A chronicle
+        insight can reference the returned archive_id, giving the retrieval
+        flow summary -> archive -> verbatim.
+
+        Args:
+            content: The verbatim text to preserve exactly.
+            source: Origin (e.g. "gemini-3.5-flash", "chatgpt", "claude-web",
+                    "human-relay").
+            descriptor: Short human label for the exchange (e.g. "v3 admission
+                    record"). Drives the readable filename; defaults to
+                    vector_id / source.
+            source_id: Optional seat/conversation identifier at the source.
+            conversation_id: Optional id tying related exchanges together.
+            vector_id: Optional vector/artifact this belongs to
+                    (e.g. "prompt_source_tokens"); becomes the grouping folder.
+            tags: Optional list of domain tags for retrieval.
+            session_id: Recording session identifier.
+            **metadata: Additional provenance fields.
+
+        Returns:
+            The stored provenance record (archive_id, descriptor, sha256,
+            byte_len, path, source/vector/conversation, tags, timestamp).
+        """
+        timestamp = datetime.now(timezone.utc)
+        session_id = session_id or f"session_{timestamp.strftime('%Y%m%d_%H%M%S')}"
+
+        encoded = content.encode("utf-8")
+        sha256 = hashlib.sha256(encoded).hexdigest()
+        byte_len = len(encoded)
+
+        # Human-legible layout: group by vector, name the file by date +
+        # source + descriptor so the directory reads at a glance. The short
+        # hash suffix keeps it content-addressed and collision-safe; the full
+        # sha256 is the canonical archive_id recorded in the index.
+        descriptor = descriptor or vector_id or source or "exchange"
+        group = self._slugify(vector_id) if vector_id else "_unfiled"
+        fname = (
+            f"{timestamp.strftime('%Y-%m-%d')}_"
+            f"{self._slugify(source)}_"
+            f"{self._slugify(descriptor)}__{sha256[:12]}.txt"
+        )
+        group_dir = self.archives_dir / group
+        group_dir.mkdir(parents=True, exist_ok=True)
+        blob_path = group_dir / fname
+        if not blob_path.exists():
+            with open(blob_path, "w", encoding="utf-8") as f:
+                f.write(content)
+
+        record = {
+            "archive_id": sha256,
+            "descriptor": descriptor,
+            "timestamp": timestamp.isoformat(),
+            "source": source,
+            "source_id": source_id,
+            "conversation_id": conversation_id,
+            "vector_id": vector_id,
+            "tags": tags or [],
+            "session_id": session_id,
+            "sha256": sha256,
+            "byte_len": byte_len,
+            "path": str(blob_path),
+            **metadata,
+        }
+        with open(self.archives_index, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record) + "\n")
+
+        return record
+
+    def _read_archive_index(self) -> list[dict]:
+        """Read all provenance records from the archive index (file order)."""
+        if not self.archives_index.exists():
+            return []
+        records = []
+        with open(self.archives_index, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    records.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+        return records
+
+    def recall_exchange(self, archive_id: str) -> dict:
+        """
+        Retrieve an archived exchange by id and VERIFY its integrity.
+
+        This is the Fetch Determinism guarantee: it does not just trust the
+        index, it reads the bytes off disk and recomputes the hash, so the
+        caller can distinguish "provably here and intact" from a dangling
+        reference.
+
+        Args:
+            archive_id: Full SHA-256 or a unique prefix (git-style).
+
+        Returns:
+            Dict with "integrity" one of: "verified", "mismatch", "missing",
+            "ambiguous", "unknown". When resolvable it carries the stored
+            provenance record; when bytes are present it adds "content" and
+            "recomputed_sha256".
+        """
+        records = self._read_archive_index()
+        matches = [r for r in records if r.get("archive_id", "").startswith(archive_id)]
+        if not matches:
+            return {
+                "integrity": "unknown",
+                "archive_id": archive_id,
+                "detail": "no archive record matches this id",
+            }
+
+        exact = [r for r in matches if r.get("archive_id") == archive_id]
+        if exact:
+            record = exact[-1]
+        elif len({r.get("archive_id") for r in matches}) > 1:
+            return {
+                "integrity": "ambiguous",
+                "archive_id": archive_id,
+                "detail": "id prefix matches multiple archives; supply more characters",
+            }
+        else:
+            record = matches[-1]
+
+        blob_path = Path(record.get("path", ""))
+        if not blob_path.exists():
+            return {
+                "integrity": "missing",
+                "detail": "index record exists but the bytes are gone from disk",
+                **record,
+            }
+
+        content = blob_path.read_text(encoding="utf-8")
+        recomputed = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        integrity = "verified" if recomputed == record.get("sha256") else "mismatch"
+        return {
+            "integrity": integrity,
+            "content": content,
+            "recomputed_sha256": recomputed,
+            **record,
+        }
+
+    def list_exchanges(
+        self,
+        vector_id: str = None,
+        source: str = None,
+        tag: str = None,
+        conversation_id: str = None,
+        limit: int = 20,
+    ) -> list[dict]:
+        """
+        List archived exchanges (provenance only, not the verbatim bytes),
+        newest first, optionally filtered. Use recall_exchange(archive_id) to
+        fetch and verify one in full.
+        """
+        records = self._read_archive_index()
+
+        def keep(r: dict) -> bool:
+            if vector_id and r.get("vector_id") != vector_id:
+                return False
+            if source and r.get("source") != source:
+                return False
+            if conversation_id and r.get("conversation_id") != conversation_id:
+                return False
+            if tag and tag not in (r.get("tags") or []):
+                return False
+            return True
+
+        filtered = [r for r in records if keep(r)]
+        filtered.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
+        return filtered[:limit]
 
 
 # =============================================================================
