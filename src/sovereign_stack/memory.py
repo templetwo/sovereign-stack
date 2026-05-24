@@ -1091,7 +1091,8 @@ class ExperientialMemory:
     # Verbatim archive layer (content-addressed, hash-verified)
     #
     # archive_exchange / recall_exchange / list_exchanges store the actual
-    # bytes of an external exchange so a chronicle insight can reference the
+    # bytes of an exchange (external model output, or an in-conversation draft
+    # or iteration) so a chronicle insight can reference the
     # artifact by id instead of substituting a summary for it. recall_exchange
     # re-reads the bytes and recomputes the hash, so callers can tell
     # "provably here and intact" from "the index points at a ghost".
@@ -1121,8 +1122,9 @@ class ExperientialMemory:
         **metadata,
     ) -> dict:
         """
-        Archive a verbatim external exchange (e.g. a model's full delivered
-        output), content-addressed by SHA-256, separate from curated insights.
+        Archive verbatim bytes that would otherwise die when the context window
+        closes (an external model's full output, or an in-conversation draft or
+        iteration), content-addressed by SHA-256, separate from curated insights.
 
         Unlike record_insight (a curated claim), this stores the bytes
         themselves so they can be retrieved and re-verified later. A chronicle
