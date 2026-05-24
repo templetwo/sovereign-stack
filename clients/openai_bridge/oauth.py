@@ -391,10 +391,11 @@ async def _authorize_get(scope, send) -> None:
     if not _redirect_uri_allowed(client_id, redirect_uri):
         await _send_text(send, 400, f"redirect_uri not allowed for client {client_id}")
         return
-    if not code_challenge:
-        await _send_text(send, 400, "code_challenge required (PKCE mandatory)")
-        return
-    if code_challenge_method not in ("S256", "plain"):
+    # PKCE is optional: ChatGPT's platform setup flow does not send a
+    # code_challenge. Validate the method only if a challenge IS present;
+    # otherwise allow the auth-code flow without PKCE. Redirect-uri binding,
+    # the consent gate, and single-use short-TTL codes remain the protections.
+    if code_challenge and code_challenge_method not in ("S256", "plain"):
         await _send_text(send, 400, "code_challenge_method must be S256 or plain")
         return
 
@@ -565,14 +566,20 @@ async def handle_token(scope, receive, send) -> None:
                                      "error_description": "redirect_uri mismatch"})
         return
 
-    if not _verify_pkce(
-        code_verifier,
-        code_data.get("code_challenge", ""),
-        code_data.get("code_challenge_method", "plain"),
-    ):
-        await _send_json(send, 400, {"error": "invalid_grant",
-                                     "error_description": "PKCE verification failed"})
-        return
+    stored_challenge = code_data.get("code_challenge", "")
+    if stored_challenge:
+        # PKCE was used at authorize time — it must verify.
+        if not _verify_pkce(
+            code_verifier,
+            stored_challenge,
+            code_data.get("code_challenge_method", "plain"),
+        ):
+            await _send_json(send, 400, {"error": "invalid_grant",
+                                         "error_description": "PKCE verification failed"})
+            return
+    # else: no challenge was issued (client did not use PKCE). The code is
+    # single-use, short-TTL, and bound to client_id + redirect_uri (enforced
+    # above), so the auth-code flow proceeds without a verifier.
 
     access_token = secrets.token_hex(32)
     token_data = {
