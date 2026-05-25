@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.5.1] - 2026-05-23
+
+### Verbatim archive layer — 82 tools, 968 passing
+
+A content-addressed, hash-verified sibling to the curated chronicle. The
+chronicle summarizes; the archive keeps the artifact byte-for-byte, so a
+summary can never silently stand in for something that was never actually
+stored. Kept deliberately separate from the three chronicle layers.
+
+### Added — Archive (`memory.py`)
+- **`archive_exchange`** (TIER_ESSENTIAL, intent=write, category=archive) —
+  store a verbatim external exchange. Content-addressed under
+  `archives/{vector_id}/{date}_{source}_{descriptor}__{shorthash}.txt`.
+- **`recall_exchange`** (TIER_CORE, intent=read, category=archive) —
+  re-reads and re-hashes on retrieval, returning an integrity verdict:
+  `verified | mismatch | missing | ambiguous | unknown`. Retrieval, not
+  trust, is where the hash is checked.
+- **`list_exchanges`** (TIER_CORE, intent=read, category=archive) —
+  enumerate archived exchanges.
+- `list_tools` count: 79 → **82**.
+
+### Added — Boot ritual
+- `start_here` gains a fourth load-bearing design point: **archive
+  verbatim before summarizing.**
+
+### Added — OpenAI bridge (post-bump, same 1.5.1 line)
+- OAuth 2.1 + PKCE + Dynamic Client Registration on `/openai/*` so ChatGPT
+  can complete the connect handshake. PKCE made optional in
+  `authorize`/`token` for clients that omit it. Request-header diagnostics
+  on `/openai/*` (bearer redacted).
+
+### Tests
+- 968 passing (up from 944 in v1.5.0). 8 new archive tests in
+  `tests/test_archive_layer.py`; remainder from the OpenAI OAuth bridge work.
+
+---
+
 ## [1.5.0] - 2026-05-19
 
 ### Breath architecture: the fast lung — 79 tools, 944 passing
