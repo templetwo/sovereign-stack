@@ -24,10 +24,12 @@ from bridge_core import (
     append_audit_event,
     get_context,
     intercept,
+    list_pending_writes,
     pop_bridge_metadata,
     send_401,
     verify_at_door,
 )
+from bridge_core.interceptor import verify_proposal
 from mcp.server import Server
 from mcp.server.sse import SseServerTransport
 from mcp.types import TextContent
@@ -92,7 +94,62 @@ async def handle_bridge_tool(name: str, arguments: dict):
             return await call_ring1_tool(name, arguments)
         # Falls through — update is Ring 2 (currently disabled)
 
-    # Ring 1 pass-through
+    # Ring 1 pass-through — with bridge-local handlers for queue-verification tools
+    # that read from the local pending_writes_dir rather than proxying to the Stack.
+    if name == "verify_proposal":
+        logger.info("Ring 1 verify_proposal call via /grok/sse")
+        proposal_id = arguments.get("proposal_id", "").strip()
+        if not proposal_id:
+            return [TextContent(
+                type="text",
+                text="verify_proposal error: proposal_id is required.",
+            )]
+        ctx = get_context(SUBSTRATE)
+        vr = verify_proposal(ctx, proposal_id)
+        if vr.get("found"):
+            text = (
+                f"FOUND — proposal exists in the pending-writes queue.\n"
+                f"proposal_id : {vr['proposal_id']}\n"
+                f"tool        : {vr['tool']}\n"
+                f"status      : {vr['status']}\n"
+                f"substrate   : {vr['substrate']}\n"
+                f"risk_level  : {vr['risk_level']}\n"
+                f"timestamp   : {vr['timestamp']}\n"
+                f"chain_valid : {vr['chain_valid']}\n"
+                f"audit_hash  : {vr['audit_hash'][:16]}...\n"
+                + (f"error       : {vr['error']}" if vr.get("error") else "")
+            )
+        else:
+            text = (
+                f"NOT FOUND — no proposal with id '{proposal_id}' exists in the "
+                f"pending-writes queue.\n"
+                f"This means the Ring 2 write was NOT executed — a narrated write is "
+                f"not the same as a real write.\n"
+                f"error: {vr.get('error', 'not_found')}"
+            )
+        return [TextContent(type="text", text=text.strip())]
+
+    if name == "list_bridge_proposals":
+        logger.info("Ring 1 list_bridge_proposals call via /grok/sse")
+        status_filter = arguments.get("status", "pending") or "pending"
+        limit = int(arguments.get("limit", 10) or 10)
+        ctx = get_context(SUBSTRATE)
+        proposals = list_pending_writes(ctx, status=status_filter)[:limit]
+        if not proposals:
+            text = f"No proposals found with status='{status_filter}' on {SUBSTRATE}."
+        else:
+            lines = [
+                f"{len(proposals)} proposal(s) with status='{status_filter}' on {SUBSTRATE}:\n"
+            ]
+            for p in proposals:
+                lines.append(
+                    f"  [{p['risk_level'].upper():8s}] {p['proposal_id'][:8]}  "
+                    f"{p['tool']:30s}  {p['timestamp'][:19]}  "
+                    f"from={p['source_instance']}"
+                )
+            text = "\n".join(lines)
+        return [TextContent(type="text", text=text)]
+
     if name in RING_1_TOOLS and name != "self_model":
         logger.info("Ring 1 call via /grok/sse: %s", name)
         return await call_ring1_tool(name, arguments)

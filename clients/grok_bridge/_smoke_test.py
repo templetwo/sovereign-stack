@@ -10,6 +10,7 @@ Every test should print PASS. No real ~/.sovereign/grok_bridge/ mutations occur
 
 from __future__ import annotations
 
+import asyncio
 import sys
 import tempfile
 import traceback
@@ -246,12 +247,145 @@ def run() -> bool:
         print("\n── Pending summary ──────────────────────────────────────────────")
         print(pending_summary(ctx))
 
+        # ── Ring 1 classification for new verification tools ──────────────────
+        print("\n── Ring 1 classification: verify_proposal + list_bridge_proposals ")
+
+        r = classify_tool(ctx, "verify_proposal")
+        results.append(check(
+            "verify_proposal → Ring 1 (not Ring 2, not Ring 3)",
+            r["ring"] == 1 and not r.get("blocked"),
+            str(r),
+        ))
+
+        r = classify_tool(ctx, "list_bridge_proposals")
+        results.append(check(
+            "list_bridge_proposals → Ring 1 (not Ring 2, not Ring 3)",
+            r["ring"] == 1 and not r.get("blocked"),
+            str(r),
+        ))
+
+        # ── Schema presence in get_all_bridge_schemas() ───────────────────────
+        print("\n── Ring 1 schema presence: verify_proposal + list_bridge_proposals ")
+
+        # get_all_bridge_schemas is async; drive it with asyncio.run
+        all_schemas = asyncio.run(_get_schemas())
+        schema_names = {t.name for t in all_schemas}
+
+        results.append(check(
+            "verify_proposal present in get_all_bridge_schemas()",
+            "verify_proposal" in schema_names,
+            str(sorted(schema_names)),
+        ))
+        results.append(check(
+            "list_bridge_proposals present in get_all_bridge_schemas()",
+            "list_bridge_proposals" in schema_names,
+            str(sorted(schema_names)),
+        ))
+
+        # Confirm schemas carry the correct inputSchema keys
+        vp_tool = next((t for t in all_schemas if t.name == "verify_proposal"), None)
+        results.append(check(
+            "verify_proposal schema has proposal_id property",
+            vp_tool is not None
+            and "proposal_id" in (vp_tool.inputSchema or {}).get("properties", {}),
+            str(vp_tool.inputSchema if vp_tool else None),
+        ))
+        results.append(check(
+            "verify_proposal schema requires proposal_id",
+            vp_tool is not None
+            and "proposal_id" in (vp_tool.inputSchema or {}).get("required", []),
+            str(vp_tool.inputSchema if vp_tool else None),
+        ))
+
+        lbp_tool = next((t for t in all_schemas if t.name == "list_bridge_proposals"), None)
+        results.append(check(
+            "list_bridge_proposals schema has status property",
+            lbp_tool is not None
+            and "status" in (lbp_tool.inputSchema or {}).get("properties", {}),
+            str(lbp_tool.inputSchema if lbp_tool else None),
+        ))
+        results.append(check(
+            "list_bridge_proposals schema has limit property",
+            lbp_tool is not None
+            and "limit" in (lbp_tool.inputSchema or {}).get("properties", {}),
+            str(lbp_tool.inputSchema if lbp_tool else None),
+        ))
+
+        # ── Interceptor-level dispatch test ───────────────────────────────────
+        # NOTE on test depth: handle_bridge_tool in mcp_filtered.py calls
+        # get_context(SUBSTRATE) which reads from the global _CONTEXTS registry
+        # (populated at bridge startup, not in this hermetic test).  Injecting a
+        # tmp BridgeContext into that registry would mutate module-level state
+        # shared with the real bridge, so we test at the interceptor / pending_writes
+        # layer instead — the same layer that handle_bridge_tool delegates to.
+        # TODO: add an integration test that patches get_context to return the tmp
+        # ctx and then calls handle_bridge_tool end-to-end once a test-fixture
+        # injection point is available.
+
+        print("\n── Interceptor-level: verify_proposal found=True / not-found ────")
+
+        # Reuse the proposal_id from the lifecycle section above if available;
+        # otherwise create a fresh one.
+        if not proposal_id:
+            r2 = intercept(
+                ctx,
+                "record_open_thread",
+                {"question": "Interceptor verify smoke probe", "domain": "grok-bridge"},
+                source_instance=SOURCE,
+            )
+            proposal_id = r2.proposal.proposal_id if r2.proposal else None
+
+        if proposal_id:
+            vr_found = verify_proposal(ctx, proposal_id)
+            results.append(check(
+                "verify_proposal (interceptor) found=True for committed proposal",
+                vr_found.get("found") is True,
+                str(vr_found),
+            ))
+            results.append(check(
+                "verify_proposal (interceptor) chain_valid=True",
+                vr_found.get("chain_valid") is True,
+                f"chain_valid={vr_found.get('chain_valid')} error={vr_found.get('error')}",
+            ))
+
+        fabricated2 = str(uuid.uuid4())
+        vr_absent = verify_proposal(ctx, fabricated2)
+        results.append(check(
+            "verify_proposal (interceptor) found=False for fabricated id",
+            vr_absent.get("found") is False,
+            str(vr_absent),
+        ))
+        results.append(check(
+            "verify_proposal (interceptor) error='not_found' for absent id",
+            vr_absent.get("error") == "not_found",
+            str(vr_absent.get("error")),
+        ))
+
+        # list_pending_writes used by list_bridge_proposals — confirm it returns
+        # the same proposal we created above (status=committed after lifecycle).
+        all_proposals = list_pending_writes(ctx)
+        results.append(check(
+            "list_pending_writes returns at least one proposal",
+            len(all_proposals) >= 1,
+            f"count={len(all_proposals)}",
+        ))
+
     print()
     passed = sum(results)
     total = len(results)
     color = "\033[92m" if passed == total else "\033[91m"
     print(f"{color}{passed}/{total} passed\033[0m")
     return passed == total
+
+
+async def _get_schemas():
+    """Async helper to call get_all_bridge_schemas() from sync test runner."""
+    # Import here to avoid polluting module-level namespace before path setup
+    from clients.grok_bridge.tool_adapter import get_all_bridge_schemas
+    # Reset cache so we pick up the freshly-built RING_1_TOOLS (including new tools)
+    import clients.grok_bridge.tool_adapter as _ta
+    _ta._RING1_CACHE = None
+    return await get_all_bridge_schemas()
 
 
 if __name__ == "__main__":

@@ -81,6 +81,19 @@ _RING1_DESCRIPTIONS: dict[str, str] = {
         "Read-only self-check before action. Returns PAUSE/WITNESS/PROCEED. "
         "Required before any Ring 2 write proposal once Ring 2 is enabled."
     ),
+    "verify_proposal": (
+        "[Ring 1 — Read-only] Verify whether a claimed Ring 2 write proposal actually "
+        "landed in the pending-writes queue. Returns found=True/False and chain_valid. "
+        "found=False means the proposal does NOT exist in the queue — a narrated write "
+        "is not a real write. Use this to confirm your own Ring 2 calls were accepted "
+        "before treating them as having been executed."
+    ),
+    "list_bridge_proposals": (
+        "[Ring 1 — Read-only] List proposals in the pending-writes queue, optionally "
+        "filtered by status (default: 'pending'). Returns structured summaries — "
+        "proposal_id, tool, risk_level, timestamp, source_instance, status. "
+        "Use to audit what Ring 2 writes are awaiting Anthony's approval."
+    ),
     "self_model": (
         "[Ring 1 read / Ring 2 update] Read or propose an update to the "
         "self-model. action=read returns current profile (Ring 1). "
@@ -108,6 +121,23 @@ def _ring1_schemas() -> list[Tool]:
                 "type": "object",
                 "properties": {
                     "action": {"type": "string", "enum": ["read"]},
+                },
+            }
+        elif name == "verify_proposal":
+            schema = {
+                "type": "object",
+                "properties": {
+                    "proposal_id": {"type": "string"},
+                    "substrate": {"type": "string"},
+                },
+                "required": ["proposal_id"],
+            }
+        elif name == "list_bridge_proposals":
+            schema = {
+                "type": "object",
+                "properties": {
+                    "status": {"type": "string"},
+                    "limit": {"type": "integer"},
                 },
             }
         else:

@@ -66,6 +66,11 @@ RING_1_TOOLS: frozenset[str] = frozenset({
     # Governance read
     "compass_check",
 
+    # Queue verification — read-only, Ring 1 so Grok can confirm its own
+    # Ring 2 writes actually landed (cannot trust narrated text alone)
+    "verify_proposal",
+    "list_bridge_proposals",
+
     # Substrate-specific welcome — Anthony's call, not polymorphic
     "grok_welcome",
 })
