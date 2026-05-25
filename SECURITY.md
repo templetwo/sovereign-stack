@@ -16,12 +16,12 @@ they prefer anonymity.
 
 | Version | Supported       |
 |---------|-----------------|
-| 1.3.x   | Yes (current)   |
-| 1.2.x   | No              |
-| 1.1.x   | No              |
-| < 1.1   | No              |
+| 1.5.x   | Yes (current)   |
+| 1.4.x   | No              |
+| 1.3.x   | No              |
+| < 1.3   | No              |
 
-Only the latest 1.3.x release receives security patches. Users on older versions
+Only the latest 1.5.x release receives security patches. Users on older versions
 should upgrade before reporting issues.
 
 ## Scope

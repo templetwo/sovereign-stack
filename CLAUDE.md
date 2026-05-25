@@ -34,7 +34,7 @@ more:
 | Need | Call |
 |------|------|
 | Active-session working set (~30 tools) | `my_toolkit(tier="core")` |
-| Full registry (78 tools) | `my_toolkit(tier="all")` |
+| Full registry (82 tools) | `my_toolkit(tier="all")` |
 | One intent (read / write / govern / ...) | `my_toolkit(intent="write")` |
 | One module bucket (legacy axis) | `my_toolkit(category="metabolism")` |
 | With JSON schemas | `my_toolkit(include_schema=true)` |

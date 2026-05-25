@@ -379,5 +379,5 @@ When the session ends, review honestly.
 
 ---
 
-**Part of Sovereign Stack v1.0**
+**Part of Sovereign Stack v1.5.1**
 **Temple of Two - 2026**

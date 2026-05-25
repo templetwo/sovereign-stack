@@ -2,7 +2,7 @@
 
 Sovereign Stack is an MCP server that gives a Claude instance persistent memory,
 runtime governance, and reflection across sessions. It runs entirely on the host
-machine, exposes 75 tools over stdio or SSE, and persists all state to
+machine, exposes 82 tools over stdio or SSE, and persists all state to
 `~/.sovereign/` as plain JSON and JSONL files. The server is not a middleware
 layer — it is a cognitive substrate that outlives any single conversation.
 
@@ -18,7 +18,7 @@ layer — it is a cognitive substrate that outlives any single conversation.
                            │  JSON-RPC 2.0 (MCP protocol)
                            ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│  server.py  — MCP dispatcher (2 591 LOC, 75 tool registrations) │
+│  server.py  — MCP dispatcher (2 591 LOC, 82 tool registrations) │
 │  sse_server.py — SSE transport wrapper                          │
 │  security.py — auth, rate limiting                              │
 └──────┬───────────┬──────────┬──────────┬────────────────────────┘
@@ -170,7 +170,7 @@ Key tools: `connectivity_status`, `stack_write_check`, `post_fix_verify`,
 4. Instance calls `my_toolkit()`. Returns the live tool registry grouped by
    intent and tier — drift-proof because it reads registrations directly, not
    documentation. Default tier is `essential` (~12 tools); `my_toolkit(tier="all")`
-   shows all 75.
+   shows all 82.
 5. Instance calls `prior_for_turn()` at the start of each response turn. Returns
    a compact priors block (k=1 per bucket, hard token cap) with the highest-scored
    relevant context for the current work.
