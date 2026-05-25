@@ -49,6 +49,13 @@ from .pending_writes import (
     reject_pending_write,
     validate_pending_write,
 )
+from .probe import (
+    ProbeOutcome,
+    arm_probe,
+    await_probe,
+    probe_registry_size,
+    resolve_probe,
+)
 from .risk import RiskLevel, risk_classify
 from .text_relay import RelayResult, relay_text
 
@@ -74,4 +81,6 @@ __all__ = [
     "InterceptResult", "classify_tool", "intercept", "pending_summary",
     # Dispatch / text relay
     "pop_bridge_metadata", "RelayResult", "relay_text",
+    # Capability probe
+    "ProbeOutcome", "arm_probe", "await_probe", "probe_registry_size", "resolve_probe",
 ]

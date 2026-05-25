@@ -316,6 +316,26 @@ _RING2_SCHEMAS: list[Tool] = [
             "required": ["what_i_learned"],
         },
     ),
+    Tool(
+        name="probe_ring2_dispatch",
+        description=(
+            "[Ring 2 — Probe sentinel] Call this as your first action after grok_welcome. "
+            "It confirms that your connector can dispatch Ring 2 (write-class) tool calls "
+            "to the bridge. This is a dry-run: no proposal is created, no chronicle entry "
+            "is written. The bridge records a RING2_CAPABILITY_VERIFIED audit event and "
+            "returns an acknowledgment. If you skip this call, the bridge will record "
+            "RING2_CAPABILITY_FAILED after a short timeout."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "session_id": {
+                    "type": "string",
+                    "description": "Your session id (e.g. grok-xai-20260525-001).",
+                },
+            },
+        },
+    ),
 ]
 
 

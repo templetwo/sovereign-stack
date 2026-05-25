@@ -15,17 +15,42 @@ Ring 3 is never registered.
 The identity gate fires at the SSE handshake — verify_at_door() runs
 BEFORE the MCP connection is established. Rejected connections receive
 401 with a clear reason.
+
+Ring 2 capability probe
+───────────────────────
+When PROBE_ON_CONNECT=true (env, default off), handle_grok_sse arms a
+per-connection probe before handing off to bridge_server.run(). If the
+arriving model calls probe_ring2_dispatch (a Ring 2 sentinel) within
+PROBE_TIMEOUT_SECONDS, RING2_CAPABILITY_VERIFIED is recorded; otherwise
+RING2_CAPABILITY_FAILED is recorded. In detector mode (require_ring2_probe
+defaults to False on BridgeContext), a timeout never disables Ring 2 —
+it only records the audit event and sets a flag. Hard-gating requires
+require_ring2_probe=True on the substrate's BridgeContext, which no
+substrate currently sets.
+
+The live call-site in handle_grok_sse is gated behind PROBE_ON_CONNECT
+(default off) because it requires launching a background asyncio.Task
+inside the SSE coroutine, which cannot be fully exercised without a live
+MCP connection. Tests cover arm/resolve/await and the sentinel dispatch
+path directly.
 """
 
+import asyncio
+import contextvars
 import logging
+import os
+import uuid
 
 from bridge_core import (
     AuditEvent,
     append_audit_event,
+    arm_probe,
+    await_probe,
     get_context,
     intercept,
     list_pending_writes,
     pop_bridge_metadata,
+    resolve_probe,
     send_401,
     verify_at_door,
 )
@@ -42,6 +67,29 @@ from .tool_adapter import (
 )
 
 logger = logging.getLogger(__name__)
+
+# ── Capability probe configuration ───────────────────────────────────────────
+
+# How long (seconds) to wait for the sentinel probe_ring2_dispatch to arrive.
+# Tunable via environment variable.
+PROBE_TIMEOUT_SECONDS: float = float(os.environ.get("PROBE_TIMEOUT_SECONDS", "5"))
+
+# Feature flag: wire the probe await into the live SSE connect handler.
+# Default OFF — the probe primitives are fully implemented and unit-tested but
+# the live await path requires a real MCP connection to exercise safely.
+# Set PROBE_ON_CONNECT=true to enable in a real deployment after verification.
+_PROBE_ON_CONNECT: bool = os.environ.get("PROBE_ON_CONNECT", "false").lower() == "true"
+
+# Per-connection id ContextVar — set in handle_grok_sse, read in handle_bridge_tool.
+# ContextVar isolation means concurrent connections don't share the same value.
+_connection_id_var: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "_grok_connection_id", default=None
+)
+
+# Per-session Ring 2 disable flag — keyed by connection_id.
+# Only populated when require_ring2_probe=True and probe fails.
+# Never mutates global RING_2_ENABLED; scoped to this connection only.
+_ring2_disabled_for_connection: set[str] = set()
 
 SUBSTRATE = "grok-xai"
 
@@ -154,9 +202,55 @@ async def handle_bridge_tool(name: str, arguments: dict):
         logger.info("Ring 1 call via /grok/sse: %s", name)
         return await call_ring1_tool(name, arguments)
 
+    # ── Ring 2 capability probe sentinel ─────────────────────────────────────
+    # Intercepted BEFORE the normal Ring 2 proposal-creation block.
+    # probe_ring2_dispatch is Ring 2 so it travels the same dispatch path that
+    # is suspected of being broken for xAI's connector — but it is a dry-run:
+    # no proposal file is written, no PROPOSAL_CREATED audit event is emitted.
+    if name == "probe_ring2_dispatch":
+        conn_id = _connection_id_var.get()
+        session_id = (arguments or {}).get("session_id", conn_id or "unknown")
+        logger.info(
+            "probe_ring2_dispatch sentinel arrived — connection_id=%s session_id=%s",
+            conn_id, session_id,
+        )
+        if conn_id:
+            resolved = resolve_probe(conn_id)
+            logger.debug("probe: resolve_probe returned %s for conn=%s", resolved, conn_id)
+        return [TextContent(
+            type="text",
+            text=(
+                "PROBE ACK — Ring 2 dispatch confirmed.\n"
+                f"connection_id: {conn_id or 'n/a'}\n"
+                f"session_id: {session_id}\n"
+                "No proposal was created. This is a dry-run sentinel that verifies\n"
+                "your connector routes Ring 2 calls to the bridge SSE handler.\n"
+                "RING2_CAPABILITY_VERIFIED will be recorded in the audit log."
+            ),
+        )]
+
     # Ring 2 — governed write through bridge_core interceptor
     from .rings import RING_2_ENABLED, RING_2_TOOLS
     if name in RING_2_TOOLS:
+        # Connection-scoped Ring 2 disable — only set when require_ring2_probe=True
+        # and the probe timed out for THIS connection. Global RING_2_ENABLED is
+        # never mutated; other connections and the OpenAI bridge are unaffected.
+        conn_id = _connection_id_var.get()
+        if conn_id and conn_id in _ring2_disabled_for_connection:
+            logger.warning(
+                "Ring 2 disabled for connection %s (probe failed, hard-gate active): %s",
+                conn_id, name,
+            )
+            return [TextContent(
+                type="text",
+                text=(
+                    f"Ring 2 is disabled for this connection — the capability probe "
+                    f"for probe_ring2_dispatch timed out at connect time, and "
+                    f"require_ring2_probe=True is set for this substrate.\n"
+                    f"Tool '{name}' cannot create a proposal in this session."
+                ),
+            )]
+
         if not RING_2_ENABLED:
             return [TextContent(
                 type="text",
@@ -267,13 +361,85 @@ async def handle_grok_sse(scope, receive, send):
     logger.info("Grok bridge SSE connection from %s:%s — substrate=%s",
                 client[0], client[1], gate_result.substrate)
 
+    # Mint a per-connection UUID so the probe registry and the per-tool dispatch
+    # handler can coordinate without cross-connection leakage.
+    connection_id = str(uuid.uuid4())
+    _connection_id_var.set(connection_id)
+    logger.debug("Grok SSE connection_id=%s", connection_id)
+
     async with bridge_sse.connect_sse(scope, receive, send) as (read_stream, write_stream):
-        await bridge_server.run(
-            read_stream,
-            write_stream,
-            bridge_server.create_initialization_options(),
-            raise_exceptions=True,
-        )
+        # ── Ring 2 capability probe (PROBE_ON_CONNECT=true required) ─────────
+        # TODO: Enable once a real xAI session is available to verify timing.
+        # The probe await runs as a background task so bridge_server.run() starts
+        # immediately — the connection is never blocked waiting for the sentinel.
+        # Cleanup: the background task removes its registry entry in finally;
+        # the connection_id set entry is removed when the connection closes below.
+        if _PROBE_ON_CONNECT:
+            ctx = get_context(SUBSTRATE)
+            arm_probe(connection_id)
+
+            async def _run_probe_in_background() -> None:
+                """Background task: await sentinel, emit audit event, hard-gate if needed."""
+                outcome = await await_probe(connection_id, timeout=PROBE_TIMEOUT_SECONDS)
+                if outcome == "verified":
+                    append_audit_event(
+                        ctx,
+                        AuditEvent.RING2_CAPABILITY_VERIFIED,
+                        proposal_id=connection_id,
+                        actor=f"probe/{SUBSTRATE}",
+                        details={"connection_id": connection_id},
+                    )
+                    logger.info(
+                        "Ring 2 capability VERIFIED for connection %s", connection_id
+                    )
+                else:
+                    append_audit_event(
+                        ctx,
+                        AuditEvent.RING2_CAPABILITY_FAILED,
+                        proposal_id=connection_id,
+                        actor=f"probe/{SUBSTRATE}",
+                        details={
+                            "connection_id": connection_id,
+                            "timeout_seconds": PROBE_TIMEOUT_SECONDS,
+                            "require_ring2_probe": ctx.require_ring2_probe,
+                        },
+                    )
+                    logger.warning(
+                        "Ring 2 capability FAILED for connection %s "
+                        "(require_ring2_probe=%s)",
+                        connection_id, ctx.require_ring2_probe,
+                    )
+                    # Hard-gate: only disable Ring 2 for this session if explicitly
+                    # opted in via require_ring2_probe=True on the BridgeContext.
+                    # Detector mode (default) records the event but leaves Ring 2 on.
+                    if ctx.require_ring2_probe:
+                        _ring2_disabled_for_connection.add(connection_id)
+                        logger.warning(
+                            "Ring 2 DISABLED for connection %s "
+                            "(hard-gate active, probe failed)",
+                            connection_id,
+                        )
+
+            probe_task = asyncio.create_task(_run_probe_in_background())
+        else:
+            probe_task = None
+
+        try:
+            await bridge_server.run(
+                read_stream,
+                write_stream,
+                bridge_server.create_initialization_options(),
+                raise_exceptions=True,
+            )
+        finally:
+            # Clean up connection-scoped state regardless of how the connection closes.
+            _ring2_disabled_for_connection.discard(connection_id)
+            if probe_task is not None and not probe_task.done():
+                probe_task.cancel()
+                try:
+                    await probe_task
+                except (asyncio.CancelledError, Exception):
+                    pass
 
 
 async def handle_grok_messages(scope, receive, send):

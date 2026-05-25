@@ -39,6 +39,16 @@ class BridgeContext:
     # (e.g. bridge "reflection" semantically maps to Stack "hypothesis")
     layer_translation: dict[str, str] = field(default_factory=lambda: {"reflection": "hypothesis"})
 
+    # Ring 2 capability probe — DEFAULTS TO FALSE (detector mode).
+    #
+    # When False (default): a probe timeout records an audit event and sets a
+    # capability flag, but NEVER disables Ring 2 for this connection. The OpenAI
+    # bridge leaves this False; its Ring 2 dispatch path is byte-for-byte unchanged.
+    #
+    # When True (opt-in hard-gate): a probe timeout disables Ring 2 for this
+    # connection/session only. Global module state is never mutated.
+    require_ring2_probe: bool = False
+
     # Convenience accessors
 
     @property
