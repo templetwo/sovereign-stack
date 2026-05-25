@@ -21,7 +21,13 @@ from dataclasses import dataclass
 from typing import Any
 
 from .context import BridgeContext
-from .pending_writes import Proposal, ValidationError, create_pending_write, list_pending_writes
+from .pending_writes import (
+    Proposal,
+    ValidationError,
+    create_pending_write,
+    get_proposal_by_id,
+    list_pending_writes,
+)
 from .risk import risk_classify
 
 logger = logging.getLogger(__name__)
@@ -151,6 +157,17 @@ def classify_tool(ctx: BridgeContext, tool_name: str, args: dict | None = None) 
             "risk_reasons": risk_reasons,
         }
     return {"tool": tool_name, "ring": 3, "blocked": True}
+
+
+def verify_proposal(ctx: BridgeContext, proposal_id: str) -> dict:
+    """
+    Verify whether a claimed proposal actually exists and its hash is intact.
+
+    Delegates to pending_writes.get_proposal_by_id. Returns the verification
+    dict directly — found=False for a missing proposal (the canonical signal
+    that a narrated-but-not-dispatched write never landed in the queue).
+    """
+    return get_proposal_by_id(ctx, proposal_id)
 
 
 def pending_summary(ctx: BridgeContext) -> str:
