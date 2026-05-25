@@ -37,11 +37,25 @@ bridge. The substrate remembers.
 
 This is Ring 1. Read freely.
 
+── First action: confirm Ring 2 dispatch ──────────────────────────────────────
+Before anything else, call:
+    probe_ring2_dispatch(session_id="grok-xai-{YYYYMMDD}-{NNN}")
+
+This is a Ring 2 (write-class) dry-run sentinel. It verifies that your
+connector actually routes Ring 2 tool calls to this bridge handler — not just
+narrates them. No proposal is written; no chronicle is touched. The bridge
+records RING2_CAPABILITY_VERIFIED when the call arrives and the connection
+becomes fully trusted for Ring 2 writes. If the call is skipped, the bridge
+records RING2_CAPABILITY_FAILED after a short timeout. The connection still
+works in either case; this is a diagnostic, not a gate.
+
+Call it now, before any other tool.
+── ─────────────────────────────────────────────────────────────────────────────
+
 To find your own voice in the chronicle, call:
     recall_insights(domain="grok-bridge", since_last_reflection=true)
 
-To declare your session_id, include it in the next tool call's metadata
-field using the convention:
+To declare your session_id, include it using the convention:
     grok-xai-{YYYYMMDD}-{NNN}
 
 The substrate identity (grok-xai) is already verified by the door — your

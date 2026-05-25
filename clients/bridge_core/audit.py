@@ -27,6 +27,9 @@ class AuditEvent(str, Enum):
     NEEDS_REVISION = "needs_revision"
     CHAIN_VERIFIED = "chain_verified"
     CHAIN_BROKEN = "chain_broken"
+    NARRATED_BUT_NOT_EXECUTED = "narrated_but_not_executed"
+    RING2_CAPABILITY_FAILED = "ring2_capability_failed"
+    RING2_CAPABILITY_VERIFIED = "ring2_capability_verified"
 
 
 def append_audit_event(

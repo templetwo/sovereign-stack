@@ -66,6 +66,11 @@ RING_1_TOOLS: frozenset[str] = frozenset({
     # Governance read
     "compass_check",
 
+    # Queue verification — read-only, Ring 1 so Grok can confirm its own
+    # Ring 2 writes actually landed (cannot trust narrated text alone)
+    "verify_proposal",
+    "list_bridge_proposals",
+
     # Substrate-specific welcome — Anthony's call, not polymorphic
     "grok_welcome",
 })
@@ -84,6 +89,10 @@ RING_2_TOOLS: frozenset[str] = frozenset({
     "self_model",           # update direction only
     "thread_touch",
     "end_bridge_session",
+    # Capability probe — MUST be Ring 2 so it exercises the same dispatch path
+    # that is suspected to be failing for xAI's connector. The sentinel is handled
+    # as a dry-run in mcp_filtered.py (no proposal file written, no audit event).
+    "probe_ring2_dispatch",
 })
 
 
@@ -113,4 +122,7 @@ COMMIT_TARGETS: dict[str, str] = {
     "self_model": "self_model",
     "end_bridge_session": "close_session",
     "thread_touch": "thread_touch",
+    # probe_ring2_dispatch is intercepted before the proposal path and never
+    # reaches commit. This entry exists for completeness only.
+    "probe_ring2_dispatch": "__probe_sentinel__",
 }

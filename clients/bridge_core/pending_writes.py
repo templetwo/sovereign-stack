@@ -425,6 +425,60 @@ def needs_revision_pending_write(
     return proposal
 
 
+def get_proposal_by_id(ctx: BridgeContext, proposal_id: str) -> dict:
+    """
+    Load a proposal by id (full UUID or 8-char prefix) and verify its audit hash.
+
+    Returns a verification dict that is safe to return to read-only callers:
+      - On missing proposal: {"found": False, "proposal_id": <id>, "error": "not_found"}
+      - On success:          {"found": True, "proposal_id": ..., "tool": ...,
+                              "status": ..., "substrate": ..., "timestamp": ...,
+                              "risk_level": ..., "audit_hash": ...,
+                              "chain_valid": bool, "error": None | "hash_mismatch"}
+
+    chain_valid is True when the stored audit_hash matches the hash recomputed from
+    the creation-time snapshot (mutable lifecycle fields restored to their initial
+    values, matching the exact snapshot hashed in create_pending_write).
+    """
+    try:
+        proposal, _path = _load_proposal(ctx, proposal_id)
+    except FileNotFoundError:
+        return {"found": False, "proposal_id": proposal_id, "error": "not_found"}
+
+    # Reconstruct the creation-time snapshot: same field exclusions as
+    # _precondition_check and create_pending_write use when computing audit_hash.
+    # The hash covers all fields except audit_hash, with lifecycle mutables
+    # restored to their creation-time values.
+    _MUTABLE = {
+        "status", "reviewed_by", "reviewed_at", "revision_notes",
+        "commit_result", "audit_hash",
+    }
+    d = proposal.to_dict()
+    creation_snapshot = {k: v for k, v in d.items() if k not in _MUTABLE}
+    creation_snapshot["status"] = "pending"
+    creation_snapshot["reviewed_by"] = None
+    creation_snapshot["reviewed_at"] = None
+    creation_snapshot["revision_notes"] = None
+    creation_snapshot["commit_result"] = None
+
+    recomputed = hash_pending_write(creation_snapshot, proposal.prev_hash)
+    chain_valid = recomputed == proposal.audit_hash
+    error = None if chain_valid else "hash_mismatch"
+
+    return {
+        "found": True,
+        "proposal_id": proposal.proposal_id,
+        "tool": proposal.tool,
+        "status": proposal.status,
+        "substrate": proposal.substrate,
+        "timestamp": proposal.timestamp,
+        "risk_level": proposal.risk_level,
+        "audit_hash": proposal.audit_hash,
+        "chain_valid": chain_valid,
+        "error": error,
+    }
+
+
 def list_pending_writes(ctx: BridgeContext, status: str | None = None) -> list[dict]:
     """List proposals, optionally filtered by status. Returns summary dicts."""
     ctx.pending_writes_dir.mkdir(parents=True, exist_ok=True)
