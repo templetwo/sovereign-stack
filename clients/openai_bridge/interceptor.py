@@ -31,55 +31,13 @@ from .risk import RiskLevel, risk_classify
 logger = logging.getLogger(__name__)
 
 # ── Ring definitions ──────────────────────────────────────────────────────────
-# Source of truth is ring_definition.yaml; this is the enforcement copy.
-# Kept in sync manually until the /openai/sse server reads the YAML directly.
+# Base scope is the canonical ring system in bridge_core.rings — the same for
+# every external substrate reaching in. The OpenAI bridge adds no substrate-
+# specific extensions, so its rings ARE the canonical sets. Do not redefine
+# locally; unifying here is what ended the grok/openai drift (33/31, 11/10).
+from bridge_core.rings import CANONICAL_RING_1 as RING_1_TOOLS  # noqa: E402
+from bridge_core.rings import CANONICAL_RING_2 as RING_2_TOOLS  # noqa: E402
 
-RING_1_TOOLS: frozenset[str] = frozenset({
-    "where_did_i_leave_off",
-    "start_here",
-    "my_toolkit",
-    "connectivity_status",
-    "self_model",       # read direction only — update direction is Ring 2
-    "spiral_status",
-    "spiral_inherit",
-    "get_my_patterns",
-    "recall_insights",
-    "context_retrieve",
-    "get_inheritable_context",
-    "check_mistakes",
-    "reflexive_surface",
-    "get_open_threads",
-    "triage_threads",
-    "thread_get_touches",
-    "comms_unread_bodies",
-    "comms_recall",
-    "comms_channels",
-    "comms_get_acks",
-    "get_compaction_context",
-    "get_compaction_stats",
-    "recall_reflections",
-    "prior_for_turn",
-    "nape_summary",
-    "get_unresolved_uncertainties",
-    "get_pending_experiments",
-    "get_growth_summary",
-    "handoff_acted_on_records",
-    "compass_check",
-    "witness_boot",         # Phase 6 — not yet implemented
-})
-
-RING_2_TOOLS: frozenset[str] = frozenset({
-    "propose_insight",      # Phase 6 — wraps record_insight
-    "propose_learning",     # Phase 6 — wraps record_learning
-    "record_open_thread",
-    "comms_acknowledge",
-    "handoff",
-    "store_compaction_summary",
-    "reflection_ack",
-    "self_model",           # update direction only
-    "end_bridge_session",   # Phase 6
-    "thread_touch",
-})
 
 # Ring 3 is implicit: anything not in Ring 1 or Ring 2
 def is_ring_3(tool_name: str) -> bool:

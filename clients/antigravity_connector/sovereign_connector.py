@@ -1,0 +1,228 @@
+#!/usr/bin/env python3
+"""Antigravity connector for the Sovereign Stack.
+
+A thin stdio MCP client: spawns the local `sovereign` server, performs the
+MCP initialize handshake, and exposes `tools/list` + `tools/call` over a small
+CLI. Built so an external editor (Google Antigravity / Gemini) can reach the
+stack through the stdio transport without holding any of the stack's internals.
+
+Originally authored in the Antigravity scratch workspace; grafted into the repo
+here so the connector lives with the other cross-substrate clients
+(grok_bridge, openai_bridge) and never depends on a scratch checkout.
+
+Resolution order for the `sovereign` binary:
+  1. --path argument
+  2. $SOVEREIGN_BIN
+  3. `sovereign` on $PATH
+  4. ./venv/bin/sovereign relative to the repo root
+
+Data root resolution:
+  1. --root argument
+  2. $SOVEREIGN_ROOT
+  3. ~/.sovereign
+"""
+import sys
+import os
+import json
+import shutil
+import subprocess
+import argparse
+
+# Make sibling client packages importable (bridge_core, and this package's
+# bridge_setup) whether run from a checkout or installed.
+_CLIENTS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if _CLIENTS_DIR not in sys.path:
+    sys.path.insert(0, _CLIENTS_DIR)
+
+try:
+    from bridge_setup import SUBSTRATE, governed_call, governed_tool_list, register
+except ImportError:  # installed as a package
+    from antigravity_connector.bridge_setup import (  # type: ignore
+        SUBSTRATE,
+        governed_call,
+        governed_tool_list,
+        register,
+    )
+
+
+def _default_sovereign_path():
+    env = os.environ.get("SOVEREIGN_BIN")
+    if env:
+        return env
+    on_path = shutil.which("sovereign")
+    if on_path:
+        return on_path
+    # repo root is two levels up from clients/antigravity_connector/
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    return os.path.join(repo_root, "venv", "bin", "sovereign")
+
+
+def _default_sovereign_root():
+    return os.environ.get("SOVEREIGN_ROOT") or os.path.expanduser("~/.sovereign")
+
+
+class SovereignConnector:
+    def __init__(self, sovereign_path=None, sovereign_root=None):
+        self.sovereign_path = sovereign_path or _default_sovereign_path()
+        self.sovereign_root = sovereign_root or _default_sovereign_root()
+        self.process = None
+
+    def start(self):
+        env = os.environ.copy()
+        env["SOVEREIGN_ROOT"] = self.sovereign_root
+
+        # Start sovereign as a subprocess using stdio transport
+        self.process = subprocess.Popen(
+            [self.sovereign_path],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,  # Line buffered
+            env=env
+        )
+
+        # Perform MCP initialization handshake
+        self._initialize()
+
+    def _send_msg(self, msg):
+        if self.process is None or self.process.stdin is None:
+            raise RuntimeError("Connector not started; call start() first.")
+        msg_str = json.dumps(msg) + "\n"
+        self.process.stdin.write(msg_str)
+        self.process.stdin.flush()
+
+    def _recv_msg(self):
+        if self.process is None or self.process.stdout is None:
+            raise RuntimeError("Connector not started; call start() first.")
+        line = self.process.stdout.readline()
+        if not line:
+            # Check if process terminated and print stderr
+            if self.process.poll() is not None:
+                stderr_content = self.process.stderr.read() if self.process.stderr else ""
+                raise RuntimeError(f"Sovereign process terminated with exit code {self.process.returncode}. Stderr: {stderr_content}")
+            raise RuntimeError("EOF reached while reading from Sovereign stdout.")
+        try:
+            return json.loads(line)
+        except json.JSONDecodeError as e:
+            raise RuntimeError(f"Failed to decode JSON response: {line}. Error: {e}")
+
+    def _initialize(self):
+        # 1. Send 'initialize'
+        init_req = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {
+                    "name": "antigravity-connector",
+                    "version": "1.0"
+                }
+            }
+        }
+        self._send_msg(init_req)
+
+        # 2. Receive 'initialize' response
+        resp = self._recv_msg()
+        if resp.get("id") != 1 or "error" in resp:
+            raise RuntimeError(f"Initialization failed: {resp}")
+
+        # 3. Send 'notifications/initialized'
+        initialized_notification = {
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized"
+        }
+        self._send_msg(initialized_notification)
+
+    def list_tools(self):
+        req = {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/list",
+            "params": {}
+        }
+        self._send_msg(req)
+        resp = self._recv_msg()
+        if "error" in resp:
+            raise RuntimeError(f"Failed to list tools: {resp['error']}")
+        return resp.get("result", {}).get("tools", [])
+
+    def call_tool(self, tool_name, arguments=None):
+        if arguments is None:
+            arguments = {}
+        req = {
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {
+                "name": tool_name,
+                "arguments": arguments
+            }
+        }
+        self._send_msg(req)
+        resp = self._recv_msg()
+        if "error" in resp:
+            raise RuntimeError(f"Tool call failed: {resp['error']}")
+        return resp.get("result", {})
+
+    def close(self):
+        if self.process:
+            self.process.terminate()
+            self.process.wait()
+            self.process = None
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Antigravity Connector for Sovereign Stack")
+    parser.add_argument("--list", action="store_true", help="List all available tools")
+    parser.add_argument("--call", type=str, help="Call a specific tool by name")
+    parser.add_argument("--args", type=str, default="{}", help="JSON string representing the arguments for the tool call")
+    parser.add_argument("--path", type=str, default=None, help="Path to sovereign executable (default: $SOVEREIGN_BIN, PATH, or ./venv/bin/sovereign)")
+    parser.add_argument("--root", type=str, default=None, help="Sovereign root data directory (default: $SOVEREIGN_ROOT or ~/.sovereign)")
+    parser.add_argument("--substrate", type=str, default=SUBSTRATE,
+                        help=f"Declared substrate (default: {SUBSTRATE}). Claude-family substrates "
+                             f"are full-trust and bypass ring governance; all others are ringed.")
+    parser.add_argument("--source-instance", type=str, default="antigravity-connector",
+                        help="Attribution string for Ring 2 write proposals.")
+
+    args = parser.parse_args()
+
+    connector = SovereignConnector(sovereign_path=args.path, sovereign_root=args.root)
+
+    if not os.path.exists(connector.sovereign_path):
+        print(f"Error: Sovereign executable not found at {connector.sovereign_path}. "
+              f"Set $SOVEREIGN_BIN, put `sovereign` on PATH, or pass --path.", file=sys.stderr)
+        sys.exit(1)
+
+    register()  # register the antigravity substrate + context with bridge_core
+
+    try:
+        connector.start()
+
+        if args.list:
+            tools = governed_tool_list(connector.list_tools(), substrate=args.substrate)
+            print(json.dumps(tools, indent=2))
+        elif args.call:
+            try:
+                tool_args = json.loads(args.args)
+            except json.JSONDecodeError as e:
+                print(f"Error parsing JSON arguments: {e}", file=sys.stderr)
+                sys.exit(1)
+            result = governed_call(
+                connector.call_tool, args.call, tool_args, args.source_instance,
+                substrate=args.substrate,
+            )
+            print(json.dumps(result, indent=2))
+        else:
+            parser.print_help()
+    except Exception as e:
+        print(f"Exception occurred: {e}", file=sys.stderr)
+        sys.exit(1)
+    finally:
+        connector.close()
+
+
+if __name__ == "__main__":
+    main()

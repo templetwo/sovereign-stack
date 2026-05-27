@@ -56,6 +56,13 @@ from .probe import (
     probe_registry_size,
     resolve_probe,
 )
+from .rings import (
+    CANONICAL_COMMIT_TARGETS,
+    CANONICAL_RING_1,
+    CANONICAL_RING_2,
+    canonical_is_ring_3,
+    is_full_trust,
+)
 from .risk import RiskLevel, risk_classify
 from .text_relay import RelayResult, relay_text
 
@@ -75,6 +82,9 @@ __all__ = [
     "approve_pending_write", "commit_pending_write", "create_pending_write",
     "list_pending_writes", "needs_revision_pending_write",
     "reject_pending_write", "validate_pending_write",
+    # Canonical ring system + Claude exemption
+    "CANONICAL_RING_1", "CANONICAL_RING_2", "CANONICAL_COMMIT_TARGETS",
+    "canonical_is_ring_3", "is_full_trust",
     # Risk
     "RiskLevel", "risk_classify",
     # Interceptor

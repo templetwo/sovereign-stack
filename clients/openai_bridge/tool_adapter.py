@@ -314,10 +314,20 @@ def _minimal_ring1_fallback() -> list[Tool]:
         "witness_boot": "[Phase 6] Identity constraints and witness posture injection. Not yet implemented.",
     }
 
+    # Canonical Ring 1 includes verify_proposal / list_bridge_proposals, but the
+    # OpenAI bridge has no local handler for them yet (grok serves them from its
+    # bridge_core pending-writes queue; openai uses its own pending_writes module).
+    # Don't advertise capabilities this bridge can't dispatch — wire local handlers
+    # in openai_bridge/mcp_filtered.py before advertising. Follow-up gate before the
+    # next openai bridge restart. The canonical ring POLICY stays unified regardless.
+    _NOT_WIRED_HERE = {"verify_proposal", "list_bridge_proposals"}
+
     tools = []
     for name in sorted(RING_1_TOOLS):
         if name == "self_model":
             continue  # handled in Ring 2 schema as direction-sensitive
+        if name in _NOT_WIRED_HERE:
+            continue
         desc = descriptions.get(name, f"[Ring 1] {name}")
         tools.append(
             Tool(
