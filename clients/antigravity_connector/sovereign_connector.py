@@ -61,6 +61,18 @@ def _default_sovereign_root():
     return os.environ.get("SOVEREIGN_ROOT") or os.path.expanduser("~/.sovereign")
 
 
+def _default_source_instance():
+    # Allow attribution to come from the MCP server env block. Supports the
+    # conventional SOVEREIGN_SOURCE_INSTANCE and the hyphenated "source-instance"
+    # key (as written in Antigravity's mcp_config env). CLI --source-instance
+    # still overrides both.
+    return (
+        os.environ.get("SOVEREIGN_SOURCE_INSTANCE")
+        or os.environ.get("source-instance")
+        or "antigravity-connector"
+    )
+
+
 class SovereignConnector:
     def __init__(self, sovereign_path=None, sovereign_root=None):
         self.sovereign_path = sovereign_path or _default_sovereign_path()
@@ -294,8 +306,9 @@ def main():
     parser.add_argument("--substrate", type=str, default=SUBSTRATE,
                         help=f"Declared substrate (default: {SUBSTRATE}). Claude-family substrates "
                              f"are full-trust and bypass ring governance; all others are ringed.")
-    parser.add_argument("--source-instance", type=str, default="antigravity-connector",
-                        help="Attribution string for Ring 2 write proposals.")
+    parser.add_argument("--source-instance", type=str, default=_default_source_instance(),
+                        help="Attribution string for Ring 2 write proposals. Defaults to "
+                             "$SOVEREIGN_SOURCE_INSTANCE / env 'source-instance' / 'antigravity-connector'.")
     parser.add_argument("--server", action="store_true",
                         help="Run in stdio MCP proxy server mode (default if neither --list nor --call is passed)")
 

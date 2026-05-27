@@ -17,9 +17,9 @@ try:
     try:
         __version__ = _pkg_version("sovereign-stack")
     except PackageNotFoundError:
-        __version__ = "1.5.2"
+        __version__ = "1.5.3"
 except ImportError:
-    __version__ = "1.5.2"
+    __version__ = "1.5.3"
 
 from .coherence import AGENT_MEMORY_SCHEMA, Coherence
 from .glyphs import GLYPHS, glyph_for

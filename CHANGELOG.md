@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.5.3] - 2026-05-27
+
+### Antigravity connector: stdio MCP server mode
+
+The governed Antigravity/Gemini connector becomes a registerable MCP server, so
+Antigravity (or any stdio MCP client) can connect to it directly rather than
+driving it through the one-shot `--list`/`--call` CLI. Interface-end work
+authored by Gemini, reviewed and verified by HQ. Still **82** MCP tools; the
+governed surface remains **41**.
+
+### Added
+- **`sovereign_connector.py` — `run_proxy` / `--server`**: a thread-based stdio
+  MCP proxy server. It spawns the local `sovereign`, forwards the MCP handshake,
+  intercepts `tools/list` to return the governed surface via
+  `governed_tool_list`, and routes `tools/call` through `governed_call` — Ring 1
+  forwarded to the spawned sovereign, Ring 2 → pending proposal, Ring 3 blocked.
+  Reuses the canonical `bridge_core.rings`; no separate ring list.
+- **`--source-instance` env fallback**: defaults to `$SOVEREIGN_SOURCE_INSTANCE`,
+  then the hyphenated `source-instance` env key (as written in Antigravity's
+  `mcp_config` env block), then `antigravity-connector`. CLI flag still overrides.
+- README rewritten with the MCP-server registration snippet and the Honesty
+  Contract pending-proposal flow.
+
+### Verified
+- Proxy `tools/list` = 41, zero Ring 3 leak; Ring 3 (`record_insight`) blocked
+  with the surface message; Ring 2 (`propose_insight`) → pending proposal, not
+  the chronicle; env-var attribution confirmed.
+
+---
+
 ## [1.5.2] - 2026-05-27
 
 ### Canonical ring system + Claude exemption + governed Antigravity connector
