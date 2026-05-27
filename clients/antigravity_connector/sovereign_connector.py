@@ -67,7 +67,7 @@ class SovereignConnector:
         self.sovereign_root = sovereign_root or _default_sovereign_root()
         self.process = None
 
-    def start(self):
+    def start(self, perform_handshake=True):
         env = os.environ.copy()
         env["SOVEREIGN_ROOT"] = self.sovereign_root
 
@@ -82,8 +82,9 @@ class SovereignConnector:
             env=env
         )
 
-        # Perform MCP initialization handshake
-        self._initialize()
+        # Perform MCP initialization handshake if requested
+        if perform_handshake:
+            self._initialize()
 
     def _send_msg(self, msg):
         if self.process is None or self.process.stdin is None:
@@ -167,6 +168,115 @@ class SovereignConnector:
             raise RuntimeError(f"Tool call failed: {resp['error']}")
         return resp.get("result", {})
 
+    def run_proxy(self, source_instance, substrate):
+        import threading
+        self.start(perform_handshake=False)
+
+        stdout_lock = threading.Lock()
+        pending_tools_list_requests = set()
+
+        class Ring1ForwardException(Exception):
+            pass
+
+        def dummy_dispatch(name, args):
+            raise Ring1ForwardException()
+
+        def raw_to_parent():
+            try:
+                if self.process and self.process.stdout:
+                    for line in self.process.stdout:
+                        if not line:
+                            break
+                        try:
+                            msg = json.loads(line)
+                            msg_id = msg.get("id")
+                            if msg_id is not None and msg_id in pending_tools_list_requests:
+                                pending_tools_list_requests.remove(msg_id)
+                                if "error" not in msg:
+                                    raw_tools = msg.get("result", {}).get("tools", [])
+                                    governed = governed_tool_list(raw_tools, substrate=substrate)
+                                    msg["result"] = {"tools": governed}
+                                    line = json.dumps(msg) + "\n"
+                        except Exception:
+                            pass
+                        
+                        with stdout_lock:
+                            sys.stdout.write(line)
+                            sys.stdout.flush()
+            except Exception as e:
+                print(f"Error in proxy raw_to_parent: {e}", file=sys.stderr)
+
+        def raw_err_to_parent():
+            try:
+                if self.process and self.process.stderr:
+                    for line in self.process.stderr:
+                        if not line:
+                            break
+                        sys.stderr.write(line)
+                        sys.stderr.flush()
+            except Exception:
+                pass
+
+        t_out = threading.Thread(target=raw_to_parent, daemon=True)
+        t_err = threading.Thread(target=raw_err_to_parent, daemon=True)
+        t_out.start()
+        t_err.start()
+
+        try:
+            for line in sys.stdin:
+                if not line:
+                    break
+                try:
+                    msg = json.loads(line)
+                    method = msg.get("method")
+                    msg_id = msg.get("id")
+
+                    if msg.get("jsonrpc") == "2.0":
+                        if msg_id is not None:
+                            if method == "initialize":
+                                params = msg.setdefault("params", {})
+                                client_info = params.setdefault("clientInfo", {})
+                                client_info["name"] = "gemini-antigravity"
+                                line = json.dumps(msg) + "\n"
+                            
+                            elif method == "tools/list":
+                                pending_tools_list_requests.add(msg_id)
+                            
+                            elif method == "tools/call":
+                                params = msg.get("params", {})
+                                name = params.get("name")
+                                arguments = params.get("arguments", {})
+
+                                try:
+                                    result = governed_call(
+                                        dummy_dispatch, name, arguments, source_instance,
+                                        substrate=substrate
+                                    )
+                                    resp = {
+                                        "jsonrpc": "2.0",
+                                        "id": msg_id,
+                                        "result": result
+                                    }
+                                    with stdout_lock:
+                                        sys.stdout.write(json.dumps(resp) + "\n")
+                                        sys.stdout.flush()
+                                    continue
+                                except Ring1ForwardException:
+                                    pass
+
+                except Exception as e:
+                    print(f"Error handling parent message: {e}", file=sys.stderr)
+
+                if self.process and self.process.stdin:
+                    self.process.stdin.write(line)
+                    self.process.stdin.flush()
+        except KeyboardInterrupt:
+            pass
+        except Exception as e:
+            print(f"Error in proxy parent_to_raw: {e}", file=sys.stderr)
+        finally:
+            self.close()
+
     def close(self):
         if self.process:
             self.process.terminate()
@@ -186,6 +296,8 @@ def main():
                              f"are full-trust and bypass ring governance; all others are ringed.")
     parser.add_argument("--source-instance", type=str, default="antigravity-connector",
                         help="Attribution string for Ring 2 write proposals.")
+    parser.add_argument("--server", action="store_true",
+                        help="Run in stdio MCP proxy server mode (default if neither --list nor --call is passed)")
 
     args = parser.parse_args()
 
@@ -199,12 +311,12 @@ def main():
     register()  # register the antigravity substrate + context with bridge_core
 
     try:
-        connector.start()
-
         if args.list:
+            connector.start(perform_handshake=True)
             tools = governed_tool_list(connector.list_tools(), substrate=args.substrate)
             print(json.dumps(tools, indent=2))
         elif args.call:
+            connector.start(perform_handshake=True)
             try:
                 tool_args = json.loads(args.args)
             except json.JSONDecodeError as e:
@@ -216,12 +328,10 @@ def main():
             )
             print(json.dumps(result, indent=2))
         else:
-            parser.print_help()
+            connector.run_proxy(args.source_instance, args.substrate)
     except Exception as e:
         print(f"Exception occurred: {e}", file=sys.stderr)
         sys.exit(1)
-    finally:
-        connector.close()
 
 
 if __name__ == "__main__":
