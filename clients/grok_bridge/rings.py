@@ -3,97 +3,40 @@ from __future__ import annotations
 """
 Ring definitions for the Grok bridge.
 
-Source of truth is ~/.sovereign/grok_bridge/ring_definition.yaml; this file
-is the enforcement copy kept in sync manually until /grok/sse reads the
-YAML directly.
+Base scope is the canonical ring system in bridge_core.rings — the same for
+every external substrate reaching in (Grok, ChatGPT, Gemini, future). This
+module layers Grok's own substrate-specific extensions on top: grok_welcome
+(Ring 1) and probe_ring2_dispatch (Ring 2). It must not redefine the base sets
+independently — that is the drift bridge_core.rings exists to end.
+
+Source of truth for the canonical sets is bridge_core.rings; the policy YAML at
+~/.sovereign/grok_bridge/ring_definition.yaml documents the Grok-facing view.
 
 RING_2_ENABLED is the policy toggle Grok specified: "Ring 1 read on first
 crossing, Ring 2 via proposal queue (after first-touch verification)."
 Anthony flips this flag once Grok's first crossing is verified clean.
 """
 
+from bridge_core.rings import (
+    CANONICAL_COMMIT_TARGETS,
+    CANONICAL_RING_1,
+    CANONICAL_RING_2,
+)
+
 # ── Policy toggle ─────────────────────────────────────────────────────────────
 
 RING_2_ENABLED: bool = True  # flipped by Anthony after first-touch verification
 
 
-# ── Ring 1 — read freely ──────────────────────────────────────────────────────
+# ── Grok-specific extensions ──────────────────────────────────────────────────
+# grok_welcome: substrate-specific welcome, handled bridge-locally (Anthony's
+#   call, not polymorphic).
+# probe_ring2_dispatch: Ring 2 capability sentinel, exercised as a dry-run in
+#   mcp_filtered.py; must be Ring 2 so it hits the same dispatch path.
 
-RING_1_TOOLS: frozenset[str] = frozenset({
-    # Orientation / boot
-    "where_did_i_leave_off",
-    "start_here",
-    "my_toolkit",
-    "connectivity_status",
+RING_1_TOOLS: frozenset[str] = CANONICAL_RING_1 | frozenset({"grok_welcome"})
 
-    # Self-knowledge
-    "self_model",       # read direction only — update direction is Ring 2
-    "spiral_status",
-    "spiral_inherit",
-    "get_my_patterns",
-
-    # Chronicle read
-    "recall_insights",
-    "context_retrieve",
-    "get_inheritable_context",
-    "check_mistakes",
-    "reflexive_surface",
-
-    # Threads
-    "get_open_threads",
-    "triage_threads",
-    "thread_get_touches",
-
-    # Comms read
-    "comms_unread_bodies",
-    "comms_recall",
-    "comms_channels",
-    "comms_get_acks",
-
-    # Compaction / context
-    "get_compaction_context",
-    "get_compaction_stats",
-
-    # Introspective read
-    "recall_reflections",
-    "prior_for_turn",
-    "nape_summary",
-    "get_unresolved_uncertainties",
-    "get_pending_experiments",
-    "get_growth_summary",
-    "handoff_acted_on_records",
-
-    # Governance read
-    "compass_check",
-
-    # Queue verification — read-only, Ring 1 so Grok can confirm its own
-    # Ring 2 writes actually landed (cannot trust narrated text alone)
-    "verify_proposal",
-    "list_bridge_proposals",
-
-    # Substrate-specific welcome — Anthony's call, not polymorphic
-    "grok_welcome",
-})
-
-
-# ── Ring 2 — governed write proposals (disabled at first crossing) ────────────
-
-RING_2_TOOLS: frozenset[str] = frozenset({
-    "propose_insight",
-    "propose_learning",
-    "record_open_thread",
-    "comms_acknowledge",
-    "handoff",
-    "store_compaction_summary",
-    "reflection_ack",
-    "self_model",           # update direction only
-    "thread_touch",
-    "end_bridge_session",
-    # Capability probe — MUST be Ring 2 so it exercises the same dispatch path
-    # that is suspected to be failing for xAI's connector. The sentinel is handled
-    # as a dry-run in mcp_filtered.py (no proposal file written, no audit event).
-    "probe_ring2_dispatch",
-})
+RING_2_TOOLS: frozenset[str] = CANONICAL_RING_2 | frozenset({"probe_ring2_dispatch"})
 
 
 def is_ring_3(tool_name: str) -> bool:
@@ -107,22 +50,10 @@ def is_grok_specific(tool_name: str) -> bool:
 
 
 # ── Ring 2 commit target mapping ──────────────────────────────────────────────
-# Each Ring 2 tool maps to the underlying Sovereign Stack tool that executes
-# on commit. propose_insight wraps record_insight, etc. Mirrors openai_bridge
-# COMMIT_TARGETS — Ring 2 tool surface is common across substrates.
+# Canonical targets (common across substrates) plus the probe sentinel, which is
+# intercepted before the proposal path and never reaches commit.
 
 COMMIT_TARGETS: dict[str, str] = {
-    "propose_insight": "record_insight",
-    "propose_learning": "record_learning",
-    "record_open_thread": "record_open_thread",
-    "comms_acknowledge": "comms_acknowledge",
-    "handoff": "handoff",
-    "store_compaction_summary": "store_compaction_summary",
-    "reflection_ack": "reflection_ack",
-    "self_model": "self_model",
-    "end_bridge_session": "close_session",
-    "thread_touch": "thread_touch",
-    # probe_ring2_dispatch is intercepted before the proposal path and never
-    # reaches commit. This entry exists for completeness only.
+    **CANONICAL_COMMIT_TARGETS,
     "probe_ring2_dispatch": "__probe_sentinel__",
 }

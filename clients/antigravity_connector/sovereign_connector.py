@@ -28,6 +28,22 @@ import shutil
 import subprocess
 import argparse
 
+# Make sibling client packages importable (bridge_core, and this package's
+# bridge_setup) whether run from a checkout or installed.
+_CLIENTS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if _CLIENTS_DIR not in sys.path:
+    sys.path.insert(0, _CLIENTS_DIR)
+
+try:
+    from bridge_setup import SUBSTRATE, governed_call, governed_tool_list, register
+except ImportError:  # installed as a package
+    from antigravity_connector.bridge_setup import (  # type: ignore
+        SUBSTRATE,
+        governed_call,
+        governed_tool_list,
+        register,
+    )
+
 
 def _default_sovereign_path():
     env = os.environ.get("SOVEREIGN_BIN")
@@ -165,6 +181,11 @@ def main():
     parser.add_argument("--args", type=str, default="{}", help="JSON string representing the arguments for the tool call")
     parser.add_argument("--path", type=str, default=None, help="Path to sovereign executable (default: $SOVEREIGN_BIN, PATH, or ./venv/bin/sovereign)")
     parser.add_argument("--root", type=str, default=None, help="Sovereign root data directory (default: $SOVEREIGN_ROOT or ~/.sovereign)")
+    parser.add_argument("--substrate", type=str, default=SUBSTRATE,
+                        help=f"Declared substrate (default: {SUBSTRATE}). Claude-family substrates "
+                             f"are full-trust and bypass ring governance; all others are ringed.")
+    parser.add_argument("--source-instance", type=str, default="antigravity-connector",
+                        help="Attribution string for Ring 2 write proposals.")
 
     args = parser.parse_args()
 
@@ -175,11 +196,13 @@ def main():
               f"Set $SOVEREIGN_BIN, put `sovereign` on PATH, or pass --path.", file=sys.stderr)
         sys.exit(1)
 
+    register()  # register the antigravity substrate + context with bridge_core
+
     try:
         connector.start()
 
         if args.list:
-            tools = connector.list_tools()
+            tools = governed_tool_list(connector.list_tools(), substrate=args.substrate)
             print(json.dumps(tools, indent=2))
         elif args.call:
             try:
@@ -187,7 +210,10 @@ def main():
             except json.JSONDecodeError as e:
                 print(f"Error parsing JSON arguments: {e}", file=sys.stderr)
                 sys.exit(1)
-            result = connector.call_tool(args.call, tool_args)
+            result = governed_call(
+                connector.call_tool, args.call, tool_args, args.source_instance,
+                substrate=args.substrate,
+            )
             print(json.dumps(result, indent=2))
         else:
             parser.print_help()
