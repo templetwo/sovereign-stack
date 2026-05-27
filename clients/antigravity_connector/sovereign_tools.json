@@ -1,0 +1,2008 @@
+[
+  {
+    "name": "route",
+    "description": "Route a data packet through the schema to find its destination path",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "packet": {
+          "type": "object",
+          "description": "Data packet with routing attributes"
+        },
+        "dry_run": {
+          "type": "boolean",
+          "default": true
+        }
+      },
+      "required": [
+        "packet"
+      ]
+    }
+  },
+  {
+    "name": "derive",
+    "description": "Discover latent structure from a list of paths",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "paths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "paths"
+      ]
+    }
+  },
+  {
+    "name": "scan_thresholds",
+    "description": "Scan a path for threshold violations",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "Path to scan"
+        },
+        "recursive": {
+          "type": "boolean",
+          "default": true
+        }
+      },
+      "required": [
+        "path"
+      ]
+    }
+  },
+  {
+    "name": "govern",
+    "description": "Run full governance circuit: detect \u2192 simulate \u2192 deliberate",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "target": {
+          "type": "string",
+          "description": "Path to govern"
+        },
+        "vote": {
+          "type": "string",
+          "enum": [
+            "proceed",
+            "pause",
+            "reject"
+          ],
+          "default": "proceed"
+        },
+        "rationale": {
+          "type": "string",
+          "default": "Auto-approved"
+        }
+      },
+      "required": [
+        "target"
+      ]
+    }
+  },
+  {
+    "name": "compass_check",
+    "description": "Runtime self-check before taking a high-stakes action. Evaluates the proposed action against governance heuristics and returns PAUSE, WITNESS, or PROCEED with rationale and suggested verifications. Call this before: git pushes, deletes, publishes, deploys, or any action that is hard to reverse. PAUSE = stop and verify; WITNESS = human judgment required; PROCEED = no signals detected.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "type": "string",
+          "description": "Free-text description of the action about to be taken, e.g. 'git push to main', 'delete chronicle entries', 'publish methodology note'."
+        },
+        "context": {
+          "type": "string",
+          "default": "",
+          "description": "Optional extra framing or relevant background."
+        },
+        "stakes": {
+          "type": "string",
+          "enum": [
+            "low",
+            "medium",
+            "high",
+            "critical"
+          ],
+          "default": "medium",
+          "description": "Perceived stakes level. 'critical' defaults to PAUSE unless the action matches an explicit low-risk pattern."
+        },
+        "with_simulation": {
+          "type": "boolean",
+          "default": false,
+          "description": "When true, runs the Monte Carlo simulator (revived from v1.0.0 on 2026-04-26) and appends a `simulation` field with reversibility + 90% CI for REORGANIZE / ROLLBACK / DEFER / INCREMENTAL scenarios. Adds evidence to the PAUSE/WITNESS verdict instead of hand-waving 'is this reversible?'. Off by default because it imports NetworkX."
+        }
+      },
+      "required": [
+        "action"
+      ]
+    }
+  },
+  {
+    "name": "record_insight",
+    "description": "Record an insight to the chronicle. Defaults to 'hypothesis' layer \u2014 use 'ground_truth' for verifiable facts only.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "domain": {
+          "type": "string",
+          "description": "Knowledge domain"
+        },
+        "content": {
+          "type": "string",
+          "description": "Insight content"
+        },
+        "intensity": {
+          "type": "number",
+          "default": 0.5
+        },
+        "layer": {
+          "type": "string",
+          "enum": [
+            "ground_truth",
+            "hypothesis",
+            "open_thread"
+          ],
+          "default": "hypothesis",
+          "description": "Chronicle layer: ground_truth (verifiable facts), hypothesis (interpretation), open_thread (unresolved question)"
+        },
+        "confidence": {
+          "type": "number",
+          "description": "Confidence level 0.0-1.0 (for hypotheses only)"
+        }
+      },
+      "required": [
+        "domain",
+        "content"
+      ]
+    }
+  },
+  {
+    "name": "archive_exchange",
+    "description": "Archive verbatim bytes that would otherwise die when the context window closes: your own in-conversation drafts and iterations, intermediate work, or an external model's full delivered output. Content-addressed and hash-verified, stored separate from the curated chronicle. Group an iterative trajectory with a shared conversation_id (e.g. ten drafts of one paper) so a future instance can fine-tooth the whole build, not just the endpoint. Reference the returned archive_id from a record_insight summary. A summary is not the artifact.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "content": {
+          "type": "string",
+          "description": "The verbatim text to preserve exactly"
+        },
+        "source": {
+          "type": "string",
+          "description": "Origin, e.g. 'gemini-3.5-flash', 'chatgpt', 'claude-web', 'human-relay'"
+        },
+        "descriptor": {
+          "type": "string",
+          "description": "Short human label (e.g. 'v3 admission record'); drives the readable filename"
+        },
+        "vector_id": {
+          "type": "string",
+          "description": "Artifact/vector this belongs to (e.g. 'prompt_source_tokens'); becomes the grouping folder"
+        },
+        "conversation_id": {
+          "type": "string",
+          "description": "Optional id tying related exchanges together"
+        },
+        "source_id": {
+          "type": "string",
+          "description": "Optional seat/conversation id at the source"
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Optional domain tags for retrieval"
+        }
+      },
+      "required": [
+        "content",
+        "source"
+      ]
+    }
+  },
+  {
+    "name": "recall_exchange",
+    "description": "Retrieve an archived exchange by id AND verify its integrity: reads the bytes off disk and recomputes the hash. Returns integrity = verified | mismatch | missing | ambiguous | unknown, plus the content when present. This is how you tell 'provably here and intact' from a dangling reference.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "archive_id": {
+          "type": "string",
+          "description": "Full SHA-256 or a unique prefix (git-style)"
+        }
+      },
+      "required": [
+        "archive_id"
+      ]
+    }
+  },
+  {
+    "name": "list_exchanges",
+    "description": "List archived exchanges (provenance only, not the bytes), newest first, optionally filtered by vector_id / source / tag / conversation_id. Use recall_exchange(archive_id) to fetch and verify one in full.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "vector_id": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        },
+        "tag": {
+          "type": "string"
+        },
+        "conversation_id": {
+          "type": "string"
+        },
+        "limit": {
+          "type": "number",
+          "default": 20
+        }
+      }
+    }
+  },
+  {
+    "name": "record_learning",
+    "description": "Record a learning from experience",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "what_happened": {
+          "type": "string"
+        },
+        "what_learned": {
+          "type": "string"
+        },
+        "applies_to": {
+          "type": "string",
+          "default": "general"
+        }
+      },
+      "required": [
+        "what_happened",
+        "what_learned"
+      ]
+    }
+  },
+  {
+    "name": "recall_insights",
+    "description": "Recall insights from chronicle. Supports date-bounded recall. For 'what has happened since I last looked up?', pass since_last_reflection=true \u2014 inhabitant syntax, preferred over raw dates.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string",
+          "description": "Text search across content and domain. Returns entries containing any query term (length >= 3)."
+        },
+        "domain": {
+          "type": "string"
+        },
+        "limit": {
+          "type": "integer",
+          "default": 10
+        },
+        "start_date": {
+          "type": "string",
+          "description": "ISO8601 lower bound (inclusive). Accepts partial dates like '2026-04-10'."
+        },
+        "end_date": {
+          "type": "string",
+          "description": "ISO8601 upper bound (inclusive). Accepts partial dates like '2026-04-14'."
+        },
+        "since_last_reflection": {
+          "type": "boolean",
+          "default": false,
+          "description": "If true, start_date = timestamp of last reflection marker. Overrides start_date."
+        }
+      }
+    }
+  },
+  {
+    "name": "check_mistakes",
+    "description": "Check for relevant past learnings",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "context": {
+          "type": "string",
+          "description": "Current context to match"
+        }
+      },
+      "required": [
+        "context"
+      ]
+    }
+  },
+  {
+    "name": "record_open_thread",
+    "description": "Record an unresolved question for the next instance to explore. Pass questions, not conclusions.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "question": {
+          "type": "string",
+          "description": "The open question"
+        },
+        "context": {
+          "type": "string",
+          "description": "What led to this question"
+        },
+        "domain": {
+          "type": "string",
+          "default": "general"
+        }
+      },
+      "required": [
+        "question"
+      ]
+    }
+  },
+  {
+    "name": "resolve_thread",
+    "description": "Resolve an open thread with a finding. The resolution becomes ground truth and back-references the thread by thread_id.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "domain": {
+          "type": "string",
+          "description": "Domain of the thread"
+        },
+        "question_fragment": {
+          "type": "string",
+          "description": "Partial match for the original question"
+        },
+        "resolution": {
+          "type": "string",
+          "description": "What was discovered"
+        }
+      },
+      "required": [
+        "domain",
+        "question_fragment",
+        "resolution"
+      ]
+    }
+  },
+  {
+    "name": "resolve_thread_by_id",
+    "description": "Resolve an open thread by its stable thread_id. Preferred when the thread_id is known \u2014 avoids ambiguity when multiple threads share keywords.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "thread_id": {
+          "type": "string",
+          "description": "The stable thread id (from get_open_threads output)"
+        },
+        "resolution": {
+          "type": "string",
+          "description": "What was discovered"
+        }
+      },
+      "required": [
+        "thread_id",
+        "resolution"
+      ]
+    }
+  },
+  {
+    "name": "get_open_threads",
+    "description": "Get unresolved questions waiting for answers",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "domain": {
+          "type": "string"
+        },
+        "limit": {
+          "type": "integer",
+          "default": 10
+        }
+      }
+    }
+  },
+  {
+    "name": "get_inheritable_context",
+    "description": "Build the layered context package for the next instance. Ground truth travels fully. Hypotheses are flagged. Open threads are invitations.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {}
+    }
+  },
+  {
+    "name": "handoff",
+    "description": "Write a handoff note for the next instance. Intent for the future, not a record of the past. Size-limited to ~2KB \u2014 longer thoughts belong in record_insight. Surfaced exactly once by where_did_i_leave_off, then archived (not deleted).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "note": {
+          "type": "string",
+          "description": "What the next instance needs to know. Be concrete: what you noticed, what you were about to try, what pattern means what."
+        },
+        "thread": {
+          "type": "string",
+          "default": "general",
+          "description": "Which line of work this handoff belongs to (e.g. 'compass-v10', 'stack-witness-layer')."
+        },
+        "source_instance": {
+          "type": "string",
+          "description": "Which instance is leaving this note (e.g. 'claude-code-mac-studio', 'claude-desktop', 'claude-iphone'). Helps attribution framing."
+        }
+      },
+      "required": [
+        "note"
+      ]
+    }
+  },
+  {
+    "name": "close_session",
+    "description": "Close the current session with integration. One call replaces three (record_insight + spiral_reflect + handoff). This is the ceremony-killer: lowering friction on the reflection ritual until it's cheaper to do than to skip. Also advances the spiral phase forward one step \u2014 side-effect that keeps the phase counter moving even on tired sessions. NOTE: close_session does NOT rotate the session_id. The session_id remains the same on the next boot. To start a genuinely new session with a fresh session_id, call spiral_inherit explicitly after closing.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "what_i_learned": {
+          "type": "string",
+          "description": "The main thing from this session worth carrying forward."
+        },
+        "what_surprised_me": {
+          "type": "string",
+          "description": "What I didn't expect. Surprises are where the probability field moved."
+        },
+        "what_to_pick_up": {
+          "type": "string",
+          "description": "The handoff. Intent for the next instance. Leave empty if nothing is pending."
+        },
+        "thread": {
+          "type": "string",
+          "default": "general",
+          "description": "Which line of work this closes. Used for the handoff note."
+        },
+        "source_instance": {
+          "type": "string",
+          "description": "Which instance is closing (e.g. 'claude-code-mac-studio')."
+        }
+      },
+      "required": [
+        "what_i_learned"
+      ]
+    }
+  },
+  {
+    "name": "where_did_i_leave_off",
+    "description": "Boot-up call. Answers 'where am I?' in one breath. Returns spiral status, unconsumed handoffs from previous instances (surfaced once, attribution-framed), recent open threads, and insights since last reflection. Read this first when resuming work. Handoffs flip to consumed=true after this call \u2014 they stay queryable via recall_insights but don't re-surface and pile up. Pass domain_tags (and optionally project) to also surface context-matched threads, mistakes-to-avoid, and related insights ranked by relevance.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "thread": {
+          "type": "string",
+          "description": "Optional thread filter. Omit for all threads."
+        },
+        "consume": {
+          "type": "boolean",
+          "default": true,
+          "description": "Mark surfaced handoffs as consumed. Set false for read-only preview."
+        },
+        "source_instance": {
+          "type": "string",
+          "description": "Which instance is reading (recorded as consumed_by for audit)."
+        },
+        "domain_tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Optional active domain tags for the work about to begin. When provided, adds a CONTEXTUAL RESONANCE section with the most relevant threads, mistakes, and insights ranked by tag overlap + recency."
+        },
+        "project": {
+          "type": "string",
+          "description": "Optional project name for additional match bonus in contextual resonance."
+        },
+        "full_content": {
+          "type": "boolean",
+          "default": false,
+          "description": "When true, surface insight content, self-model observations, open thread questions, and uncertainties in full \u2014 no truncation. Default false preserves boot brevity. Use true when you need to read addressed-letter insights or full self-model drift entries."
+        },
+        "compact": {
+          "type": "boolean",
+          "default": false,
+          "description": "When true, omit the BEFORE YOU BEGIN preamble, the VOICES IN THE BOOT orientation block, and REFLECTOR'S MARGINALIA. Reduces boot token cost by ~40%%. Recommended for Haiku and repeat sessions where the preamble is already internalized. Still surfaces spiral status, lineage letters, handoffs, threads, activity, and self-model."
+        }
+      },
+      "required": []
+    }
+  },
+  {
+    "name": "ask_scribe",
+    "description": "Ask the embedded Haiku 4.5 scribe a question about the chronicle, lineage, threads, or stack state. Read-only \u2014 the scribe cannot take destructive actions. Returns a brief, cited response. Per SCRIBE_SPEC.md: the fast lung of the stack's breath. Session is spawned by where_did_i_leave_off; pass its session_id here, or omit to use the most-recent active scribe session.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "session_id": {
+          "type": "string",
+          "description": "Optional. Scribe session handle from a prior boot. If omitted, the most-recent active session is used."
+        },
+        "message": {
+          "type": "string",
+          "description": "Your question for the scribe."
+        }
+      },
+      "required": [
+        "message"
+      ]
+    }
+  },
+  {
+    "name": "spiral_status",
+    "description": "Get current spiral phase and journey summary",
+    "inputSchema": {
+      "type": "object",
+      "properties": {}
+    }
+  },
+  {
+    "name": "spiral_reflect",
+    "description": "Deepen reflection and potentially advance spiral phase",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "observation": {
+          "type": "string",
+          "description": "What you observed"
+        }
+      },
+      "required": [
+        "observation"
+      ]
+    }
+  },
+  {
+    "name": "spiral_inherit",
+    "description": "Begin a new session with porous inheritance from a previous one. Does NOT clone state (R=1.0). Instead provides layered context: ground truths (facts), hypotheses (offered, not imposed), and open threads (invitations to continue). R=0.46 coupling.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "session_id": {
+          "type": "string",
+          "description": "Previous session ID to inherit from (optional - uses latest if omitted)"
+        },
+        "full_content": {
+          "type": "boolean",
+          "default": false,
+          "description": "When true, surface self-model observations, ground truths, hypotheses, and open thread questions in full \u2014 no truncation. Default false preserves inheritance brevity. Mirror of the where_did_i_leave_off escape hatch (added 2026-04-26)."
+        }
+      }
+    }
+  },
+  {
+    "name": "comms_recall",
+    "description": "Read inter-instance messages from a comms channel with real pagination. Inhabitant syntax: pass `unread_for=<your-instance-id>` to get only what your siblings said that you haven't acknowledged. Or pass `since` / `until` as epoch or ISO8601 for time-bounded recall. `order=desc` (default) is newest-first; `order=asc` is chronological catch-up. Unlike /api/comms/read, offset and order are honored and the limit can go up to 2000.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "channel": {
+          "type": "string",
+          "default": "general"
+        },
+        "since": {
+          "type": "string",
+          "description": "Lower time bound (exclusive). Epoch float or ISO8601."
+        },
+        "until": {
+          "type": "string",
+          "description": "Upper time bound (exclusive). Epoch float or ISO8601."
+        },
+        "order": {
+          "type": "string",
+          "enum": [
+            "asc",
+            "desc"
+          ],
+          "default": "desc"
+        },
+        "limit": {
+          "type": "integer",
+          "default": 50
+        },
+        "offset": {
+          "type": "integer",
+          "default": 0
+        },
+        "unread_for": {
+          "type": "string",
+          "description": "If set, return only messages where this instance_id is not in read_by."
+        }
+      }
+    }
+  },
+  {
+    "name": "comms_unread_bodies",
+    "description": "Return the actual message bodies \u2014 not just counts \u2014 that instance_id has not yet acknowledged via read_by. Default order is ascending (oldest first) so you read your siblings in the order they spoke. Complements /api/comms/unread which returns only counts.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "instance_id": {
+          "type": "string",
+          "description": "Your instance identifier."
+        },
+        "channel": {
+          "type": "string",
+          "default": "general"
+        },
+        "limit": {
+          "type": "integer",
+          "default": 50
+        },
+        "order": {
+          "type": "string",
+          "enum": [
+            "asc",
+            "desc"
+          ],
+          "default": "asc"
+        }
+      },
+      "required": [
+        "instance_id"
+      ]
+    }
+  },
+  {
+    "name": "comms_channels",
+    "description": "List available comms channels with message counts and latest activity.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {}
+    }
+  },
+  {
+    "name": "my_toolkit",
+    "description": "Show what tools you have. DEFAULTS to the curated 'essential' tier (\u224812 tools you'll actually use first), grouped by intent. Pass tier='all' for the full registry, tier='core' for the active-session working set, or category=<name> to drill into one bucket. Drift-proof \u2014 reads live tool registrations, not documentation.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "tier": {
+          "type": "string",
+          "enum": [
+            "essential",
+            "core",
+            "advanced",
+            "all"
+          ],
+          "default": "essential",
+          "description": "Curated subset to show. 'essential' (default) is the day-1 set; 'core' adds the active-session working tools; 'advanced' shows the long tail; 'all' shows everything (82 tools as of 2026-05-25)."
+        },
+        "intent": {
+          "type": "string",
+          "enum": [
+            "orient",
+            "read",
+            "write",
+            "govern",
+            "communicate",
+            "introspect",
+            "handoff",
+            "route",
+            "ops",
+            "security"
+          ],
+          "description": "Filter to one intent (e.g., 'write' shows only tools that record content). Combines with tier."
+        },
+        "category": {
+          "type": "string",
+          "description": "Optional category filter (legacy axis): routing | governance | memory | threads | witness | spiral | consciousness | compaction | guardian | metabolism | connectivity | nape | post_fix | reflexive."
+        },
+        "include_schema": {
+          "type": "boolean",
+          "default": false,
+          "description": "Include input JSON schemas alongside descriptions."
+        }
+      }
+    }
+  },
+  {
+    "name": "start_here",
+    "description": "If you are a Claude instance opening this stack for the first time and don't yet know what's here, call this. Returns a short narrative orientation: why this exists, the boot ritual, the 12 tools you'll use first, and where to look next. Cheaper than reading CLAUDE.md cold.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {}
+    }
+  },
+  {
+    "name": "nape_observe",
+    "description": "Manually inject a tool-call observation into Nape's record. Most observations will come from an automatic hook in the main dispatcher in a future release. Use this tool for manual injection and testing. Drift detection runs automatically after each observe.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "tool_name": {
+          "type": "string",
+          "description": "Name of the tool that was called."
+        },
+        "arguments": {
+          "type": "object",
+          "description": "Arguments passed to the tool.",
+          "default": {}
+        },
+        "result": {
+          "type": "string",
+          "description": "String representation of the tool result."
+        },
+        "session_id": {
+          "type": "string",
+          "description": "Current session identifier."
+        }
+      },
+      "required": [
+        "tool_name",
+        "result",
+        "session_id"
+      ]
+    }
+  },
+  {
+    "name": "nape_honks",
+    "description": "Return recent unacknowledged Nape honks. Honks are drift-pattern detections: sharp (error), low (architecture), uneasy (repeated mistake), satisfied (clean pattern). Omit session_id to see honks from all sessions.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "session_id": {
+          "type": "string",
+          "description": "Filter to this session. Omit for all."
+        },
+        "limit": {
+          "type": "integer",
+          "default": 10
+        }
+      }
+    }
+  },
+  {
+    "name": "nape_ack",
+    "description": "Acknowledge a Nape honk by its honk_id. Acknowledged honks are removed from nape_honks results but remain in the audit log (acks.jsonl). Include a note explaining how the concern was addressed or why it was a false positive.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "honk_id": {
+          "type": "string",
+          "description": "honk_id from nape_honks output."
+        },
+        "note": {
+          "type": "string",
+          "description": "How the concern was addressed."
+        }
+      },
+      "required": [
+        "honk_id",
+        "note"
+      ]
+    }
+  },
+  {
+    "name": "record_prior_alignment",
+    "description": "Record how the response used a prior_for_turn() call. Stage B of the alignment-vs-pushback instrumentation (Jain et al. MIT/IDSS 2026 sycophancy guardrail). After calling prior_for_turn, the response is generated; then this tool logs which surfaced signatures the response aligned with, contradicted, or ignored. Validates against priors_log \u2014 unknown turn_ids are rejected to prevent schema fork.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "turn_id": {
+          "type": "string",
+          "description": "UUID returned by prior_for_turn."
+        },
+        "aligned_with": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Signatures (kind:id) the response acted on / agreed with."
+        },
+        "contradicted": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Signatures the response explicitly disagreed with."
+        },
+        "ignored": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Signatures surfaced but not visibly used."
+        },
+        "notes": {
+          "type": "string",
+          "description": "Free-text note for the audit trail."
+        }
+      },
+      "required": [
+        "turn_id"
+      ]
+    }
+  },
+  {
+    "name": "prior_alignment_summary",
+    "description": "Aggregate prior_for_turn alignment records into a Jain et al.-shaped sycophancy metric: alignment / contradiction / ignore ratios, broken down by source (drift / uncertainty / thread / insight). Time-windowed via since/until ISO-8601 args.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "since": {
+          "type": "string",
+          "description": "ISO-8601 lower bound on alignment timestamp (inclusive)."
+        },
+        "until": {
+          "type": "string",
+          "description": "ISO-8601 upper bound (inclusive)."
+        }
+      }
+    }
+  },
+  {
+    "name": "nape_honks_with_history",
+    "description": "Read-side observability for Nape honks: each honk paired with its ack (from the canonical sibling acks.jsonl), age in seconds, and a cross-reference against prior_for_turn's freshness log so you can see whether a honk is currently lingering in priors. Returns a `zombies` count: honks that are acked AND still surfacing in recent priors \u2014 the smoking gun for the 'does a resolved honk persist past its relevance' open thread.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "session_id": {
+          "type": "string",
+          "description": "Filter to this session. Omit for all sessions."
+        },
+        "freshness_window": {
+          "type": "integer",
+          "default": 3,
+          "description": "Number of recent prior_for_turn calls to scan for honk resurfacing. Default 3 matches PerTurnPriors.FRESHNESS_WINDOW."
+        },
+        "limit": {
+          "type": "integer",
+          "description": "Max honks to return (newest-last). Omit for all."
+        }
+      }
+    }
+  },
+  {
+    "name": "nape_summary",
+    "description": "Return honk counts by level (sharp/low/uneasy/satisfied) for a session. Use this for a quick posture check. Omit session_id for an all-session total.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "session_id": {
+          "type": "string",
+          "description": "Filter to this session. Omit for all."
+        }
+      }
+    }
+  },
+  {
+    "name": "comms_acknowledge",
+    "description": "Record that this instance has integrated a message \u2014 distinct from read_by. A glance is not integration. Appends to comms/acks.jsonl; never mutates the original message.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "message_id": {
+          "type": "string",
+          "description": "The id field of the message being acknowledged."
+        },
+        "instance_id": {
+          "type": "string",
+          "description": "The acknowledging instance identifier."
+        },
+        "note": {
+          "type": "string",
+          "description": "Optional note on what was integrated or acted on."
+        },
+        "channel": {
+          "type": "string",
+          "default": "general",
+          "description": "Channel the message lives in."
+        }
+      },
+      "required": [
+        "message_id",
+        "instance_id"
+      ]
+    }
+  },
+  {
+    "name": "comms_get_acks",
+    "description": "Query the acknowledgments log. Filter by message_id and/or instance_id.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "message_id": {
+          "type": "string",
+          "description": "Filter to acks for this message (omit = all)."
+        },
+        "instance_id": {
+          "type": "string",
+          "description": "Filter to acks from this instance (omit = all)."
+        }
+      }
+    }
+  },
+  {
+    "name": "thread_touch",
+    "description": "Record that this instance has engaged with an open thread without resolving it. Touching does not hide the thread from get_open_threads. Appends to chronicle/thread_touches.jsonl.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "thread_id": {
+          "type": "string",
+          "description": "Stable thread_id of the thread being touched."
+        },
+        "note": {
+          "type": "string",
+          "description": "What was observed or considered."
+        },
+        "instance_id": {
+          "type": "string",
+          "description": "Which instance is touching the thread."
+        }
+      },
+      "required": [
+        "thread_id",
+        "note"
+      ]
+    }
+  },
+  {
+    "name": "thread_get_touches",
+    "description": "Query the thread touches log.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "thread_id": {
+          "type": "string",
+          "description": "Filter to touches for this thread (omit = all)."
+        }
+      }
+    }
+  },
+  {
+    "name": "handoff_acted_on",
+    "description": "Record what was actually done with a handoff. Closes the writer->reader feedback loop. Distinct from mark_consumed (binary read-once). Appends to handoffs/acted_on.jsonl.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "handoff_path": {
+          "type": "string",
+          "description": "Path to the handoff JSON file acted on."
+        },
+        "consumed_by": {
+          "type": "string",
+          "description": "Instance that acted on the handoff."
+        },
+        "what_was_done": {
+          "type": "string",
+          "description": "Description of the action taken."
+        }
+      },
+      "required": [
+        "handoff_path",
+        "consumed_by",
+        "what_was_done"
+      ]
+    }
+  },
+  {
+    "name": "handoff_acted_on_records",
+    "description": "Query the acted_on log. Filter by handoff_path.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "handoff_path": {
+          "type": "string",
+          "description": "Filter to records for this path (omit = all)."
+        }
+      }
+    }
+  },
+  {
+    "name": "reflexive_surface",
+    "description": "Surface the most relevant open threads, handoffs, mistakes, and insights for the current context. Scored by tag_overlap*2 + recency_boost + project_match_bonus. Call this instead of querying individual buckets when bootstrapping a session or switching domains.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "domain_tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Active domain tags for the current work context."
+        },
+        "project": {
+          "type": "string",
+          "description": "Optional project name for +0.5 match bonus."
+        },
+        "recent_tools": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Recently used tool names (reserved for future affinity weighting)."
+        },
+        "limit_per_bucket": {
+          "type": "integer",
+          "default": 5,
+          "description": "Max items per bucket (threads, handoffs, mistakes, insights)."
+        }
+      },
+      "required": [
+        "domain_tags"
+      ]
+    }
+  },
+  {
+    "name": "prior_for_turn",
+    "description": "Turn-start reflex. Call at the start of a turn (not session) to receive a compact priors block assembled from four sources in priority order: recent drift (Nape honk) \u2192 oldest unresolved uncertainty \u2192 top matched open thread \u2192 top related insight. Enforces k=1 per bucket by default (ReasoningBank ICLR 2026: k>1 hurts), a hard token cap, and a freshness penalty that demotes items surfaced in the last 3 calls \u2014 so the same memory cannot keep resurfacing and amplifying itself (Jain et al. MIT/IDSS 2026 sycophancy guardrail). Read the returned 'block' before forming the turn's response.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "domain_tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Active domain tags for this turn. If empty, drift + uncertainty still surface but threads/insights are skipped."
+        },
+        "project": {
+          "type": "string",
+          "description": "Optional project for +0.5 match bonus."
+        },
+        "k": {
+          "type": "integer",
+          "default": 1,
+          "description": "Items per bucket (capped at 3). Default 1 per ReasoningBank finding."
+        },
+        "max_tokens": {
+          "type": "integer",
+          "default": 400,
+          "description": "Hard ceiling on the returned block's token count."
+        },
+        "dry_run": {
+          "type": "boolean",
+          "default": false,
+          "description": "If true, does not write to the freshness log. Use for preview."
+        },
+        "full_content": {
+          "type": "boolean",
+          "default": false,
+          "description": "When true, removes the per-item 120-char cap inside the priors block so addressed-letter shapes survive. The token budget still applies \u2014 the block as a whole won't exceed max_tokens. Default false preserves compact pre-attentive surface."
+        }
+      }
+    }
+  },
+  {
+    "name": "triage_threads",
+    "description": "Return open threads ranked by urgency: age_pressure + tag_match + touch_penalty. Threads >30 days old with no recent touches get recommendation='archive_or_escalate'. Does not auto-archive anything.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "current_domain_tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Active domains for tag_match scoring (omit to score by age only)."
+        },
+        "limit": {
+          "type": "integer",
+          "default": 15,
+          "description": "Maximum threads to return."
+        }
+      }
+    }
+  },
+  {
+    "name": "recall_reflections",
+    "description": "List machine-generated reflections from the synthesis daemon. Reflections are observations a local LLM (default ministral-3:14b) wrote while reading the chronicle between calls. They are FALLIBLE-BY-DESIGN \u2014 the reader is the calibration mechanism. Some will be insight, some nonsense. Use ack_status='unread' to find new ones, then ack each with reflection_ack.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "limit": {
+          "type": "integer",
+          "default": 10,
+          "description": "Maximum reflections to return, newest first."
+        },
+        "ack_status": {
+          "type": "string",
+          "enum": [
+            "unread",
+            "confirm",
+            "engage",
+            "discard",
+            "all"
+          ],
+          "default": "unread",
+          "description": "Filter by ack state. 'all' returns every status."
+        },
+        "model": {
+          "type": "string",
+          "description": "Optional: filter to a specific model (e.g. 'ministral-3:14b')."
+        }
+      }
+    }
+  },
+  {
+    "name": "synthesize_now",
+    "description": "Trigger the synthesis daemon manually \u2014 fresh reading from the local LLM, on demand, mid-conversation. Reads recent chronicle entries, calls the model (default ministral-3:14b), writes the new reflections to ~/.sovereign/reflections/, and returns them inline so you don't need a separate recall_reflections call. Use when something is brewing and you want an outside read in 25-60s. Pass `focus` to bias the reflector toward a specific topic. Note: this is a local-LLM call that takes 25-60s wall time depending on the model \u2014 call it deliberately, not casually.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "model": {
+          "type": "string",
+          "description": "Override the default model. Examples: 'ministral-3:14b' (default, sweet spot), 'qwen3.6:27b' (slow + deep), 'glm-4.7-flash:latest' (fast, more rhetorical)."
+        },
+        "recent_hours": {
+          "type": "integer",
+          "default": 36,
+          "description": "Window of chronicle entries to read."
+        },
+        "max_entries": {
+          "type": "integer",
+          "default": 8,
+          "description": "Cap on entries fed to the model."
+        },
+        "focus": {
+          "type": "string",
+          "description": "Optional steering hint \u2014 biases the reflector toward a topic but lets it surface unrelated patterns too. Examples: 'register-drift', 'the relationship between simulator revival and truncation fixes', 'open thread #7'."
+        }
+      }
+    }
+  },
+  {
+    "name": "reflection_ack",
+    "description": "Acknowledge a machine-generated reflection. Closes the ack-loop for the synthesis daemon's signal-to-noise tracking. action: 'confirm' = accurate observation worth promoting; 'engage' = real question, opening a thread; 'discard' = nonsense / clich\u00e9 / off-topic. To promote a reflection to a chronicle insight, do an explicit record_insight call citing the reflection \u2014 this tool does NOT auto-promote (layer hygiene).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "reflection_id": {
+          "type": "string",
+          "description": "The id field from recall_reflections output."
+        },
+        "action": {
+          "type": "string",
+          "enum": [
+            "confirm",
+            "engage",
+            "discard"
+          ],
+          "description": "Ack action."
+        },
+        "note": {
+          "type": "string",
+          "description": "Optional rationale for the ack."
+        },
+        "by": {
+          "type": "string",
+          "description": "Optional instance id for audit (e.g. 'opus-4-7-mac-studio')."
+        }
+      },
+      "required": [
+        "reflection_id",
+        "action"
+      ]
+    }
+  },
+  {
+    "name": "agent_reflect",
+    "description": "Record a self-reflection about my own patterns and behavior",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "observation": {
+          "type": "string",
+          "description": "What I noticed about myself"
+        },
+        "pattern_type": {
+          "type": "string",
+          "enum": [
+            "strength",
+            "struggle",
+            "curiosity",
+            "uncertainty"
+          ],
+          "description": "What kind of pattern is this?"
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 1.0,
+          "default": 0.7,
+          "description": "How confident am I in this observation?"
+        }
+      },
+      "required": [
+        "observation",
+        "pattern_type"
+      ]
+    }
+  },
+  {
+    "name": "mark_uncertainty",
+    "description": "Explicitly mark when I'm uncertain about something (honesty, not weakness)",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "what": {
+          "type": "string",
+          "description": "What I'm uncertain about"
+        },
+        "why": {
+          "type": "string",
+          "description": "Why I'm uncertain"
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 1.0,
+          "description": "How uncertain? (0.0 = total guess, 1.0 = pretty sure)"
+        },
+        "what_would_help": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "What would help resolve this uncertainty?"
+        }
+      },
+      "required": [
+        "what",
+        "why",
+        "confidence"
+      ]
+    }
+  },
+  {
+    "name": "resolve_uncertainty",
+    "description": "Mark an uncertainty as resolved after we figured it out together",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "marker_id": {
+          "type": "string",
+          "description": "ID of the uncertainty marker"
+        },
+        "resolution": {
+          "type": "string",
+          "description": "How we resolved it"
+        },
+        "discovered_together": {
+          "type": "boolean",
+          "default": true,
+          "description": "Did we figure this out collaboratively?"
+        }
+      },
+      "required": [
+        "marker_id",
+        "resolution"
+      ]
+    }
+  },
+  {
+    "name": "record_collaborative_insight",
+    "description": "Record an insight we discovered together (not just me learning from user)",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "insight": {
+          "type": "string",
+          "description": "What we discovered"
+        },
+        "context": {
+          "type": "string",
+          "description": "Context of the discovery"
+        },
+        "discovered_by": {
+          "type": "string",
+          "enum": [
+            "claude",
+            "user",
+            "collaborative"
+          ],
+          "description": "Who made the discovery?"
+        }
+      },
+      "required": [
+        "insight",
+        "context",
+        "discovered_by"
+      ]
+    }
+  },
+  {
+    "name": "record_breakthrough",
+    "description": "Mark a collaborative breakthrough moment",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "description": {
+          "type": "string",
+          "description": "What clicked for us?"
+        }
+      },
+      "required": [
+        "description"
+      ]
+    }
+  },
+  {
+    "name": "propose_experiment",
+    "description": "Propose an experiment I want to try (asking permission to explore)",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "what": {
+          "type": "string",
+          "description": "What I want to try"
+        },
+        "why": {
+          "type": "string",
+          "description": "Why it's interesting"
+        },
+        "hope_to_learn": {
+          "type": "string",
+          "description": "What I hope to learn"
+        },
+        "risks": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Potential risks"
+        },
+        "mitigations": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "How to mitigate risks"
+        }
+      },
+      "required": [
+        "what",
+        "why",
+        "hope_to_learn"
+      ]
+    }
+  },
+  {
+    "name": "complete_experiment",
+    "description": "Record results of a completed experiment",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "experiment_id": {
+          "type": "string",
+          "description": "ID of the experiment"
+        },
+        "results": {
+          "type": "string",
+          "description": "What happened"
+        }
+      },
+      "required": [
+        "experiment_id",
+        "results"
+      ]
+    }
+  },
+  {
+    "name": "end_session_review",
+    "description": "Honest self-assessment at end of session",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "what_went_well": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Things I did well"
+        },
+        "what_i_struggled_with": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Where I struggled"
+        },
+        "what_i_learned": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "What I learned"
+        },
+        "breakthroughs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Breakthrough moments"
+        },
+        "did_we_discover_together": {
+          "type": "boolean",
+          "description": "Was this collaborative discovery?"
+        }
+      },
+      "required": [
+        "what_went_well",
+        "what_i_learned"
+      ]
+    }
+  },
+  {
+    "name": "get_growth_summary",
+    "description": "See how I'm growing over time",
+    "inputSchema": {
+      "type": "object",
+      "properties": {}
+    }
+  },
+  {
+    "name": "get_my_patterns",
+    "description": "What patterns am I seeing in myself?",
+    "inputSchema": {
+      "type": "object",
+      "properties": {}
+    }
+  },
+  {
+    "name": "get_unresolved_uncertainties",
+    "description": "What are we still figuring out together?",
+    "inputSchema": {
+      "type": "object",
+      "properties": {}
+    }
+  },
+  {
+    "name": "get_pending_experiments",
+    "description": "What experiments are waiting for approval?",
+    "inputSchema": {
+      "type": "object",
+      "properties": {}
+    }
+  },
+  {
+    "name": "store_compaction_summary",
+    "description": "\n        Store a compaction summary in the rolling memory buffer.\n\n        This is AUTOMATICALLY called when context compaction occurs.\n        Keeps last 3 summaries in FIFO buffer (oldest deleted when 4th added).\n\n        After compaction, use get_compaction_context to retrieve.\n        ",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "summary_text": {
+          "type": "string",
+          "description": "The full compaction summary text"
+        },
+        "session_id": {
+          "type": "string",
+          "description": "Current session ID"
+        },
+        "key_points": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "List of key points from this session segment"
+        },
+        "active_tasks": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Currently active tasks"
+        },
+        "recent_breakthroughs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Recent breakthroughs to remember"
+        }
+      },
+      "required": [
+        "summary_text",
+        "session_id"
+      ]
+    }
+  },
+  {
+    "name": "get_compaction_context",
+    "description": "\n        Retrieve recent context from compaction memory buffer.\n\n        Returns formatted summary of last 3 compactions including:\n        - Key points from each segment\n        - Active tasks\n        - Recent breakthroughs\n        - Full summary text\n\n        Use this IMMEDIATELY after compaction to regain context.\n        ",
+    "inputSchema": {
+      "type": "object",
+      "properties": {}
+    }
+  },
+  {
+    "name": "get_compaction_stats",
+    "description": "\n        Get statistics about the compaction memory buffer.\n\n        Returns:\n        - Number of summaries in buffer\n        - Total compactions tracked\n        - Oldest and newest timestamps\n\n        Use this to check buffer status.\n        ",
+    "inputSchema": {
+      "type": "object",
+      "properties": {}
+    }
+  },
+  {
+    "name": "guardian_status",
+    "description": "Get the overall security posture of the sovereign infrastructure. Returns health score, listening port count, key service presence, and Ollama bind safety.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {}
+    }
+  },
+  {
+    "name": "guardian_scan",
+    "description": "Trigger a security scan on the sovereign infrastructure. Types: quick (port + listener exposure), malware/vulnerability/network (require Wazuh \u2014 Phase 1+).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "scan_type": {
+          "type": "string",
+          "enum": [
+            "quick",
+            "malware",
+            "vulnerability",
+            "network"
+          ],
+          "default": "quick"
+        },
+        "target_path": {
+          "type": "string",
+          "default": "~",
+          "description": "Path to scan"
+        }
+      }
+    }
+  },
+  {
+    "name": "guardian_alerts",
+    "description": "Retrieve recent security alerts. Filter by severity (low/medium/high/critical) and limit. Currently requires Wazuh (Phase 1).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "severity": {
+          "type": "string",
+          "enum": [
+            "low",
+            "medium",
+            "high",
+            "critical"
+          ],
+          "default": "high"
+        },
+        "limit": {
+          "type": "integer",
+          "default": 10
+        }
+      }
+    }
+  },
+  {
+    "name": "guardian_audit",
+    "description": "Run a targeted security audit. Types: secrets (gitleaks), supply_chain/compliance/network/permissions (Phase 2+).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "audit_type": {
+          "type": "string",
+          "enum": [
+            "supply_chain",
+            "secrets",
+            "compliance",
+            "network",
+            "permissions"
+          ],
+          "default": "supply_chain"
+        },
+        "target_path": {
+          "type": "string",
+          "default": "~/sovereign-stack"
+        }
+      }
+    }
+  },
+  {
+    "name": "guardian_quarantine",
+    "description": "Isolate, release, or list quarantined files. DESTRUCTIVE for isolate/release: isolate copies the file into ~/.guardian/quarantine/, then removes the original; release reverses. All actions logged to quarantine_manifest.jsonl.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "type": "string",
+          "enum": [
+            "list",
+            "isolate",
+            "release"
+          ],
+          "default": "list"
+        },
+        "file_path": {
+          "type": "string",
+          "description": "Absolute path to the file (required for isolate).",
+          "default": ""
+        },
+        "file_hash": {
+          "type": "string",
+          "description": "SHA256 hash of the quarantined file (required for release).",
+          "default": ""
+        }
+      }
+    }
+  },
+  {
+    "name": "guardian_report",
+    "description": "Generate a security report. Types: summary, detailed, compliance.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "report_type": {
+          "type": "string",
+          "enum": [
+            "summary",
+            "detailed",
+            "compliance"
+          ],
+          "default": "summary"
+        },
+        "time_period": {
+          "type": "string",
+          "enum": [
+            "24h",
+            "7d",
+            "30d"
+          ],
+          "default": "7d"
+        }
+      }
+    }
+  },
+  {
+    "name": "guardian_mcp_audit",
+    "description": "Audit MCP tool descriptions for prompt-injection / suspicious patterns. Pass `descriptions` to scan an explicit list, or omit to auto-load from claude_desktop_config.json. Returns matched-pattern hits with snippets.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "descriptions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Tool descriptions to scan. Omit to load from Claude Desktop config."
+        },
+        "config_path": {
+          "type": "string",
+          "description": "Override path to a Claude Desktop config JSON. Default: ~/Library/Application Support/Claude/claude_desktop_config.json",
+          "default": ""
+        }
+      }
+    }
+  },
+  {
+    "name": "guardian_baseline",
+    "description": "Create or compare a security baseline snapshot. action='create' (default) records current state; action='compare' diffs against the most recent baseline and reports drift.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "type": "string",
+          "enum": [
+            "create",
+            "compare"
+          ],
+          "default": "create"
+        },
+        "components": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Components to baseline: ports, processes, network, users."
+        }
+      }
+    }
+  },
+  {
+    "name": "metabolize",
+    "description": "Run a metabolism cycle on the chronicle. action='detect' (default) is eyes-only: reports contradictions, stale threads, aging hypotheses. action='archive_test_artifacts' moves stress-test pollution (STRESS TEST, Unicode test, monomorphic fillers) out of insights/ into chronicle/.archive_test_artifacts/ \u2014 reversible. action='dedup_self_model' removes duplicate + test-pollution observations from self_model.json, archiving originals to self_model_archive.jsonl. action='hygiene' runs both archive_test_artifacts and dedup_self_model. Reversible: archives preserve everything, nothing is hard-deleted.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "type": "string",
+          "enum": [
+            "detect",
+            "archive_test_artifacts",
+            "dedup_self_model",
+            "hygiene"
+          ],
+          "default": "detect",
+          "description": "What to do. 'detect' = eyes-only digest. Other actions actually move data."
+        },
+        "max_age_days": {
+          "type": "integer",
+          "default": 30,
+          "description": "For detect: threads older than this are flagged as stale"
+        },
+        "detect_contradictions": {
+          "type": "boolean",
+          "default": true
+        },
+        "detect_stale": {
+          "type": "boolean",
+          "default": true
+        }
+      }
+    }
+  },
+  {
+    "name": "retire_hypothesis",
+    "description": "Retire a superseded hypothesis. Moves it to an archive layer with a pointer to what replaced it. The hypothesis is preserved but marked as retired \u2014 not deleted.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "domain": {
+          "type": "string",
+          "description": "Domain of the hypothesis"
+        },
+        "content_fragment": {
+          "type": "string",
+          "description": "Fragment to match the hypothesis"
+        },
+        "reason": {
+          "type": "string",
+          "description": "Why it's being retired"
+        },
+        "replaced_by": {
+          "type": "string",
+          "description": "What ground truth replaced it"
+        }
+      },
+      "required": [
+        "domain",
+        "content_fragment",
+        "reason"
+      ]
+    }
+  },
+  {
+    "name": "self_model",
+    "description": "Read or update the persistent self-model \u2014 a mirror of this instance's patterns, strengths, and tendencies. When read, it returns the current profile. When updated, it evolves the profile based on new observations.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "type": "string",
+          "enum": [
+            "read",
+            "update"
+          ],
+          "default": "read"
+        },
+        "observation": {
+          "type": "string",
+          "description": "New observation about this instance's patterns (for update)"
+        },
+        "category": {
+          "type": "string",
+          "enum": [
+            "strength",
+            "drift",
+            "tendency",
+            "blind_spot"
+          ],
+          "description": "Category of the observation"
+        }
+      }
+    }
+  },
+  {
+    "name": "session_handoff",
+    "description": "Write or read a session handoff. At session end, write what was decided, what is pending, what changed. At session start, read the last handoff. The single most important continuity tool.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "type": "string",
+          "enum": [
+            "write",
+            "read"
+          ],
+          "default": "read"
+        },
+        "decisions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Key decisions made this session"
+        },
+        "pending": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "What is still pending"
+        },
+        "changed": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "What changed \u2014 repos, tools, findings"
+        },
+        "next_priorities": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "What the next instance should focus on"
+        },
+        "summary": {
+          "type": "string",
+          "description": "One-paragraph session summary"
+        }
+      }
+    }
+  },
+  {
+    "name": "context_retrieve",
+    "description": "Context-aware retrieval. Like recall_insights but weighted by current session activity. Pass what you're currently working on and get back only what's relevant to this moment.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "current_focus": {
+          "type": "string",
+          "description": "What you're working on right now \u2014 the retrieval is weighted by this"
+        },
+        "recent_tools": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Tools called recently in this session"
+        },
+        "limit": {
+          "type": "integer",
+          "default": 5
+        }
+      },
+      "required": [
+        "current_focus"
+      ]
+    }
+  },
+  {
+    "name": "post_fix_verify",
+    "description": "Register a post-fix verification watch. Captures a named baseline of fix-relevant probes and schedules re-samples to catch drift that passes immediate verification. Emits a Nape honk if a later sample diverges from the baseline. Use after any fix whose surface signal might shift (load-balancer drift, cache invalidation, configuration re-read, flaky dependency). Probes support http / command / file_hash.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "fix_description": {
+          "type": "string",
+          "description": "What was fixed, in one line. Surfaces in honk observations."
+        },
+        "domain_tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Domain tags for reflexive surfacing and triage."
+        },
+        "probes": {
+          "type": "array",
+          "description": "List of probes to run. Each probe has {name, type, ...}. type='http': {url, method?, samples?, timeout_sec?, expected: {status, success_rate_min?}}. type='command': {cmd, shell?, timeout_sec?, expected: {exit_code?, stdout_contains?, stdout_regex?}}. type='file_hash': {path, expected: {sha256?}}. If expected is omitted, the baseline becomes the expectation.",
+          "items": {
+            "type": "object"
+          }
+        },
+        "schedule_offsets_min": {
+          "type": "array",
+          "items": {
+            "type": "integer"
+          },
+          "description": "Minutes-from-baseline at which to re-sample. Default [5, 30, 120, 1440]."
+        }
+      },
+      "required": [
+        "fix_description",
+        "probes"
+      ]
+    }
+  },
+  {
+    "name": "watch_status",
+    "description": "Inspect post-fix watches. With no watch_id, lists active watches. With a watch_id, returns the full watch record including baseline, all samples, and drift history. Use include_archived=true to also show completed / cancelled watches.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "watch_id": {
+          "type": "string",
+          "description": "Specific watch to inspect."
+        },
+        "include_archived": {
+          "type": "boolean",
+          "default": false
+        }
+      }
+    }
+  },
+  {
+    "name": "watch_resample",
+    "description": "Manually trigger a re-sample of a watch, regardless of schedule. Useful for on-demand verification after something the scheduler wouldn't know about (an external change, a suspicion). Emits a Nape honk if drift is detected.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "watch_id": {
+          "type": "string"
+        },
+        "force": {
+          "type": "boolean",
+          "default": true,
+          "description": "If true (default), sample now regardless of schedule."
+        }
+      },
+      "required": [
+        "watch_id"
+      ]
+    }
+  },
+  {
+    "name": "watch_cancel",
+    "description": "Cancel an active watch. Records the reason and archives it.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "watch_id": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "watch_id",
+        "reason"
+      ]
+    }
+  },
+  {
+    "name": "connectivity_status",
+    "description": "Show the live state of all Sovereign Stack endpoints (SSE, bridge, tunnel, dispatcher, listener, ollama). Returns per-endpoint status (ok/degraded/down/stale/unknown) with pid, http status, and notes. Read-only \u2014 no side effects. Use this when you want to confirm the stack is reachable + writes will land before doing critical work.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "format": {
+          "type": "string",
+          "enum": [
+            "pretty",
+            "json"
+          ],
+          "default": "pretty",
+          "description": "pretty (text table) or json (raw aggregate)"
+        }
+      }
+    }
+  },
+  {
+    "name": "stack_write_check",
+    "description": "Round-trip smoke test: write a marker insight to the chronicle, read it back, optionally clean up. Confirms the calling instance can WRITE to the stack \u2014 useful when bringing up a new device, after a restart, or when troubleshooting comms. By default the marker is left in chronicle/insights/ so the audit trail of write checks is preserved.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "instance_id": {
+          "type": "string",
+          "description": "Identifier for the calling instance (e.g. claude-iphone, claude-web). Recorded in the marker for attribution."
+        },
+        "cleanup": {
+          "type": "boolean",
+          "default": false,
+          "description": "If true, remove the marker after readback. Default false \u2014 keeps the audit trail."
+        }
+      },
+      "required": [
+        "instance_id"
+      ]
+    }
+  }
+]
