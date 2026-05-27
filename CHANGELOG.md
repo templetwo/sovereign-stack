@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.5.2] - 2026-05-27
+
+### Canonical ring system + Claude exemption + governed Antigravity connector
+
+A bridge-layer release. No new MCP tools (still **82**); the work lands in
+`clients/`. Unifies the ring scope across every external substrate reaching in
+and brings the Antigravity/Gemini connector under the same governance as the
+Grok and ChatGPT bridges.
+
+### Added — `bridge_core.rings` (single source of truth)
+- **`CANONICAL_RING_1`** (33 reads), **`CANONICAL_RING_2`** (10 governed
+  writes), **`CANONICAL_COMMIT_TARGETS`** — the ring scope is now identical for
+  all external substrates (Grok, ChatGPT, Gemini, future).
+- **`is_full_trust()`** — the Claude exemption. Claude-family substrates bypass
+  ring governance entirely (full surface); every other substrate is ringed.
+  Trust is the infrastructure: Claude operates the Stack natively, not through
+  an airlock.
+
+### Added — `clients/antigravity_connector` (ring-governed)
+- `bridge_setup.py` registers a `gemini-antigravity` `BridgeContext` and routes
+  the stdio connector through `bridge_core`'s membrane: Ring 1 proxied to the
+  spawned `sovereign`, Ring 2 → pending proposal under
+  `~/.sovereign/antigravity_connector/`, Ring 3 refused, Claude full-trust
+  bypass. `--substrate` / `--source-instance` flags.
+- Governed surface = 41 tools (down from the raw 82), zero Ring 3 exposure.
+
+### Changed
+- `grok_bridge` and `openai_bridge` now source their base ring scope from
+  `bridge_core.rings`, ending the prior 33/31 (Ring 1) and 11/10 (Ring 2)
+  drift. Grok keeps its extensions (`grok_welcome`, `probe_ring2_dispatch`);
+  openai equals canonical.
+- openai does not advertise `verify_proposal` / `list_bridge_proposals` until
+  local handlers are wired in `openai_bridge/mcp_filtered.py` (follow-up gate
+  before the next openai bridge restart).
+
+### Verified
+- Governed list 41 tools, zero Ring 3 leak; Ring 1 proxied; Ring 2 creates a
+  proposal and does NOT reach the chronicle; Ring 3 refused; Claude full-trust
+  bypass on both list and call paths. grok smoke 62/62; openai 25/28
+  (== pre-existing baseline).
+
+---
+
 ## [1.5.1] - 2026-05-23
 
 ### Verbatim archive layer — 82 tools, 968 passing
