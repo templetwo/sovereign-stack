@@ -4,12 +4,8 @@ from __future__ import annotations
 
 import json
 
-import pytest
-
 from sovereign_stack.scribe import tools
 from sovereign_stack.scribe.tools import (
-    ScribeToolError,
-    SCRIBE_TOOLS,
     anthropic_tool_definitions,
     dispatch_tool,
     tool_chronicle_list_domains,
@@ -49,16 +45,12 @@ class TestPathScopeGuard:
         assert "outside the chronicle root" in result
 
     def test_rejects_absolute_unix_path(self):
-        result, is_error = dispatch_tool(
-            "chronicle_read_file", {"path": "/etc/passwd"}
-        )
+        result, is_error = dispatch_tool("chronicle_read_file", {"path": "/etc/passwd"})
         assert is_error is True
         assert "absolute paths are not allowed" in result
 
     def test_rejects_home_tilde(self):
-        result, is_error = dispatch_tool(
-            "chronicle_read_file", {"path": "~/.env"}
-        )
+        result, is_error = dispatch_tool("chronicle_read_file", {"path": "~/.env"})
         assert is_error is True
         assert "absolute paths are not allowed" in result
 
@@ -68,9 +60,7 @@ class TestPathScopeGuard:
         assert "non-empty string" in result
 
     def test_rejects_non_string(self):
-        result, is_error = dispatch_tool(
-            "chronicle_read_file", {"path": 123}
-        )
+        result, is_error = dispatch_tool("chronicle_read_file", {"path": 123})
         assert is_error is True
 
     def test_rejects_missing_path(self):
@@ -105,17 +95,13 @@ class TestListDomains:
 
 class TestRecallLimits:
     def test_limit_clamped_to_max(self):
-        result, is_error = dispatch_tool(
-            "chronicle_recall", {"limit": 999_999}
-        )
+        result, is_error = dispatch_tool("chronicle_recall", {"limit": 999_999})
         assert is_error is False
         parsed = json.loads(result)
         assert parsed["limit"] <= tools.MAX_RECALL_LIMIT
 
     def test_limit_minimum_one(self):
-        result, is_error = dispatch_tool(
-            "chronicle_recall", {"limit": -5}
-        )
+        result, is_error = dispatch_tool("chronicle_recall", {"limit": -5})
         assert is_error is False
         parsed = json.loads(result)
         assert parsed["limit"] >= 1
@@ -123,9 +109,7 @@ class TestRecallLimits:
 
 class TestErrorEnvelope:
     def test_error_returns_tuple_with_is_error_true(self):
-        result, is_error = dispatch_tool(
-            "chronicle_read_file", {"path": "../../etc/passwd"}
-        )
+        result, is_error = dispatch_tool("chronicle_read_file", {"path": "../../etc/passwd"})
         assert isinstance(result, str)
         assert is_error is True
 

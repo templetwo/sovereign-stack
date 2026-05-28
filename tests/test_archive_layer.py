@@ -5,6 +5,7 @@ external exchange, content-addressed and hash-verified, separate from the curate
 chronicle. These tests pin the integrity guarantee (a summary can never silently
 stand in for a missing artifact) and the human-legible on-disk layout.
 """
+
 import hashlib
 import os
 
@@ -19,8 +20,10 @@ def test_archive_then_recall_verified(tmp_path):
     em = _em(tmp_path)
     content = "verbatim line one\nverbatim line two\n"
     rec = em.archive_exchange(
-        content, source="gemini-3.5-flash",
-        descriptor="v3 admission record", vector_id="prompt_source_tokens",
+        content,
+        source="gemini-3.5-flash",
+        descriptor="v3 admission record",
+        vector_id="prompt_source_tokens",
     )
     assert rec["archive_id"] == hashlib.sha256(content.encode()).hexdigest()
     got = em.recall_exchange(rec["archive_id"])
@@ -31,7 +34,9 @@ def test_archive_then_recall_verified(tmp_path):
 def test_descriptor_layout_in_path(tmp_path):
     em = _em(tmp_path)
     rec = em.archive_exchange(
-        "x", source="ChatGPT", descriptor="framing note",
+        "x",
+        source="ChatGPT",
+        descriptor="framing note",
         vector_id="chronicle_failure_profile",
     )
     # Human-legible: grouped by vector, filename carries source + descriptor,

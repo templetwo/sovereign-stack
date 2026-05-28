@@ -36,7 +36,6 @@ from sovereign_stack.daemons.synthesis_daemon import (
     write_reflections,
 )
 
-
 # ── Fixtures ────────────────────────────────────────────────────────────────
 
 
@@ -93,9 +92,7 @@ class TestReadRecentChronicle:
         # Entries older than the recent_hours window must NOT surface.
         old = datetime.now(timezone.utc) - timedelta(hours=72)
         _write_entry(chronicle_root, "old-domain", old, "stale")
-        entries = read_recent_chronicle(
-            chronicle_root=chronicle_root, recent_hours=24
-        )
+        entries = read_recent_chronicle(chronicle_root=chronicle_root, recent_hours=24)
         assert entries == []
 
     def test_max_entries_cap_respected(self, chronicle_root: Path):
@@ -107,9 +104,7 @@ class TestReadRecentChronicle:
                 now - timedelta(minutes=i),
                 f"content {i}",
             )
-        entries = read_recent_chronicle(
-            chronicle_root=chronicle_root, max_entries=5
-        )
+        entries = read_recent_chronicle(chronicle_root=chronicle_root, max_entries=5)
         assert len(entries) == 5
 
     def test_newest_first(self, chronicle_root: Path):
@@ -153,7 +148,7 @@ class TestExtractJsonBlock:
         assert extract_json_block(raw) == raw
 
     def test_strips_thinking_trailer(self):
-        raw = "Some thinking here.\n...done thinking.\n\n{\"reflections\": []}"
+        raw = 'Some thinking here.\n...done thinking.\n\n{"reflections": []}'
         assert extract_json_block(raw) == '{"reflections": []}'
 
     def test_strips_markdown_fences(self):
@@ -172,7 +167,7 @@ class TestExtractJsonBlock:
         assert extract_json_block("") is None
 
     def test_finds_json_amid_prose(self):
-        raw = "Here is what I think: {\"reflections\": [1]} that is all."
+        raw = 'Here is what I think: {"reflections": [1]} that is all.'
         assert extract_json_block(raw) == '{"reflections": [1]}'
 
 
@@ -460,11 +455,7 @@ class TestRecoverCompleteReflections:
         # An object that is brace-balanced but invalid JSON (missing comma,
         # bad escape, etc.) gets skipped silently — the brace counter
         # advances past it and tries the next one.
-        block = (
-            '{"reflections": ['
-            '{"observation": "valid"}'
-            "]}"
-        )
+        block = '{"reflections": [{"observation": "valid"}]}'
         out = _recover_complete_reflections(block)
         assert len(out) == 1
 
@@ -609,9 +600,7 @@ class TestReadSpanningChronicle:
         now = datetime.now(timezone.utc)
         # 6 entries in the same week.
         for i in range(6):
-            _write_entry(
-                chronicle_root, f"d{i}", now - timedelta(hours=i + 1), f"e{i}"
-            )
+            _write_entry(chronicle_root, f"d{i}", now - timedelta(hours=i + 1), f"e{i}")
         entries = read_spanning_chronicle(
             chronicle_root=chronicle_root, span_weeks=1, entries_per_week=2
         )
@@ -659,9 +648,7 @@ class TestReadRecentHandoffs:
                 "source_instance": "x",
             }
             (tmp_path / f"h{i}.json").write_text(json.dumps(h))
-        result = read_recent_handoffs(
-            handoffs_dir=tmp_path, recent_hours=24, max_handoffs=3
-        )
+        result = read_recent_handoffs(handoffs_dir=tmp_path, recent_hours=24, max_handoffs=3)
         assert len(result) == 3
 
     def test_malformed_json_skipped(self, tmp_path: Path):

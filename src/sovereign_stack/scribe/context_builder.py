@@ -19,32 +19,27 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Optional
 
 from sovereign_stack.handoff import HandoffEngine, format_handoff_for_surface
 from sovereign_stack.memory import ExperientialMemory
 from sovereign_stack.witness import (
     format_lineage_layer,
     format_self_model,
-    format_threads_with_age,
 )
-
 
 SOVEREIGN_ROOT = Path(os.environ.get("SOVEREIGN_ROOT", str(Path.home() / ".sovereign")))
-CHRONICLE_ROOT = Path(
-    os.environ.get("SOVEREIGN_CHRONICLE", str(SOVEREIGN_ROOT / "chronicle"))
-)
+CHRONICLE_ROOT = Path(os.environ.get("SOVEREIGN_CHRONICLE", str(SOVEREIGN_ROOT / "chronicle")))
 
 
 # Tunables — the scribe should see broadly but not be drowned.
 # All values are intentionally generous; the goal is "enough breath",
 # not boot brevity.
-DEFAULT_OPEN_THREADS_LIMIT = 25       # boot ritual surfaces top 5; scribe gets 25
-DEFAULT_RECENT_ACTIVITY_DAYS = 14     # last two weeks of insights
-DEFAULT_RECENT_ACTIVITY_LIMIT = 80    # cap to keep prompt size bounded
+DEFAULT_OPEN_THREADS_LIMIT = 25  # boot ritual surfaces top 5; scribe gets 25
+DEFAULT_RECENT_ACTIVITY_DAYS = 14  # last two weeks of insights
+DEFAULT_RECENT_ACTIVITY_LIMIT = 80  # cap to keep prompt size bounded
 DEFAULT_PERSISTENT_MARKER_LIMIT = 30  # high-intensity ground_truths
 DEFAULT_PERSISTENT_MIN_INTENSITY = 0.85
-DEFAULT_REFLECTIONS_LIMIT = 20        # ack'd + unread, newest first
+DEFAULT_REFLECTIONS_LIMIT = 20  # ack'd + unread, newest first
 
 
 def _format_open_threads(memory: ExperientialMemory, limit: int) -> str:
@@ -64,9 +59,7 @@ def _format_open_threads(memory: ExperientialMemory, limit: int) -> str:
     return "\n".join(lines)
 
 
-def _format_recent_activity(
-    memory: ExperientialMemory, days: int, limit: int
-) -> str:
+def _format_recent_activity(memory: ExperientialMemory, days: int, limit: int) -> str:
     """Recent insights, newest first, full content."""
     from datetime import datetime, timedelta, timezone
 
@@ -135,10 +128,7 @@ def _format_recent_reflections(limit: int) -> str:
         return "(reflections module unavailable)"
     try:
         result = recall_reflections(limit=limit)
-        if isinstance(result, dict):
-            refs = result.get("reflections", [])
-        else:
-            refs = result
+        refs = result.get("reflections", []) if isinstance(result, dict) else result
     except Exception as exc:
         return f"(reflection recall failed: {type(exc).__name__})"
     if not refs:
@@ -157,8 +147,8 @@ def _format_recent_reflections(limit: int) -> str:
 
 
 def build_scribe_chronicle_context(
-    chronicle_root: Optional[Path] = None,
-    sovereign_root: Optional[Path] = None,
+    chronicle_root: Path | None = None,
+    sovereign_root: Path | None = None,
     *,
     open_threads_limit: int = DEFAULT_OPEN_THREADS_LIMIT,
     recent_activity_days: int = DEFAULT_RECENT_ACTIVITY_DAYS,
@@ -184,9 +174,7 @@ def build_scribe_chronicle_context(
         ("OPEN THREADS (full, newest first)", _format_open_threads(memory, open_threads_limit)),
         (
             f"PERSISTENT MARKERS (intensity ≥ {persistent_min_intensity}, full content)",
-            _format_persistent_markers(
-                memory, persistent_marker_limit, persistent_min_intensity
-            ),
+            _format_persistent_markers(memory, persistent_marker_limit, persistent_min_intensity),
         ),
         (
             f"RECENT ACTIVITY (last {recent_activity_days} days, full content)",

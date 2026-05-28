@@ -6,9 +6,6 @@ not instantiated."""
 
 from __future__ import annotations
 
-import os
-from pathlib import Path
-
 import pytest
 
 from sovereign_stack.scribe import haiku_client
@@ -109,10 +106,7 @@ class TestApiKeyFromEnvFileFallback:
 
     def test_scribe_beats_general_in_file(self, monkeypatch, tmp_path):
         p = tmp_path / ".env"
-        p.write_text(
-            "ANTHROPIC_API_KEY=general\n"
-            "ANTHROPIC_API_KEY_SCRIBE=scoped\n"
-        )
+        p.write_text("ANTHROPIC_API_KEY=general\nANTHROPIC_API_KEY_SCRIBE=scoped\n")
         monkeypatch.setattr(haiku_client, "_env_file_path", p)
         haiku_client.reset_env_cache()
         assert haiku_client._api_key_from_env() == "scoped"

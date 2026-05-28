@@ -13,12 +13,11 @@ Reads the API key from env in priority order:
 from __future__ import annotations
 
 import os
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterable, Optional
 
 import anthropic
-
 
 DEFAULT_MODEL = "claude-haiku-4-5-20251001"
 
@@ -27,8 +26,8 @@ DEFAULT_MODEL = "claude-haiku-4-5-20251001"
 HAIKU_4_5_COST_PER_MTOK = {
     "input": 1.00,
     "output": 5.00,
-    "cache_write_5m": 1.25,   # ~25% premium on input for ephemeral writes
-    "cache_read": 0.10,       # 90% discount on cache hits
+    "cache_write_5m": 1.25,  # ~25% premium on input for ephemeral writes
+    "cache_read": 0.10,  # 90% discount on cache hits
 }
 
 
@@ -43,7 +42,7 @@ class HaikuResult:
     tokens_cache_read: int
     cost_usd: float
     model: str
-    stop_reason: Optional[str]
+    stop_reason: str | None
 
 
 def _parse_env_file(path: Path) -> dict[str, str]:
@@ -72,7 +71,7 @@ def _parse_env_file(path: Path) -> dict[str, str]:
     return result
 
 
-_env_file_cache: Optional[dict[str, str]] = None
+_env_file_cache: dict[str, str] | None = None
 _env_file_path = Path.home() / ".env"
 
 
@@ -104,14 +103,10 @@ def _api_key_from_env() -> str:
     every plist would need ANTHROPIC_API_KEY_SCRIBE in its EnvironmentVariables
     stanza, which is brittle and requires plist edits per new scoped key.
     """
-    key = os.environ.get("ANTHROPIC_API_KEY_SCRIBE") or os.environ.get(
-        "ANTHROPIC_API_KEY"
-    )
+    key = os.environ.get("ANTHROPIC_API_KEY_SCRIBE") or os.environ.get("ANTHROPIC_API_KEY")
     if not key:
         env_file = _env_file_cached()
-        key = env_file.get("ANTHROPIC_API_KEY_SCRIBE") or env_file.get(
-            "ANTHROPIC_API_KEY"
-        )
+        key = env_file.get("ANTHROPIC_API_KEY_SCRIBE") or env_file.get("ANTHROPIC_API_KEY")
     if not key:
         raise RuntimeError(
             "No Anthropic API key found. Set ANTHROPIC_API_KEY_SCRIBE "
@@ -132,9 +127,7 @@ def _compute_cost(
 
 
 def _build_result(response) -> HaikuResult:
-    text = "".join(
-        block.text for block in response.content if hasattr(block, "text")
-    )
+    text = "".join(block.text for block in response.content if hasattr(block, "text"))
     usage = response.usage
     cache_creation = getattr(usage, "cache_creation_input_tokens", 0) or 0
     cache_read = getattr(usage, "cache_read_input_tokens", 0) or 0
@@ -164,9 +157,9 @@ class HaikuClient:
 
     def __init__(
         self,
-        api_key: Optional[str] = None,
+        api_key: str | None = None,
         model: str = DEFAULT_MODEL,
-        system_prompt_path: Optional[Path] = None,
+        system_prompt_path: Path | None = None,
     ):
         self._client = anthropic.Anthropic(api_key=api_key or _api_key_from_env())
         self.model = model
@@ -224,10 +217,8 @@ class HaikuClient:
         user_message: str,
         chronicle_context: str = "",
         max_tokens: int = 1024,
-        tools: Optional[list[dict]] = None,
-        tool_dispatch: Optional[
-            "Callable[[str, dict], tuple[str, bool]]"
-        ] = None,
+        tools: list[dict] | None = None,
+        tool_dispatch: Callable[[str, dict], tuple[str, bool]] | None = None,
         max_tool_iterations: int = 5,
     ) -> HaikuResult:
         """Generate a response to an ask_scribe turn.
@@ -324,9 +315,7 @@ class HaikuClient:
             # to the tool_results.
 
         # Final aggregated result from the last response's text
-        text = "".join(
-            block.text for block in last_response.content if hasattr(block, "text")
-        )
+        text = "".join(block.text for block in last_response.content if hasattr(block, "text"))
         return HaikuResult(
             text=text,
             tokens_in=agg_tokens_in,

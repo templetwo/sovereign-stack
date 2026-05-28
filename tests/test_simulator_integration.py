@@ -22,14 +22,13 @@ from pathlib import Path
 import pytest
 
 from sovereign_stack.governance import (
+    SIMULATOR_AVAILABLE,
     DecisionType,
     GovernanceCircuit,
     MetricType,
-    SIMULATOR_AVAILABLE,
     StakeholderVote,
     runtime_compass_check,
 )
-
 
 # ── GovernanceCircuit.run() ─────────────────────────────────────────────────
 
@@ -52,9 +51,7 @@ class TestGovernanceCircuitSimulation:
     def _circuit_with_threshold(self) -> GovernanceCircuit:
         circuit = GovernanceCircuit()
         # Default detector has no thresholds. Add one to trigger events.
-        circuit.detector.add_threshold(
-            MetricType.FILE_COUNT, limit=100, warning_ratio=0.8
-        )
+        circuit.detector.add_threshold(MetricType.FILE_COUNT, limit=100, warning_ratio=0.8)
         return circuit
 
     def test_result_has_simulation_block(self):
@@ -147,17 +144,13 @@ class TestCompassCheckSimulation:
         result = runtime_compass_check(action="git commit -m 'normal commit'")
         assert "simulation" not in result
 
-        result_explicit = runtime_compass_check(
-            action="ls", with_simulation=False
-        )
+        result_explicit = runtime_compass_check(action="ls", with_simulation=False)
         assert "simulation" not in result_explicit
 
     def test_with_simulation_attaches_block(self):
         # With the flag on, every result has a simulation block —
         # callers can rely on the shape.
-        result = runtime_compass_check(
-            action="delete chronicle entries", with_simulation=True
-        )
+        result = runtime_compass_check(action="delete chronicle entries", with_simulation=True)
         assert "simulation" in result
         assert "available" in result["simulation"]
 
@@ -191,9 +184,7 @@ class TestCompassCheckSimulation:
         # rules-first and that's a separate decision.)
         action = "delete chronicle entries"
         without_sim = runtime_compass_check(action=action)
-        with_sim = runtime_compass_check(
-            action=action, with_simulation=True
-        )
+        with_sim = runtime_compass_check(action=action, with_simulation=True)
         assert without_sim["classification"] == with_sim["classification"]
         assert without_sim["risk_signals"] == with_sim["risk_signals"]
 
@@ -204,9 +195,7 @@ class TestCompassCheckSimulation:
         import sovereign_stack.governance as gov
 
         monkeypatch.setattr(gov, "SIMULATOR_AVAILABLE", False)
-        result = runtime_compass_check(
-            action="some action", with_simulation=True
-        )
+        result = runtime_compass_check(action="some action", with_simulation=True)
         # Verdict still produced.
         assert result["classification"] in {"PAUSE", "WITNESS", "PROCEED"}
         # Simulation block reports unavailability.

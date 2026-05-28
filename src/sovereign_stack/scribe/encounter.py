@@ -19,12 +19,10 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Optional
 
 from sovereign_stack.memory import ExperientialMemory
 
 from .session import SCRIBE_ATTRIBUTION, ScribeSession
-
 
 DEFAULT_INTENSITY = 0.3
 
@@ -34,7 +32,7 @@ def _default_chronicle_root() -> Path:
     return sov / "chronicle"
 
 
-def _normalize_parent_hint(parent_instance: Optional[str]) -> str:
+def _normalize_parent_hint(parent_instance: str | None) -> str:
     """Build a chronicle-tag-safe hint for the parent instance.
 
     Examples:
@@ -87,10 +85,10 @@ def build_encounter_summary(session: ScribeSession) -> str:
 
 def write_encounter_note(
     session: ScribeSession,
-    chronicle_root: Optional[Path] = None,
+    chronicle_root: Path | None = None,
     intensity: float = DEFAULT_INTENSITY,
     extra_summary: str = "",
-    extra_metadata: Optional[dict] = None,
+    extra_metadata: dict | None = None,
 ) -> str:
     """Write a single encounter-note insight to the chronicle.
 

@@ -258,9 +258,7 @@ def read_spanning_chronicle(
         week_start = week_end - week_seconds
         if week_start < cutoff:
             week_start = cutoff
-        week_entries = [
-            e for e in all_entries if week_start <= e["ts_epoch"] < week_end
-        ]
+        week_entries = [e for e in all_entries if week_start <= e["ts_epoch"] < week_end]
         week_entries.sort(key=lambda e: e["ts_epoch"], reverse=True)
         # Evenly sample across the week rather than just taking the newest.
         if week_entries:
@@ -472,18 +470,14 @@ def build_prompt(
                 lines.append(f"{i}. {p}")
         if discarded_patterns:
             lines.append("")
-            lines.append(
-                "═══ PREVIOUSLY DISCARDED — these angles were noise; do not revisit ═══"
-            )
+            lines.append("═══ PREVIOUSLY DISCARDED — these angles were noise; do not revisit ═══")
             for i, p in enumerate(discarded_patterns, 1):
                 lines.append(f"{i}. {p}")
 
     # ── Handoffs section (goose mode only) ──────────────────────────────────
     if is_goose and handoffs:
         lines.append("")
-        lines.append(
-            "═══════════════ RECENT HANDOFFS (declared intent) ═══════════════"
-        )
+        lines.append("═══════════════ RECENT HANDOFFS (declared intent) ═══════════════")
         lines.append("")
         for i, h in enumerate(handoffs, 1):
             ts_short = h.get("timestamp", "")[:19]
@@ -500,21 +494,15 @@ def build_prompt(
     # ── Chronicle section ────────────────────────────────────────────────────
     if spanning_mode:
         lines.append("")
-        lines.append(
-            "═══════════════ CHRONICLE SAMPLE (spanning multiple weeks) ═══════════════"
-        )
-        lines.append(
-            "Note: entries below are sampled across several weeks, ordered oldest→newest."
-        )
+        lines.append("═══════════════ CHRONICLE SAMPLE (spanning multiple weeks) ═══════════════")
+        lines.append("Note: entries below are sampled across several weeks, ordered oldest→newest.")
     else:
         lines.append("")
         lines.append("═══════════════ CHRONICLE EXCERPT ═══════════════")
     lines.append("")
 
     for i, e in enumerate(entries, 1):
-        lines.append(
-            f"[ENTRY {i}] {e['timestamp'][:19]} — domain={e['domain'][:80]}"
-        )
+        lines.append(f"[ENTRY {i}] {e['timestamp'][:19]} — domain={e['domain'][:80]}")
         lines.append(f"LAYER: {e['layer']}")
         content = e["content"]
         if len(content) > 1800:
@@ -791,7 +779,9 @@ class SynthesisDaemon:
     chronicle_root: Path = field(default_factory=lambda: CHRONICLE_INSIGHTS)
     reflections_dir: Path = field(default_factory=lambda: REFLECTIONS_DIR)
     handoffs_dir: Path = field(default_factory=lambda: HANDOFFS_DIR)
-    focus: str | None = None  # "goose" activates gap-finder mode; any other value steers the reflector
+    focus: str | None = (
+        None  # "goose" activates gap-finder mode; any other value steers the reflector
+    )
     sample_mode: str = "recent"  # "recent" | "spanning"
     span_weeks: int = DEFAULT_SPAN_WEEKS
     entries_per_week: int = DEFAULT_ENTRIES_PER_WEEK
@@ -832,8 +822,7 @@ class SynthesisDaemon:
         if not entries and not is_goose:
             result.outcome = "no_entries"
             result.details = (
-                f"no chronicle entries in last {self.recent_hours}h "
-                f"under {self.chronicle_root}"
+                f"no chronicle entries in last {self.recent_hours}h under {self.chronicle_root}"
             )
             result.elapsed_seconds = round(time.time() - started, 2)
             return result
@@ -891,9 +880,7 @@ class SynthesisDaemon:
         result.outcome = "wrote"
         result.reflections_written = len(reflections)
         result.reflections_path = str(path)
-        result.details = (
-            f"wrote {len(reflections)} reflections from {len(entries)} entries"
-        )
+        result.details = f"wrote {len(reflections)} reflections from {len(entries)} entries"
         result.elapsed_seconds = round(time.time() - started, 2)
         return result
 

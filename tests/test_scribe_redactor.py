@@ -10,16 +10,12 @@ that match pattern shapes.
 
 from __future__ import annotations
 
-import pytest
-
 from sovereign_stack.scribe.redactor import (
-    RedactionResult,
     pattern_names,
     redact,
     redact_iter,
     redact_structure,
 )
-
 
 # ----------------------------------------------------------------------
 # Bearer tokens
@@ -280,9 +276,9 @@ class TestEdgeCases:
     def test_total_redactions_property(self):
         text = "Bearer aaaaaaaaaaaaaaaaaaaa and TOKEN_X=secret"
         result = redact(text)
-        assert result.total_redactions == result.counts.get(
-            "bearer_token", 0
-        ) + result.counts.get("env_credential", 0)
+        assert result.total_redactions == result.counts.get("bearer_token", 0) + result.counts.get(
+            "env_credential", 0
+        )
         assert result.total_redactions >= 2
 
     def test_pattern_names_returns_all(self):

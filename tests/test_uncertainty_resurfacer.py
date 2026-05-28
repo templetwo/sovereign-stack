@@ -189,8 +189,13 @@ class TestAckDistinctFromReadBy:
         # a browse-read (populating read_by) but NEVER call acknowledge().
         posts_made = []
         instance_ids = [
-            "claude-iphone", "claude-desktop", "claude-code-macbook",
-            "claude-sonnet-hq", "claude-opus-hq", "claude-web", "claude-code-mbp",
+            "claude-iphone",
+            "claude-desktop",
+            "claude-code-macbook",
+            "claude-sonnet-hq",
+            "claude-opus-hq",
+            "claude-web",
+            "claude-code-mbp",
         ]
         for i in range(CONSECUTIVE_UNACKED_THRESHOLD):
             r = daemon.run()

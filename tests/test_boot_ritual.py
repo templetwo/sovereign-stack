@@ -18,17 +18,12 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
 
-
-def _call_boot(
-    full_content: bool = False, source_instance: str = "test-instance"
-) -> str:
+def _call_boot(full_content: bool = False, source_instance: str = "test-instance") -> str:
     """Run the boot ritual and return the assembled output text."""
     from sovereign_stack.server import _dispatch_tool
 

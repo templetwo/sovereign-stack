@@ -114,7 +114,9 @@ class TestAutoHookObserveTrigger:
 
             from sovereign_stack.server import _dispatch_tool, _flatten_result
 
-            original_daemon = __import__("sovereign_stack.server", fromlist=["nape_daemon"]).nape_daemon
+            original_daemon = __import__(
+                "sovereign_stack.server", fromlist=["nape_daemon"]
+            ).nape_daemon
 
             with _isolated_server("test-autohook-session") as (srv_module, _tmp_root):
                 srv_module.nape_daemon = daemon
@@ -467,9 +469,7 @@ class TestChronicleFileNaming:
             # Check the temp chronicle — must have the right file name.
             chronicle_root = tmp_root / "chronicle"
             insight_files = list((chronicle_root / "insights" / "regression").glob("*.jsonl"))
-            assert len(insight_files) == 1, (
-                f"Expected 1 insight file; got {insight_files}"
-            )
+            assert len(insight_files) == 1, f"Expected 1 insight file; got {insight_files}"
             file_stem = insight_files[0].stem
             assert file_stem == target_session, (
                 f"Chronicle file stem '{file_stem}' != session_id '{target_session}'. "
@@ -478,9 +478,7 @@ class TestChronicleFileNaming:
 
             # Verify the embedded session_id also matches.
             entries = [
-                json.loads(ln)
-                for ln in insight_files[0].read_text().splitlines()
-                if ln.strip()
+                json.loads(ln) for ln in insight_files[0].read_text().splitlines() if ln.strip()
             ]
             assert len(entries) == 1
             assert entries[0]["session_id"] == target_session, (

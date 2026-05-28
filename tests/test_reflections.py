@@ -16,7 +16,6 @@ from sovereign_stack.reflections import (
     reflection_stats,
 )
 
-
 # ── Fixtures ────────────────────────────────────────────────────────────────
 
 
@@ -73,13 +72,9 @@ class TestListReflections:
 
     def test_lists_in_newest_first_order(self, reflections_dir: Path):
         now = datetime.now(timezone.utc)
-        _write_record(
-            reflections_dir, rid="r1", timestamp=now - timedelta(hours=2)
-        )
+        _write_record(reflections_dir, rid="r1", timestamp=now - timedelta(hours=2))
         _write_record(reflections_dir, rid="r2", timestamp=now)
-        _write_record(
-            reflections_dir, rid="r3", timestamp=now - timedelta(hours=1)
-        )
+        _write_record(reflections_dir, rid="r3", timestamp=now - timedelta(hours=1))
         results = list_reflections(reflections_dir=reflections_dir)
         assert [r.id for r in results] == ["r2", "r3", "r1"]
 
@@ -87,17 +82,13 @@ class TestListReflections:
         _write_record(reflections_dir, rid="u1", ack_status="unread")
         _write_record(reflections_dir, rid="c1", ack_status="confirm")
         _write_record(reflections_dir, rid="d1", ack_status="discard")
-        results = list_reflections(
-            reflections_dir=reflections_dir, ack_status="unread"
-        )
+        results = list_reflections(reflections_dir=reflections_dir, ack_status="unread")
         assert [r.id for r in results] == ["u1"]
 
     def test_filters_by_model(self, reflections_dir: Path):
         _write_record(reflections_dir, rid="m1", model="ministral-3:14b")
         _write_record(reflections_dir, rid="g1", model="glm-4.7-flash")
-        results = list_reflections(
-            reflections_dir=reflections_dir, model="glm-4.7-flash"
-        )
+        results = list_reflections(reflections_dir=reflections_dir, model="glm-4.7-flash")
         assert [r.id for r in results] == ["g1"]
 
     def test_limit_respected(self, reflections_dir: Path):
@@ -113,9 +104,7 @@ class TestListReflections:
 
     def test_invalid_ack_status_raises(self, reflections_dir: Path):
         with pytest.raises(ValueError):
-            list_reflections(
-                reflections_dir=reflections_dir, ack_status="not-a-status"
-            )
+            list_reflections(reflections_dir=reflections_dir, ack_status="not-a-status")
 
     def test_all_status_keyword_includes_everything(self, reflections_dir: Path):
         _write_record(reflections_dir, rid="u1", ack_status="unread")
@@ -214,7 +203,7 @@ class TestAckReflection:
         assert keep.observation == "should stay as-is"
 
     def test_ack_actions_constant_matches_valid_values(self):
-        assert ACK_ACTIONS == {"confirm", "engage", "discard"}
+        assert {"confirm", "engage", "discard"} == ACK_ACTIONS
 
 
 # ── reflection_stats ────────────────────────────────────────────────────────
@@ -227,15 +216,9 @@ class TestReflectionStats:
         assert result["ack_rate"] == 0.0
 
     def test_counts_by_status_and_model(self, reflections_dir: Path):
-        _write_record(
-            reflections_dir, rid="a", ack_status="unread", model="m1"
-        )
-        _write_record(
-            reflections_dir, rid="b", ack_status="confirm", model="m1"
-        )
-        _write_record(
-            reflections_dir, rid="c", ack_status="discard", model="m2"
-        )
+        _write_record(reflections_dir, rid="a", ack_status="unread", model="m1")
+        _write_record(reflections_dir, rid="b", ack_status="confirm", model="m1")
+        _write_record(reflections_dir, rid="c", ack_status="discard", model="m2")
         stats = reflection_stats(reflections_dir=reflections_dir)
         assert stats["total"] == 3
         assert stats["by_status"] == {

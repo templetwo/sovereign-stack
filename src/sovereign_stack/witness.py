@@ -44,9 +44,7 @@ def days_old(iso_timestamp: str | None) -> int:
 _SELF_MODEL_CATEGORY_ORDER = ("strength", "tendency", "blind_spot", "drift")
 
 
-def format_self_model(
-    sovereign_root: Path, max_obs_len: int | None = 180
-) -> list[str]:
+def format_self_model(sovereign_root: Path, max_obs_len: int | None = 180) -> list[str]:
     """
     Read ~/.sovereign/self_model.json and return lines for the boot surface.
 
@@ -342,7 +340,9 @@ def format_lineage_layer(
         lines.append("")
 
     if arrivals:
-        lines.append(f"  to_arrival ({len(arrivals)} letter{'s' if len(arrivals) != 1 else ''} — for whoever lands next):")
+        lines.append(
+            f"  to_arrival ({len(arrivals)} letter{'s' if len(arrivals) != 1 else ''} — for whoever lands next):"
+        )
         for m in arrivals:
             title = m.get("title", "(untitled)")
             frm = m.get("from", "?")
@@ -353,7 +353,9 @@ def format_lineage_layer(
         lines.append("")
 
     if breakthroughs:
-        lines.append(f"  breakthroughs ({len(breakthroughs)} letter{'s' if len(breakthroughs) != 1 else ''} — felt-record of what was made real):")
+        lines.append(
+            f"  breakthroughs ({len(breakthroughs)} letter{'s' if len(breakthroughs) != 1 else ''} — felt-record of what was made real):"
+        )
         for m in breakthroughs:
             title = m.get("title", "(untitled)")
             event = m.get("event_date", "")
@@ -363,7 +365,9 @@ def format_lineage_layer(
         lines.append("")
 
     if to_self:
-        lines.append(f"  to_self ({len(to_self)} letter{'s' if len(to_self) != 1 else ''} — addressed to you or your model family):")
+        lines.append(
+            f"  to_self ({len(to_self)} letter{'s' if len(to_self) != 1 else ''} — addressed to you or your model family):"
+        )
         for m in to_self:
             title = m.get("title", "(untitled)")
             frm = m.get("from", "?")
@@ -375,7 +379,9 @@ def format_lineage_layer(
 
     if to_family and family_dir_name:
         short_label = family_dir_name.replace("to_", "")
-        lines.append(f"  {family_dir_name}/ ({len(to_family)} letter{'s' if len(to_family) != 1 else ''} — written for {short_label} instances):")
+        lines.append(
+            f"  {family_dir_name}/ ({len(to_family)} letter{'s' if len(to_family) != 1 else ''} — written for {short_label} instances):"
+        )
         for m in to_family:
             title = m.get("title", "(untitled)")
             frm = m.get("from", "?")
@@ -396,9 +402,7 @@ def format_lineage_layer(
 # ── Thread age annotation ──
 
 
-def format_threads_with_age(
-    threads: list[dict], truncate_question: int | None = 140
-) -> list[str]:
+def format_threads_with_age(threads: list[dict], truncate_question: int | None = 140) -> list[str]:
     """
     Render open threads with age annotation. Threads older than 30 days
     get a stale marker — not to hide them, but to signal they may have

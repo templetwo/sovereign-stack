@@ -38,9 +38,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Optional
 
 from sovereign_stack.memory import ExperientialMemory
 
@@ -56,10 +56,10 @@ CHRONICLE_ROOT = Path(
 # Safety caps. Tuned to keep any single tool call bounded so the scribe
 # cannot accidentally pull a megabyte of chronicle into one response.
 MAX_RECALL_LIMIT = 30
-MAX_READ_FILE_BYTES = 100_000          # ~25K tokens of JSONL per read
+MAX_READ_FILE_BYTES = 100_000  # ~25K tokens of JSONL per read
 MAX_DOMAIN_LIST = 200
 MAX_THREADS_LIMIT = 50
-MAX_RESULT_CHARS_PER_TOOL = 80_000     # response cap regardless of source
+MAX_RESULT_CHARS_PER_TOOL = 80_000  # response cap regardless of source
 
 
 # ----------------------------------------------------------------------
@@ -78,7 +78,7 @@ def _resolve_chronicle_path(rel_path: str) -> Path:
     CHRONICLE_ROOT."""
     if not rel_path or not isinstance(rel_path, str):
         raise ScribeToolError("path must be a non-empty string")
-    if rel_path.startswith("/") or rel_path.startswith("~"):
+    if rel_path.startswith(("/", "~")):
         raise ScribeToolError(
             "absolute paths are not allowed; pass a path relative to the "
             f"chronicle root ({CHRONICLE_ROOT})"
@@ -86,11 +86,11 @@ def _resolve_chronicle_path(rel_path: str) -> Path:
     candidate = (CHRONICLE_ROOT / rel_path).resolve()
     try:
         candidate.relative_to(CHRONICLE_ROOT)
-    except ValueError:
+    except ValueError as exc:
         raise ScribeToolError(
             f"path {rel_path!r} resolves outside the chronicle root and is "
             "not readable by the scribe"
-        )
+        ) from exc
     return candidate
 
 
@@ -106,13 +106,13 @@ def _truncate_result(text: str, max_chars: int = MAX_RESULT_CHARS_PER_TOOL) -> s
 
 
 def tool_chronicle_recall(
-    query: Optional[str] = None,
-    domain: Optional[str] = None,
+    query: str | None = None,
+    domain: str | None = None,
     limit: int = 10,
     min_intensity: float = 0.0,
-    layer: Optional[str] = None,
-    start_date: Optional[str] = None,
-    end_date: Optional[str] = None,
+    layer: str | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
 ) -> str:
     """Query the chronicle for insights matching the filters. Returns
     a JSON string for Haiku to read."""
@@ -171,9 +171,7 @@ def tool_chronicle_read_file(path: str) -> str:
     return _truncate_result(redacted.text)
 
 
-def tool_chronicle_list_domains(
-    filter: Optional[str] = None, limit: int = 50
-) -> str:
+def tool_chronicle_list_domains(filter: str | None = None, limit: int = 50) -> str:
     """List insight domain directory names, optionally filtered by
     substring. Returns a JSON list."""
     limit = max(1, min(limit, MAX_DOMAIN_LIST))
@@ -185,7 +183,7 @@ def tool_chronicle_list_domains(
         if not d.is_dir():
             continue
         name = d.name
-        if name.startswith("_") or name.startswith("."):
+        if name.startswith(("_", ".")):
             continue
         if filter and filter.lower() not in name.lower():
             continue
@@ -199,9 +197,7 @@ def tool_chronicle_list_domains(
     )
 
 
-def tool_chronicle_get_threads(
-    domain: Optional[str] = None, limit: int = 20
-) -> str:
+def tool_chronicle_get_threads(domain: str | None = None, limit: int = 20) -> str:
     """List open threads (unresolved questions) with full question text."""
     limit = max(1, min(limit, MAX_THREADS_LIMIT))
     memory = ExperientialMemory(root=str(CHRONICLE_ROOT))

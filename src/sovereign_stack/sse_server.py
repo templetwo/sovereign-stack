@@ -28,6 +28,8 @@ if _BRIDGE_CLIENTS.exists() and str(_BRIDGE_CLIENTS) not in sys.path:
     sys.path.insert(0, str(_BRIDGE_CLIENTS))
 
 try:
+    from bridge_core import send_401 as _gate_send_401
+    from bridge_core import verify_at_door as _verify_at_door
     from openai_bridge.mcp_filtered import (
         handle_openai_messages,
         handle_openai_messages_test,
@@ -36,12 +38,20 @@ try:
     )
     from openai_bridge.oauth import (
         handle_authorization_server_metadata as handle_openai_oauth_as_meta,
+    )
+    from openai_bridge.oauth import (
         handle_authorize as handle_openai_oauth_authorize,
+    )
+    from openai_bridge.oauth import (
         handle_protected_resource_metadata as handle_openai_oauth_pr_meta,
+    )
+    from openai_bridge.oauth import (
         handle_register as handle_openai_oauth_register,
+    )
+    from openai_bridge.oauth import (
         handle_token as handle_openai_oauth_token,
     )
-    from bridge_core import send_401 as _gate_send_401, verify_at_door as _verify_at_door
+
     _BRIDGE_ENABLED = True
 except ImportError:
     _BRIDGE_ENABLED = False
@@ -59,17 +69,24 @@ except ImportError:
 
 # Grok bridge — independently importable; failure doesn't disable openai_bridge.
 try:
+    from grok_bridge.manifest import MANIFEST as GROK_MANIFEST
     from grok_bridge.mcp_filtered import (
         handle_grok_messages,
         handle_grok_sse,
     )
-    from grok_bridge.manifest import MANIFEST as GROK_MANIFEST
     from grok_bridge.oauth import (
         handle_authorization_server_metadata as handle_grok_oauth_as_meta,
+    )
+    from grok_bridge.oauth import (
         handle_authorize as handle_grok_oauth_authorize,
+    )
+    from grok_bridge.oauth import (
         handle_protected_resource_metadata as handle_grok_oauth_pr_meta,
+    )
+    from grok_bridge.oauth import (
         handle_token as handle_grok_oauth_token,
     )
+
     _GROK_BRIDGE_ENABLED = True
 except ImportError as _grok_e:
     _GROK_BRIDGE_ENABLED = False
@@ -80,9 +97,7 @@ except ImportError as _grok_e:
     handle_grok_oauth_as_meta = None
     handle_grok_oauth_pr_meta = None
     GROK_MANIFEST = None
-    logging.getLogger("sovereign-stack-sse").warning(
-        "Grok bridge not loaded: %s", _grok_e
-    )
+    logging.getLogger("sovereign-stack-sse").warning("Grok bridge not loaded: %s", _grok_e)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -140,9 +155,16 @@ def _bridge_auth_ok(scope: dict) -> bool:
 
 async def _send_401(send) -> None:
     body = b'{"error":"Unauthorized","detail":"Valid Bearer token required for /openai/sse"}'
-    await send({"type": "http.response.start", "status": 401,
-                "headers": [(b"content-type", b"application/json"),
-                            (b"content-length", str(len(body)).encode())]})
+    await send(
+        {
+            "type": "http.response.start",
+            "status": 401,
+            "headers": [
+                (b"content-type", b"application/json"),
+                (b"content-length", str(len(body)).encode()),
+            ],
+        }
+    )
     await send({"type": "http.response.body", "body": body})
 
 
@@ -152,6 +174,7 @@ async def _send_401(send) -> None:
 # mismatch (Mcp-Session-Id / MCP-Protocol-Version present, Streamable-HTTP Accept)
 # from an auth-drop (bearer absent on retry). NEVER logs the bearer value — only
 # its presence and scheme. Remove or gate behind a flag once the issue is closed.
+
 
 def _log_openai_request_headers(scope: dict) -> None:
     """Log diagnostic headers for an /openai/* request. Bearer value redacted."""
@@ -219,20 +242,26 @@ class SovereignAsgiMiddleware:
                     raise_exceptions=True,
                 )
         elif _BRIDGE_ENABLED and path == "/openai/sse" and method == "GET":
-            _gate = _verify_at_door(scope, expected_substrate="chatgpt-openai-bridge", transport="sse")
+            _gate = _verify_at_door(
+                scope, expected_substrate="chatgpt-openai-bridge", transport="sse"
+            )
             if not _gate.allowed:
                 await _gate_send_401(
-                    send, _gate.reason or "Unauthorized",
+                    send,
+                    _gate.reason or "Unauthorized",
                     realm="Sovereign Stack OpenAI Bridge",
                     resource_metadata_url="https://stack.templetwo.com/openai/.well-known/oauth-protected-resource",
                 )
             else:
                 await handle_openai_sse(scope, receive, send)
         elif _BRIDGE_ENABLED and path == "/openai/messages" and method == "POST":
-            _gate = _verify_at_door(scope, expected_substrate="chatgpt-openai-bridge", transport="sse")
+            _gate = _verify_at_door(
+                scope, expected_substrate="chatgpt-openai-bridge", transport="sse"
+            )
             if not _gate.allowed:
                 await _gate_send_401(
-                    send, _gate.reason or "Unauthorized",
+                    send,
+                    _gate.reason or "Unauthorized",
                     realm="Sovereign Stack OpenAI Bridge",
                     resource_metadata_url="https://stack.templetwo.com/openai/.well-known/oauth-protected-resource",
                 )
@@ -251,9 +280,17 @@ class SovereignAsgiMiddleware:
             await handle_grok_oauth_authorize(scope, receive, send)
         elif _GROK_BRIDGE_ENABLED and path == "/grok/oauth/token" and method == "POST":
             await handle_grok_oauth_token(scope, receive, send)
-        elif _GROK_BRIDGE_ENABLED and path == "/grok/.well-known/oauth-authorization-server" and method == "GET":
+        elif (
+            _GROK_BRIDGE_ENABLED
+            and path == "/grok/.well-known/oauth-authorization-server"
+            and method == "GET"
+        ):
             await handle_grok_oauth_as_meta(scope, receive, send)
-        elif _GROK_BRIDGE_ENABLED and path == "/grok/.well-known/oauth-protected-resource" and method == "GET":
+        elif (
+            _GROK_BRIDGE_ENABLED
+            and path == "/grok/.well-known/oauth-protected-resource"
+            and method == "GET"
+        ):
             await handle_grok_oauth_pr_meta(scope, receive, send)
         elif _BRIDGE_ENABLED and path == "/openai/oauth/authorize":
             # GET shows consent page; POST receives consent submission
@@ -262,9 +299,17 @@ class SovereignAsgiMiddleware:
             await handle_openai_oauth_token(scope, receive, send)
         elif _BRIDGE_ENABLED and path == "/openai/oauth/register" and method == "POST":
             await handle_openai_oauth_register(scope, receive, send)
-        elif _BRIDGE_ENABLED and path == "/openai/.well-known/oauth-authorization-server" and method == "GET":
+        elif (
+            _BRIDGE_ENABLED
+            and path == "/openai/.well-known/oauth-authorization-server"
+            and method == "GET"
+        ):
             await handle_openai_oauth_as_meta(scope, receive, send)
-        elif _BRIDGE_ENABLED and path == "/openai/.well-known/oauth-protected-resource" and method == "GET":
+        elif (
+            _BRIDGE_ENABLED
+            and path == "/openai/.well-known/oauth-protected-resource"
+            and method == "GET"
+        ):
             await handle_openai_oauth_pr_meta(scope, receive, send)
         else:
             await self.app(scope, receive, send)
@@ -275,6 +320,7 @@ async def bridge_info(request: Request) -> JSONResponse:
     if not _BRIDGE_ENABLED:
         return JSONResponse({"error": "OpenAI bridge not loaded"}, status_code=503)
     from openai_bridge.manifest import MANIFEST
+
     return JSONResponse(MANIFEST)
 
 

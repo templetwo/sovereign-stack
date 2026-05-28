@@ -13,7 +13,6 @@ from sovereign_stack.scribe.session import (
     SCRIBE_ATTRIBUTION,
     ScribeSession,
     ScribeSessionStore,
-    ScribeTurn,
     archive_session,
 )
 
@@ -61,9 +60,7 @@ class TestTurnAppend:
 
     def test_assistant_turn_with_metrics(self):
         session = ScribeSession.create()
-        session.append_assistant_turn(
-            "hi there", tokens_in=100, tokens_out=20, cost_usd=0.0012
-        )
+        session.append_assistant_turn("hi there", tokens_in=100, tokens_out=20, cost_usd=0.0012)
         assert session.turn_count == 1
         assert session.turns[0].role == "assistant"
         assert session.turns[0].tokens_in == 100

@@ -651,10 +651,7 @@ class ExperientialMemory:
             # comma-separated element (e.g. domain="openai-bridge" matches
             # both "openai-bridge.jsonl" and
             # "openai-bridge,cross-system-inquiry,...jsonl").
-            files = [
-                f for f in self.threads_dir.glob("*.jsonl")
-                if domain in f.stem.split(",")
-            ]
+            files = [f for f in self.threads_dir.glob("*.jsonl") if domain in f.stem.split(",")]
         else:
             files = list(self.threads_dir.glob("*.jsonl"))
 
@@ -1290,9 +1287,7 @@ class ExperientialMemory:
                 return False
             if conversation_id and r.get("conversation_id") != conversation_id:
                 return False
-            if tag and tag not in (r.get("tags") or []):
-                return False
-            return True
+            return not (tag and tag not in (r.get("tags") or []))
 
         filtered = [r for r in records if keep(r)]
         filtered.sort(key=lambda x: x.get("timestamp", ""), reverse=True)

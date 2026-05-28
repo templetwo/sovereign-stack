@@ -222,9 +222,7 @@ def ack_reflection(
         KeyError:   reflection_id not found.
     """
     if action not in ACK_ACTIONS:
-        raise ValueError(
-            f"action must be one of {sorted(ACK_ACTIONS)}, got {action!r}"
-        )
+        raise ValueError(f"action must be one of {sorted(ACK_ACTIONS)}, got {action!r}")
 
     target = get_reflection(reflection_id, reflections_dir=reflections_dir)
     if target is None:

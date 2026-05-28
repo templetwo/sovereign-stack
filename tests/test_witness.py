@@ -384,7 +384,12 @@ class TestFormatLineageLayer:
     def test_to_arrival_surfaces(self):
         d = self.letters / "to_arrival"
         d.mkdir()
-        _write_letter(d, "2026-01-01-test.md", {"type": "to_arrival", "from": "opus-test", "written_at": "2026-01-01"}, "Hello arrival")
+        _write_letter(
+            d,
+            "2026-01-01-test.md",
+            {"type": "to_arrival", "from": "opus-test", "written_at": "2026-01-01"},
+            "Hello arrival",
+        )
         lines = format_lineage_layer(self.tmp)
         assert any("to_arrival" in ln for ln in lines)
         assert any("Hello arrival" in ln for ln in lines)
@@ -392,28 +397,45 @@ class TestFormatLineageLayer:
     def test_to_self_exact_match_surfaces(self):
         d = self.letters / "to_self"
         d.mkdir()
-        _write_letter(d, "letter.md", {"type": "to_self", "to": "claude-sonnet-4-6-1m-test", "from": "me"}, "Exact")
+        _write_letter(
+            d,
+            "letter.md",
+            {"type": "to_self", "to": "claude-sonnet-4-6-1m-test", "from": "me"},
+            "Exact",
+        )
         lines = format_lineage_layer(self.tmp, reader_instance="claude-sonnet-4-6-1m-test")
         assert any("Exact" in ln for ln in lines)
 
     def test_to_self_family_match_surfaces(self):
         d = self.letters / "to_self"
         d.mkdir()
-        _write_letter(d, "letter.md", {"type": "to_self", "to": "claude-sonnet", "from": "me"}, "Family letter")
+        _write_letter(
+            d,
+            "letter.md",
+            {"type": "to_self", "to": "claude-sonnet", "from": "me"},
+            "Family letter",
+        )
         lines = format_lineage_layer(self.tmp, reader_instance="claude-sonnet-4-6-1m-test")
         assert any("Family letter" in ln for ln in lines)
 
     def test_to_self_wrong_family_hidden(self):
         d = self.letters / "to_self"
         d.mkdir()
-        _write_letter(d, "letter.md", {"type": "to_self", "to": "claude-opus", "from": "me"}, "Opus only")
+        _write_letter(
+            d, "letter.md", {"type": "to_self", "to": "claude-opus", "from": "me"}, "Opus only"
+        )
         lines = format_lineage_layer(self.tmp, reader_instance="claude-sonnet-4-6-1m-test")
         assert not any("Opus only" in ln for ln in lines)
 
     def test_to_family_dir_surfaces_for_matching_tier(self):
         d = self.letters / "to_sonnet"
         d.mkdir()
-        _write_letter(d, "letter.md", {"type": "to_family", "from": "me", "written_at": "2026-01-01"}, "Sonnet family")
+        _write_letter(
+            d,
+            "letter.md",
+            {"type": "to_family", "from": "me", "written_at": "2026-01-01"},
+            "Sonnet family",
+        )
         lines = format_lineage_layer(self.tmp, reader_instance="claude-sonnet-4-6-1m-test")
         assert any("Sonnet family" in ln for ln in lines)
         assert any("to_sonnet" in ln for ln in lines)
@@ -421,7 +443,12 @@ class TestFormatLineageLayer:
     def test_to_family_dir_hidden_for_wrong_tier(self):
         d = self.letters / "to_opus"
         d.mkdir()
-        _write_letter(d, "letter.md", {"type": "to_family", "from": "me", "written_at": "2026-01-01"}, "Opus family")
+        _write_letter(
+            d,
+            "letter.md",
+            {"type": "to_family", "from": "me", "written_at": "2026-01-01"},
+            "Opus family",
+        )
         lines = format_lineage_layer(self.tmp, reader_instance="claude-sonnet-4-6-1m-test")
         assert not any("Opus family" in ln for ln in lines)
 
@@ -429,7 +456,12 @@ class TestFormatLineageLayer:
         """Default boot path lists titles only — bodies live on disk, reader file-walks."""
         d = self.letters / "to_arrival"
         d.mkdir()
-        _write_letter(d, "letter.md", {"type": "to_arrival", "from": "test", "written_at": "2026-01-01"}, "Title")
+        _write_letter(
+            d,
+            "letter.md",
+            {"type": "to_arrival", "from": "test", "written_at": "2026-01-01"},
+            "Title",
+        )
         lines = format_lineage_layer(self.tmp)
         joined = "\n".join(lines)
         assert "Title" in joined
@@ -443,7 +475,12 @@ class TestFormatLineageLayer:
         """full_content=True closes the truncation catch-22 — body surfaces inline."""
         d = self.letters / "to_arrival"
         d.mkdir()
-        _write_letter(d, "letter.md", {"type": "to_arrival", "from": "test", "written_at": "2026-01-01"}, "Inline title")
+        _write_letter(
+            d,
+            "letter.md",
+            {"type": "to_arrival", "from": "test", "written_at": "2026-01-01"},
+            "Inline title",
+        )
         lines = format_lineage_layer(self.tmp, full_content=True)
         joined = "\n".join(lines)
         assert "Inline title" in joined
@@ -456,8 +493,15 @@ class TestFormatLineageLayer:
     def test_full_content_true_inlines_to_self_bodies(self):
         d = self.letters / "to_self"
         d.mkdir()
-        _write_letter(d, "letter.md", {"type": "to_self", "to": "claude-sonnet-4-6-1m-test", "from": "me"}, "Self body")
-        lines = format_lineage_layer(self.tmp, reader_instance="claude-sonnet-4-6-1m-test", full_content=True)
+        _write_letter(
+            d,
+            "letter.md",
+            {"type": "to_self", "to": "claude-sonnet-4-6-1m-test", "from": "me"},
+            "Self body",
+        )
+        lines = format_lineage_layer(
+            self.tmp, reader_instance="claude-sonnet-4-6-1m-test", full_content=True
+        )
         joined = "\n".join(lines)
         assert "Self body" in joined
         assert "Content here." in joined

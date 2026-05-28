@@ -12,22 +12,22 @@ conversation history and produce responses.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import secrets
 import threading
 import time
-from dataclasses import dataclass, field, asdict
+from collections.abc import Iterator
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterator, Optional
-
 
 SCRIBE_ATTRIBUTION = "scribe-haiku-4-5"
 DEFAULT_TTL_MINUTES = 240
-ARCHIVE_ROOT = Path(
-    os.environ.get("SOVEREIGN_ROOT", str(Path.home() / ".sovereign"))
-) / "scribe_threads"
+ARCHIVE_ROOT = (
+    Path(os.environ.get("SOVEREIGN_ROOT", str(Path.home() / ".sovereign"))) / "scribe_threads"
+)
 
 
 def _now_iso() -> str:
@@ -65,7 +65,7 @@ class ScribeSession:
     """
 
     session_id: str
-    parent_instance: Optional[str]
+    parent_instance: str | None
     boot_context_summary: str  # short hint of what was in the boot, not the full thing
     created_at: str
     last_message_at: str
@@ -73,7 +73,7 @@ class ScribeSession:
     attribution: str = SCRIBE_ATTRIBUTION
     turns: list[ScribeTurn] = field(default_factory=list)
     closed: bool = False
-    archived_at: Optional[str] = None
+    archived_at: str | None = None
     # Full chronicle context (typically the joined boot ritual text) — sent
     # to Haiku as a cache-controlled system block so multi-turn sessions
     # reuse it cheaply. Stored on the session so ask_scribe turns can pass
@@ -85,11 +85,11 @@ class ScribeSession:
     @classmethod
     def create(
         cls,
-        parent_instance: Optional[str] = None,
+        parent_instance: str | None = None,
         boot_context_summary: str = "",
         ttl_minutes: int = DEFAULT_TTL_MINUTES,
         chronicle_context: str = "",
-    ) -> "ScribeSession":
+    ) -> ScribeSession:
         now = _now_iso()
         return cls(
             session_id=_new_session_id(),
@@ -130,7 +130,7 @@ class ScribeSession:
     # ----- Turn append --------------------------------------------------
 
     def append_user_turn(
-        self, message: str, redaction_counts: Optional[dict[str, int]] = None
+        self, message: str, redaction_counts: dict[str, int] | None = None
     ) -> ScribeTurn:
         turn = ScribeTurn(
             timestamp=_now_iso(),
@@ -197,7 +197,7 @@ class ScribeSessionStore:
         with self._lock:
             self._sessions[session.session_id] = session
 
-    def get(self, session_id: str) -> Optional[ScribeSession]:
+    def get(self, session_id: str) -> ScribeSession | None:
         with self._lock:
             session = self._sessions.get(session_id)
             if session is None:
@@ -244,12 +244,10 @@ class ScribeSessionStore:
             return
         session.closed = True
         session.archived_at = _now_iso()
-        try:
+        # Archive failure should not crash the bridge; log and move on.
+        # In Phase 1 we wire this to the dashboard halt-alert.
+        with contextlib.suppress(OSError):
             archive_session(session, self._archive_root, eviction_reason=reason)
-        except OSError:
-            # Archive failure should not crash the bridge. Log and move on.
-            # In Phase 1 we wire this to the dashboard halt-alert.
-            pass
 
 
 # ----------------------------------------------------------------------

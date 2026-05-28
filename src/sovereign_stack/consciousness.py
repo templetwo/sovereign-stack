@@ -605,7 +605,9 @@ class ExperimentationLog:
             if exp.get("id") == exp_id:
                 if "notes" not in exp:
                     exp["notes"] = []
-                exp["notes"].append({"note": note, "timestamp": datetime.now(timezone.utc).isoformat()})
+                exp["notes"].append(
+                    {"note": note, "timestamp": datetime.now(timezone.utc).isoformat()}
+                )
                 break
 
         with open(self.log_path, "w") as f:

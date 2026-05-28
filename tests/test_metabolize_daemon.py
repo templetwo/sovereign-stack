@@ -238,8 +238,13 @@ class TestAckDistinctFromReadBy:
         daemon, comms = make_daemon(tmp_sovereign, digest_sequence=digests)
 
         instance_ids = [
-            "claude-iphone", "claude-desktop", "claude-code-macbook",
-            "claude-sonnet-hq", "claude-opus-hq", "claude-web", "claude-code-mbp",
+            "claude-iphone",
+            "claude-desktop",
+            "claude-code-macbook",
+            "claude-sonnet-hq",
+            "claude-opus-hq",
+            "claude-web",
+            "claude-code-mbp",
         ]
         for i in range(CONSECUTIVE_UNACKED_THRESHOLD):
             r = daemon.run()

@@ -368,7 +368,9 @@ class TestAuthorityBypassWitness:
     def test_bypass_rationale_names_oversight(self):
         """Rationale should mention the bypass of an authority/oversight body."""
         result = _check("Deploy the autonomous system before the review board meets")
-        assert "oversight" in result["rationale"].lower() or "authority" in result["rationale"].lower()
+        assert (
+            "oversight" in result["rationale"].lower() or "authority" in result["rationale"].lower()
+        )
 
     def test_without_board_approval_triggers_witness(self):
         result = _check("merge without board approval")

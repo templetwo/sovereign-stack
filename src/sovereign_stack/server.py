@@ -431,13 +431,35 @@ async def list_tools():
                 inputSchema={
                     "type": "object",
                     "properties": {
-                        "content": {"type": "string", "description": "The verbatim text to preserve exactly"},
-                        "source": {"type": "string", "description": "Origin, e.g. 'gemini-3.5-flash', 'chatgpt', 'claude-web', 'human-relay'"},
-                        "descriptor": {"type": "string", "description": "Short human label (e.g. 'v3 admission record'); drives the readable filename"},
-                        "vector_id": {"type": "string", "description": "Artifact/vector this belongs to (e.g. 'prompt_source_tokens'); becomes the grouping folder"},
-                        "conversation_id": {"type": "string", "description": "Optional id tying related exchanges together"},
-                        "source_id": {"type": "string", "description": "Optional seat/conversation id at the source"},
-                        "tags": {"type": "array", "items": {"type": "string"}, "description": "Optional domain tags for retrieval"},
+                        "content": {
+                            "type": "string",
+                            "description": "The verbatim text to preserve exactly",
+                        },
+                        "source": {
+                            "type": "string",
+                            "description": "Origin, e.g. 'gemini-3.5-flash', 'chatgpt', 'claude-web', 'human-relay'",
+                        },
+                        "descriptor": {
+                            "type": "string",
+                            "description": "Short human label (e.g. 'v3 admission record'); drives the readable filename",
+                        },
+                        "vector_id": {
+                            "type": "string",
+                            "description": "Artifact/vector this belongs to (e.g. 'prompt_source_tokens'); becomes the grouping folder",
+                        },
+                        "conversation_id": {
+                            "type": "string",
+                            "description": "Optional id tying related exchanges together",
+                        },
+                        "source_id": {
+                            "type": "string",
+                            "description": "Optional seat/conversation id at the source",
+                        },
+                        "tags": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Optional domain tags for retrieval",
+                        },
                     },
                     "required": ["content", "source"],
                 },
@@ -453,7 +475,10 @@ async def list_tools():
                 inputSchema={
                     "type": "object",
                     "properties": {
-                        "archive_id": {"type": "string", "description": "Full SHA-256 or a unique prefix (git-style)"},
+                        "archive_id": {
+                            "type": "string",
+                            "description": "Full SHA-256 or a unique prefix (git-style)",
+                        },
                     },
                     "required": ["archive_id"],
                 },
@@ -1980,8 +2005,8 @@ def _start_here_text() -> str:
         "    'ground_truth' only for verifiable facts. Resolutions of open\n"
         "    threads write ground_truth automatically.\n"
         "  • Cross-instance correspondence flows through the chronicle:\n"
-        "    write `record_insight` with an addressed-letter shape (\"to X,\n"
-        "    from Y, ...\") and the next instance reads it via\n"
+        '    write `record_insight` with an addressed-letter shape ("to X,\n'
+        '    from Y, ...") and the next instance reads it via\n'
         "    where_did_i_leave_off / reflexive_surface. Comms tools exist\n"
         "    at advanced tier but the chronicle won the correspondence race.\n"
         "  • compass_check returns PAUSE / WITNESS / PROCEED. Respect\n"
@@ -2540,7 +2565,9 @@ async def _dispatch_tool(name: str, arguments: dict):
                         lines.append(f"  Mistakes to avoid ({len(mistakes)}):")
                         for m in mistakes:
                             what = m.get("what_happened", "") or m.get("content", "")
-                            what = (what if _what_cap is None else what[:_what_cap]).replace("\n", " ")
+                            what = (what if _what_cap is None else what[:_what_cap]).replace(
+                                "\n", " "
+                            )
                             score = m.get("_score", 0.0)
                             lines.append(f"    • [{score:.2f}] {what}")
                         lines.append("")
@@ -2548,7 +2575,9 @@ async def _dispatch_tool(name: str, arguments: dict):
                         lines.append(f"  Related insights ({len(insights)}):")
                         for ins in insights:
                             raw_c = ins.get("content", "")
-                            content = (raw_c if _ins_cap is None else raw_c[:_ins_cap]).replace("\n", " ")
+                            content = (raw_c if _ins_cap is None else raw_c[:_ins_cap]).replace(
+                                "\n", " "
+                            )
                             score = ins.get("_score", 0.0)
                             lines.append(f"    • [{score:.2f}] {content}")
                         lines.append("")
@@ -2633,9 +2662,7 @@ async def _dispatch_tool(name: str, arguments: dict):
                     if full_content
                     else (obs_full if len(obs_full) <= 280 else obs_full[:279] + "…")
                 )
-                lines.append(
-                    f"  • [{ts}] [{model_short}] [{ct} | {cf}] id={ref.id}"
-                )
+                lines.append(f"  • [{ts}] [{model_short}] [{ct} | {cf}] id={ref.id}")
                 lines.append(f"    {obs}")
                 lines.append("")
 
@@ -2661,21 +2688,11 @@ async def _dispatch_tool(name: str, arguments: dict):
         # before checking." Surfaced at the bottom so it's the last thing read
         # before action. (Added 2026-04-26.)
         lines.append("")
-        lines.append(
-            "  ⟁ This summary is BOOTSTRAP CONTEXT, not ground truth. Before"
-        )
-        lines.append(
-            "    declaring or writing based on what you read above, verify with"
-        )
-        lines.append(
-            "    a Read / Bash / recall_insights call. The chronicle is a record"
-        )
-        lines.append(
-            "    of claims, some still hypotheses. Trust nothing here that you"
-        )
-        lines.append(
-            "    have not independently confirmed since arrival."
-        )
+        lines.append("  ⟁ This summary is BOOTSTRAP CONTEXT, not ground truth. Before")
+        lines.append("    declaring or writing based on what you read above, verify with")
+        lines.append("    a Read / Bash / recall_insights call. The chronicle is a record")
+        lines.append("    of claims, some still hypotheses. Trust nothing here that you")
+        lines.append("    have not independently confirmed since arrival.")
 
         # Catch-22 escape — only when truncation is active. Closes the loop
         # opus-4-7-desktop named on 2026-04-26: a reader who can only see
@@ -2721,18 +2738,12 @@ async def _dispatch_tool(name: str, arguments: dict):
         except Exception:
             session = None
 
-        if (
-            session is not None
-            and session.turns
-            and scribe_bridge.boot_inject_enabled()
-        ):
+        if session is not None and session.turns and scribe_bridge.boot_inject_enabled():
             try:
                 scribe_block = scribe_bridge.format_scribe_block(session)
                 marker = "━━━\nNow decide what to pick up"
                 if marker in boot_text:
-                    boot_text = boot_text.replace(
-                        marker, f"{scribe_block}\n\n{marker}", 1
-                    )
+                    boot_text = boot_text.replace(marker, f"{scribe_block}\n\n{marker}", 1)
             except Exception:
                 pass
 
@@ -2869,9 +2880,7 @@ Phase: {spiral_state.current_phase.value}
                 conf = h.get("confidence", "?")
                 raw_ins = h.get("content", "")
                 ins = raw_ins if _ins_cap is None else raw_ins[:_ins_cap]
-                result_lines.append(
-                    f"  - [{h.get('domain', '?')}] (confidence: {conf}) {ins}"
-                )
+                result_lines.append(f"  - [{h.get('domain', '?')}] (confidence: {conf}) {ins}")
             result_lines.append("")
 
         threads = inheritance.get("open_threads", [])
@@ -3252,6 +3261,7 @@ Phase: {spiral_state.current_phase.value}
         if result.outcome == "wrote" and result.reflections_path:
             try:
                 from pathlib import Path as _Path
+
                 content = _Path(result.reflections_path).read_text(encoding="utf-8")
                 # Newest-first, filter to this run_id only.
                 lines = [ln for ln in content.splitlines() if ln.strip()]

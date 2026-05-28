@@ -24,8 +24,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
-
 
 def _dispatch(name: str, arguments: dict) -> str:
     """Run an MCP tool dispatch and return the assembled text result."""
@@ -78,9 +76,7 @@ class TestRecallReflectionsHandler:
         _seed_reflection(d, rid="r2", observation="second observation")
 
         with patch("sovereign_stack.reflections.REFLECTIONS_DIR", d):
-            text = _dispatch(
-                "recall_reflections", {"limit": 5, "ack_status": "unread"}
-            )
+            text = _dispatch("recall_reflections", {"limit": 5, "ack_status": "unread"})
 
         data = json.loads(text)
         assert data["count"] == 2
@@ -94,9 +90,7 @@ class TestRecallReflectionsHandler:
         _seed_reflection(d, rid="c1", ack_status="confirm")
 
         with patch("sovereign_stack.reflections.REFLECTIONS_DIR", d):
-            text = _dispatch(
-                "recall_reflections", {"limit": 10, "ack_status": "confirm"}
-            )
+            text = _dispatch("recall_reflections", {"limit": 10, "ack_status": "confirm"})
         data = json.loads(text)
         assert data["count"] == 1
         assert data["reflections"][0]["id"] == "c1"
@@ -119,9 +113,7 @@ class TestRecallReflectionsHandler:
         d = tmp_path / "reflections"
         d.mkdir()
         with patch("sovereign_stack.reflections.REFLECTIONS_DIR", d):
-            text = _dispatch(
-                "recall_reflections", {"ack_status": "not-a-status"}
-            )
+            text = _dispatch("recall_reflections", {"ack_status": "not-a-status"})
         # The handler catches ValueError and surfaces a readable message,
         # not a stack trace.
         assert "recall_reflections error" in text
@@ -371,12 +363,14 @@ class TestSynthesizeNowHandler:
             if "model" not in kwargs:
                 self.model = sd.DEFAULT_MODEL
 
-        with patch.object(sd.SynthesisDaemon, "__init__", _capture_init), \
-             patch.object(
-                 sd.SynthesisDaemon,
-                 "run",
-                 return_value=_StubRunResult(outcome="no_entries", run_id="x"),
-             ):
+        with (
+            patch.object(sd.SynthesisDaemon, "__init__", _capture_init),
+            patch.object(
+                sd.SynthesisDaemon,
+                "run",
+                return_value=_StubRunResult(outcome="no_entries", run_id="x"),
+            ),
+        ):
             _dispatch(
                 "synthesize_now",
                 {

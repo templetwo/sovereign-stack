@@ -24,7 +24,6 @@ import logging
 import os
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
 
 from .context_builder import build_scribe_chronicle_context
 from .encounter import write_encounter_note
@@ -68,7 +67,7 @@ def get_store() -> ScribeSessionStore:
 
 
 _client_cache: object = None  # None = not tried, False = tried + failed, else HaikuClient
-_client_error: Optional[str] = None
+_client_error: str | None = None
 
 
 def get_client():
@@ -130,7 +129,7 @@ def _log_phase1_greeting(session: ScribeSession, greeting_text: str, result_meta
 
 
 def boot_spawn(
-    parent_instance: Optional[str],
+    parent_instance: str | None,
     boot_text: str,
     ttl_minutes: int = 240,
 ) -> ScribeSession:
@@ -168,7 +167,7 @@ def boot_spawn(
     return session
 
 
-def greet_session(session: ScribeSession) -> Optional[str]:
+def greet_session(session: ScribeSession) -> str | None:
     """Run the Haiku greeting on this session. Best-effort: returns the
     greeting text on success, None on any failure. Logs result to disk."""
     client = get_client()
@@ -206,7 +205,7 @@ def greet_session(session: ScribeSession) -> Optional[str]:
 
 
 async def boot_spawn_and_greet_async(
-    parent_instance: Optional[str],
+    parent_instance: str | None,
     boot_text: str,
     ttl_minutes: int = 240,
 ) -> ScribeSession:
@@ -305,7 +304,7 @@ def _format_response(text: str, result_meta: dict, session: ScribeSession) -> st
     )
 
 
-def ask_scribe(session_id: Optional[str], message: str) -> str:
+def ask_scribe(session_id: str | None, message: str) -> str:
     """Handle an ask_scribe call. Returns plain text response.
 
     Session resolution: if session_id given, look up exact session.
@@ -346,9 +345,7 @@ def ask_scribe(session_id: Optional[str], message: str) -> str:
     session.append_user_turn(redacted.text, redaction_counts=redacted.counts)
 
     # Build conversation history (all turns BEFORE the just-added user turn).
-    history = [
-        {"role": turn.role, "content": turn.message} for turn in session.turns[:-1]
-    ]
+    history = [{"role": turn.role, "content": turn.message} for turn in session.turns[:-1]]
 
     try:
         result = client.generate_response(
@@ -381,7 +378,7 @@ def ask_scribe(session_id: Optional[str], message: str) -> str:
     return _format_response(result.text, meta, session)
 
 
-async def ask_scribe_async(session_id: Optional[str], message: str) -> str:
+async def ask_scribe_async(session_id: str | None, message: str) -> str:
     """Async wrapper for the MCP handler."""
     return await asyncio.to_thread(ask_scribe, session_id, message)
 

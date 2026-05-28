@@ -5,8 +5,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pytest
-
 from sovereign_stack.scribe.encounter import (
     DEFAULT_INTENSITY,
     _normalize_parent_hint,
