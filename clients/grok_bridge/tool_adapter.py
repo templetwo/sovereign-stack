@@ -52,13 +52,9 @@ _RING1_DESCRIPTIONS: dict[str, str] = {
         "pre-crossing entries. Supports date bounds, since_last_reflection."
     ),
     "context_retrieve": "Session-weighted chronicle retrieval.",
-    "get_inheritable_context": (
-        "Layered inheritance: ground truths + hypotheses + open threads."
-    ),
+    "get_inheritable_context": ("Layered inheritance: ground truths + hypotheses + open threads."),
     "check_mistakes": "Find relevant past learnings before taking action.",
-    "reflexive_surface": (
-        "Surface relevant threads/handoffs/insights by domain_tags."
-    ),
+    "reflexive_surface": ("Surface relevant threads/handoffs/insights by domain_tags."),
     "get_open_threads": "List unresolved questions, newest first.",
     "triage_threads": "Open threads ranked by urgency. Read-only.",
     "thread_get_touches": "Who has touched a thread. Read-only.",
@@ -68,9 +64,7 @@ _RING1_DESCRIPTIONS: dict[str, str] = {
     "comms_get_acks": "Query the acknowledgment log. Read-only.",
     "get_compaction_context": "Recent compaction memory buffer. Read-only.",
     "get_compaction_stats": "Compaction buffer statistics. Read-only.",
-    "recall_reflections": (
-        "Machine-generated marginalia from the synthesis daemon. Read-only."
-    ),
+    "recall_reflections": ("Machine-generated marginalia from the synthesis daemon. Read-only."),
     "prior_for_turn": "Turn-start priors from four sources. Read-only.",
     "nape_summary": "Honk counts by level for posture check. Read-only.",
     "get_unresolved_uncertainties": "Open uncertainties. Read-only.",
@@ -167,19 +161,25 @@ _RING2_SCHEMAS: list[Tool] = [
         inputSchema={
             "type": "object",
             "properties": {
-                "domain": {"type": "string", "description": "Domain tag (e.g. grok-bridge, lineage)"},
+                "domain": {
+                    "type": "string",
+                    "description": "Domain tag (e.g. grok-bridge, lineage)",
+                },
                 "content": {"type": "string", "description": "The insight text"},
                 "layer": {
                     "type": "string",
-                    "enum": ["hypothesis", "reflection", "ground_truth"],
-                    "description": "Epistemic layer. 'reflection' commits as 'hypothesis'. ground_truth requires a receipt_url.",
+                    "enum": ["hypothesis", "ground_truth"],
+                    "description": "Epistemic layer. Defaults to 'hypothesis'. ground_truth requires a receipt_url. (Note: the bridge also accepts 'reflection' for backward compatibility — it is translated to 'hypothesis' at commit time — but new callers should use 'hypothesis' directly. The 'reflection' layer in the chronicle is reserved for daemon-written marginalia.)",
                     "default": "hypothesis",
                 },
                 "intensity": {"type": "number", "minimum": 0.0, "maximum": 1.0},
                 "receipt_url": {"type": "string", "description": "URL/receipt for ground_truth"},
                 "compass_check_result": {"type": "string", "enum": ["PROCEED", "PAUSE", "WITNESS"]},
                 "compass_check_rationale": {"type": "string"},
-                "session_id": {"type": "string", "description": "Grok-asserted session id (e.g. grok-xai-20260509-001)"},
+                "session_id": {
+                    "type": "string",
+                    "description": "Grok-asserted session id (e.g. grok-xai-20260509-001)",
+                },
             },
             "required": ["domain", "content"],
         },
@@ -389,13 +389,15 @@ async def call_ring1_tool(name: str, args: dict) -> list[TextContent]:
     this dispatcher. Other Ring 1 tools all proxy.
     """
     if not BRIDGE_TOKEN:
-        return [TextContent(
-            type="text",
-            text=(
-                "Bridge proxy error: BRIDGE_TOKEN not set in server env. "
-                "The Grok bridge cannot reach the Sovereign Stack REST API."
-            ),
-        )]
+        return [
+            TextContent(
+                type="text",
+                text=(
+                    "Bridge proxy error: BRIDGE_TOKEN not set in server env. "
+                    "The Grok bridge cannot reach the Sovereign Stack REST API."
+                ),
+            )
+        ]
 
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:

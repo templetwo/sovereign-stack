@@ -45,16 +45,22 @@ _RING2_SCHEMAS: list[Tool] = [
         inputSchema={
             "type": "object",
             "properties": {
-                "domain": {"type": "string", "description": "Domain tag (e.g. openai-bridge, lineage)"},
+                "domain": {
+                    "type": "string",
+                    "description": "Domain tag (e.g. openai-bridge, lineage)",
+                },
                 "content": {"type": "string", "description": "The insight text"},
                 "layer": {
                     "type": "string",
-                    "enum": ["hypothesis", "reflection", "ground_truth"],
-                    "description": "Epistemic layer. 'reflection' is the bridge semantic for reflective observations — committed as 'hypothesis'. ground_truth requires a receipt_url.",
+                    "enum": ["hypothesis", "ground_truth"],
+                    "description": "Epistemic layer. Defaults to 'hypothesis'. ground_truth requires a receipt_url. (Note: the bridge also accepts 'reflection' for backward compatibility — it is translated to 'hypothesis' at commit time — but new callers should use 'hypothesis' directly. The 'reflection' layer in the chronicle is reserved for daemon-written marginalia.)",
                     "default": "hypothesis",
                 },
                 "intensity": {"type": "number", "minimum": 0.0, "maximum": 1.0},
-                "receipt_url": {"type": "string", "description": "URL/receipt for ground_truth claims"},
+                "receipt_url": {
+                    "type": "string",
+                    "description": "URL/receipt for ground_truth claims",
+                },
                 "compass_check_result": {
                     "type": "string",
                     "enum": ["PROCEED", "PAUSE", "WITNESS"],
@@ -347,6 +353,7 @@ async def get_all_bridge_schemas() -> list[Tool]:
 
 # ── Call dispatchers ──────────────────────────────────────────────────────────
 
+
 async def call_ring1_tool(name: str, args: dict) -> list[TextContent]:
     """Proxy a Ring 1 tool call to the Stack via the bridge REST API."""
     try:
@@ -407,31 +414,35 @@ async def call_ring2_tool(
     )
 
     if not result.allowed:
-        return [TextContent(
-            type="text",
-            text=(
-                f"BLOCKED by bridge membrane.\n"
-                f"Ring: {result.ring}\n"
-                f"Reason: {result.error}\n\n"
-                f"Ring 3 tools are never callable via /openai/sse."
-                if result.ring == 3
-                else f"PROPOSAL REJECTED during validation.\nReason: {result.error}"
-            ),
-        )]
+        return [
+            TextContent(
+                type="text",
+                text=(
+                    f"BLOCKED by bridge membrane.\n"
+                    f"Ring: {result.ring}\n"
+                    f"Reason: {result.error}\n\n"
+                    f"Ring 3 tools are never callable via /openai/sse."
+                    if result.ring == 3
+                    else f"PROPOSAL REJECTED during validation.\nReason: {result.error}"
+                ),
+            )
+        ]
 
     p = result.proposal
-    return [TextContent(
-        type="text",
-        text=(
-            f"PROPOSAL CREATED — not committed.\n"
-            f"proposal_id: {p.proposal_id}\n"
-            f"tool: {p.tool}\n"
-            f"commit_target: {p.commit_target}\n"
-            f"risk: {p.risk_level} — {', '.join(p.risk_reasons)}\n"
-            f"layer: {p.proposed_layer}\n"
-            f"status: {p.status}\n\n"
-            f"This proposal requires Anthony's approval before any Stack write.\n"
-            f"Run: bridge approve {p.proposal_id[:8]}\n"
-            f"     bridge commit {p.proposal_id[:8]} --live"
-        ),
-    )]
+    return [
+        TextContent(
+            type="text",
+            text=(
+                f"PROPOSAL CREATED — not committed.\n"
+                f"proposal_id: {p.proposal_id}\n"
+                f"tool: {p.tool}\n"
+                f"commit_target: {p.commit_target}\n"
+                f"risk: {p.risk_level} — {', '.join(p.risk_reasons)}\n"
+                f"layer: {p.proposed_layer}\n"
+                f"status: {p.status}\n\n"
+                f"This proposal requires Anthony's approval before any Stack write.\n"
+                f"Run: bridge approve {p.proposal_id[:8]}\n"
+                f"     bridge commit {p.proposal_id[:8]} --live"
+            ),
+        )
+    ]
