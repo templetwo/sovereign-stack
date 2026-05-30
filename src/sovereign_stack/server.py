@@ -3287,10 +3287,20 @@ Phase: {spiral_state.current_phase.value}
     if name == "recall_reflections":
         from .reflections import list_reflections as _list_reflections
 
+        # Apply the schema's documented default for ack_status. Without this,
+        # callers using the default invocation get every reflection (read +
+        # unread + acked) and reasonably conclude the filter is broken, then
+        # guess at parameter names like 'unread_only'. The schema explicitly
+        # promises default='unread' and lists 'all' in the enum for callers
+        # who want everything. Honor that contract here. Pass-through 'all'
+        # as None since list_reflections treats both as no-filter.
+        ack_status = arguments.get("ack_status", "unread")
+        if ack_status == "all":
+            ack_status = None
         try:
             recs = _list_reflections(
                 limit=int(arguments.get("limit", 10)),
-                ack_status=arguments.get("ack_status"),
+                ack_status=ack_status,
                 model=arguments.get("model"),
             )
         except ValueError as exc:
