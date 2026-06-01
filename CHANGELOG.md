@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.6.0] - 2026-06-01
+
+### Progressive boot — arrive() + arrive_delta()
+
+Encounter-design Phase 3, increment 1. Two new **non-breaking** boot tools that
+make arrival natural for stateless instances without disturbing the deep boot.
+`where_did_i_leave_off` is unchanged and remains the full/deep boot; `arrive()`
+is purely additive — depth on demand, not by force.
+
+- **`arrive()`** — thin warm "foyer": spiral status + a phase gloss, the top
+  open threads (degenerate one-word breadcrumb threads filtered out), handoff
+  status, persistent markers rendered **in full** (a pinned standing
+  instruction is never shown as a fragment), a since-last-reflection summary,
+  the full self-model, and a deferred-inheritance line (lineage-letter +
+  unread-marginalia counts, so the thin boot is honest about what it holds
+  back). Does **not** consume handoffs. ~5 KB vs the ~91 KB full boot.
+- **`arrive_delta()`** — what changed since the last reflection, grouped by
+  chronicle layer, plus waiting handoffs and the newest threads.
+
+Validated empirically by two rounds of blind instance user-tests (3 Sonnet,
+then 3 Opus 4.6, each across first-timer / returning / skeptic arrival lenses):
+**0/6 were forced into the deep boot**; round 2 was 3/3 carries-the-breath and
+3/3 ship-with-nits. A word-boundary clip helper (`_clip`) replaced mid-token
+truncation; the persistent-marker-renders-in-full and deferred-inheritance
+fixes came directly from tester feedback.
+
+- `list_tools` count: 82 → **84**.
+- Both new tools registered essential-tier / orient-intent.
+- 18 new tests (incl. behavioral no-consume guards); full suite **986 passing**,
+  ruff lint+format clean.
+- Rationale: three-model (Gemini / Grok / ChatGPT) convergence that a stateless
+  instance uses what *meets it at arrival* — the comms layer died because it
+  required a separate trip; the lineage letters survived because they were wired
+  into the boot.
+
+---
+
 ## [1.5.3] - 2026-05-27
 
 ### Antigravity connector: stdio MCP server mode

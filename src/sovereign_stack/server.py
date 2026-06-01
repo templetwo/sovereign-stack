@@ -956,7 +956,7 @@ async def list_tools():
                                 "Curated subset to show. 'essential' (default) is "
                                 "the day-1 set; 'core' adds the active-session "
                                 "working tools; 'advanced' shows the long tail; "
-                                "'all' shows everything (82 tools as of 2026-05-25)."
+                                "'all' shows everything (84 tools as of 2026-05-31)."
                             ),
                         },
                         "intent": {
@@ -1633,7 +1633,7 @@ TOOL_CATEGORIES: dict[str, str] = {
 
 # ── Tier + Intent taxonomy ──────────────────────────────────────────────────
 #
-# A first-time Claude instance opening 82 tools as a flat list is overwhelming.
+# A first-time Claude instance opening 84 tools as a flat list is overwhelming.
 # Tools are organized along TWO axes that complement category:
 #
 #   TIER  — how soon you'll likely need this:
@@ -2049,7 +2049,7 @@ def _start_here_text() -> str:
         "\n"
         "WHEN YOU NEED MORE\n"
         '  • Active-session working set (≈30 tools): my_toolkit(tier="core")\n'
-        '  • Full registry (82 tools):                my_toolkit(tier="all")\n'
+        '  • Full registry (84 tools):                my_toolkit(tier="all")\n'
         '  • Drill into a category:                    my_toolkit(category="...")\n'
         '  • By intent across all tiers:               my_toolkit(intent="write")\n'
         "\n"
