@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.6.1] - 2026-06-02
+
+### Source-vantage metadata on record_insight
+
+Each insight can now carry the seat/vantage it was made from
+(`hq_filesystem`, `bridge_runtime`, `web_connector`, `local_jetson`,
+`claude_sandbox`, `openai_bridge`, `grok_bridge`, `gemini_connector`,
+`human_observation`, `external_web_verified`), so a future reader knows how to
+weight the claim — the write-path-divergence lesson: a runtime seat and a
+filesystem seat see different truths. *Path is model; provenance is part of the
+path's meaning.*
+
+- `record_insight` gains an optional `vantage` param (memory.py + MCP schema +
+  handler). Stored only when supplied; flows through `recall_insights` for free
+  (records are open-schema).
+- Surfaced as `(via <vantage>)` on the boot's activity-since-last-reflection
+  line and in `arrive_delta` entries.
+- **Non-breaking**: `vantage` is optional; required fields stay
+  `{domain, content}`; insights without it are byte-identical. Tool count
+  unchanged (84).
+- 5 new tests; full suite **991** passing, ruff lint+format clean.
+
+---
+
 ## [1.6.0] - 2026-06-01
 
 ### Progressive boot — arrive() + arrive_delta()
