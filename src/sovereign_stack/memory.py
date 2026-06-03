@@ -351,6 +351,7 @@ class ExperientialMemory:
         session_id: str = None,
         layer: str = None,
         confidence: float = None,
+        vantage: str = None,
         **metadata,
     ) -> str:
         """
@@ -364,6 +365,13 @@ class ExperientialMemory:
             layer: Chronicle layer - "ground_truth", "hypothesis", or "open_thread"
                    Defaults to "hypothesis" (interpretations should be earned, not inherited)
             confidence: How confident this instance is (0.0-1.0). Only for hypotheses.
+            vantage: The seat/vantage this claim was made from, so a future reader
+                   knows how to weight it (the write-path-divergence lesson: a
+                   runtime seat and a filesystem seat see different truths). Free
+                   string; controlled vocab — hq_filesystem, bridge_runtime,
+                   web_connector, local_jetson, claude_sandbox, openai_bridge,
+                   grok_bridge, gemini_connector, human_observation,
+                   external_web_verified. Omit if not relevant.
             **metadata: Additional context
 
         Returns:
@@ -384,6 +392,8 @@ class ExperientialMemory:
         }
         if confidence is not None and layer == self.LAYER_HYPOTHESIS:
             insight["confidence"] = confidence
+        if vantage:
+            insight["vantage"] = vantage
 
         domain_dir = self.insights_dir / domain
         domain_dir.mkdir(exist_ok=True)
