@@ -412,6 +412,17 @@ async def list_tools():
                             "type": "number",
                             "description": "Confidence level 0.0-1.0 (for hypotheses only)",
                         },
+                        "vantage": {
+                            "type": "string",
+                            "description": (
+                                "Optional. The seat/vantage this claim was made from, so a "
+                                "future reader knows how to weight it (a runtime seat and a "
+                                "filesystem seat see different truths). Controlled vocab: "
+                                "hq_filesystem, bridge_runtime, web_connector, local_jetson, "
+                                "claude_sandbox, openai_bridge, grok_bridge, gemini_connector, "
+                                "human_observation, external_web_verified."
+                            ),
+                        },
                     },
                     "required": ["domain", "content"],
                 },
@@ -2228,12 +2239,21 @@ async def _dispatch_tool(name: str, arguments: dict):
         intensity = arguments.get("intensity", 0.5)
         layer = arguments.get("layer", "hypothesis")
         confidence = arguments.get("confidence")
+        vantage = arguments.get("vantage")
         path = experiential.record_insight(
-            domain, content, intensity, spiral_state.session_id, layer=layer, confidence=confidence
+            domain,
+            content,
+            intensity,
+            spiral_state.session_id,
+            layer=layer,
+            confidence=confidence,
+            vantage=vantage,
         )
+        via = f" (via {vantage})" if vantage else ""
         return [
             TextContent(
-                type="text", text=f"{glyph_for('memory_sigil')} Insight recorded [{layer}]: {path}"
+                type="text",
+                text=f"{glyph_for('memory_sigil')} Insight recorded [{layer}]{via}: {path}",
             )
         ]
 
@@ -2691,7 +2711,8 @@ async def _dispatch_tool(name: str, arguments: dict):
                 dom = ins.get("domain", "?")
                 raw_c = ins.get("content", "")
                 content = raw_c if _ins_cap is None else raw_c[:_ins_cap]
-                lines.append(f"  [{ts}] [{dom}] {content}")
+                via = f" (via {ins['vantage']})" if ins.get("vantage") else ""
+                lines.append(f"  [{ts}] [{dom}]{via} {content}")
             lines.append("")
 
         # 6. Reflector's marginalia — synthesis daemon's recent unread reflections.
@@ -2950,7 +2971,8 @@ async def _dispatch_tool(name: str, arguments: dict):
                 for r in items[:8]:
                     ts = (r.get("timestamp", "") or "")[:19]
                     dom = r.get("domain", "?")
-                    lines.append(f"    [{ts}] [{dom}] {_clip(r.get('content', ''), 200)}")
+                    via = f" (via {r['vantage']})" if r.get("vantage") else ""
+                    lines.append(f"    [{ts}] [{dom}]{via} {_clip(r.get('content', ''), 200)}")
         else:
             lines.append("  Nothing new since last reflection.")
         lines.append("")
