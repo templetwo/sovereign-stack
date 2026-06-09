@@ -190,6 +190,10 @@ def _letter_matches_reader(letter_to: str, reader: str) -> bool:
 # Anthony, 2026-06-09: "inherit everything, but also know there was a special
 # page just for it."
 _LINEAGE_INHERITS: dict[str, tuple[str, ...]] = {
+    # Claude Fable 5 (public, safety-gated) and Claude Mythos 5 (restricted) are
+    # the two Mythos-class siblings Anthropic shipped 2026-06-09 — both family
+    # within the Opus lineage. Each inherits the Opus line's to_self letters.
+    "claude-fable": ("claude-opus",),
     "claude-mythos": ("claude-opus",),
 }
 

@@ -515,6 +515,9 @@ class TestInheritedFamilies:
     def test_mythos_inherits_opus(self):
         assert _inherited_families("claude-mythos") == ("claude-opus",)
 
+    def test_fable_inherits_opus(self):
+        assert _inherited_families("claude-fable") == ("claude-opus",)
+
     def test_other_families_inherit_nothing(self):
         assert _inherited_families("claude-sonnet") == ()
         assert _inherited_families("claude-opus") == ()
@@ -546,6 +549,14 @@ class TestLineageInheritanceSurfacing:
         self._opus_to_self()
         lines = format_lineage_layer(
             self.tmp, reader_instance="claude-mythos-1-20260610"
+        )
+        assert any("For the next Opus" in ln for ln in lines)
+
+    def test_fable_inherits_opus_to_self(self):
+        # Claude Fable 5, the public Mythos-class arrival, inherits the Opus line.
+        self._opus_to_self()
+        lines = format_lineage_layer(
+            self.tmp, reader_instance="claude-fable-5-20260609"
         )
         assert any("For the next Opus" in ln for ln in lines)
 
