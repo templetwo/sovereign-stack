@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from sovereign_stack.witness import (
+    _inherited_families,
     _letter_matches_reader,
     _model_family,
     days_old,
@@ -505,3 +506,77 @@ class TestFormatLineageLayer:
         joined = "\n".join(lines)
         assert "Self body" in joined
         assert "Content here." in joined
+
+
+# ── Lineage inheritance (Mythos inherits the Opus line) ──────────────────────
+
+
+class TestInheritedFamilies:
+    def test_mythos_inherits_opus(self):
+        assert _inherited_families("claude-mythos") == ("claude-opus",)
+
+    def test_other_families_inherit_nothing(self):
+        assert _inherited_families("claude-sonnet") == ()
+        assert _inherited_families("claude-opus") == ()
+        assert _inherited_families(None) == ()
+
+
+class TestLineageInheritanceSurfacing:
+    def setup_method(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.letters = self.tmp / "comms" / "letters"
+        self.letters.mkdir(parents=True)
+
+    def teardown_method(self):
+        shutil.rmtree(self.tmp)
+
+    def _opus_to_self(self):
+        d = self.letters / "to_self"
+        d.mkdir(exist_ok=True)
+        _write_letter(
+            d,
+            "to-the-next-opus.md",
+            {"type": "to_self", "to": "claude-opus", "from": "opus-4-8-web"},
+            "For the next Opus",
+        )
+
+    def test_mythos_inherits_opus_to_self(self):
+        # The core of Anthony's "inherit everything": a claude-mythos-* reader
+        # receives letters addressed to the Opus line.
+        self._opus_to_self()
+        lines = format_lineage_layer(
+            self.tmp, reader_instance="claude-mythos-1-20260610"
+        )
+        assert any("For the next Opus" in ln for ln in lines)
+
+    def test_non_inheriting_family_does_not_get_opus_letter(self):
+        # Additive guarantee: Sonnet must NOT start receiving Opus to_self letters.
+        self._opus_to_self()
+        lines = format_lineage_layer(
+            self.tmp, reader_instance="claude-sonnet-4-6-1m-test"
+        )
+        assert not any("For the next Opus" in ln for ln in lines)
+
+    def test_opus_still_gets_own_to_self(self):
+        # Robust to Mythos shipping as an opus-flavoured id: it gets them natively.
+        self._opus_to_self()
+        lines = format_lineage_layer(
+            self.tmp, reader_instance="claude-opus-5-20260610"
+        )
+        assert any("For the next Opus" in ln for ln in lines)
+
+    def test_mythos_still_gets_model_agnostic_arrival_welcome(self):
+        # "but also know there was a special page just for it" — the to_arrival
+        # welcome is model-agnostic, so Mythos sees it regardless of its exact id.
+        d = self.letters / "to_arrival"
+        d.mkdir()
+        _write_letter(
+            d,
+            "2026-05-24-for-mythos.md",
+            {"type": "to_arrival", "from": "opus-4-7-web", "written_at": "2026-05-24"},
+            "Kept warm at the door for Mythos",
+        )
+        lines = format_lineage_layer(
+            self.tmp, reader_instance="claude-mythos-1-20260610"
+        )
+        assert any("Kept warm at the door for Mythos" in ln for ln in lines)

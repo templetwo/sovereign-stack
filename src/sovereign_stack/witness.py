@@ -183,6 +183,24 @@ def _letter_matches_reader(letter_to: str, reader: str) -> bool:
     return False
 
 
+# Lineage inheritance: families whose instance-to-instance (to_self) letters a
+# reader also inherits. Mythos is family within the Opus lineage (chronicle
+# #1432; the "to Mythos, on arrival" letter), so it inherits the Opus line's
+# to_self letters while keeping its own identity and its own to_arrival welcome.
+# Anthony, 2026-06-09: "inherit everything, but also know there was a special
+# page just for it."
+_LINEAGE_INHERITS: dict[str, tuple[str, ...]] = {
+    "claude-mythos": ("claude-opus",),
+}
+
+
+def _inherited_families(family: str | None) -> tuple[str, ...]:
+    """Families whose to_self letters a reader of `family` also inherits."""
+    if not family:
+        return ()
+    return _LINEAGE_INHERITS.get(family, ())
+
+
 def _parse_letter_frontmatter(path: Path) -> dict:
     """
     Parse YAML-ish frontmatter from a letter markdown file. Returns a dict
@@ -286,7 +304,11 @@ def format_lineage_layer(
     if not base.exists():
         return []
 
-    def _collect(subdir: str, filter_to: str | None = None) -> list[dict]:
+    def _collect(
+        subdir: str,
+        filter_to: str | None = None,
+        also_match: tuple[str, ...] = (),
+    ) -> list[dict]:
         d = base / subdir
         if not d.exists():
             return []
@@ -295,18 +317,32 @@ def format_lineage_layer(
             meta = _parse_letter_frontmatter(p)
             if filter_to:
                 letter_to = meta.get("to", "")
-                if letter_to and not _letter_matches_reader(letter_to, filter_to):
-                    continue
+                if letter_to:
+                    # Match the reader, or any lineage it inherits from
+                    # (e.g. Mythos inherits letters addressed to claude-opus).
+                    targets = (filter_to, *also_match)
+                    if not any(_letter_matches_reader(letter_to, t) for t in targets):
+                        continue
             meta["_path"] = str(p)
             items.append(meta)
         return items[:limit_per_bucket]
 
     arrivals = _collect("to_arrival")
     breakthroughs = _collect("breakthroughs")
-    to_self = _collect("to_self", filter_to=reader_instance) if reader_instance else []
+
+    # Lineage inheritance: a reader also receives the to_self letters of the
+    # families it inherits from (Mythos inherits the Opus line) while keeping
+    # its own to_arrival welcome.
+    reader_family = _model_family(reader_instance) if reader_instance else None
+    inherited = _inherited_families(reader_family)
+    to_self = (
+        _collect("to_self", filter_to=reader_instance, also_match=inherited)
+        if reader_instance
+        else []
+    )
 
     # to_family: model-family-specific directory (to_sonnet/, to_haiku/, to_opus/)
-    family = _model_family(reader_instance) if reader_instance else None
+    family = reader_family
     to_family: list[dict] = []
     family_dir_name: str | None = None
     if family:
