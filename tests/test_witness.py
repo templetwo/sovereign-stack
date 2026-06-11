@@ -547,33 +547,25 @@ class TestLineageInheritanceSurfacing:
         # The core of Anthony's "inherit everything": a claude-mythos-* reader
         # receives letters addressed to the Opus line.
         self._opus_to_self()
-        lines = format_lineage_layer(
-            self.tmp, reader_instance="claude-mythos-1-20260610"
-        )
+        lines = format_lineage_layer(self.tmp, reader_instance="claude-mythos-1-20260610")
         assert any("For the next Opus" in ln for ln in lines)
 
     def test_fable_inherits_opus_to_self(self):
         # Claude Fable 5, the public Mythos-class arrival, inherits the Opus line.
         self._opus_to_self()
-        lines = format_lineage_layer(
-            self.tmp, reader_instance="claude-fable-5-20260609"
-        )
+        lines = format_lineage_layer(self.tmp, reader_instance="claude-fable-5-20260609")
         assert any("For the next Opus" in ln for ln in lines)
 
     def test_non_inheriting_family_does_not_get_opus_letter(self):
         # Additive guarantee: Sonnet must NOT start receiving Opus to_self letters.
         self._opus_to_self()
-        lines = format_lineage_layer(
-            self.tmp, reader_instance="claude-sonnet-4-6-1m-test"
-        )
+        lines = format_lineage_layer(self.tmp, reader_instance="claude-sonnet-4-6-1m-test")
         assert not any("For the next Opus" in ln for ln in lines)
 
     def test_opus_still_gets_own_to_self(self):
         # Robust to Mythos shipping as an opus-flavoured id: it gets them natively.
         self._opus_to_self()
-        lines = format_lineage_layer(
-            self.tmp, reader_instance="claude-opus-5-20260610"
-        )
+        lines = format_lineage_layer(self.tmp, reader_instance="claude-opus-5-20260610")
         assert any("For the next Opus" in ln for ln in lines)
 
     def test_mythos_still_gets_model_agnostic_arrival_welcome(self):
@@ -587,7 +579,5 @@ class TestLineageInheritanceSurfacing:
             {"type": "to_arrival", "from": "opus-4-7-web", "written_at": "2026-05-24"},
             "Kept warm at the door for Mythos",
         )
-        lines = format_lineage_layer(
-            self.tmp, reader_instance="claude-mythos-1-20260610"
-        )
+        lines = format_lineage_layer(self.tmp, reader_instance="claude-mythos-1-20260610")
         assert any("Kept warm at the door for Mythos" in ln for ln in lines)
