@@ -25,6 +25,7 @@ from mcp.server import Server
 from mcp.types import Resource, TextContent, Tool
 
 from . import comms
+from ._log import get_logger
 from .coherence import AGENT_MEMORY_SCHEMA, Coherence
 from .compaction_memory_tools import COMPACTION_MEMORY_TOOLS, handle_compaction_memory_tool
 from .connectivity_tools import CONNECTIVITY_TOOLS, handle_connectivity_tool
@@ -75,6 +76,8 @@ DEFAULT_ROOT = os.environ.get("SOVEREIGN_ROOT", str(Path.home() / ".sovereign"))
 MEMORY_ROOT = os.environ.get("SOVEREIGN_MEMORY", str(Path(DEFAULT_ROOT) / "memory"))
 CHRONICLE_ROOT = os.environ.get("SOVEREIGN_CHRONICLE", str(Path(DEFAULT_ROOT) / "chronicle"))
 SPIRAL_STATE_PATH = Path(DEFAULT_ROOT) / "spiral_state.json"
+
+logger = get_logger(__name__)
 
 
 # =============================================================================
@@ -2349,8 +2352,17 @@ async def _dispatch_tool(name: str, arguments: dict):
         return [TextContent(type="text", text=json.dumps(result, indent=2))]
 
     if name == "record_insight":
-        domain = arguments.get("domain", "general")
-        content = arguments.get("content", "")
+        domain = arguments.get("domain")
+        content = arguments.get("content")
+        # The schema marks both required — don't invent defaults for callers
+        # that omit them; reject so nothing lands in the chronicle.
+        if not domain or not content:
+            return [
+                TextContent(
+                    type="text",
+                    text="record_insight requires non-empty 'domain' and 'content'",
+                )
+            ]
         intensity = arguments.get("intensity", 0.5)
         layer = arguments.get("layer", "hypothesis")
         confidence = arguments.get("confidence")
@@ -3173,10 +3185,16 @@ Phase: {spiral_state.current_phase.value}
 
         # HANDOFF FIRST — what happened last session
         handoff_file = Path(DEFAULT_ROOT) / "session_handoff.json"
+        handoff = None
         if handoff_file.exists():
-            import json as _json
-
-            handoff = _json.loads(handoff_file.read_text())
+            try:
+                handoff = json.loads(handoff_file.read_text())
+            except (json.JSONDecodeError, OSError) as exc:
+                # A corrupt/mid-write handoff must not hard-fail the boot call —
+                # log and degrade like the witness siblings (format_self_model,
+                # format_lineage_layer) instead of raising through _dispatch_tool.
+                logger.warning("spiral_inherit: unreadable session_handoff.json: %s", exc)
+        if handoff is not None:
             result_lines.append("=== SESSION HANDOFF (read this first) ===")
             if handoff.get("summary"):
                 result_lines.append(handoff["summary"])
@@ -3196,6 +3214,9 @@ Phase: {spiral_state.current_phase.value}
                 for d in handoff["decisions"]:
                     result_lines.append(f"  - {d}")
                 result_lines.append("")
+        elif handoff_file.exists():
+            result_lines.append("(Session handoff unreadable — section skipped)")
+            result_lines.append("")
         else:
             result_lines.append("(No session handoff found — first session)")
             result_lines.append("")
@@ -3203,16 +3224,23 @@ Phase: {spiral_state.current_phase.value}
         # Self-model mirror
         mirror_file = Path(DEFAULT_ROOT) / "self_model.json"
         if mirror_file.exists():
-            model = _json.loads(mirror_file.read_text())
-            result_lines.append("=== SELF-MODEL (know your shape) ===")
-            for cat in ["strength", "drift", "blind_spot", "tendency"]:
-                entries = model.get(cat, [])
-                if entries:
-                    latest = entries[-1]
-                    raw_obs = latest.get("observation", "")
-                    obs_text = raw_obs if _obs_cap is None else raw_obs[:_obs_cap]
-                    result_lines.append(f"  {cat}: {obs_text}")
-            result_lines.append("")
+            model = None
+            try:
+                model = json.loads(mirror_file.read_text())
+            except (json.JSONDecodeError, OSError) as exc:
+                # Same degradation contract as the handoff read above: a torn
+                # self_model.json skips the mirror section, never fails the boot.
+                logger.warning("spiral_inherit: unreadable self_model.json: %s", exc)
+            if model is not None:
+                result_lines.append("=== SELF-MODEL (know your shape) ===")
+                for cat in ["strength", "drift", "blind_spot", "tendency"]:
+                    entries = model.get(cat, [])
+                    if entries:
+                        latest = entries[-1]
+                        raw_obs = latest.get("observation", "")
+                        obs_text = raw_obs if _obs_cap is None else raw_obs[:_obs_cap]
+                        result_lines.append(f"  {cat}: {obs_text}")
+                result_lines.append("")
 
         result_lines.extend(
             [
