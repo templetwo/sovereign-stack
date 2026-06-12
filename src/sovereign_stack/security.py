@@ -9,8 +9,12 @@ Comprehensive security utilities:
 - Permission checking
 - Audit logging
 
+NOTE: This module is currently UNWIRED — imported nowhere in the stack.
+Nothing routes through these guards yet; do not assume they protect a path.
+
 """
 
+import base64
 import hashlib
 import hmac
 import logging
@@ -418,9 +422,11 @@ class SessionManager:
         # HMAC for integrity
         hmac_digest = hmac.new(self.secret_key, random_bytes + timestamp, hashlib.sha256).digest()
 
-        # Combine and encode
+        # Combine and encode. The id is derived FROM the random bytes +
+        # HMAC material (an earlier version fed only len(combined) to
+        # token_urlsafe, discarding the HMAC entirely).
         combined = random_bytes + hmac_digest[:16]
-        return secrets.token_urlsafe(len(combined))[:48]
+        return base64.urlsafe_b64encode(combined).rstrip(b"=").decode("ascii")[:48]
 
 
 # =============================================================================

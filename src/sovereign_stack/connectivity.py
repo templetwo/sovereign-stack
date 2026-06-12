@@ -279,7 +279,9 @@ def check_status(
       3. PERIODIC: state may legitimately be "not running" between ticks.
          Healthy if log_path's mtime is within 2x cadence. Stale otherwise.
       4. If health_url set, probe it. Failure on an otherwise-healthy
-         service downgrades to STATUS_DEGRADED.
+         service downgrades to STATUS_DEGRADED. Success on an ALWAYS_ON
+         service is authoritative: the service is UP even when launchctl
+         can't enumerate it (launchctl detail stays in the report).
     """
     now = now if now is not None else time.time()
     status = EndpointStatus(
@@ -365,6 +367,18 @@ def check_status(
             if status.http_ok is False and status.status == STATUS_OK:
                 status.status = STATUS_DEGRADED
                 status.notes.append("launchctl OK but health probe failed")
+
+        # Probe success is authoritative for always-on services: a live
+        # HTTP response proves the service is up even when launchctl
+        # can't enumerate it (label not loaded, wrong domain). launchctl
+        # detail above stays in the report as supplementary info.
+        if (
+            status.http_ok is True
+            and endpoint.kind == KIND_ALWAYS_ON
+            and status.status != STATUS_OK
+        ):
+            status.notes.append(f"health probe OK overrides launchctl-derived {status.status!r}")
+            status.status = STATUS_OK
 
     return status
 

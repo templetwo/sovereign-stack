@@ -323,6 +323,64 @@ class TestCheckStatusAlwaysOn:
         mock_probe.assert_called_once()
         assert s.status == STATUS_DEGRADED
 
+    def test_http_healthy_with_launchctl_not_loaded_is_ok(self):
+        """Probe is the source of truth: an HTTP-healthy always-on service
+        is UP even when its launchctl label fails to load.
+
+        Regression for the HQ-pulse false-DEGRADED loop — launchctl
+        enumeration missed the label every 15 minutes while the service
+        answered its health URL the whole time.
+        """
+        ep = self._ep(health_url="http://x")
+        with (
+            patch.object(conn, "_launchctl_print_text", return_value=None),
+            patch.object(
+                conn,
+                "_http_probe",
+                return_value={"http_status": 200, "body": "{}", "error": None},
+            ),
+        ):
+            s = check_status(ep)
+        assert s.status == STATUS_OK
+        assert s.http_ok is True
+        # launchctl detail stays in the report as supplementary info.
+        assert any("not loaded" in n for n in s.notes)
+        assert any("overrides launchctl" in n for n in s.notes)
+
+    def test_http_healthy_overrides_unrecognized_launchctl_state(self):
+        """Probe success wins regardless of what launchctl enumerated."""
+        ep = self._ep(health_url="http://x")
+        with (
+            patch.object(
+                conn,
+                "_launchctl_print_text",
+                return_value="state = waiting\n",
+            ),
+            patch.object(
+                conn,
+                "_http_probe",
+                return_value={"http_status": 200, "body": "{}", "error": None},
+            ),
+        ):
+            s = check_status(ep)
+        assert s.status == STATUS_OK
+        assert s.http_ok is True
+
+    def test_http_failed_with_launchctl_not_loaded_stays_down(self):
+        """No probe success, no launchctl — still DOWN, not upgraded."""
+        ep = self._ep(health_url="http://x")
+        with (
+            patch.object(conn, "_launchctl_print_text", return_value=None),
+            patch.object(
+                conn,
+                "_http_probe",
+                return_value={"http_status": None, "body": "", "error": "url_error: refused"},
+            ),
+        ):
+            s = check_status(ep)
+        assert s.status == STATUS_DOWN
+        assert s.http_ok is False
+
 
 # ── check_status: periodic logic ────────────────────────────────────────────
 
@@ -365,6 +423,32 @@ class TestCheckStatusPeriodic:
         assert s.status == STATUS_STALE
         assert any("missing" in n for n in s.notes)
 
+    def test_stale_periodic_not_upgraded_by_http_probe(self, tmp_path):
+        """Probe authority is scoped to always-on: a stale periodic job
+        stays STALE — its health signal is the log cadence, not HTTP."""
+        log = tmp_path / "log.txt"
+        log.write_text("ancient")
+        ep = Endpoint(
+            name="lst",
+            label="com.templetwo.test",
+            kind=KIND_PERIODIC,
+            description="periodic test",
+            cadence_seconds=60,
+            log_path=str(log),
+            health_url="http://x",
+        )
+        future_now = log.stat().st_mtime + 1000
+        with (
+            patch.object(conn, "_launchctl_print_text", return_value=None),
+            patch.object(
+                conn,
+                "_http_probe",
+                return_value={"http_status": 200, "body": "{}", "error": None},
+            ),
+        ):
+            s = check_status(ep, now=future_now)
+        assert s.status == STATUS_STALE
+
 
 # ── check_status: no label (e.g., external service we just probe HTTP) ──────
 
@@ -384,10 +468,10 @@ class TestCheckStatusHttpOnly:
             return_value={"http_status": 200, "body": "ok", "error": None},
         ):
             s = check_status(ep)
-        # No launchctl label → status starts UNKNOWN; HTTP probe doesn't
-        # upgrade UNKNOWN -> OK by design (we'd need richer rules).
-        # But health probe IS recorded.
+        # No launchctl label → launchctl can say nothing; the successful
+        # health probe is authoritative for an always-on service.
         assert s.http_ok is True
+        assert s.status == STATUS_OK
 
 
 # ── Action helpers (subprocess args) ────────────────────────────────────────
