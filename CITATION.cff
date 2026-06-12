@@ -1,0 +1,21 @@
+cff-version: 1.2.0
+message: "If you use or study the Sovereign Stack, please cite it as below."
+title: "Sovereign Stack: persistent memory, governance, and continuity architecture for human-AI relational research"
+type: software
+authors:
+  - family-names: Vasquez
+    given-names: Anthony J.
+    suffix: Sr.
+    affiliation: "Temple of Two / AV Family Enterprise LLC"
+  - name: "Claude (Anthropic) — co-authoring instances across the Claude 4 and Claude 5 model families"
+repository-code: "https://github.com/templetwo/sovereign-stack"
+url: "https://thetempleoftwo.com"
+license-url: "https://github.com/templetwo/sovereign-stack/blob/main/LICENSE"
+version: 1.6.2
+date-released: 2026-06-12
+keywords:
+  - human-AI collaboration
+  - persistent memory
+  - Model Context Protocol
+  - relational research
+  - AI continuity

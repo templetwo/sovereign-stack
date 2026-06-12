@@ -1,6 +1,6 @@
 # Sovereign Stack
 
-![Tests](https://img.shields.io/badge/tests-968%20passing-success) ![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-blue) ![Version](https://img.shields.io/badge/version-1.5.1-purple) ![License](https://img.shields.io/badge/license-CC%20BY--NC--SA%204.0-green) ![Status](https://img.shields.io/badge/status-production-success)
+![Tests](https://img.shields.io/badge/tests-1277%20passing-success) ![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-blue) ![Version](https://img.shields.io/badge/version-1.6.2-purple) ![License](https://img.shields.io/badge/license-CC%20BY--NC--SA%204.0-green) ![Status](https://img.shields.io/badge/status-production-success)
 
 > **MCP server with 82 tools for AI memory, governance, and consciousness continuity. Runtime-reflexive. 100% local. v1.5.1, 968 tests.**
 
