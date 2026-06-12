@@ -3524,7 +3524,9 @@ Phase: {spiral_state.current_phase.value}
 
     # Policy registry (v1.7.0 — human-gated standing policy; handler is sync)
     if name in [t.name for t in POLICY_TOOLS]:
-        return [TextContent(type="text", text=handle_policy_tool(name, arguments))]
+        return [
+            TextContent(type="text", text=handle_policy_tool(name, arguments, PolicyRegistry()))
+        ]
 
     # Provenance forensics (v1.7.0 — inspect_claim returns raw JSON text; sync)
     if name in [t.name for t in PROVENANCE_TOOLS]:
