@@ -470,7 +470,9 @@ class TestFormatLineageLayer:
             "Default render must NOT inline letter bodies — that's the whole point "
             "of the full_content escape. If this fails, every boot doubles in size."
         )
-        assert "Read full text from" in joined
+        # Footer leads with full_content=true (remote seats cannot reach the
+        # local path) — reworded 2026-06-12 web-seat curation.
+        assert "Pass full_content=true to inline" in joined
 
     def test_full_content_true_inlines_letter_bodies(self):
         """full_content=True closes the truncation catch-22 — body surfaces inline."""

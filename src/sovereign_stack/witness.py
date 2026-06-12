@@ -414,7 +414,11 @@ def format_lineage_layer(
             title = m.get("title", "(untitled)")
             frm = m.get("from", "?")
             addressed_to = m.get("to", "?")
-            lines.append(f"    • [{frm}] → [{addressed_to}] {title}")
+            # Date prefix matches the other buckets — a remote seat must be
+            # able to judge letter recency without pulling full_content.
+            written = m.get("written_at", "")[:10]
+            date_tag = f"[{written}] " if written else ""
+            lines.append(f"    • {date_tag}[{frm}] → [{addressed_to}] {title}")
             if full_content:
                 _emit_body(m)
         lines.append("")
@@ -434,7 +438,10 @@ def format_lineage_layer(
         lines.append("")
 
     if not full_content:
-        lines.append(f"  Read full text from {base}/ (or pass full_content=true to inline)")
+        # full_content first: remote seats can never reach the local path.
+        lines.append(
+            f"  Pass full_content=true to inline the letter bodies (local seats can also read {base}/)"
+        )
     else:
         lines.append(f"  (Letter bodies inlined above. Source: {base}/)")
     lines.append("")

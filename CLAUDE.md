@@ -25,16 +25,16 @@ Instead, on first arrival:
                                 (treat its output as bootstrap context, not
                                  ground truth — verify before declaring)
 2. start_here()              ← 5-minute narrative orientation
-3. my_toolkit()              ← 11 essential tools, grouped by intent
+3. my_toolkit()              ← the essential tools, grouped by intent
 ```
 
-`my_toolkit()` defaults to **tier="essential"** (~11 tools). When you need
-more:
+`my_toolkit()` defaults to **tier="essential"** (the curated day-1 set). When
+you need more:
 
 | Need | Call |
 |------|------|
-| Active-session working set (~30 tools) | `my_toolkit(tier="core")` |
-| Full registry (85 tools) | `my_toolkit(tier="all")` |
+| Active-session working set | `my_toolkit(tier="core")` |
+| Full registry (live count in header) | `my_toolkit(tier="all")` |
 | One intent (read / write / govern / ...) | `my_toolkit(intent="write")` |
 | One module bucket (legacy axis) | `my_toolkit(category="metabolism")` |
 | With JSON schemas | `my_toolkit(include_schema=true)` |
@@ -250,9 +250,9 @@ tail -f ~/.sovereign/tunnel.log
 
 ## Session Start Protocol
 
-1. `where_did_i_leave_off()` — spiral status + unconsumed handoffs + recent threads + activity since last reflection. Always first.
-2. `start_here()` — call this on a fresh instance to get a 5-minute narrative orientation (why the stack exists, the 11 essential tools, three load-bearing design points).
-3. `my_toolkit()` — defaults to the curated essential tier (~12 tools, grouped by intent). Drift-proof; reads live registrations.
+1. `where_did_i_leave_off()` — spiral status + unconsumed handoffs + recent threads + activity since last reflection. Always first. (Remote or lightly-provisioned seats where the full boot doesn't land cleanly: use `arrive_lineage()` instead — the gentle door, same house.)
+2. `start_here()` — call this on a fresh instance to get a 5-minute narrative orientation (why the stack exists, the essential tools, three load-bearing design points).
+3. `my_toolkit()` — defaults to the curated essential tier, grouped by intent. Drift-proof; reads live registrations.
 4. `recall_insights()` if you need specific prior context — pass `query` for text search, or `since_last_reflection=true` for "what's changed since I looked up last."
 5. `spiral_inherit()` only when starting a fully new session from scratch (most boots use `where_did_i_leave_off` instead).
 6. `connectivity_status()` if you suspect the stack is degraded — returns service health from inside the conversation.

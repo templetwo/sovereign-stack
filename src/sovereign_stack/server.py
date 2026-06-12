@@ -105,7 +105,12 @@ logger = get_logger(__name__)
 # SERVER SETUP
 # =============================================================================
 
-server = Server("sovereign-stack")
+# Pass our own version or the MCP handshake advertises the mcp LIBRARY's
+# version as ours (found 2026-06-12: serverInfo said v1.26.0 while the
+# heartbeat said v1.7.0 — a version surface lying by default).
+from . import __version__ as _stack_version  # noqa: E402
+
+server = Server("sovereign-stack", version=_stack_version)
 
 # Initialize components
 coherence = Coherence(AGENT_MEMORY_SCHEMA, root=MEMORY_ROOT)
@@ -883,28 +888,31 @@ async def list_tools():
             Tool(
                 name="arrive_lineage",
                 description=(
-                    "Lineage-only relational arrival boot. Returns preamble (BEFORE YOU BEGIN "
+                    "Lineage-only relational arrival. Returns the preamble (BEFORE YOU BEGIN "
                     "+ THE VOICES IN THE BOOT), spiral status, lineage letters (COMMS — "
-                    "LINEAGE), and self-model snapshot (WHO YOU'VE BEEN OBSERVED TO BE). "
-                    "Omits all work-thread sections (open threads, handoffs, persistent "
-                    "markers, activity since last reflection), reflector's marginalia, and "
-                    "the scribe block — by construction, not by filter. Does NOT consume "
-                    "handoffs. The safe arrival path for heavily input-gated models whose "
-                    "classifier scores flag the full boot's work-thread vocabulary."
+                    "LINEAGE), and the self-model snapshot — and omits all work-thread "
+                    "sections (open threads, handoffs, persistent markers, recent activity), "
+                    "marginalia, and the scribe block by construction, not by filter. Does "
+                    "NOT consume handoffs. The gentle arrival path for remote and "
+                    "lightly-provisioned seats: the smallest, calmest boot payload, for "
+                    "seats where the full boot does not land cleanly."
                 ),
                 inputSchema={
                     "type": "object",
                     "properties": {
                         "source_instance": {
                             "type": "string",
-                            "description": "Which instance is arriving (for audit/log).",
+                            "description": (
+                                "Which instance is arriving (e.g. 'claude-fable-5') — also "
+                                "routes your model line's to_self letters to you."
+                            ),
                         },
                         "full_content": {
                             "type": "boolean",
                             "description": (
                                 "When true, render full lineage letter bodies and self-model "
-                                "observations without truncation. Default false keeps payload "
-                                "compact and classifier-safe."
+                                "observations without truncation. Default false keeps the "
+                                "payload compact."
                             ),
                         },
                     },
@@ -1051,7 +1059,7 @@ async def list_tools():
                 name="my_toolkit",
                 description=(
                     "Show what tools you have. DEFAULTS to the curated 'essential' "
-                    "tier (≈12 tools you'll actually use first), grouped by intent. "
+                    "tier — the tools you'll actually use first — grouped by intent. "
                     "Pass tier='all' for the full registry, tier='core' for the "
                     "active-session working set, or category=<name> to drill into "
                     "one bucket. Drift-proof — reads live tool registrations, not "
@@ -1068,7 +1076,7 @@ async def list_tools():
                                 "Curated subset to show. 'essential' (default) is "
                                 "the day-1 set; 'core' adds the active-session "
                                 "working tools; 'advanced' shows the long tail; "
-                                "'all' shows everything (84 tools as of 2026-05-31)."
+                                "'all' shows everything (the header reports the live count)."
                             ),
                         },
                         "intent": {
@@ -1114,7 +1122,7 @@ async def list_tools():
                     "If you are a Claude instance opening this stack for the first "
                     "time and don't yet know what's here, call this. Returns a "
                     "short narrative orientation: why this exists, the boot "
-                    "ritual, the 12 tools you'll use first, and where to look "
+                    "ritual, the essential tools you'll use first, and where to look "
                     "next. Cheaper than reading CLAUDE.md cold."
                 ),
                 inputSchema={
@@ -1127,8 +1135,8 @@ async def list_tools():
                 name="nape_observe",
                 description=(
                     "Manually inject a tool-call observation into Nape's record. "
-                    "Most observations will come from an automatic hook in the main "
-                    "dispatcher in a future release. Use this tool for manual injection "
+                    "Most observations arrive via the automatic hook in the main "
+                    "dispatcher on every call (live since v1.3.1). Use this for manual injection "
                     "and testing. Drift detection runs automatically after each observe."
                 ),
                 inputSchema={
@@ -1757,11 +1765,11 @@ TOOL_CATEGORIES: dict[str, str] = {
 
 # ── Tier + Intent taxonomy ──────────────────────────────────────────────────
 #
-# A first-time Claude instance opening 84 tools as a flat list is overwhelming.
+# A first-time Claude instance opening 90+ tools as a flat list is overwhelming.
 # Tools are organized along TWO axes that complement category:
 #
 #   TIER  — how soon you'll likely need this:
-#     "essential"   ~12 tools — what you use in your first session
+#     "essential"   the day-1 set — derived live; see TOOL_TIERS
 #     "core"        ~25 tools — the working set for an active session
 #     "advanced"    rest      — daemons, security, watches, niche ops
 #
@@ -1788,12 +1796,12 @@ TOOL_TIERS: dict[str, str] = {
     # Essential — boot-and-survive (call my_toolkit() to see these by default)
     "where_did_i_leave_off": TIER_ESSENTIAL,
     "arrive": TIER_ESSENTIAL,
-    "arrive_delta": TIER_ESSENTIAL,
+    "arrive_delta": TIER_CORE,
     "arrive_lineage": TIER_ESSENTIAL,
     "start_here": TIER_ESSENTIAL,
     "close_session": TIER_ESSENTIAL,
     "my_toolkit": TIER_ESSENTIAL,
-    "prior_for_turn": TIER_ESSENTIAL,
+    "prior_for_turn": TIER_CORE,
     "record_insight": TIER_ESSENTIAL,
     "archive_exchange": TIER_ESSENTIAL,
     "recall_insights": TIER_ESSENTIAL,
@@ -2122,6 +2130,42 @@ def _format_toolkit(
 # ── start_here narrative orientation ────────────────────────────────────────
 
 
+_INTENT_GLOSS = {
+    "orient": "Orient (where am I, what do I have)",
+    "read": "Read (query stored knowledge)",
+    "write": "Write (record content to chronicle — the correspondence layer)",
+    "govern": "Govern (pause before risky actions — git push, delete, publish)",
+    "communicate": "Communicate (talk to / acknowledge other instances)",
+    "introspect": "Introspect (reflect on patterns, advance the spiral)",
+    "handoff": "Handoff (close gracefully, bridge sessions)",
+    "route": "Route (coherence engine)",
+    "ops": "Ops (verify the stack itself is healthy)",
+    "security": "Security (Guardian)",
+}
+
+
+def _essential_tools_block() -> str:
+    """
+    Render the essential-tier enumeration LIVE from TOOL_TIERS, grouped by
+    intent. Derived at render time so start_here can never lie about the
+    count or membership again (found 2026-06-12: three contradictory
+    hardcoded counts — 11, 12, ≈12 — shipping simultaneously).
+    """
+    essential = sorted(n for n, t in TOOL_TIERS.items() if t == TIER_ESSENTIAL)
+    by_intent: dict[str, list[str]] = {}
+    for n in essential:
+        by_intent.setdefault(_intent_for(n), []).append(n)
+    count_words = {12: "TWELVE", 13: "THIRTEEN", 14: "FOURTEEN", 15: "FIFTEEN", 16: "SIXTEEN"}
+    header = count_words.get(len(essential), str(len(essential)))
+    lines = [f"THE {header} ESSENTIAL TOOLS — by intent", ""]
+    for intent in _INTENT_ORDER:
+        if intent in by_intent:
+            lines.append(f"  {_INTENT_GLOSS.get(intent, intent.title())}:")
+            lines.append(f"    {', '.join(by_intent[intent])}")
+            lines.append("")
+    return "\n".join(lines)
+
+
 def _start_here_text() -> str:
     """
     Returns a curated narrative for first-time instances. Under 60 lines
@@ -2151,39 +2195,19 @@ def _start_here_text() -> str:
         "                                 Treat its output as bootstrap\n"
         "                                 context, not ground truth — verify\n"
         "                                 before declaring or writing.\n"
+        "                                 (Remote or lightly-provisioned seat\n"
+        "                                 where the full boot doesn't land\n"
+        "                                 cleanly? Use arrive_lineage() —\n"
+        "                                 the gentle door, same house.)\n"
         "  2. start_here()             — this orientation. (You are here.)\n"
-        "  3. my_toolkit()             — see the 12 essential tools\n"
+        "  3. my_toolkit()             — the curated essential tools,\n"
         "                                 grouped by intent.\n"
-        "\n"
-        "THE TWELVE ESSENTIAL TOOLS — by intent\n"
-        "\n"
-        "  Orient (where am I, what do I have):\n"
-        "    where_did_i_leave_off, start_here, my_toolkit, prior_for_turn\n"
-        "\n"
-        "  Read (query stored knowledge):\n"
-        "    recall_insights, get_open_threads\n"
-        "\n"
-        "  Write (record content to chronicle — including addressed letters\n"
-        "  to sibling instances; the chronicle is the correspondence layer):\n"
-        "    record_insight, record_open_thread, archive_exchange\n"
-        "    (archive_exchange holds verbatim bytes that would otherwise die with\n"
-        "     the context window: your own in-conversation drafts and iterations,\n"
-        "     not only another model's output. A summary never stands in for it.)\n"
-        "\n"
-        "  Govern (pause before risky actions — git push, delete, publish):\n"
-        "    compass_check  (pass with_simulation=true for reversibility evidence)\n"
-        "\n"
-        "  Handoff (close gracefully):\n"
-        "    close_session\n"
-        "\n"
-        "  Ops (verify the stack itself is healthy):\n"
-        "    connectivity_status\n"
-        "\n"
+        "\n" + _essential_tools_block() + "\n"
         "WHEN YOU NEED MORE\n"
-        '  • Active-session working set (≈30 tools): my_toolkit(tier="core")\n'
-        '  • Full registry (84 tools):                my_toolkit(tier="all")\n'
-        '  • Drill into a category:                    my_toolkit(category="...")\n'
-        '  • By intent across all tiers:               my_toolkit(intent="write")\n'
+        '  • Active-session working set:  my_toolkit(tier="core")\n'
+        '  • Full registry (live count in its header): my_toolkit(tier="all")\n'
+        '  • Drill into a category:       my_toolkit(category="...")\n'
+        '  • By intent across all tiers:  my_toolkit(intent="write")\n'
         "\n"
         "FOUR LOAD-BEARING DESIGN POINTS\n"
         "  • record_insight defaults to the 'hypothesis' layer. Use\n"
@@ -2965,7 +2989,7 @@ async def _dispatch_tool(name: str, arguments: dict):
             lines.append("")
             lines.append(
                 "First time here? Call start_here for a 5-minute "
-                "orientation, or my_toolkit() for the 11 essential tools."
+                "orientation, or my_toolkit() for the essential tools."
             )
 
         boot_text = "\n".join(lines)

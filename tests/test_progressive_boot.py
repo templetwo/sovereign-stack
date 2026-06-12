@@ -153,7 +153,9 @@ class TestProgressiveBootRegistration:
 
     def test_new_tools_are_essential_tier(self):
         assert server.TOOL_TIERS["arrive"] == server.TIER_ESSENTIAL
-        assert server.TOOL_TIERS["arrive_delta"] == server.TIER_ESSENTIAL
+        # Demoted 2026-06-12 toolkit curation: "what changed since you LAST
+        # looked" is definitionally not a first-session tool.
+        assert server.TOOL_TIERS["arrive_delta"] == server.TIER_CORE
 
     def test_new_tools_have_orient_intent(self):
         assert server.TOOL_INTENTS["arrive"] == "orient"

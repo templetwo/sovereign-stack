@@ -477,7 +477,7 @@ class TestToolSchemas:
         assert set(POLICY_TOOL_TIERS) == names
         assert set(POLICY_TOOL_INTENTS) == names
         assert POLICY_TOOL_TIERS["current_policies"] == "essential"
-        assert POLICY_TOOL_TIERS["set_policy"] == "core"
+        assert POLICY_TOOL_TIERS["set_policy"] == "advanced"  # human-gated; demoted 2026-06-12
         assert POLICY_TOOL_INTENTS["current_policies"] == "orient"
         assert POLICY_TOOL_INTENTS["set_policy"] == "govern"
 

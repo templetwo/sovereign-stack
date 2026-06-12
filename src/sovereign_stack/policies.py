@@ -504,7 +504,7 @@ POLICY_TOOLS = [
 # TOOL_TIERS / TOOL_INTENTS; category "policies" in TOOL_CATEGORIES).
 POLICY_TOOL_TIERS: dict[str, str] = {
     "current_policies": "essential",
-    "set_policy": "core",
+    "set_policy": "advanced",  # human-gated by design; current_policies footers the breadcrumb
 }
 POLICY_TOOL_INTENTS: dict[str, str] = {
     "current_policies": "orient",

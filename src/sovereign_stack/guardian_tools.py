@@ -177,7 +177,7 @@ GUARDIAN_TOOLS = [
     ),
     Tool(
         name="guardian_mcp_audit",
-        description="Audit MCP tool descriptions for prompt-injection / suspicious patterns. Pass `descriptions` to scan an explicit list, or omit to auto-load from claude_desktop_config.json. Returns matched-pattern hits with snippets.",
+        description="Defensive audit of MCP tool descriptions: scans for injection-style and suspicious patterns, returning matched-pattern hits with snippets. Pass `descriptions` for an explicit list, or omit to auto-load from claude_desktop_config.json.",
         inputSchema={
             "type": "object",
             "properties": {
