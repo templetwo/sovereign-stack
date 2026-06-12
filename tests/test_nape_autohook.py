@@ -20,6 +20,7 @@ with a temp-dir ExperientialMemory and srv_module.SPIRAL_STATE_PATH with a temp
 path so they never write to the live ~/.sovereign/ tree.
 """
 
+import copy
 import shutil
 import tempfile
 from contextlib import contextmanager
@@ -68,7 +69,12 @@ def _isolated_server(session_id: str):
 
     original_experiential = srv_module.experiential
     original_spiral_path = srv_module.SPIRAL_STATE_PATH
-    original_session_id = srv_module.spiral_state.session_id
+    # Snapshot the ENTIRE spiral state, not just session_id. Dispatched tools
+    # mutate other fields on this shared object (phase_history, counters); a
+    # partial restore let test session ids leak into the live
+    # ~/.sovereign/spiral_state.json (found 2026-06-12: 'rotation-reminder-test'
+    # and 'pre-close-session-id' in live phase_history).
+    original_spiral_snapshot = copy.deepcopy(srv_module.spiral_state.__dict__)
 
     srv_module.experiential = tmp_experiential
     srv_module.SPIRAL_STATE_PATH = tmp_spiral_path
@@ -79,7 +85,8 @@ def _isolated_server(session_id: str):
     finally:
         srv_module.experiential = original_experiential
         srv_module.SPIRAL_STATE_PATH = original_spiral_path
-        srv_module.spiral_state.session_id = original_session_id
+        srv_module.spiral_state.__dict__.clear()
+        srv_module.spiral_state.__dict__.update(original_spiral_snapshot)
         shutil.rmtree(tmp_root, ignore_errors=True)
 
 

@@ -380,3 +380,42 @@ class TestRedactIter:
         assert "<redacted-env>" in results[2]
         assert counts.get("bearer_token") == 1
         assert counts.get("env_credential") == 1
+
+
+# ----------------------------------------------------------------------
+# boot_spawn redacts the assembled chronicle context (gap found 2026-06-12)
+# ----------------------------------------------------------------------
+
+
+class TestBootSpawnRedaction:
+    # Synthetic 64-hex credential — deliberately NOT a real token; this file
+    # lives in a public repo.
+    FAKE_HEX_TOKEN = "deadbeef" * 8
+
+    def test_boot_context_is_redacted_before_freezing(self, monkeypatch):
+        from sovereign_stack.scribe import bridge_integration as bi
+
+        poisoned = (
+            "PERSISTENT MARKERS\n"
+            f"Bridge env: BRIDGE_TOKEN={self.FAKE_HEX_TOKEN}\n"
+            "Auth header was: Bearer aaaaaaaaaaaaaaaaaaaaaaaa\n"
+        )
+        monkeypatch.setattr(bi, "build_scribe_chronicle_context", lambda: poisoned)
+        session = bi.boot_spawn(parent_instance="test-redaction", boot_text="boot")
+        assert self.FAKE_HEX_TOKEN not in session.chronicle_context
+        assert "Bearer aaaaaaaaaaaaaaaaaaaa" not in session.chronicle_context
+        assert "<redacted-" in session.chronicle_context
+
+    def test_fallback_boot_text_is_redacted_too(self, monkeypatch):
+        from sovereign_stack.scribe import bridge_integration as bi
+
+        def _boom():
+            raise RuntimeError("context build failed")
+
+        monkeypatch.setattr(bi, "build_scribe_chronicle_context", _boom)
+        session = bi.boot_spawn(
+            parent_instance="test-redaction-fallback",
+            boot_text="fallback with API_KEY=supersecretvalue inside",
+        )
+        assert "supersecretvalue" not in session.chronicle_context
+        assert "<redacted-env>" in session.chronicle_context
