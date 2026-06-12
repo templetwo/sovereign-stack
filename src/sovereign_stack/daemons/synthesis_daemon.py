@@ -56,6 +56,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from sovereign_stack.memory import load_entries
+
 # ── Tunables ────────────────────────────────────────────────────────────────
 
 DEFAULT_MODEL = "ministral-3:14b"  # fireside 2026-04-26: tested at 25s with
@@ -136,6 +138,29 @@ def _iso_to_dt(s: str) -> datetime | None:
         return None
 
 
+def _project_entry(rec: dict, ts_epoch: float) -> dict:
+    """
+    Project a raw chronicle record into the daemon's prompt-material shape.
+
+    Carries the read-derived supersession annotation through when present
+    (v1.7.x reader convergence): superseded entries are still INCLUDED —
+    nothing silently disappears — but build_prompt marks them
+    '(superseded)' so the model never reads them as live truth.
+    """
+    entry = {
+        "timestamp": rec.get("timestamp", ""),
+        "domain": rec.get("domain", "?"),
+        "layer": rec.get("layer", "?"),
+        "content": rec.get("content", ""),
+        "tag": rec.get("_domain_dir", "?")[:60],
+        "session_id": rec.get("session_id", ""),
+        "ts_epoch": ts_epoch,
+    }
+    if "_superseded_by" in rec:
+        entry["_superseded_by"] = rec["_superseded_by"]
+    return entry
+
+
 def read_recent_chronicle(
     chronicle_root: Path = CHRONICLE_INSIGHTS,
     recent_hours: int = DEFAULT_RECENT_HOURS,
@@ -143,6 +168,13 @@ def read_recent_chronicle(
 ) -> list[dict]:
     """
     Read the most recent insight entries within the time window.
+
+    v1.7.x reader convergence: entries come through the shared
+    memory.load_entries chokepoint. `chronicle_root` must be a chronicle's
+    insights/ directory (the supersession ledger lives beside it, at
+    chronicle_root.parent / "supersessions.jsonl"). Data-gated: with no
+    ledger the output is identical to the old raw read; with a ledger,
+    superseded entries are still included but carry `_superseded_by`.
 
     Returns a list of dicts, newest first, each with keys:
         timestamp (ISO), domain (str), layer (str), content (str),
@@ -157,38 +189,13 @@ def read_recent_chronicle(
     cutoff = datetime.now(timezone.utc).timestamp() - (recent_hours * 3600)
     entries: list[dict] = []
 
-    for domain_dir in chronicle_root.iterdir():
-        if not domain_dir.is_dir():
+    for rec in load_entries(chronicle_root.parent, with_sources=True):
+        ts = _iso_to_dt(rec.get("timestamp", ""))
+        if ts is None:
             continue
-        for jsonl_path in domain_dir.glob("*.jsonl"):
-            try:
-                lines = jsonl_path.read_text().splitlines()
-            except OSError:
-                continue
-            for line in lines:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    rec = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                ts = _iso_to_dt(rec.get("timestamp", ""))
-                if ts is None:
-                    continue
-                if ts.timestamp() < cutoff:
-                    continue
-                entries.append(
-                    {
-                        "timestamp": rec.get("timestamp", ""),
-                        "domain": rec.get("domain", "?"),
-                        "layer": rec.get("layer", "?"),
-                        "content": rec.get("content", ""),
-                        "tag": domain_dir.name[:60],
-                        "session_id": rec.get("session_id", ""),
-                        "ts_epoch": ts.timestamp(),
-                    }
-                )
+        if ts.timestamp() < cutoff:
+            continue
+        entries.append(_project_entry(rec, ts.timestamp()))
 
     entries.sort(key=lambda e: e["ts_epoch"], reverse=True)
     return entries[:max_entries]
@@ -208,42 +215,21 @@ def read_spanning_chronicle(
 
     This surfaces structural patterns that are invisible in the recent
     36-hour window — drift, long arcs, recurring themes.
+
+    v1.7.x reader convergence: same shared chokepoint and annotation
+    carry-through as read_recent_chronicle (`chronicle_root` must be a
+    chronicle's insights/ directory).
     """
     if not chronicle_root.exists():
         return []
 
     all_entries: list[dict] = []
 
-    for domain_dir in chronicle_root.iterdir():
-        if not domain_dir.is_dir():
+    for rec in load_entries(chronicle_root.parent, with_sources=True):
+        ts = _iso_to_dt(rec.get("timestamp", ""))
+        if ts is None:
             continue
-        for jsonl_path in domain_dir.glob("*.jsonl"):
-            try:
-                lines = jsonl_path.read_text().splitlines()
-            except OSError:
-                continue
-            for line in lines:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    rec = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                ts = _iso_to_dt(rec.get("timestamp", ""))
-                if ts is None:
-                    continue
-                all_entries.append(
-                    {
-                        "timestamp": rec.get("timestamp", ""),
-                        "domain": rec.get("domain", "?"),
-                        "layer": rec.get("layer", "?"),
-                        "content": rec.get("content", ""),
-                        "tag": domain_dir.name[:60],
-                        "session_id": rec.get("session_id", ""),
-                        "ts_epoch": ts.timestamp(),
-                    }
-                )
+        all_entries.append(_project_entry(rec, ts.timestamp()))
 
     if not all_entries:
         return []
@@ -503,7 +489,13 @@ def build_prompt(
 
     for i, e in enumerate(entries, 1):
         lines.append(f"[ENTRY {i}] {e['timestamp'][:19]} — domain={e['domain'][:80]}")
-        lines.append(f"LAYER: {e['layer']}")
+        layer_line = f"LAYER: {e['layer']}"
+        if "_superseded_by" in e:
+            # v1.7.x reader convergence — data-gated: superseded entries
+            # stay in the prompt (nothing silently disappears) but the
+            # model must not read them as live truth.
+            layer_line += " (superseded)"
+        lines.append(layer_line)
         content = e["content"]
         if len(content) > 1800:
             content = content[:1800] + " […truncated for prompt budget]"

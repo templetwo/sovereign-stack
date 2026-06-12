@@ -18,6 +18,7 @@ from pathlib import Path
 
 from mcp.types import TextContent, Tool
 
+from .memory import load_entries
 from .provenance import append_supersession, build_supersession_record, derive_claim_id
 
 SOVEREIGN_ROOT = Path.home() / ".sovereign"
@@ -70,6 +71,19 @@ def _archive_test_artifacts_impl(chronicle_dir: Path) -> dict:
     archive_dir = chronicle_dir / ".archive_test_artifacts"
     archive_dir.mkdir(exist_ok=True)
 
+    # v1.7.x reader convergence: the SCAN goes through the shared annotated
+    # read chokepoint (memory.load_entries) like every other chronicle
+    # reader. Supersession state rides along on the scan (artifact detection
+    # itself is content-pattern only, and read-derived annotations are never
+    # persisted into the archive sidecar). The per-file rewrite below
+    # re-reads raw lines, so corrupt lines and untouched files keep their
+    # exact bytes.
+    flagged_files = {
+        entry["_file"]
+        for entry in load_entries(chronicle_dir, with_sources=True)
+        if _is_test_artifact(entry.get("content", ""))
+    }
+
     archived_total = 0
     files_modified = 0
     domains_removed = 0
@@ -79,6 +93,8 @@ def _archive_test_artifacts_impl(chronicle_dir: Path) -> dict:
         if not domain_dir.is_dir() or domain_dir.name.startswith("."):
             continue
         for jsonl_file in list(domain_dir.glob("*.jsonl")):
+            if str(jsonl_file) not in flagged_files:
+                continue
             kept_lines: list[str] = []
             archived_entries: list[dict] = []
             for line in jsonl_file.read_text().splitlines():
@@ -357,25 +373,17 @@ METABOLISM_TOOLS = [
 
 
 def _load_all_insights():
-    """Load all insights from the chronicle."""
-    insights = []
-    insights_dir = CHRONICLE_DIR / "insights"
-    if not insights_dir.exists():
-        return insights
-    for domain_dir in insights_dir.iterdir():
-        if not domain_dir.is_dir():
-            continue
-        for jsonl_file in domain_dir.glob("*.jsonl"):
-            for line in jsonl_file.read_text().splitlines():
-                if line.strip():
-                    try:
-                        entry = json.loads(line)
-                        entry["_domain_dir"] = domain_dir.name
-                        entry["_file"] = str(jsonl_file)
-                        insights.append(entry)
-                    except json.JSONDecodeError:
-                        continue
-    return insights
+    """
+    Load all insights from the chronicle, supersession-aware.
+
+    v1.7.x reader convergence: routed through memory.load_entries — the
+    same annotation chokepoint recall_insights uses. Data-gated: with no
+    supersession ledger the result is identical to the old raw read; with
+    a ledger, superseded entries are annotated in place (_superseded_by /
+    _carry_forward_summary), never dropped. Source markers (_domain_dir,
+    _file) are preserved for the callers that filter by them.
+    """
+    return load_entries(CHRONICLE_DIR, with_sources=True)
 
 
 def _load_all_threads():
@@ -493,17 +501,23 @@ async def handle_metabolism_tool(name, arguments):
                         # Raised from 0.3 -> 0.45 on 2026-05-18 (Wave 1 substrate fix, GAMEPLAN.md):
                         # CODA April 20 entry was firing as false-positive against 5 unrelated entries
                         # every night due to common-vocabulary overlap at the lower threshold.
-                        digest["contradictions"].append(
-                            {
-                                "hypothesis_domain": hyp.get("_domain_dir", "?"),
-                                "hypothesis_preview": h_content[:120],
-                                "hypothesis_timestamp": hyp.get("timestamp", "?"),
-                                "ground_truth_domain": gt.get("_domain_dir", "?"),
-                                "ground_truth_preview": g_content[:120],
-                                "ground_truth_timestamp": gt.get("timestamp", "?"),
-                                "overlap_score": round(overlap, 3),
-                            }
-                        )
+                        row = {
+                            "hypothesis_domain": hyp.get("_domain_dir", "?"),
+                            "hypothesis_preview": h_content[:120],
+                            "hypothesis_timestamp": hyp.get("timestamp", "?"),
+                            "ground_truth_domain": gt.get("_domain_dir", "?"),
+                            "ground_truth_preview": g_content[:120],
+                            "ground_truth_timestamp": gt.get("timestamp", "?"),
+                            "overlap_score": round(overlap, 3),
+                        }
+                        # v1.7.x reader convergence — data-gated: superseded
+                        # entries stay in the digest (nothing silently
+                        # disappears) but the state is visible downstream.
+                        if "_superseded_by" in hyp:
+                            row["hypothesis_superseded"] = True
+                        if "_superseded_by" in gt:
+                            row["ground_truth_superseded"] = True
+                        digest["contradictions"].append(row)
 
         # Detect stale threads
         if detect_stale:
@@ -543,13 +557,15 @@ async def handle_metabolism_tool(name, arguments):
 
                 age_days = (now - hyp_time) / 86400 if hyp_time > 0 else 999
                 if age_days > max_age:
-                    digest["stale_hypotheses"].append(
-                        {
-                            "content": hyp.get("content", "?")[:120],
-                            "domain": hyp.get("_domain_dir", "?"),
-                            "age_days": round(age_days),
-                        }
-                    )
+                    row = {
+                        "content": hyp.get("content", "?")[:120],
+                        "domain": hyp.get("_domain_dir", "?"),
+                        "age_days": round(age_days),
+                    }
+                    # Data-gated supersession visibility (see contradictions).
+                    if "_superseded_by" in hyp:
+                        row["superseded"] = True
+                    digest["stale_hypotheses"].append(row)
 
         # Log the metabolism cycle
         log_entry = {
@@ -570,10 +586,12 @@ async def handle_metabolism_tool(name, arguments):
         if digest["contradictions"]:
             result += f"⚠️ {len(digest['contradictions'])} potential contradiction(s):\n"
             for c in digest["contradictions"][:5]:
-                result += f"  Hyp [{c['hypothesis_domain']}]: {c['hypothesis_preview'][:80]}\n"
+                hyp_mark = " (superseded)" if c.get("hypothesis_superseded") else ""
+                gt_mark = " (superseded)" if c.get("ground_truth_superseded") else ""
                 result += (
-                    f"  vs GT [{c['ground_truth_domain']}]: {c['ground_truth_preview'][:80]}\n"
+                    f"  Hyp{hyp_mark} [{c['hypothesis_domain']}]: {c['hypothesis_preview'][:80]}\n"
                 )
+                result += f"  vs GT{gt_mark} [{c['ground_truth_domain']}]: {c['ground_truth_preview'][:80]}\n"
                 result += f"  Overlap: {c['overlap_score']}\n\n"
 
         if digest["stale_threads"]:
@@ -584,7 +602,8 @@ async def handle_metabolism_tool(name, arguments):
         if digest["stale_hypotheses"]:
             result += f"\n📜 {len(digest['stale_hypotheses'])} aging hypothesis(es):\n"
             for h in digest["stale_hypotheses"][:5]:
-                result += f"  [{h['domain']}] {h['content'][:80]} ({h['age_days']}d)\n"
+                mark = " (superseded)" if h.get("superseded") else ""
+                result += f"  [{h['domain']}]{mark} {h['content'][:80]} ({h['age_days']}d)\n"
 
         if (
             not digest["contradictions"]
@@ -610,39 +629,58 @@ async def handle_metabolism_tool(name, arguments):
             return [
                 TextContent(type="text", text=f"No matching hypothesis found for '{fragment[:60]}'")
             ]
-        for domain_dir in insights_dir.iterdir():
-            if domain and domain not in domain_dir.name:
+
+        # v1.7.x reader convergence: the scan SELECTS through the shared
+        # annotated chokepoint (_load_all_insights -> memory.load_entries),
+        # so already-superseded matches are visible instead of silently
+        # treated as live. Selection is unchanged — superseded matches are
+        # still retired (never drop), the state is just surfaced below. The
+        # mutation loop then re-reads raw lines for ONLY the matched files,
+        # so corrupt lines and untouched files keep their exact bytes.
+        already_superseded = 0
+        match_files: set[str] = set()
+        for candidate in _load_all_insights():
+            if domain and domain not in candidate.get("_domain_dir", ""):
                 continue
-            for jsonl_file in domain_dir.glob("*.jsonl"):
-                lines = jsonl_file.read_text().splitlines()
-                updated = []
-                file_changed = False
-                for line in lines:
-                    if not line.strip():
-                        continue
-                    try:
-                        entry = json.loads(line)
-                        if (
-                            entry.get("layer") == "hypothesis"
-                            and fragment.lower() in entry.get("content", "").lower()
-                        ):
-                            # Claim ids derive from (timestamp, domain, content)
-                            # only — the retirement annotations below are
-                            # outside the preimage, so the id never shifts.
-                            retired_entries.append((derive_claim_id(entry), dict(entry)))
-                            entry["layer"] = "retired"
-                            entry["retired_reason"] = reason
-                            entry["retired_by"] = replaced_by
-                            entry["retired_at"] = datetime.now(timezone.utc).isoformat()
-                            retired = True
-                            file_changed = True
-                        updated.append(json.dumps(entry))
-                    except json.JSONDecodeError:
-                        updated.append(line)
-                # Only rewrite files that actually changed — untouched files
-                # keep their bytes (and mtimes) exactly as they were.
-                if file_changed:
-                    jsonl_file.write_text("\n".join(updated) + "\n")
+            if (
+                candidate.get("layer") == "hypothesis"
+                and fragment.lower() in candidate.get("content", "").lower()
+            ):
+                match_files.add(candidate["_file"])
+                if "_superseded_by" in candidate:
+                    already_superseded += 1
+
+        for match_file in sorted(match_files):
+            jsonl_file = Path(match_file)
+            lines = jsonl_file.read_text().splitlines()
+            updated = []
+            file_changed = False
+            for line in lines:
+                if not line.strip():
+                    continue
+                try:
+                    entry = json.loads(line)
+                    if (
+                        entry.get("layer") == "hypothesis"
+                        and fragment.lower() in entry.get("content", "").lower()
+                    ):
+                        # Claim ids derive from (timestamp, domain, content)
+                        # only — the retirement annotations below are
+                        # outside the preimage, so the id never shifts.
+                        retired_entries.append((derive_claim_id(entry), dict(entry)))
+                        entry["layer"] = "retired"
+                        entry["retired_reason"] = reason
+                        entry["retired_by"] = replaced_by
+                        entry["retired_at"] = datetime.now(timezone.utc).isoformat()
+                        retired = True
+                        file_changed = True
+                    updated.append(json.dumps(entry))
+                except json.JSONDecodeError:
+                    updated.append(line)
+            # Only rewrite files that actually changed — untouched files
+            # keep their bytes (and mtimes) exactly as they were.
+            if file_changed:
+                jsonl_file.write_text("\n".join(updated) + "\n")
 
         if retired:
             # Reconcile the two liveness systems: the supersession read path
@@ -659,12 +697,15 @@ async def handle_metabolism_tool(name, arguments):
                     predecessor=snapshot,
                 )
                 append_supersession(ledger_path, record)
-            return [
-                TextContent(
-                    type="text",
-                    text=f"📦 Hypothesis retired: '{fragment[:60]}...'\n  Reason: {reason}\n  Replaced by: {replaced_by}",
+            text = f"📦 Hypothesis retired: '{fragment[:60]}...'\n  Reason: {reason}\n  Replaced by: {replaced_by}"
+            if already_superseded:
+                # Data-gated visibility: the scan saw ledger state — say so.
+                noun = "entry was" if already_superseded == 1 else "entries were"
+                text += (
+                    f"\n  Note: {already_superseded} matched {noun} already "
+                    "superseded in the ledger (retired anyway; latest action wins)"
                 )
-            ]
+            return [TextContent(type="text", text=text)]
         return [
             TextContent(type="text", text=f"No matching hypothesis found for '{fragment[:60]}'")
         ]
@@ -843,7 +884,10 @@ async def handle_metabolism_tool(name, arguments):
             domain = ins.get("_domain_dir", "?")
             layer = ins.get("layer", "?")
             content = ins.get("content", "")[:150]
-            result += f"  [{layer}] ({domain}) score={score:.1f}\n"
+            # v1.7.x reader convergence — data-gated: superseded entries are
+            # still retrieved (never drop) but visibly marked.
+            mark = " (superseded)" if "_superseded_by" in ins else ""
+            result += f"  [{layer}]{mark} ({domain}) score={score:.1f}\n"
             result += f"  {content}\n\n"
 
         return [TextContent(type="text", text=result)]
