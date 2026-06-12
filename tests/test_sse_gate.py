@@ -131,3 +131,50 @@ class TestMiddlewareGate:
         sent = self._call(_scope(path="/health"))
         start = next(m for m in sent if m["type"] == "http.response.start")
         assert start["status"] == 200
+
+
+class TestConnectRateLimit:
+    """Public connects (CF-Connecting-IP present) are bucketed; local exempt."""
+
+    @pytest.fixture(autouse=True)
+    def fresh_buckets(self):
+        sse_server._connect_buckets.clear()
+        yield
+        sse_server._connect_buckets.clear()
+
+    def test_local_connect_has_no_public_ip(self):
+        assert sse_server._public_ip(_scope()) is None
+
+    def test_tunnel_connect_extracts_ip(self):
+        scope = _scope(headers=[(b"cf-connecting-ip", b"203.0.113.7")])
+        assert sse_server._public_ip(scope) == "203.0.113.7"
+
+    def test_burst_then_throttle(self):
+        ip = "203.0.113.7"
+        burst = int(sse_server._SSE_CONNECT_BURST)
+        for _ in range(burst):
+            assert sse_server._connect_rate_ok(ip) is True
+        assert sse_server._connect_rate_ok(ip) is False
+
+    def test_ips_have_independent_buckets(self):
+        burst = int(sse_server._SSE_CONNECT_BURST)
+        for _ in range(burst):
+            sse_server._connect_rate_ok("203.0.113.7")
+        assert sse_server._connect_rate_ok("203.0.113.7") is False
+        assert sse_server._connect_rate_ok("198.51.100.9") is True
+
+    def test_middleware_429_on_public_flood(self, token_env):
+        headers = [(b"cf-connecting-ip", b"203.0.113.7")]
+        burst = int(sse_server._SSE_CONNECT_BURST)
+        for _ in range(burst):
+            sse_server._connect_rate_ok("203.0.113.7")
+        sent = TestMiddlewareGate._call(_scope(headers=headers))
+        start = next(m for m in sent if m["type"] == "http.response.start")
+        assert start["status"] == 429
+
+    def test_local_flood_never_throttled(self, token_env):
+        # No CF header → exempt; with a bad token this is 401, never 429.
+        for _ in range(int(sse_server._SSE_CONNECT_BURST) + 5):
+            sent = TestMiddlewareGate._call(_scope(query=b"token=wrong"))
+            start = next(m for m in sent if m["type"] == "http.response.start")
+            assert start["status"] == 401
