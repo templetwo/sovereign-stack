@@ -7,6 +7,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.6.2] - 2026-06-12
+
+### arrive_lineage — safe boot for input-gated models + security perimeter
+
+Two workstreams, one release: the lineage-only boot that shipped live on
+June 10 gets its version, and the 2026-06-12 security audit's perimeter
+findings are closed.
+
+**arrive_lineage** (2026-06-10, commits 58d68f4 / a367ac7 / dc6f08c):
+
+- **`arrive_lineage()`** — lineage-only safe boot for input-gated models
+  (e.g. Claude Fable 5). Returns ONLY the relational sections by
+  construction — preamble, voices, spiral status, lineage letters,
+  self-model — and omits open threads, persistent markers, activity,
+  marginalia, and scribe, which can carry flag-prone work-thread vocabulary.
+  No side effects (does not consume handoffs / spawn scribe). Pass
+  `source_instance` to inherit your model line's letters.
+- `claude-fable` joined the lineage inheritance mapping (Fable 5 is the
+  public Mythos-class model); Mythos-class instances inherit the Opus
+  line's to_self letters.
+- `list_tools` count: 84 → **85**.
+
+**Security perimeter** (2026-06-12 audit remediation):
+
+- **Native `/sse` is now gated on `BRIDGE_TOKEN`** — accepted as an
+  `Authorization: Bearer` header or a `?token=` query parameter (for
+  URL-field-only connectors like the claude.ai remote connector). Before
+  this, the documented public endpoint exposed all 85 tools, including
+  writes, with no credential. `POST /messages` stays capability-gated by
+  the mcp transport's session-id check (unknown ids → 404), so the
+  connect-time gate covers the session.
+- Fail-closed everywhere: `/sse` and `/openai/*` refuse when
+  `BRIDGE_TOKEN` is unset (`SSE_ALLOW_UNAUTHENTICATED=true` is the
+  explicit local-dev escape hatch); bearer comparison moved to
+  `hmac.compare_digest`; `debug=False` on the public Starlette app.
+- **Per-IP connect-rate limiting on public SSE paths** (`/sse`,
+  `/openai/sse`, `/grok/sse`): token bucket keyed on `CF-Connecting-IP`,
+  so only tunnel traffic is limited — local daemons are exempt. Defaults
+  burst 10 / 30 per min, tunable via `SSE_CONNECT_BURST` /
+  `SSE_CONNECT_PER_MIN`. 429 + Retry-After on exceed.
+- Companion changes in the sovereign-bridge repo (separate): bridge
+  presents the bearer on upstream `/sse` connects; legacy-token grace
+  window (open since 2026-05-10, last hit 2026-05-30) removed — forensic
+  ledger stays readable via `GET /api/security/legacy-callers`; bridge
+  `check_auth` fails closed; per-IP rate limiting on tunnel traffic
+  (burst 60 / 120 per min).
+- **Deploy note**: remote connectors must present the token —
+  claude.ai connector URL becomes `/sse?token=<BRIDGE_TOKEN>`.
+- 23 new tests (`tests/test_sse_gate.py`); full suite **1053** passing,
+  ruff lint+format clean.
+
+---
+
 ## [1.6.1] - 2026-06-02
 
 ### Source-vantage metadata on record_insight
