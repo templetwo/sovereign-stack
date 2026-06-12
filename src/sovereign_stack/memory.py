@@ -22,6 +22,7 @@ from glob import glob as glob_files
 from pathlib import Path
 from typing import Any
 
+from . import provenance
 from .coherence import Coherence
 
 # Pattern: "(1) ... (2) ..." with sequential numbered items is a bundle.
@@ -140,6 +141,62 @@ class DedupedInsightPath(str):
         obj = super().__new__(cls, path)
         obj.existing_entry = existing_entry
         return obj
+
+
+# =============================================================================
+# v1.7.0 TOOL-SCHEMA EXTENSIONS (server.py owner: merge these into the
+# existing record_insight / recall_insights inputSchema["properties"] —
+# plain dicts in the exact TOOLS-list style, zero side effects here).
+# =============================================================================
+
+RECORD_INSIGHT_SCHEMA_EXTENSIONS = {
+    "verified_by": {
+        "type": "array",
+        "items": {"type": "object"},
+        "description": (
+            "Optional receipts: [{kind, ref, sha256?, note?}] with kind one of "
+            "archive | file | claim | cmd | url | human. Verified at write and "
+            "stored stamped (checked_at_write: verified | mismatch | cites | "
+            "attested). A dangling/ambiguous/malformed receipt rejects the whole "
+            "call, naming the receipt. file receipts require sha256; claim refs "
+            "stamp 'cites', never 'verified'."
+        ),
+    },
+    "supersedes": {
+        "type": "array",
+        "items": {"type": "string"},
+        "description": (
+            "Optional list of claim ids (full 64-hex or unique prefix) this entry "
+            "supersedes — N-to-1 consolidation. Each resolved at write (unknown/"
+            "ambiguous rejects); one supersession ledger record per predecessor is "
+            "appended in the same call. Requires carry_forward_summary."
+        ),
+    },
+    "carry_forward_summary": {
+        "type": "string",
+        "description": (
+            "What the superseded predecessors still teach (<= 500 chars). "
+            "REQUIRED when supersedes is present."
+        ),
+    },
+}
+
+RECALL_INSIGHTS_SCHEMA_EXTENSIONS = {
+    "with_ids": {
+        "type": "boolean",
+        "default": False,
+        "description": "If true, annotate every returned entry with its derived claim_id (64-hex).",
+    },
+    "exclude_superseded": {
+        "type": "boolean",
+        "default": False,
+        "description": (
+            "If true, drop superseded entries before the limit (successors fill the "
+            "slots). Default false: superseded entries return annotated in place "
+            "(_superseded_by, _carry_forward_summary) — the raw query tool never hides."
+        ),
+    },
+}
 
 
 # =============================================================================
@@ -385,6 +442,12 @@ class ExperientialMemory:
         # signal-to-noise is preserved. Chronicle entries reference archives by id.
         self.archives_dir = self.root / "archives"
         self.archives_index = self.archives_dir / "index.jsonl"
+        # Supersession ledger (v1.7.0): append-only canonical source for
+        # supersede/revoke/retire records; the entry's `supersedes` field is
+        # a denormalized breadcrumb. Same layout as
+        # provenance.default_supersessions_path(), relative to this root.
+        # NOT created here — lazily on first write, never on read.
+        self.supersessions_path = self.root / "supersessions.jsonl"
 
         # Create directories
         for d in [
@@ -405,6 +468,9 @@ class ExperientialMemory:
         layer: str = None,
         confidence: float = None,
         vantage: str = None,
+        verified_by: list[dict] = None,
+        supersedes: list[str] = None,
+        carry_forward_summary: str = None,
         **metadata,
     ) -> str:
         """
@@ -425,14 +491,49 @@ class ExperientialMemory:
                    web_connector, local_jetson, claude_sandbox, openai_bridge,
                    grok_bridge, gemini_connector, human_observation,
                    external_web_verified. Omit if not relevant.
+            verified_by: Optional receipts list, {kind, ref, sha256?, note?}
+                   per provenance.RECEIPT_KINDS. Verified at write: dangling /
+                   ambiguous / malformed refs REJECT the whole call (ValueError
+                   naming the receipt); resolvable refs are stored stamped
+                   (`checked_at_write`: verified | mismatch | cites | attested).
+            supersedes: Optional list of claim ids (full 64-hex or unique
+                   prefix) this entry supersedes — N-to-1 consolidation. Each
+                   resolved at write; one supersession ledger record appended
+                   per predecessor in the same call; full ids stored as the
+                   entry's `supersedes` breadcrumb.
+            carry_forward_summary: REQUIRED when supersedes is present
+                   (<= 500 chars) — what the predecessors still teach.
             **metadata: Additional context
 
         Returns:
-            Path to the recorded insight. If the write was skipped as an
-            immediate retry duplicate (identical content+domain+layer within
-            120s of the file's last entry), the path is a DedupedInsightPath —
-            a str subclass carrying deduped=True and the surviving entry.
+            Path to the recorded insight. When verified_by was supplied the
+            string gains ' (receipts: N verified, M attested)'; when
+            supersedes was supplied it gains ' ⊃ supersedes N'. Absent both,
+            the return is byte-identical to the pre-v1.7.0 path string.
+            If the write was skipped as an immediate retry duplicate
+            (identical content+domain+layer within 120s of the file's last
+            entry), the path is a DedupedInsightPath — a str subclass
+            carrying deduped=True and the surviving entry — returned BEFORE
+            any receipt verification or ledger write, so a retry can never
+            double-write supersession records.
         """
+        # v1.7.0 provenance params — validate SHAPES first (fail fast, before
+        # the dedup check); ref resolution and ledger writes happen only
+        # after dedup so a retry duplicate never touches the ledger.
+        if supersedes is not None:
+            if not isinstance(supersedes, list) or not all(
+                isinstance(ref, str) for ref in supersedes
+            ):
+                raise provenance.ProvenanceError("supersedes must be a list of claim-id strings")
+            provenance.validate_carry_forward(supersedes, carry_forward_summary)
+        elif carry_forward_summary is not None:
+            provenance.validate_carry_forward(None, carry_forward_summary)
+        if verified_by:
+            if not isinstance(verified_by, list):
+                raise provenance.ReceiptError("verified_by must be a list of receipt dicts")
+            for position, receipt in enumerate(verified_by, start=1):
+                provenance.validate_receipt_shape(receipt, position)
+
         timestamp = datetime.now(timezone.utc)
         session_id = session_id or f"session_{timestamp.strftime('%Y%m%d_%H%M%S')}"
         layer = layer if layer in self.VALID_LAYERS else self.LAYER_HYPOTHESIS
@@ -465,6 +566,19 @@ class ExperientialMemory:
                 if delta is not None and delta <= _DEDUP_WINDOW_SECONDS:
                     return DedupedInsightPath(str(jsonl_path), last)
 
+        # Receipts: verify refs and stamp write-time verdicts. A dangling /
+        # ambiguous / malformed receipt rejects the whole call (ReceiptError
+        # is a ValueError, naming the receipt); a hash-mismatched one is
+        # recordable but permanently stamped "mismatch".
+        stamped_receipts: list[dict] = []
+        if verified_by:
+            stamped_receipts = provenance.verify_receipts_at_write(verified_by, self.root)
+
+        # Supersedes: resolve each ref (unknown/ambiguous rejects the call).
+        resolved_predecessors: list[tuple[str, dict]] = []
+        if supersedes:
+            resolved_predecessors = provenance.resolve_supersedes(supersedes, self.root)
+
         insight = {
             "timestamp": timestamp.isoformat(),
             "domain": domain,
@@ -478,12 +592,55 @@ class ExperientialMemory:
             insight["confidence"] = confidence
         if vantage:
             insight["vantage"] = vantage
+        if stamped_receipts:
+            insight["verified_by"] = stamped_receipts
+        if resolved_predecessors:
+            # Denormalized breadcrumb — the ledger remains canonical.
+            insight["supersedes"] = [claim_id for claim_id, _entry in resolved_predecessors]
+        if carry_forward_summary:
+            insight["carry_forward_summary"] = carry_forward_summary
+
+        # Supersession guards run against the new entry's derived id BEFORE
+        # anything is written — a guard failure leaves chronicle and ledger
+        # both untouched.
+        successor_id = None
+        if resolved_predecessors:
+            successor_id = provenance.derive_claim_id(insight)
+            fold = provenance.fold_supersessions(
+                provenance.load_supersessions(self.supersessions_path)
+            )
+            for claim_id, _entry in resolved_predecessors:
+                provenance.check_supersession_guards(claim_id, successor_id, fold)
 
         # Append to domain's JSONL file
         with open(jsonl_path, "a") as f:
             f.write(json.dumps(insight) + "\n")
 
-        return str(jsonl_path)
+        # One ledger record per predecessor, in the same call as the entry
+        # write (ledger is canonical; breadcrumb above is the denormalized
+        # copy — a test asserts the two stay rebuildable from each other).
+        for claim_id, predecessor in resolved_predecessors:
+            record = provenance.build_supersession_record(
+                action="supersede",
+                superseded_id=claim_id,
+                successor_id=successor_id,
+                carry_forward_summary=carry_forward_summary,
+                reason="",
+                by=str(metadata.get("source_instance") or ""),
+                vantage=vantage,
+                predecessor=predecessor,
+                timestamp=insight["timestamp"],
+            )
+            provenance.append_supersession(self.supersessions_path, record)
+
+        # Absent both params this return is byte-identical to pre-v1.7.0.
+        path_str = str(jsonl_path)
+        if stamped_receipts:
+            counts = provenance.receipt_stamp_counts(stamped_receipts)
+            path_str += f" (receipts: {counts['verified']} verified, {counts['attested']} attested)"
+        if resolved_predecessors:
+            path_str += f" ⊃ supersedes {len(resolved_predecessors)}"
+        return path_str
 
     def record_learning(
         self,
@@ -978,8 +1135,14 @@ class ExperientialMemory:
         hypotheses = self.recall_insights(layer_filter=self.LAYER_HYPOTHESIS, limit=limit)
         open_threads = self.get_open_threads(limit=limit)
 
-        return {
-            "ground_truth": ground_truth,
+        # v1.7.0: superseded ground truths do not travel — successors do.
+        # Data-gated: with an empty ledger nothing carries the annotation,
+        # the partition is a no-op, and the held-back key never appears.
+        live_ground_truth = [g for g in ground_truth if "_superseded_by" not in g]
+        superseded_held_back = len(ground_truth) - len(live_ground_truth)
+
+        context = {
+            "ground_truth": live_ground_truth,
             "hypotheses": [
                 {**h, "_note": "This is one instance's interpretation, not settled truth"}
                 for h in hypotheses
@@ -991,6 +1154,9 @@ class ExperientialMemory:
             "inheritance_timestamp": datetime.now(timezone.utc).isoformat(),
             "coupling_advisory": "R=0.46, not R=1.0. Facts travel. Interpretations are offered. Feelings are not transmitted.",
         }
+        if superseded_held_back > 0:
+            context["superseded_held_back"] = superseded_held_back
+        return context
 
     def recall_insights(
         self,
@@ -1002,6 +1168,8 @@ class ExperientialMemory:
         start_date: str = None,
         end_date: str = None,
         since_last_reflection: bool = False,
+        with_ids: bool = False,
+        exclude_superseded: bool = False,
     ) -> list[dict]:
         """
         Recall insights, optionally filtered by domain, intensity, and time window.
@@ -1016,9 +1184,20 @@ class ExperientialMemory:
             since_last_reflection: If True, start_date is overridden with the timestamp of
                 the last recorded reflection in this chronicle. Inhabitant syntax:
                 "what has happened since I last looked up?"
+            with_ids: If True, every returned entry carries its derived
+                `claim_id` (full 64-hex, computed on read, never persisted).
+            exclude_superseded: If True, entries the supersession ledger marks
+                superseded/retired are dropped BEFORE the limit (successors
+                fill the slots). Default False: the raw query tool never
+                hides — superseded entries are returned annotated in place.
 
         Returns:
-            List of insight dicts, newest first
+            List of insight dicts, newest first. Data-gated annotation: when
+            the supersessions ledger is non-empty, superseded entries gain
+            `_superseded_by` (full 64-hex; null for retirements) and
+            `_carry_forward_summary` (underscore = derived at read, never
+            persisted). With no ledger records the output is byte-identical
+            to pre-v1.7.0 behavior.
         """
         # Resolve since_last_reflection — inhabitant interface for date filtering
         if since_last_reflection:
@@ -1082,7 +1261,24 @@ class ExperientialMemory:
 
         # Sort by timestamp descending
         insights.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
-        return insights[:limit]
+
+        # v1.7.0 read path — single chokepoint, data-gated: zero ledger
+        # records, zero change. Annotate-not-drop is the default (the raw
+        # query tool never hides); exclude_superseded drops pre-limit.
+        fold: dict[str, dict] = {}
+        ledger_records = provenance.load_supersessions(self.supersessions_path)
+        if ledger_records:
+            fold = provenance.fold_supersessions(ledger_records)
+        if fold:
+            if exclude_superseded:
+                insights, _superseded = provenance.partition_superseded(insights, fold)
+            else:
+                insights = provenance.annotate_superseded(insights, fold)
+
+        insights = insights[:limit]
+        if with_ids:
+            insights = provenance.annotate_claim_ids(insights)
+        return insights
 
     def last_reflection_timestamp(self) -> str | None:
         """

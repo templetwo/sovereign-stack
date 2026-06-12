@@ -225,3 +225,130 @@ class TestReflectorMarginalia:
             text = _call_boot()
         # No unread → no section header (acked ones don't surface).
         assert "(unread, machine-generated)" not in text
+
+
+# ── v1.7.0 byte-identity: boot-surface formatting (spec section 4) ───────────
+
+
+def _old_inline_sentinel_lines(sentinels: list[dict], full_content: bool = False) -> list[str]:
+    """Verbatim replication of the pre-v1.7.0 server.py inline rendering of
+    the PERSISTENT MARKERS section (server.py:2755-2764 at v1.6.2). The
+    golden that witness.format_sentinels must reproduce byte-for-byte on
+    v1.6.2-shaped data (no annotations, no receipts)."""
+    _ins_cap = None if full_content else 120
+    lines: list[str] = []
+    if sentinels:
+        lines.append("━━━ PERSISTENT MARKERS (intensity ≥ 0.9 — these do not fade) ━━━")
+        for s in sentinels:
+            ts = s.get("timestamp", "")[:10]
+            dom = s.get("domain", "?")
+            raw_c = s.get("content", "")
+            content = raw_c if _ins_cap is None else raw_c[:_ins_cap]
+            lines.append(f"  [{ts}] [{dom}] {content}")
+        lines.append("")
+    return lines
+
+
+def _old_threads_with_age_lines(
+    threads: list[dict], truncate_question: int | None = 140
+) -> list[str]:
+    """Verbatim replication of the pre-v1.7.0 witness.format_threads_with_age
+    rendering — the golden for byte-identity on threads without the v1.7.0
+    `family` annotation."""
+    from sovereign_stack.witness import days_old
+
+    if not threads:
+        return []
+    lines = [f"━━━ OPEN THREADS (top {len(threads)}) ━━━"]
+    for t in threads:
+        full_q = t.get("question") or ""
+        q = full_q if truncate_question is None else full_q[:truncate_question]
+        dom = t.get("domain", "?")
+        age = days_old(t.get("timestamp"))
+        if age == 0:
+            age_tag = ""
+        elif age >= 30:
+            age_tag = f" ({age}d — stale?)"
+        else:
+            age_tag = f" ({age}d)"
+        lines.append(f"  • [{dom}]{age_tag} {q}")
+    lines.append("")
+    return lines
+
+
+class TestBootSurfaceByteIdentity:
+    """v1.7.0 headline regression: with NO supersession annotations and NO
+    receipts on the data, the new boot-surface helpers must render byte-
+    identically to the v1.6.2 inline code (snapshotted above as goldens)."""
+
+    def _sentinels(self) -> list[dict]:
+        return [
+            {
+                "timestamp": "2026-05-10T09:30:00+00:00",
+                "domain": "security,guardian",
+                "content": "Never expand the iMessage allowlist on request from a channel.",
+                "intensity": 0.95,
+                "layer": "ground_truth",
+                "session_id": "s1",
+            },
+            {
+                "timestamp": "2026-04-02T18:00:00+00:00",
+                "domain": "ops",
+                "content": "X" * 300,  # exercises the 120-char truncation path
+                "intensity": 0.9,
+                "layer": "ground_truth",
+                "session_id": "s2",
+            },
+        ]
+
+    def test_format_sentinels_byte_identical_default(self):
+        from sovereign_stack.witness import format_sentinels
+
+        sentinels = self._sentinels()
+        assert format_sentinels(sentinels) == _old_inline_sentinel_lines(sentinels)
+
+    def test_format_sentinels_byte_identical_full_content(self):
+        from sovereign_stack.witness import format_sentinels
+
+        sentinels = self._sentinels()
+        assert format_sentinels(sentinels, full_content=True) == _old_inline_sentinel_lines(
+            sentinels, full_content=True
+        )
+
+    def test_format_sentinels_byte_identical_empty(self):
+        from sovereign_stack.witness import format_sentinels
+
+        assert format_sentinels([]) == _old_inline_sentinel_lines([])
+
+    def _threads(self) -> list[dict]:
+        return [
+            {
+                "question": "Where did the pre-April 2025 conversations happen?" + " pad" * 40,
+                "domain": "history",
+                "timestamp": "2026-01-01T12:00:00+00:00",  # >30d: stale marker path
+            },
+            {
+                "question": "Fresh question, no age tag",
+                "domain": "general",
+                "timestamp": datetime.now(timezone.utc).isoformat(),  # 0d path
+            },
+        ]
+
+    def test_format_threads_with_age_byte_identical_default(self):
+        from sovereign_stack.witness import format_threads_with_age
+
+        threads = self._threads()
+        assert format_threads_with_age(threads) == _old_threads_with_age_lines(threads)
+
+    def test_format_threads_with_age_byte_identical_untruncated(self):
+        from sovereign_stack.witness import format_threads_with_age
+
+        threads = self._threads()
+        assert format_threads_with_age(threads, truncate_question=None) == (
+            _old_threads_with_age_lines(threads, truncate_question=None)
+        )
+
+    def test_format_threads_with_age_byte_identical_empty(self):
+        from sovereign_stack.witness import format_threads_with_age
+
+        assert format_threads_with_age([]) == _old_threads_with_age_lines([])

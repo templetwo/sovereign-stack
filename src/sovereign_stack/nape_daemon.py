@@ -24,6 +24,7 @@ the audit trail intact regardless of what the instance claimed to do.
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -182,7 +183,14 @@ PATTERN_LEVELS: dict[str, str] = {
     "stale_context": "low",  # Phase 2 — detector deferred
     "clean_verify_declare": "satisfied",
     "post_fix_drift": "uneasy",  # Emitted by post_fix_tools when a watch diverges from baseline.
+    "unreceipted_ground_truth": "low",  # v1.7.0: sentinel ground_truth with no verified receipt.
 }
+
+# The receipt-count suffix record_insight appends when verified_by receipts
+# were supplied: " (receipts: N verified, M attested)". Only the verified
+# count silences the unreceipted_ground_truth honk — attestation is a
+# witness statement, not a verification.
+_RECEIPTS_VERIFIED_RE = re.compile(r"\(receipts: (\d+) verified, \d+ attested\)")
 
 # How many recent observations to consider as the sliding window for each check.
 WINDOW_DECLARE_VERIFY = 3  # spec: "within last 3 tool calls"
@@ -369,6 +377,7 @@ class NapeDaemon:
         honks.extend(self._detect_premature_summary(latest, recent_obs))
         honks.extend(self._detect_assertion_without_evidence(latest, recent_obs))
         honks.extend(self._detect_repeated_mistake(latest, recent_obs))
+        honks.extend(self._detect_unreceipted_ground_truth(latest))
         # Stale-context detection deferred to Phase 2 (see module docstring).
 
         return honks
@@ -864,6 +873,58 @@ class NapeDaemon:
                     f"Earliest prior error at {earliest_error_ts}. "
                     f"Consider calling record_learning to capture what went wrong "
                     f"before repeating the same action."
+                ),
+                timestamp=latest["timestamp"],
+            )
+        ]
+
+    def _detect_unreceipted_ground_truth(self, latest: dict) -> list[dict]:
+        """
+        Detect a ground_truth write at sentinel intensity carrying no receipt
+        stamped "verified" (v1.7.0 receipts layer).
+
+        Pattern: low honk.
+        Fires when: tool_name is "record_insight", the arguments declare
+        layer="ground_truth" at intensity >= 0.9, and the result string
+        reports no verified receipt (record_insight appends
+        "(receipts: N verified, M attested)" when verified_by was supplied).
+        Attestation-only receipts (cmd / url / human) count as UNRECEIPTED —
+        an attestation is a witness statement, not a verification, so a
+        zero-cost human: receipt can never silence the honk. Mismatch and
+        cites stamps never count either.
+        """
+        if latest.get("tool_name") != "record_insight":
+            return []
+        args = latest.get("arguments") or {}
+        if args.get("layer") != "ground_truth":
+            return []
+        try:
+            intensity = float(args.get("intensity", 0.5))
+        except (TypeError, ValueError):
+            return []
+        if intensity < 0.9:
+            return []
+
+        match = _RECEIPTS_VERIFIED_RE.search(latest.get("result_str", ""))
+        if match and int(match.group(1)) >= 1:
+            return []
+
+        receipt_state = (
+            f"receipts present but none stamped 'verified' ({match.group(0)})"
+            if match
+            else "no receipts supplied"
+        )
+        return [
+            self._build_honk(
+                session_id=latest["session_id"],
+                pattern="unreceipted_ground_truth",
+                trigger_tool="record_insight",
+                observation=(
+                    f"record_insight wrote ground_truth at intensity={intensity} "
+                    f"(sentinel tier, surfaces at every boot) with {receipt_state}. "
+                    f"A persistent marker should carry a verifiable receipt — pass "
+                    f"verified_by with an archive:/file: ref that re-hashes clean. "
+                    f"Attestations (cmd/url/human) do not count as verification."
                 ),
                 timestamp=latest["timestamp"],
             )
