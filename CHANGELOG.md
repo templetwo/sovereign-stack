@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.7.1] - 2026-06-12
+
+### Reader convergence + web-seat toolkit curation
+
+**One chokepoint for every chronicle reader.** The four remaining raw-file
+readers (metabolize detect/retrieve scans, retire_hypothesis, the synthesis
+daemon) now read through `memory.load_entries()` — the same data-gated
+supersession annotation path as `recall_insights`. The local reflector can
+never again read a superseded claim as live truth: its prompt material marks
+`LAYER: <layer> (superseded)`, detect/retrieve outputs tag superseded rows,
+and retire notes already-ledgered matches. Nothing is dropped anywhere —
+annotate, never hide. No ledger = byte-identical outputs (exact-text
+regression tests per reader; 22 new tests). Honest non-data-gated notes:
+reader iteration order is now deterministic (sorted, was filesystem-order),
+and non-canonical layouts (loose/nested jsonl, hidden dot-dirs under
+insights/) converge on the canonical glob semantics. Adversarially reviewed:
+approved, zero blocking findings.
+
+**Web-seat toolkit curation** (same release window, shipped on main):
+neutral gate vocabulary in `arrive_lineage` + `guardian_mcp_audit`
+descriptions; `start_here` offers the gentle door for remote seats and
+derives its essential-tools block from TOOL_TIERS at render time (three
+contradictory hardcoded counts retired); MCP serverInfo reports the stack's
+own version (was advertising the mcp library's); essential tier curated to
+14 (`arrive_delta`, `prior_for_turn` → core; `set_policy` → advanced);
+to_self letters carry date prefixes in the compact lineage view; the lineage
+footer leads with `full_content=true` for remote seats.
+
+---
+
 ## [1.7.0] - 2026-06-12
 
 ### Receipts & Seasons — "unable to lie, able to digest"

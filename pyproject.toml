@@ -1,6 +1,6 @@
 [project]
 name = "sovereign-stack"
-version = "1.7.0"
+version = "1.7.1"
 description = "MCP server with 91 tools for AI memory, governance, reflection daemons, consciousness continuity, progressive boot (arrive/arrive_delta/arrive_lineage), and a Haiku 4.5 scribe (fast lung of the breath architecture). Runtime-reflexive. 100% local. Token-gated SSE surface. Cross-substrate bridges for ChatGPT and Grok."
 readme = "README.md"
 license = {file = "LICENSE"}
