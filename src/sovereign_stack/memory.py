@@ -89,6 +89,59 @@ def _parse_iso(ts: str | None) -> datetime | None:
         return None
 
 
+# Idempotent-write window: client retries land identical duplicates a few
+# hundred ms apart. 120s comfortably covers retry storms without swallowing
+# a deliberate later re-recording of the same observation.
+_DEDUP_WINDOW_SECONDS = 120
+
+
+def _normalize_domain(domain: str) -> str:
+    """
+    Normalize a domain string with the same rule as the domain directory
+    name: strip whitespace around commas (e.g. "a, b" -> "a,b").
+
+    The stored domain field and the directory the entry lands in must always
+    agree — historically two normalizers disagreed, leaving entries whose
+    stored domain had spaces while their directory name had none.
+    """
+    if not domain:
+        return domain
+    return ",".join(part.strip() for part in domain.split(","))
+
+
+def _last_jsonl_entry(path: Path) -> dict | None:
+    """Return the last parseable JSON entry of a JSONL file, or None."""
+    if not path.exists():
+        return None
+    last_line = None
+    with open(path) as f:
+        for line in f:
+            if line.strip():
+                last_line = line
+    if last_line is None:
+        return None
+    try:
+        return json.loads(last_line)
+    except json.JSONDecodeError:
+        return None
+
+
+class DedupedInsightPath(str):
+    """
+    record_insight return value when an append was skipped as a retry
+    duplicate. Behaves exactly like the plain path string it subclasses
+    (non-breaking for existing callers); adds the dedup marker and the
+    surviving entry for callers that want to inspect them.
+    """
+
+    deduped: bool = True
+
+    def __new__(cls, path: str, existing_entry: dict):
+        obj = super().__new__(cls, path)
+        obj.existing_entry = existing_entry
+        return obj
+
+
 # =============================================================================
 # DEFAULT MEMORY SCHEMA
 # =============================================================================
@@ -375,11 +428,42 @@ class ExperientialMemory:
             **metadata: Additional context
 
         Returns:
-            Path to the recorded insight
+            Path to the recorded insight. If the write was skipped as an
+            immediate retry duplicate (identical content+domain+layer within
+            120s of the file's last entry), the path is a DedupedInsightPath —
+            a str subclass carrying deduped=True and the surviving entry.
         """
         timestamp = datetime.now(timezone.utc)
         session_id = session_id or f"session_{timestamp.strftime('%Y%m%d_%H%M%S')}"
         layer = layer if layer in self.VALID_LAYERS else self.LAYER_HYPOTHESIS
+        # One normalizer for both the stored field and the directory name —
+        # they used to disagree ("a, b" stored under "a,b"), which broke
+        # domain-filtered recall.
+        domain = _normalize_domain(domain)
+
+        domain_dir = self.insights_dir / domain
+        domain_dir.mkdir(exist_ok=True)
+        jsonl_path = domain_dir / f"{session_id}.jsonl"
+
+        # Idempotent writes: client retries land identical duplicates a few
+        # hundred ms apart. If the last entry of this session file already
+        # carries the same content+domain+layer within the dedup window, skip
+        # the append and report the surviving entry instead.
+        last = _last_jsonl_entry(jsonl_path)
+        if (
+            last is not None
+            and last.get("content") == content
+            and last.get("domain") == domain
+            and last.get("layer") == layer
+        ):
+            prev_ts = _parse_iso(last.get("timestamp"))
+            if prev_ts is not None:
+                try:
+                    delta = abs((timestamp - prev_ts).total_seconds())
+                except TypeError:
+                    delta = None  # naive legacy timestamp — not comparable
+                if delta is not None and delta <= _DEDUP_WINDOW_SECONDS:
+                    return DedupedInsightPath(str(jsonl_path), last)
 
         insight = {
             "timestamp": timestamp.isoformat(),
@@ -395,11 +479,7 @@ class ExperientialMemory:
         if vantage:
             insight["vantage"] = vantage
 
-        domain_dir = self.insights_dir / domain
-        domain_dir.mkdir(exist_ok=True)
-
         # Append to domain's JSONL file
-        jsonl_path = domain_dir / f"{session_id}.jsonl"
         with open(jsonl_path, "a") as f:
             f.write(json.dumps(insight) + "\n")
 
@@ -949,6 +1029,9 @@ class ExperientialMemory:
         insights = []
 
         if domain:
+            # Same normalizer as record_insight, so spaced and unspaced
+            # queries ("a, b" vs "a,b") reach the same domain directory.
+            domain = _normalize_domain(domain)
             domain_path = self.insights_dir / domain
             # If specified domain doesn't exist, search all domains
             if not domain_path.exists():
@@ -977,7 +1060,12 @@ class ExperientialMemory:
                             ts = insight.get("timestamp", "")
                             if start_date and ts < start_date:
                                 continue
-                            if end_date and ts > end_date:
+                            # Inclusive upper bound: a partial end_date like
+                            # "2026-06-12" must include the whole final day,
+                            # so timestamps that extend the bound string
+                            # (prefix match) are kept rather than dropped by
+                            # the lexicographic compare.
+                            if end_date and ts > end_date and not ts.startswith(end_date):
                                 continue
                             # Text search: match any query term (len>=3) in content or domain
                             if query:

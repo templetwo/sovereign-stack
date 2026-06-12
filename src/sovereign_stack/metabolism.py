@@ -595,12 +595,18 @@ async def handle_metabolism_tool(name, arguments):
         # Find and retire the hypothesis
         insights_dir = CHRONICLE_DIR / "insights"
         retired = False
+        if not insights_dir.exists():
+            # Fresh chronicle — nothing to retire, nothing to crash on.
+            return [
+                TextContent(type="text", text=f"No matching hypothesis found for '{fragment[:60]}'")
+            ]
         for domain_dir in insights_dir.iterdir():
             if domain and domain not in domain_dir.name:
                 continue
             for jsonl_file in domain_dir.glob("*.jsonl"):
                 lines = jsonl_file.read_text().splitlines()
                 updated = []
+                file_changed = False
                 for line in lines:
                     if not line.strip():
                         continue
@@ -615,10 +621,14 @@ async def handle_metabolism_tool(name, arguments):
                             entry["retired_by"] = replaced_by
                             entry["retired_at"] = datetime.now(timezone.utc).isoformat()
                             retired = True
+                            file_changed = True
                         updated.append(json.dumps(entry))
                     except json.JSONDecodeError:
                         updated.append(line)
-                jsonl_file.write_text("\n".join(updated) + "\n")
+                # Only rewrite files that actually changed — untouched files
+                # keep their bytes (and mtimes) exactly as they were.
+                if file_changed:
+                    jsonl_file.write_text("\n".join(updated) + "\n")
 
         if retired:
             return [

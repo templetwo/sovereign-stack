@@ -11,6 +11,7 @@ Layers:
 import json
 import shutil
 import tempfile
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from sovereign_stack.memory import ExperientialMemory
@@ -460,3 +461,172 @@ class TestLayeredChronicle:
         )
         hits = self.chronicle.check_mistakes("guardian review")
         assert len(hits) == 1
+
+
+class TestRecallEndDateInclusive:
+    """recall_insights end_date must include the WHOLE final day (BUG #4).
+
+    The old lexicographic compare (`ts > end_date`) dropped every entry
+    timestamped on the end_date itself, contradicting the docstring.
+    """
+
+    def setup_method(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.chronicle = ExperientialMemory(root=self.tmpdir)
+
+    def teardown_method(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_end_date_includes_entries_on_final_day(self):
+        """An entry written today must be returned by end_date=today."""
+        self.chronicle.record_insight(
+            domain="dates", content="written today", session_id="test_session"
+        )
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        results = self.chronicle.recall_insights(domain="dates", end_date=today)
+        assert len(results) == 1
+        assert results[0]["content"] == "written today"
+
+    def test_end_date_still_excludes_later_days(self):
+        """Inclusivity must not widen the window past the final day."""
+        domain_dir = Path(self.tmpdir) / "insights" / "dates"
+        domain_dir.mkdir(parents=True, exist_ok=True)
+        entries = [
+            {
+                "timestamp": "2026-06-12T08:00:00+00:00",
+                "domain": "dates",
+                "content": "on the boundary day",
+                "intensity": 0.5,
+                "layer": "hypothesis",
+                "session_id": "s",
+            },
+            {
+                "timestamp": "2026-06-13T08:00:00+00:00",
+                "domain": "dates",
+                "content": "the day after",
+                "intensity": 0.5,
+                "layer": "hypothesis",
+                "session_id": "s",
+            },
+        ]
+        with open(domain_dir / "s.jsonl", "w") as f:
+            for e in entries:
+                f.write(json.dumps(e) + "\n")
+
+        results = self.chronicle.recall_insights(domain="dates", end_date="2026-06-12")
+        assert len(results) == 1
+        assert results[0]["content"] == "on the boundary day"
+
+
+class TestIdempotentInsightWrites:
+    """record_insight collapses sub-second retry duplicates (Convention A)."""
+
+    def setup_method(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.chronicle = ExperientialMemory(root=self.tmpdir)
+
+    def teardown_method(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _lines(self, path):
+        with open(path) as f:
+            return [line for line in f if line.strip()]
+
+    def test_retry_duplicate_collapses_to_one_line(self):
+        first = self.chronicle.record_insight(
+            domain="dedup", content="same observation", session_id="s1"
+        )
+        second = self.chronicle.record_insight(
+            domain="dedup", content="same observation", session_id="s1"
+        )
+        assert len(self._lines(first)) == 1
+        # Same path string either way — non-breaking for existing callers.
+        assert str(first) == str(second)
+        # The second call reports the dedup; the first does not.
+        assert getattr(first, "deduped", False) is False
+        assert getattr(second, "deduped", False) is True
+        assert second.existing_entry["content"] == "same observation"
+
+    def test_different_content_appends_two_lines(self):
+        self.chronicle.record_insight(domain="dedup", content="first thought", session_id="s1")
+        path = self.chronicle.record_insight(
+            domain="dedup", content="second thought", session_id="s1"
+        )
+        assert getattr(path, "deduped", False) is False
+        assert len(self._lines(path)) == 2
+
+    def test_same_content_outside_window_appends(self):
+        """A deliberate re-recording >120s later is NOT a retry duplicate."""
+        path = self.chronicle.record_insight(
+            domain="dedup", content="recurring observation", session_id="s1"
+        )
+        # Age the existing entry past the dedup window.
+        entry = json.loads(self._lines(path)[0])
+        entry["timestamp"] = (datetime.now(timezone.utc) - timedelta(seconds=600)).isoformat()
+        with open(path, "w") as f:
+            f.write(json.dumps(entry) + "\n")
+
+        again = self.chronicle.record_insight(
+            domain="dedup", content="recurring observation", session_id="s1"
+        )
+        assert getattr(again, "deduped", False) is False
+        assert len(self._lines(again)) == 2
+
+    def test_different_layer_not_deduped(self):
+        self.chronicle.record_insight(
+            domain="dedup", content="same words", layer="ground_truth", session_id="s1"
+        )
+        path = self.chronicle.record_insight(
+            domain="dedup", content="same words", layer="hypothesis", session_id="s1"
+        )
+        assert getattr(path, "deduped", False) is False
+        assert len(self._lines(path)) == 2
+
+
+class TestDomainNormalization:
+    """One domain normalizer for write and recall (Convention B).
+
+    Historically the stored domain field could keep spaces after commas
+    while the directory name had none — two normalizers disagreeing. The 13
+    historical entries with spaced domains are NOT rewritten (the chronicle
+    is append-only); they already live in unspaced directories, so the
+    query-side normalization is what makes them reachable again.
+    """
+
+    def setup_method(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.chronicle = ExperientialMemory(root=self.tmpdir)
+
+    def teardown_method(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_stored_domain_field_matches_directory_name(self):
+        path = self.chronicle.record_insight(
+            domain="security, guardian", content="spaced write", session_id="s1"
+        )
+        assert Path(path).parent.name == "security,guardian"
+        with open(path) as f:
+            entry = json.loads(f.readline())
+        assert entry["domain"] == "security,guardian"
+
+    def test_recall_matches_spaced_domain_query(self):
+        self.chronicle.record_insight(
+            domain="security,guardian", content="the real one", session_id="s1"
+        )
+        self.chronicle.record_insight(
+            domain="unrelated", content="noise from another domain", session_id="s1"
+        )
+        results = self.chronicle.recall_insights(domain="security, guardian")
+        assert len(results) == 1
+        assert results[0]["content"] == "the real one"
+
+    def test_recall_matches_unspaced_query_for_spaced_write(self):
+        self.chronicle.record_insight(
+            domain="security, guardian", content="the real one", session_id="s1"
+        )
+        self.chronicle.record_insight(
+            domain="unrelated", content="noise from another domain", session_id="s1"
+        )
+        results = self.chronicle.recall_insights(domain="security,guardian")
+        assert len(results) == 1
+        assert results[0]["content"] == "the real one"
