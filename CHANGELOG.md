@@ -7,6 +7,82 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.7.0] - 2026-06-12
+
+### Receipts & Seasons — "unable to lie, able to digest"
+
+The chronicle gains claim identity, receipts, supersession, a policy
+registry, thread families, and a read-only season review. Designed by a
+6-agent judge panel (3 lenses, 2 adversarial critics, 1 synthesis), spec
+archived verbatim (archive_id `c8c53a36…`, vector `v17_design`). Six new
+tools: 85 → **91**. Three new append-only ledgers, all lazily created —
+zero migration.
+
+**Claim identity (the keystone).** Every insight entry has a derived
+`claim_id` = sha256(timestamp + domain + content), computed on read and
+NEVER stored: editing a historical line visibly orphans every pointer to
+it — tamper-evidence by construction. Prefix-addressable, quarantine-aware
+resolution. Zero preimage collisions verified across all live entries.
+
+**Receipts.** `record_insight` gains optional `verified_by` receipts
+(`{kind: archive|file|claim|cmd|url|human, ref, sha256?, note?}`). A
+receipt pointing at nothing is unrecordable (the call fails naming the
+offender); hash mismatches are recorded but stamped (`checked_at_write:
+mismatch`) and never counted as verified; `claim:` refs stamp `cites`,
+never `verified` — citation laundering is structurally dead. Boot surfaces
+render honest `[N verified, M attested]` counts, never a bare checkmark.
+A Nape detector honks on unreceipted ground_truth sentinels.
+
+**Supersession.** `supersedes` (list) + mandatory `carry_forward_summary`
+on `record_insight`; `supersede_insight` links two existing entries
+(formalizing the live DEFINITIVE-marker convention) with one-successor-
+per-predecessor, cycle/self guards, and append-only revoke. Raw
+`recall_insights` ANNOTATES superseded entries in place (`_superseded_by`,
+`_carry_forward_summary`) — the raw query tool never hides; boot surfaces
+filter to live sentinels WITH an explicit holdback count naming the call
+that reveals the chain. `inspect_claim` is the forensic surface: lineage
+walk, receipt re-verification, ledger-vs-breadcrumb divergence detection.
+`retire_hypothesis` now writes the same ledger.
+
+**Policies.** `current_policies` / `set_policy`: standing policy becomes a
+live, human-gated registry (`set_by` required) with receipts on every
+policy, versioned amendments, and a data-gated boot one-liner. No
+chronicle echo — the registry is the single source.
+
+**Seasons.** `link_threads` coalesces split-rot threads into display-side
+families (append-only ledger at the chronicle root; thread files never
+touched; destructive merges remain human-gated — the panel CUT bulk
+family-resolution as fatal). `get_open_threads` / `triage_threads` /
+both boots fold families (family row carries MAX member triage score).
+`season_review` is the read-only digestion pass: supersession candidates
+(cross-domain, marker-regex + token-overlap), thread-family candidates,
+policy candidates, hygiene (dangling pointers, receipt re-verify failures,
+unreceipted sentinels, sentinel-vs-boot-budget pressure), each with a
+ready-to-paste call — enforced read-only by a filesystem-hash test.
+
+**Byte-identity rule** (shipped as tests, not a promise): v1.6.2-shaped
+calls on v1.6.2-shaped data (no ledgers, no new params) produce today's
+exact bytes across record_insight, recall_insights, both boots, threads,
+and triage.
+
+New modules: `provenance.py`, `provenance_tools.py`, `policies.py`,
+`seasons.py`. Suite: 1053 → **1432 passing** (+12 documented skips),
+including the new contract-test walker enforcing schema-default ==
+handler-default across all tools. Known deferred items are named in the
+archived spec (notably: shared `load_entries()` for the four remaining
+raw readers; bridge adapter parity — non-Claude seats cannot write
+supersessions until the sovereign-bridge release catches up).
+
+Same-day foundation (also in this release window): all 9 confirmed tuneup
+bugs fixed (#2028/#2037 — inclusive end_date recall, idempotent insight
+writes, one domain normalizer, validated record_insight handler, corrupt-
+file-tolerant spiral_inherit, probe-authoritative connectivity, unified
+comms timestamps, forward-compatible reflection acks, security.py HMAC),
+and the security perimeter (token-gated `/sse`, fail-closed auth,
+per-IP rate limiting) shipped earlier today as v1.6.2.
+
+---
+
 ## [1.6.2] - 2026-06-12
 
 ### arrive_lineage — safe boot for input-gated models + security perimeter

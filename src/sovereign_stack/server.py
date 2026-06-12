@@ -42,9 +42,16 @@ from .governance import (
 )
 from .guardian_tools import GUARDIAN_TOOLS, handle_guardian_tool
 from .handoff import HandoffEngine, format_handoff_for_surface
-from .memory import ExperientialMemory, MemoryEngine
+from .memory import RECALL_INSIGHTS_SCHEMA_EXTENSIONS, ExperientialMemory, MemoryEngine
 from .metabolism import METABOLISM_TOOLS, handle_metabolism_tool
 from .nape_daemon import NapeDaemon
+from .policies import (
+    POLICY_TOOL_INTENTS,
+    POLICY_TOOL_TIERS,
+    POLICY_TOOLS,
+    PolicyRegistry,
+    handle_policy_tool,
+)
 from .post_fix_tools import POST_FIX_TOOLS, handle_post_fix_tool
 from .prior_alignment import (
     prior_alignment_summary as _prior_alignment_summary,
@@ -52,8 +59,20 @@ from .prior_alignment import (
 from .prior_alignment import (
     record_prior_alignment as _record_prior_alignment,
 )
+from .provenance_tools import (
+    PROVENANCE_TOOL_INTENTS,
+    PROVENANCE_TOOL_TIERS,
+    PROVENANCE_TOOLS,
+    handle_provenance_tool,
+)
 from .reflexive import PerTurnPriors, ReflexiveSurface
 from .scribe import bridge_integration as scribe_bridge
+from .seasons import (
+    SEASON_TOOL_INTENTS,
+    SEASON_TOOL_TIERS,
+    SEASON_TOOLS,
+    handle_season_tool,
+)
 from .spiral import (
     PHASE_ORDER,
     SpiralPhase,
@@ -62,8 +81,10 @@ from .spiral import (
     save_spiral_state,
 )
 from .witness import (
+    _receipt_count_tag,
     format_lineage_layer,
     format_self_model,
+    format_sentinels,
     format_threads_with_age,
     format_unresolved_uncertainties,
 )
@@ -426,6 +447,36 @@ async def list_tools():
                                 "human_observation, external_web_verified."
                             ),
                         },
+                        "verified_by": {
+                            "type": "array",
+                            "items": {"type": "object"},
+                            "description": (
+                                "Optional receipts grounding this claim: "
+                                "[{kind: archive|file|claim|cmd|url|human, ref, sha256?, note?}]. "
+                                "archive/file refs are re-hashed at write (verified|mismatch); "
+                                "claim refs stamp 'cites', never 'verified'; cmd/url/human stamp "
+                                "'attested'. A receipt pointing at nothing is rejected — the "
+                                "whole call fails naming the offender."
+                            ),
+                        },
+                        "supersedes": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": (
+                                "Optional claim-id list (full 64-hex or unique prefix) this "
+                                "entry supersedes. Requires carry_forward_summary. Nothing is "
+                                "erased: predecessors stay in the chronicle, annotated; boot "
+                                "surfaces show the successor plus a holdback count."
+                            ),
+                        },
+                        "carry_forward_summary": {
+                            "type": "string",
+                            "description": (
+                                "What the superseded entries still carry that a reader of only "
+                                "the successor would lose (<=500 chars). Required with "
+                                "supersedes."
+                            ),
+                        },
                     },
                     "required": ["domain", "content"],
                 },
@@ -557,6 +608,7 @@ async def list_tools():
                             "default": False,
                             "description": "If true, start_date = timestamp of last reflection marker. Overrides start_date.",
                         },
+                        **RECALL_INSIGHTS_SCHEMA_EXTENSIONS,
                     },
                 },
             ),
@@ -624,6 +676,16 @@ async def list_tools():
                     "properties": {
                         "domain": {"type": "string"},
                         "limit": {"type": "integer", "default": 10},
+                        "coalesce_families": {
+                            "type": "boolean",
+                            "default": True,
+                            "description": (
+                                "Fold linked thread families into their primary row "
+                                "(display-side only; the primary carries a `family` "
+                                "annotation listing folded members). Data-gated: no "
+                                "family ledger, no change."
+                            ),
+                        },
                     },
                 },
             ),
@@ -1598,7 +1660,11 @@ async def list_tools():
         + METABOLISM_TOOLS
         + POST_FIX_TOOLS
         + CONNECTIVITY_TOOLS
+        + POLICY_TOOLS
+        + PROVENANCE_TOOLS
+        + SEASON_TOOLS
     )  # consciousness + compaction + guardian + metabolism + post_fix + connectivity
+    # + policies + provenance + seasons (v1.7.0 Receipts & Seasons)
 
 
 # Category mapping for my_toolkit. Source of truth for how tools are grouped
@@ -1679,6 +1745,13 @@ TOOL_CATEGORIES: dict[str, str] = {
     # Connectivity / multi-instance write-path tools
     "connectivity_status": "connectivity",
     "stack_write_check": "connectivity",
+    # Receipts & Seasons (v1.7.0)
+    "current_policies": "policies",
+    "set_policy": "policies",
+    "inspect_claim": "provenance",
+    "supersede_insight": "provenance",
+    "link_threads": "seasons",
+    "season_review": "seasons",
 }
 
 
@@ -1778,6 +1851,9 @@ TOOL_TIERS: dict[str, str] = {
     "comms_channels": TIER_ADVANCED,
     "comms_get_acks": TIER_ADVANCED,
 }
+TOOL_TIERS.update(POLICY_TOOL_TIERS)
+TOOL_TIERS.update(PROVENANCE_TOOL_TIERS)
+TOOL_TIERS.update(SEASON_TOOL_TIERS)
 
 
 # Map from tool_name → intent. Tools missing here fall under "advanced".
@@ -1880,6 +1956,9 @@ TOOL_INTENTS: dict[str, str] = {
     "guardian_mcp_audit": "security",
     "guardian_baseline": "security",
 }
+TOOL_INTENTS.update(POLICY_TOOL_INTENTS)
+TOOL_INTENTS.update(PROVENANCE_TOOL_INTENTS)
+TOOL_INTENTS.update(SEASON_TOOL_INTENTS)
 
 
 def _tier_for(tool_name: str) -> str:
@@ -2367,15 +2446,23 @@ async def _dispatch_tool(name: str, arguments: dict):
         layer = arguments.get("layer", "hypothesis")
         confidence = arguments.get("confidence")
         vantage = arguments.get("vantage")
-        path = experiential.record_insight(
-            domain,
-            content,
-            intensity,
-            spiral_state.session_id,
-            layer=layer,
-            confidence=confidence,
-            vantage=vantage,
-        )
+        try:
+            path = experiential.record_insight(
+                domain,
+                content,
+                intensity,
+                spiral_state.session_id,
+                layer=layer,
+                confidence=confidence,
+                vantage=vantage,
+                verified_by=arguments.get("verified_by"),
+                supersedes=arguments.get("supersedes"),
+                carry_forward_summary=arguments.get("carry_forward_summary"),
+            )
+        except ValueError as exc:
+            # Receipt/supersession validation failures name the offending
+            # receipt or claim ref — surface verbatim, record nothing.
+            return [TextContent(type="text", text=f"record_insight rejected: {exc}")]
         via = f" (via {vantage})" if vantage else ""
         return [
             TextContent(
@@ -2437,6 +2524,8 @@ async def _dispatch_tool(name: str, arguments: dict):
             start_date=start_date,
             end_date=end_date,
             since_last_reflection=since_last_reflection,
+            with_ids=arguments.get("with_ids", False),
+            exclude_superseded=arguments.get("exclude_superseded", False),
         )
         return [TextContent(type="text", text=json.dumps(insights, indent=2))]
 
@@ -2486,7 +2575,9 @@ async def _dispatch_tool(name: str, arguments: dict):
         if domain and domain.lower() == "all":
             domain = None  # "all" means no filter
         limit = arguments.get("limit", 10)
-        threads = experiential.get_open_threads(domain, limit)
+        threads = experiential.get_open_threads(
+            domain, limit, coalesce_families=arguments.get("coalesce_families", True)
+        )
         if not threads:
             return [
                 TextContent(
@@ -2752,16 +2843,12 @@ async def _dispatch_tool(name: str, arguments: dict):
         # 5. Sentinel insights — high-intensity markers that persist regardless of chronicle volume.
         #    Answers the "boundary whispers" problem: warnings that should never fade as the
         #    chronicle grows. Surfaced at every boot when intensity >= 0.9.
-        sentinels = experiential.recall_insights(min_intensity=0.9, limit=5)
+        #    v1.7.0: fetched with headroom; superseded sentinels are held back with an
+        #    honest count, never silently buried (format_sentinels renders the section).
+        sentinels = experiential.recall_insights(min_intensity=0.9, limit=10)
         if sentinels:
-            lines.append("━━━ PERSISTENT MARKERS (intensity ≥ 0.9 — these do not fade) ━━━")
-            for s in sentinels:
-                ts = s.get("timestamp", "")[:10]
-                dom = s.get("domain", "?")
-                raw_c = s.get("content", "")
-                content = raw_c if _ins_cap is None else raw_c[:_ins_cap]
-                lines.append(f"  [{ts}] [{dom}] {content}")
-            lines.append("")
+            # format_sentinels emits the section header and trailing blank line.
+            lines.extend(format_sentinels(sentinels, limit=5, full_content=(_ins_cap is None)))
 
         # 6. Insights since last reflection
         recent = experiential.recall_insights(since_last_reflection=True, limit=10)
@@ -2775,7 +2862,11 @@ async def _dispatch_tool(name: str, arguments: dict):
                 raw_c = ins.get("content", "")
                 content = raw_c if _ins_cap is None else raw_c[:_ins_cap]
                 via = f" (via {ins['vantage']})" if ins.get("vantage") else ""
-                lines.append(f"  [{ts}] [{dom}]{via} {content}")
+                # v1.7.0 data-gated decorations (vantage precedent): receipt
+                # stamp counts and a superseded marker, only when present.
+                receipts = _receipt_count_tag(ins)
+                sup = " (superseded)" if ins.get("_superseded_by") else ""
+                lines.append(f"  [{ts}] [{dom}]{via}{sup} {content}{receipts}")
             lines.append("")
 
         # 6. Reflector's marginalia — synthesis daemon's recent unread reflections.
@@ -2827,6 +2918,15 @@ async def _dispatch_tool(name: str, arguments: dict):
                 max_obs_len=None if full_content else 180,
             )
         )
+
+        # v1.7.0 data-gated policy one-liner: only when the registry is non-empty.
+        try:
+            _policy_line = PolicyRegistry().boot_line()
+        except Exception:
+            _policy_line = None
+        if _policy_line:
+            lines.append(_policy_line)
+            lines.append("")
 
         lines.append("━━━")
         lines.append("Now decide what to pick up. The handoffs are claims, not commands.")
@@ -2926,7 +3026,11 @@ async def _dispatch_tool(name: str, arguments: dict):
         # Drop degenerate one-word breadcrumb "threads" from the surface.
         threads = [t for t in threads_all if len((t.get("question") or "").strip()) >= 12]
         pending = handoff_engine.unconsumed(limit=20)
-        sentinels = experiential.recall_insights(min_intensity=0.9, limit=1)
+        # v1.7.0: fetch with headroom; pin the newest LIVE sentinel (annotated
+        # by the recall chokepoint when a supersession ledger exists).
+        _sentinel_pool = experiential.recall_insights(min_intensity=0.9, limit=10)
+        sentinels = [s for s in _sentinel_pool if "_superseded_by" not in s][:1]
+        _pin_was_superseded = bool(_sentinel_pool) and bool(_sentinel_pool[0].get("_superseded_by"))
 
         # Deferred-inheritance signal: name what the thin boot is NOT showing, so an
         # instance in a relational/lineage moment knows to reach for the full boot
@@ -2958,6 +3062,17 @@ async def _dispatch_tool(name: str, arguments: dict):
             # never clipped: a partial instruction is dangerous (user-test, both rounds).
             marker_full = " ".join((sentinels[0].get("content", "") or "").split())
             lines.append(f"  Persistent marker (pinned standing instruction): {marker_full}")
+            if _pin_was_superseded:
+                lines.append(
+                    "  (the newest marker was superseded — its successor is pinned; "
+                    "recall_insights(exclude_superseded=false) shows the chain)"
+                )
+        try:
+            _policy_line = PolicyRegistry().boot_line()
+        except Exception:
+            _policy_line = None
+        if _policy_line:
+            lines.append(f"  {_policy_line}")
         lines.append(
             f"  Deferred to the full boot: {lineage_count} lineage letters · "
             f"{unread_marginalia} unread marginalia (where_did_i_leave_off)"
@@ -3406,6 +3521,18 @@ Phase: {spiral_state.current_phase.value}
         return await handle_post_fix_tool(
             name, arguments, spiral_state.session_id, nape_daemon=nape_daemon
         )
+
+    # Policy registry (v1.7.0 — human-gated standing policy; handler is sync)
+    if name in [t.name for t in POLICY_TOOLS]:
+        return [TextContent(type="text", text=handle_policy_tool(name, arguments))]
+
+    # Provenance forensics (v1.7.0 — inspect_claim returns raw JSON text; sync)
+    if name in [t.name for t in PROVENANCE_TOOLS]:
+        return [TextContent(type="text", text=handle_provenance_tool(name, arguments, None, None))]
+
+    # Seasons (v1.7.0 — thread families + read-only season review; sync)
+    if name in [t.name for t in SEASON_TOOLS]:
+        return [TextContent(type="text", text=handle_season_tool(name, arguments))]
 
     # Nape daemon — runtime critique layer
     if name == "nape_observe":

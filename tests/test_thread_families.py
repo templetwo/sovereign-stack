@@ -95,12 +95,24 @@ class TestLedgerPlacement:
 
         link(chronicle, families_path, ids[:3])
 
+        # Unfolded view: ledger records must not appear as phantom threads —
+        # the thread set is exactly what it was before linking.
+        unfolded = chronicle.get_open_threads(limit=100, coalesce_families=False)
+        assert {t["thread_id"] for t in unfolded} == before
+
+        # Default (folded) view: family members collapse into the primary, but
+        # nothing NEW appears — still no phantoms, and no raw ledger fields.
         after = chronicle.get_open_threads(limit=100)
-        assert {t["thread_id"] for t in after} == before
+        assert {t["thread_id"] for t in after} <= before
         for thread in after:
             assert thread.get("action") not in ("link", "unlink")
-            assert "family_id" not in thread
-            assert "member_thread_ids" not in thread
+            assert "family_id" not in thread  # raw ledger field; folded rows
+            assert "member_thread_ids" not in thread  # carry `family` instead
+        primaries_with_family = [t for t in after if "family" in t]
+        assert len(primaries_with_family) == 1
+        assert set(ids[:3]) - {primaries_with_family[0]["thread_id"]} == set(
+            primaries_with_family[0]["family"]["folded_thread_ids"]
+        )
 
     def test_resolve_thread_by_id_never_resolves_ledger_records(self, chronicle, families_path):
         ids = make_threads(chronicle)

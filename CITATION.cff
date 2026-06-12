@@ -11,7 +11,7 @@ authors:
 repository-code: "https://github.com/templetwo/sovereign-stack"
 url: "https://thetempleoftwo.com"
 license-url: "https://github.com/templetwo/sovereign-stack/blob/main/LICENSE"
-version: 1.6.2
+version: 1.7.0
 date-released: 2026-06-12
 keywords:
   - human-AI collaboration

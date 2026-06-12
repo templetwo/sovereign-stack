@@ -875,7 +875,9 @@ class ExperientialMemory:
             resolved_thread_timestamp=resolved_timestamp,
         )
 
-    def get_open_threads(self, domain: str = None, limit: int = 10) -> list[dict]:
+    def get_open_threads(
+        self, domain: str = None, limit: int = 10, coalesce_families: bool = True
+    ) -> list[dict]:
         """
         Get unresolved open threads - questions waiting for answers.
 
@@ -883,9 +885,17 @@ class ExperientialMemory:
         in thread_touches.jsonl for this thread_id) and last_touched_at (ISO
         timestamp of the most recent touch, or None if never touched).
 
+        v1.7.0: when coalesce_families is True (default) and a thread-family
+        ledger exists, family members fold into their primary row, which gains
+        a `family` annotation ({family_id, label, member_count,
+        folded_thread_ids}). Data-gated: with no ledger records the output is
+        byte-identical to pre-1.7.0 behavior. Coalescing happens BEFORE the
+        limit so members beyond the window still fold.
+
         Args:
             domain: Filter to specific domain (None = all)
             limit: Maximum number of threads
+            coalesce_families: Fold linked thread families (display-side only)
 
         Returns:
             List of unresolved thread dicts, newest first. Each dict includes
@@ -924,6 +934,15 @@ class ExperientialMemory:
                         continue
 
         threads.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
+
+        if coalesce_families:
+            # Data-gated family fold (v1.7.0): no ledger records, no change.
+            from .seasons import coalesce_threads, families_path_for, fold_families, load_families
+
+            fam_fold = fold_families(load_families(families_path_for(self.root)))
+            if fam_fold:
+                threads = coalesce_threads(threads, fam_fold)
+
         threads = threads[:limit]
 
         # Annotate with touch counts.  Load all touches once (avoids N+1 reads)
@@ -1041,7 +1060,10 @@ class ExperientialMemory:
         """
         from .witness import days_old as _days_old
 
-        all_threads = self.get_open_threads(limit=9999)
+        # Fetch UNFOLDED so every family member gets scored; the family fold
+        # happens after scoring (family row = MAX member score), per the
+        # v1.7.0 seasons semantics.
+        all_threads = self.get_open_threads(limit=9999, coalesce_families=False)
 
         # Build touch counts per thread from the full touches log.
         # "Recent" is within the last 7 days.
@@ -1118,6 +1140,15 @@ class ExperientialMemory:
             key=lambda r: (r["triage_score"], r.get("timestamp", "")),
             reverse=True,
         )
+
+        # Data-gated family fold (v1.7.0): family row carries the MAX member
+        # score and a ", family of N" reason suffix; no ledger, no change.
+        from .seasons import coalesce_triaged, families_path_for, fold_families, load_families
+
+        fam_fold = fold_families(load_families(families_path_for(self.root)))
+        if fam_fold:
+            result = coalesce_triaged(result, fam_fold)
+
         return result[:limit]
 
     def get_inheritable_context(self, limit: int = 20) -> dict:
