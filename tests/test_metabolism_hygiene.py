@@ -7,15 +7,20 @@ original content, genuine observations are untouched, self-model dedup keeps
 the first occurrence, backups are written.
 """
 
+import asyncio
 import json
+import os
 import shutil
 import tempfile
+import time
 from pathlib import Path
 
+from sovereign_stack import metabolism
 from sovereign_stack.metabolism import (
     _archive_test_artifacts_impl,
     _dedup_self_model_impl,
     _is_test_artifact,
+    handle_metabolism_tool,
 )
 
 # ══════════ Pattern detection ══════════
@@ -335,3 +340,93 @@ class TestDedupSelfModel:
         result = _dedup_self_model_impl(self.tmpdir)
         assert "strength" in result["categories_touched"]
         assert "tendency" not in result["categories_touched"]
+
+
+# ══════════ retire_hypothesis (BUG #6) ══════════
+
+
+class TestRetireHypothesis:
+    """retire_hypothesis must survive a fresh chronicle and must only
+    rewrite JSONL files whose content actually changed."""
+
+    def setup_method(self):
+        self.tmpdir = Path(tempfile.mkdtemp())
+        self.chronicle = self.tmpdir / "chronicle"
+        self.insights = self.chronicle / "insights"
+
+    def teardown_method(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _call(self, arguments):
+        return asyncio.run(handle_metabolism_tool("retire_hypothesis", arguments))
+
+    def _write_hypothesis(self, domain: str, content: str) -> Path:
+        domain_dir = self.insights / domain
+        domain_dir.mkdir(parents=True, exist_ok=True)
+        path = domain_dir / "session.jsonl"
+        entry = {
+            "timestamp": "2026-06-01T00:00:00+00:00",
+            "domain": domain,
+            "content": content,
+            "intensity": 0.5,
+            "layer": "hypothesis",
+            "session_id": "s",
+        }
+        with open(path, "a") as f:
+            f.write(json.dumps(entry) + "\n")
+        return path
+
+    @staticmethod
+    def _age(path: Path) -> float:
+        """Push a file's mtime an hour into the past, return the new mtime."""
+        old = time.time() - 3600
+        os.utime(path, (old, old))
+        return os.stat(path).st_mtime
+
+    def test_fresh_chronicle_is_clean_noop(self, monkeypatch):
+        """No insights dir at all — must return a no-op, not FileNotFoundError."""
+        monkeypatch.setattr(metabolism, "CHRONICLE_DIR", self.chronicle)
+        result = self._call({"domain": "any", "content_fragment": "anything", "reason": "testing"})
+        assert "No matching hypothesis found" in result[0].text
+
+    def test_no_match_leaves_files_untouched(self, monkeypatch):
+        monkeypatch.setattr(metabolism, "CHRONICLE_DIR", self.chronicle)
+        path = self._write_hypothesis("general", "an unrelated idea")
+        before_bytes = path.read_bytes()
+        before_mtime = self._age(path)
+
+        result = self._call(
+            {"domain": "", "content_fragment": "zzz-no-such-fragment", "reason": "testing"}
+        )
+
+        assert "No matching hypothesis found" in result[0].text
+        assert path.read_bytes() == before_bytes
+        assert os.stat(path).st_mtime == before_mtime
+
+    def test_match_rewrites_only_the_changed_file(self, monkeypatch):
+        monkeypatch.setattr(metabolism, "CHRONICLE_DIR", self.chronicle)
+        target = self._write_hypothesis("alpha", "the target idea to retire")
+        bystander = self._write_hypothesis("beta", "a perfectly healthy idea")
+        bystander_bytes = bystander.read_bytes()
+        bystander_mtime = self._age(bystander)
+
+        # Empty domain scans every domain dir — the old code rewrote ALL of
+        # them; only the file with the matched hypothesis may change.
+        result = self._call(
+            {
+                "domain": "",
+                "content_fragment": "target idea",
+                "reason": "superseded",
+                "replaced_by": "the new ground truth",
+            }
+        )
+
+        assert "Hypothesis retired" in result[0].text
+        entry = json.loads(target.read_text().splitlines()[0])
+        assert entry["layer"] == "retired"
+        assert entry["retired_reason"] == "superseded"
+        assert entry["retired_by"] == "the new ground truth"
+        assert "retired_at" in entry
+        # The bystander file was not rewritten.
+        assert bystander.read_bytes() == bystander_bytes
+        assert os.stat(bystander).st_mtime == bystander_mtime
