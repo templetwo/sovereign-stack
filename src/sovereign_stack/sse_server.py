@@ -5,11 +5,13 @@ HTTP/SSE transport layer for remote access via Cloudflare tunnel.
 Runs alongside stdio server for local Claude Code access.
 """
 
+import hmac
 import json
 import logging
 import os
 import sys
 from pathlib import Path
+from urllib.parse import parse_qs
 
 import uvicorn
 from mcp.server.sse import SseServerTransport
@@ -132,29 +134,72 @@ async def handle_sse(request: Request):
         )
 
 
-# ── OpenAI bridge auth ────────────────────────────────────────────────────────
-# /openai/sse and /openai/messages require a valid bearer token.
-# Token is read from BRIDGE_TOKEN env var (same as the bridge REST API).
-# /sse is intentionally left unchanged — existing auth model.
+# ── Native SSE auth ───────────────────────────────────────────────────────────
+# GET /sse requires the BRIDGE_TOKEN credential, supplied either as an
+# `Authorization: Bearer <token>` header (bridge, header-capable MCP clients)
+# or a `?token=<token>` query parameter (clients whose connector config only
+# exposes a URL field, e.g. the claude.ai remote connector).
+#
+# POST /messages stays capability-gated: the mcp transport only accepts a
+# session_id minted by an authenticated /sse connect (unknown ids → 404), so
+# the token check on the connect covers the whole session.
+#
+# Fail-closed: if BRIDGE_TOKEN is unset, /sse refuses everything unless
+# SSE_ALLOW_UNAUTHENTICATED=true is set explicitly (local-dev escape hatch).
+# Token is read at call time so a launchd env edit + restart is sufficient.
 
-_OPENAI_BRIDGE_TOKEN: str = os.environ.get("BRIDGE_TOKEN", "")
+
+def _expected_token() -> str:
+    return os.environ.get("BRIDGE_TOKEN", "")
+
+
+def _allow_unauthenticated() -> bool:
+    return os.environ.get("SSE_ALLOW_UNAUTHENTICATED", "").strip().lower() == "true"
+
+
+def _scope_credential(scope: dict) -> str:
+    """Extract the presented credential from header or query param ('' if absent)."""
+    headers = dict(scope.get("headers") or [])
+    auth = headers.get(b"authorization", b"").decode("utf-8", errors="replace")
+    if auth.startswith("Bearer "):
+        return auth[7:].strip()
+    query = parse_qs(scope.get("query_string", b"").decode("utf-8", errors="replace"))
+    return (query.get("token") or [""])[0].strip()
+
+
+def _native_auth_ok(scope: dict) -> bool:
+    """Gate for GET /sse. Constant-time compare; fail-closed when unconfigured."""
+    expected = _expected_token()
+    if not expected:
+        if _allow_unauthenticated():
+            logger.warning("BRIDGE_TOKEN not set — /sse unauthenticated (explicit opt-in)")
+            return True
+        logger.error("BRIDGE_TOKEN not set and no SSE_ALLOW_UNAUTHENTICATED opt-in — refusing /sse")
+        return False
+    presented = _scope_credential(scope)
+    if not presented:
+        return False
+    return hmac.compare_digest(presented, expected)
 
 
 def _bridge_auth_ok(scope: dict) -> bool:
     """Return True if the request carries a valid BRIDGE_TOKEN bearer credential."""
-    if not _OPENAI_BRIDGE_TOKEN:
-        # Token not configured — allow (preserves existing /sse behaviour during local dev).
-        logger.warning("BRIDGE_TOKEN not set — /openai/sse is unauthenticated")
-        return True
-    headers = dict(scope.get("headers", []))
+    expected = _expected_token()
+    if not expected:
+        if _allow_unauthenticated():
+            logger.warning("BRIDGE_TOKEN not set — /openai/sse unauthenticated (explicit opt-in)")
+            return True
+        logger.error("BRIDGE_TOKEN not set — refusing /openai/sse (fail-closed)")
+        return False
+    headers = dict(scope.get("headers") or [])
     auth = headers.get(b"authorization", b"").decode("utf-8", errors="replace")
     if auth.startswith("Bearer "):
-        return auth[7:].strip() == _OPENAI_BRIDGE_TOKEN
+        return hmac.compare_digest(auth[7:].strip(), expected)
     return False
 
 
-async def _send_401(send) -> None:
-    body = b'{"error":"Unauthorized","detail":"Valid Bearer token required for /openai/sse"}'
+async def _send_401(send, detail: str = "Valid Bearer token required for /openai/sse") -> None:
+    body = json.dumps({"error": "Unauthorized", "detail": detail}).encode()
     await send(
         {
             "type": "http.response.start",
@@ -233,6 +278,13 @@ class SovereignAsgiMiddleware:
             logger.info("Message received")
             await sse.handle_post_message(scope, receive, send)
         elif scope["type"] == "http" and path == "/sse" and method == "GET":
+            if not _native_auth_ok(scope):
+                logger.warning(f"Rejected unauthenticated /sse connect from {scope.get('client')}")
+                await _send_401(
+                    send,
+                    "Credential required for /sse: Authorization: Bearer <token> or ?token=<token>",
+                )
+                return
             logger.info(f"New SSE connection from {scope.get('client')}")
             async with sse.connect_sse(scope, receive, send) as (read_stream, write_stream):
                 await sovereign_server.run(
@@ -333,7 +385,7 @@ async def grok_bridge_info(request: Request) -> JSONResponse:
 
 # Create Starlette app with SSE and health routes
 _inner_app = Starlette(
-    debug=True,
+    debug=False,
     routes=[
         Route("/health", health, methods=["GET"]),
         Route("/openai/info", bridge_info, methods=["GET"]),
