@@ -202,6 +202,35 @@ class TestAckReflection:
         assert keep.ack_status == "unread"
         assert keep.observation == "should stay as-is"
 
+    def test_unknown_fields_survive_ack_rewrite(self, reflections_dir: Path):
+        """Forward-compat: a hand-written (or newer-daemon) field outside
+        the ReflectionRecord dataclass must survive the ack rewrite —
+        to_dict() alone is an allowlist serializer and would drop it."""
+        path = _write_record(
+            reflections_dir,
+            rid="r-extra",
+            extra={"salience": 0.9, "embedding_ref": "vec-123"},
+        )
+        ack_reflection("r-extra", "confirm", note="kept", reflections_dir=reflections_dir)
+        # Re-read the raw line — the rewrite must preserve the extras.
+        (raw,) = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+        assert raw["salience"] == 0.9
+        assert raw["embedding_ref"] == "vec-123"
+        # And the ack itself landed.
+        assert raw["ack_status"] == "confirm"
+        assert raw["ack_note"] == "kept"
+
+    def test_extras_on_sibling_lines_unaffected_by_ack(self, reflections_dir: Path):
+        now = datetime.now(timezone.utc)
+        path = _write_record(reflections_dir, rid="keep", timestamp=now, extra={"salience": 0.1})
+        _write_record(reflections_dir, rid="ack", timestamp=now, extra={"salience": 0.8})
+        ack_reflection("ack", "engage", reflections_dir=reflections_dir)
+        lines = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+        by_id = {entry["id"]: entry for entry in lines}
+        assert by_id["keep"]["salience"] == 0.1
+        assert by_id["ack"]["salience"] == 0.8
+        assert by_id["ack"]["ack_status"] == "engage"
+
     def test_ack_actions_constant_matches_valid_values(self):
         assert {"confirm", "engage", "discard"} == ACK_ACTIONS
 

@@ -237,6 +237,32 @@ class TestReadChannel:
         assert len(result) == 2
         assert result[0]["content"] == "good"
 
+    def test_since_filter_on_iso_only_message(self, fake_comms):
+        """Entries may carry 'iso' without 'timestamp' — the time filters
+        must source from the same field rule instead of treating the
+        message as epoch 0 (which silently dropped it from since= reads)."""
+        with_both = _make_msg(100, content="early")
+        iso_only = _make_msg(300, content="iso only")
+        del iso_only["timestamp"]
+        _write_messages(fake_comms, "general", [with_both, iso_only])
+        result = comms.read_channel(since=200)
+        contents = {m["content"] for m in result}
+        assert "iso only" in contents
+        assert "early" not in contents
+
+    def test_ordering_with_mixed_time_fields(self, fake_comms):
+        timestamp_only = _make_msg(200, content="middle")
+        del timestamp_only["iso"]
+        iso_only = _make_msg(300, content="late")
+        del iso_only["timestamp"]
+        _write_messages(
+            fake_comms,
+            "general",
+            [iso_only, _make_msg(100, content="early"), timestamp_only],
+        )
+        result = comms.read_channel(order="asc")
+        assert [m["content"] for m in result] == ["early", "middle", "late"]
+
 
 # ── count_unread ──
 
@@ -328,3 +354,30 @@ class TestListChannels:
         assert by_name["general"]["messages"] == 2
         assert by_name["alerts"]["messages"] == 1
         assert by_name["general"]["latest"] is not None
+
+    def test_latest_kept_verbatim_when_both_fields_present(self, fake_comms):
+        """Bridge-written messages carry both fields; 'latest' output is
+        unchanged by the fallback (non-breaking)."""
+        msg = _make_msg(100, iso="2026-04-03T02:24:15Z")
+        _write_messages(fake_comms, "general", [msg])
+        channels = comms.list_channels()
+        assert channels[0]["latest"] == "2026-04-03T02:24:15Z"
+
+    def test_latest_falls_back_to_timestamp_only_message(self, fake_comms):
+        """A message carrying 'timestamp' but no 'iso' must still surface
+        a 'latest' instead of silently going None — same field sourcing
+        (with fallback) as the read_channel time filters."""
+        msg = _make_msg(1775183055.0)
+        del msg["iso"]
+        _write_messages(fake_comms, "general", [msg])
+        channels = comms.list_channels()
+        latest = channels[0]["latest"]
+        assert latest is not None
+        assert comms._parse_timestamp(latest) == 1775183055.0
+
+    def test_latest_from_iso_only_message(self, fake_comms):
+        msg = _make_msg(100, iso="2026-04-03T02:24:15Z")
+        del msg["timestamp"]
+        _write_messages(fake_comms, "general", [msg])
+        channels = comms.list_channels()
+        assert channels[0]["latest"] == "2026-04-03T02:24:15Z"

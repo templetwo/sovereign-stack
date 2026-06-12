@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -85,6 +85,13 @@ class ReflectionRecord:
         if self.entries_count is not None:
             d["entries_count"] = self.entries_count
         return d
+
+
+# Dataclass-modeled keys (public only). Anything on disk outside this set
+# is an unknown field that must survive rewrites — see ack_reflection.
+_RECORD_FIELD_NAMES = frozenset(
+    f.name for f in fields(ReflectionRecord) if not f.name.startswith("_")
+)
 
 
 def _record_from_dict(data: dict, path: Path, line_index: int) -> ReflectionRecord | None:
@@ -239,7 +246,19 @@ def ack_reflection(
     new_lines: list[str] = []
     for idx, line in enumerate(lines):
         if idx == target._line_index:
-            new_lines.append(json.dumps(target.to_dict(), ensure_ascii=False))
+            # to_dict() is an allowlist serializer — rewriting from it
+            # alone silently drops any on-disk field the dataclass does
+            # not model (e.g. one added by a newer daemon). Carry those
+            # unknown fields over; dataclass-modeled fields stay
+            # authoritative from to_dict().
+            try:
+                original = json.loads(line)
+            except json.JSONDecodeError:
+                original = {}
+            if not isinstance(original, dict):
+                original = {}
+            extras = {k: v for k, v in original.items() if k not in _RECORD_FIELD_NAMES}
+            new_lines.append(json.dumps({**target.to_dict(), **extras}, ensure_ascii=False))
         else:
             new_lines.append(line)
     tmp = path.with_suffix(path.suffix + ".tmp")

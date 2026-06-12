@@ -63,6 +63,21 @@ def _parse_timestamp(value) -> float | None:
     return None
 
 
+def _msg_epoch(msg: dict) -> float:
+    """
+    Canonical event time for a message, as epoch float.
+
+    Bridge-written messages carry both 'timestamp' (epoch) and 'iso'
+    (ISO8601); entries from other writers may have only one. Source
+    'timestamp' first, fall back to 'iso' — every reader of message
+    time goes through this single rule.
+    """
+    ts = _parse_timestamp(msg.get("timestamp"))
+    if ts is None:
+        ts = _parse_timestamp(msg.get("iso"))
+    return ts if ts is not None else 0.0
+
+
 # ── Core read ──
 
 
@@ -126,7 +141,7 @@ def read_channel(
     # Apply filters.
     filtered: list[dict] = []
     for msg in messages:
-        ts = msg.get("timestamp", 0)
+        ts = _msg_epoch(msg)
         if since_ts is not None and ts <= since_ts:
             continue
         if until_ts is not None and ts >= until_ts:
@@ -136,7 +151,7 @@ def read_channel(
         filtered.append(msg)
 
     # Order.
-    filtered.sort(key=lambda m: m.get("timestamp", 0), reverse=(order == "desc"))
+    filtered.sort(key=_msg_epoch, reverse=(order == "desc"))
 
     # Offset + limit.
     page = filtered[offset : offset + limit]
@@ -189,7 +204,17 @@ def list_channels() -> list[dict]:
         if path.name == ACKS_FILE:
             continue
         messages = _load_all(path.stem)
-        latest = messages[-1].get("iso") if messages else None
+        # Same field sourcing as the read filters (timestamp ⇄ iso):
+        # entries may carry either field. Keep 'iso' verbatim when
+        # present; otherwise derive the ISO form from 'timestamp' so
+        # 'latest' stays a string instead of going silently None.
+        latest = None
+        if messages:
+            latest = messages[-1].get("iso")
+            if not latest:
+                epoch = _msg_epoch(messages[-1])
+                if epoch:
+                    latest = datetime.fromtimestamp(epoch, tz=timezone.utc).isoformat()
         channels.append(
             {
                 "name": path.stem,
