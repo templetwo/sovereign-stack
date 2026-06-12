@@ -402,6 +402,61 @@ class MemoryEngine:
 
 
 # =============================================================================
+# SHARED CHRONICLE READ CHOKEPOINT (v1.7.x reader convergence)
+# =============================================================================
+
+
+def load_entries(chronicle_root: str | Path, *, with_sources: bool = False) -> list[dict]:
+    """
+    The shared chronicle read chokepoint — the v1.7.0 deferred item.
+
+    Every code path that reads raw insight JSONL (metabolize's hygiene scan,
+    metabolize detect / context_retrieve via _load_all_insights, the
+    retire_hypothesis scan, the synthesis daemon's chronicle readers) goes
+    through here, so the supersession ledger is visible to ALL readers, not
+    just recall_insights. Without this, a daemon can treat a superseded
+    entry as live truth — the last write-path-divergence class.
+
+    Behavior:
+      - Iterates insights/**/*.jsonl under `chronicle_root` via
+        provenance.iter_chronicle_entries, in deterministic sorted-file
+        order (file line order within each file). Quarantined entries
+        (_quarantine_*/) are EXCLUDED: no converged reader consumed
+        quarantine before, and convergence must not widen any input set.
+      - Applies the SAME data-gated supersession annotation recall_insights
+        uses: when the ledger (chronicle_root/supersessions.jsonl) is
+        non-empty, superseded entries gain `_superseded_by` (full 64-hex;
+        null for retirements) and `_carry_forward_summary` in place —
+        annotate, never drop. With an empty or absent ledger, entries pass
+        through exactly as parsed (byte-identical to the old raw reads).
+      - with_sources=True attaches `_domain_dir` (parent directory name)
+        and `_file` (str path of the source jsonl) to every entry.
+        Underscore prefix = derived at read, never persisted. The claim-id
+        preimage is (timestamp, domain, content) only, so source markers
+        and annotations never shift identity.
+
+    Callers do their own filtering/sorting; this function never drops an
+    entry the raw files contain (corrupt lines excepted, matching the
+    chronicle read convention).
+    """
+    root = Path(chronicle_root)
+    entries: list[dict] = []
+    for entry, jsonl_file, location in provenance.iter_chronicle_entries(root):
+        if location != "insights":
+            continue
+        if with_sources:
+            entry["_domain_dir"] = jsonl_file.parent.name
+            entry["_file"] = str(jsonl_file)
+        entries.append(entry)
+    ledger_records = provenance.load_supersessions(root / "supersessions.jsonl")
+    if ledger_records:
+        fold = provenance.fold_supersessions(ledger_records)
+        if fold:
+            entries = provenance.annotate_superseded(entries, fold)
+    return entries
+
+
+# =============================================================================
 # HIGH-LEVEL EXPERIENTIAL MEMORY (Vault-style)
 # =============================================================================
 
