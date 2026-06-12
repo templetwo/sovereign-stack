@@ -157,6 +157,13 @@ def boot_spawn(
             exc,
         )
         chronicle_ctx = boot_text
+    # The redaction gate covered ask_scribe messages and tool results but NOT
+    # this boot-assembled block, which reached Haiku raw (found 2026-06-12).
+    # Credentials in chronicle entries must never leave the machine.
+    ctx_redaction = redact(chronicle_ctx)
+    if ctx_redaction.counts:
+        logger.info("scribe: redacted boot context: %s", dict(ctx_redaction.counts))
+    chronicle_ctx = ctx_redaction.text
     session = ScribeSession.create(
         parent_instance=parent_instance,
         boot_context_summary=summary,
