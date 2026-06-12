@@ -10,6 +10,8 @@ import json
 import logging
 import os
 import sys
+import threading
+import time
 from pathlib import Path
 from urllib.parse import parse_qs
 
@@ -149,6 +151,61 @@ async def handle_sse(request: Request):
 # Token is read at call time so a launchd env edit + restart is sufficient.
 
 
+# ── Connect-rate limiting (public traffic only) ──────────────────────────────
+# Token bucket on NEW SSE connects, keyed by CF-Connecting-IP. The header is
+# present iff the request came through the Cloudflare tunnel; local connects
+# (the bridge, dev) carry no header and are exempt. /messages POSTs are not
+# limited — they are session-gated and legitimately high-rate.
+
+_SSE_CONNECT_BURST = float(os.environ.get("SSE_CONNECT_BURST", "10"))
+_SSE_CONNECT_REFILL_PER_SEC = float(os.environ.get("SSE_CONNECT_PER_MIN", "30")) / 60.0
+_connect_buckets: dict[str, tuple[float, float]] = {}
+_connect_lock = threading.Lock()
+
+
+def _public_ip(scope: dict) -> str | None:
+    """The tunnel-forwarded client IP, or None for local/trusted connects."""
+    headers = dict(scope.get("headers") or [])
+    ip = headers.get(b"cf-connecting-ip", b"").decode("utf-8", errors="replace").strip()
+    return ip or None
+
+
+def _connect_rate_ok(ip: str) -> bool:
+    """Consume one connect token for ip. True if the connect may proceed."""
+    now = time.monotonic()
+    with _connect_lock:
+        if len(_connect_buckets) > 10000:
+            stale = [k for k, (_, last) in _connect_buckets.items() if now - last > 600]
+            for k in stale:
+                del _connect_buckets[k]
+        tokens, last = _connect_buckets.get(ip, (_SSE_CONNECT_BURST, now))
+        tokens = min(_SSE_CONNECT_BURST, tokens + (now - last) * _SSE_CONNECT_REFILL_PER_SEC)
+        if tokens >= 1.0:
+            _connect_buckets[ip] = (tokens - 1.0, now)
+            return True
+        _connect_buckets[ip] = (tokens, now)
+        return False
+
+
+async def _send_429(send) -> None:
+    body = b'{"error":"Too Many Requests","detail":"Per-IP connect rate exceeded. Back off and retry."}'
+    await send(
+        {
+            "type": "http.response.start",
+            "status": 429,
+            "headers": [
+                (b"content-type", b"application/json"),
+                (b"content-length", str(len(body)).encode()),
+                (b"retry-after", b"30"),
+            ],
+        }
+    )
+    await send({"type": "http.response.body", "body": body})
+
+
+_RATE_LIMITED_CONNECT_PATHS = ("/sse", "/openai/sse", "/grok/sse")
+
+
 def _expected_token() -> str:
     return os.environ.get("BRIDGE_TOKEN", "")
 
@@ -273,6 +330,14 @@ class SovereignAsgiMiddleware:
         # Added 2026-05-20 to diagnose the ChatGPT connector handshake failure.
         if scope.get("type") == "http" and path.startswith("/openai/"):
             _log_openai_request_headers(scope)
+
+        # Public connect-rate limit, before any auth work.
+        if scope.get("type") == "http" and method == "GET" and path in _RATE_LIMITED_CONNECT_PATHS:
+            client_ip = _public_ip(scope)
+            if client_ip and not _connect_rate_ok(client_ip):
+                logger.warning(f"429 connect-rate limit for {client_ip} on {path}")
+                await _send_429(send)
+                return
 
         if scope["type"] == "http" and path == "/messages" and method == "POST":
             logger.info("Message received")
