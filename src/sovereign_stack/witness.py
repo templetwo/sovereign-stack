@@ -14,6 +14,8 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .provenance import receipt_stamp_counts
+
 # ── Time ──
 
 
@@ -439,14 +441,88 @@ def format_lineage_layer(
     return lines
 
 
+# ── Sentinel surfacing (persistent markers) ──
+
+
+def _receipt_count_tag(entry: dict) -> str:
+    """
+    Honest receipt-count suffix for a receipted entry: ' [N verified,
+    M attested]'. Only `checked_at_write == "verified"` stamps count as
+    verification — mismatch and cites never upgrade, and there is never a
+    bare checkmark. Empty string when the entry carries no receipts.
+    """
+    receipts = entry.get("verified_by")
+    if not receipts:
+        return ""
+    counts = receipt_stamp_counts(receipts)
+    return f" [{counts['verified']} verified, {counts['attested']} attested]"
+
+
+def format_sentinels(entries: list[dict], limit: int = 5, full_content: bool = False) -> list[str]:
+    """
+    Render the boot PERSISTENT MARKERS section from sentinel entries
+    (recall_insights output, which carries the data-gated supersession
+    annotation).
+
+    Live sentinels only: entries annotated `_superseded_by` are held back
+    — never silently buried — and counted in an explicit holdback line
+    that names the call revealing the chain. Receipted sentinels render
+    `[N verified, M attested]` stamp counts.
+
+    Byte-identical to the pre-v1.7.0 inline rendering when no entry is
+    annotated and none carries receipts. Pass entries fetched with
+    headroom (e.g. limit=10) so held-back markers don't starve the
+    surface; at most ``limit`` live sentinels are shown.
+    """
+    if not entries:
+        return []
+    live = [e for e in entries if "_superseded_by" not in e]
+    held_back = len(entries) - len(live)
+    cap = None if full_content else 120
+    lines = ["━━━ PERSISTENT MARKERS (intensity ≥ 0.9 — these do not fade) ━━━"]
+    for s in live[:limit]:
+        ts = s.get("timestamp", "")[:10]
+        dom = s.get("domain", "?")
+        raw_c = s.get("content", "")
+        content = raw_c if cap is None else raw_c[:cap]
+        lines.append(f"  [{ts}] [{dom}] {content}{_receipt_count_tag(s)}")
+    if held_back >= 1:
+        plural = "s" if held_back != 1 else ""
+        lines.append(
+            f"  ({held_back} superseded marker{plural} held back — successors shown; "
+            "recall_insights(exclude_superseded=false) shows the chain)"
+        )
+    lines.append("")
+    return lines
+
+
 # ── Thread age annotation ──
+
+
+def _family_tag(thread: dict) -> str:
+    """
+    Family-fold suffix for a coalesced thread row: ' [family "<label>"
+    ×N]'. Rendered only when the thread carries the read-time `family`
+    annotation ({family_id, label, member_count, folded_thread_ids} —
+    seasons.py provides it at fold time). Empty string otherwise.
+    """
+    family = thread.get("family")
+    if not isinstance(family, dict):
+        return ""
+    label = family.get("label")
+    member_count = family.get("member_count")
+    if not label or not member_count:
+        return ""
+    return f' [family "{label}" ×{member_count}]'
 
 
 def format_threads_with_age(threads: list[dict], truncate_question: int | None = 140) -> list[str]:
     """
     Render open threads with age annotation. Threads older than 30 days
     get a stale marker — not to hide them, but to signal they may have
-    drifted out of active relevance.
+    drifted out of active relevance. Threads carrying the `family`
+    annotation (engine-level fold, v1.7.0) gain a [family "<label>" ×N]
+    suffix so the fold is visible, not silent.
 
     Pass ``truncate_question=None`` to disable question truncation (full_content path).
     """
@@ -464,6 +540,6 @@ def format_threads_with_age(threads: list[dict], truncate_question: int | None =
             age_tag = f" ({age}d — stale?)"
         else:
             age_tag = f" ({age}d)"
-        lines.append(f"  • [{dom}]{age_tag} {q}")
+        lines.append(f"  • [{dom}]{age_tag} {q}{_family_tag(t)}")
     lines.append("")
     return lines

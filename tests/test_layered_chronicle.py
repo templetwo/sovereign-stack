@@ -630,3 +630,92 @@ class TestDomainNormalization:
         results = self.chronicle.recall_insights(domain="security,guardian")
         assert len(results) == 1
         assert results[0]["content"] == "the real one"
+
+
+class TestByteIdentityNoLedgers:
+    """v1.7.0 headline regression (spec section 4): param-gated code changes,
+    data-gated display changes. With NO supersession ledger present and NO
+    new params used, record_insight and recall_insights must be
+    byte-identical to v1.6.2 behavior. Direct golden comparisons — any
+    accidental default change fails loudly."""
+
+    def setup_method(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.chronicle = ExperientialMemory(root=self.tmpdir)
+
+    def teardown_method(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_record_insight_return_string_byte_identical(self):
+        path = self.chronicle.record_insight(
+            domain="bid", content="plain v1.6.2-shaped entry", session_id="s1"
+        )
+        # Golden: the bare path string, exactly — no receipt counts, no ⊃.
+        assert path == str(Path(self.tmpdir) / "insights" / "bid" / "s1.jsonl")
+
+    def test_record_insight_written_line_byte_identical(self):
+        path = self.chronicle.record_insight(
+            domain="bid",
+            content="plain v1.6.2-shaped entry",
+            intensity=0.7,
+            session_id="s1",
+            layer="ground_truth",
+        )
+        raw_line = Path(path).read_text().splitlines()[0]
+        entry = json.loads(raw_line)
+        # Golden: exact v1.6.2 field set, in exact insertion order, exact
+        # serialization. New fields must appear ONLY when supplied.
+        golden = json.dumps(
+            {
+                "timestamp": entry["timestamp"],
+                "domain": "bid",
+                "content": "plain v1.6.2-shaped entry",
+                "intensity": 0.7,
+                "layer": "ground_truth",
+                "session_id": "s1",
+            }
+        )
+        assert raw_line == golden
+
+    def test_recall_insights_output_byte_identical(self):
+        self.chronicle.record_insight(domain="bid", content="first entry", session_id="s1")
+        self.chronicle.record_insight(domain="bid", content="second entry", session_id="s1")
+        raw = [
+            json.loads(line)
+            for line in (Path(self.tmpdir) / "insights" / "bid" / "s1.jsonl")
+            .read_text()
+            .splitlines()
+        ]
+        golden = sorted(raw, key=lambda x: x.get("timestamp", ""), reverse=True)
+
+        result = self.chronicle.recall_insights(domain="bid")
+        # Byte-level golden: serialized output identical, no read-time
+        # annotation keys (_superseded_by / _carry_forward_summary / claim_id).
+        assert json.dumps(result) == json.dumps(golden)
+
+    def test_new_recall_params_inert_without_ledger(self):
+        self.chronicle.record_insight(domain="bid", content="only entry", session_id="s1")
+        default = self.chronicle.recall_insights(domain="bid")
+        excluded = self.chronicle.recall_insights(domain="bid", exclude_superseded=True)
+        assert json.dumps(excluded) == json.dumps(default)
+        assert "claim_id" not in default[0]
+
+    def test_plain_writes_never_create_the_ledger(self):
+        self.chronicle.record_insight(domain="bid", content="only entry", session_id="s1")
+        self.chronicle.recall_insights(domain="bid")
+        assert not (Path(self.tmpdir) / "supersessions.jsonl").exists()
+
+    def test_inheritable_context_keys_byte_identical(self):
+        self.chronicle.record_insight(
+            domain="bid", content="a fact", layer="ground_truth", session_id="s1"
+        )
+        ctx = self.chronicle.get_inheritable_context()
+        # Golden key set: superseded_held_back must NOT appear on v1.6.2 data.
+        assert sorted(ctx.keys()) == [
+            "coupling_advisory",
+            "ground_truth",
+            "hypotheses",
+            "inheritance_timestamp",
+            "open_threads",
+        ]
+        assert ctx["ground_truth"][0]["content"] == "a fact"

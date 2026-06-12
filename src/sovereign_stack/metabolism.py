@@ -18,6 +18,8 @@ from pathlib import Path
 
 from mcp.types import TextContent, Tool
 
+from .provenance import append_supersession, build_supersession_record, derive_claim_id
+
 SOVEREIGN_ROOT = Path.home() / ".sovereign"
 CHRONICLE_DIR = SOVEREIGN_ROOT / "chronicle"
 METABOLISM_LOG = SOVEREIGN_ROOT / "metabolism_log.jsonl"
@@ -250,7 +252,14 @@ METABOLISM_TOOLS = [
     ),
     Tool(
         name="retire_hypothesis",
-        description="Retire a superseded hypothesis. Moves it to an archive layer with a pointer to what replaced it. The hypothesis is preserved but marked as retired — not deleted.",
+        description=(
+            "Retire a superseded hypothesis. Moves it to an archive layer with a pointer "
+            "to what replaced it. The hypothesis is preserved but marked as retired — not "
+            "deleted. Appends a {action: 'retire', successor_id: null} record to the "
+            "supersession ledger so the read path sees the retirement. For "
+            "replace-with-successor cases (linking the retired claim to a specific "
+            "successor entry), use supersede_insight instead."
+        ),
         inputSchema={
             "type": "object",
             "properties": {
@@ -595,6 +604,7 @@ async def handle_metabolism_tool(name, arguments):
         # Find and retire the hypothesis
         insights_dir = CHRONICLE_DIR / "insights"
         retired = False
+        retired_entries: list[tuple[str, dict]] = []  # (claim_id, pre-mutation snapshot)
         if not insights_dir.exists():
             # Fresh chronicle — nothing to retire, nothing to crash on.
             return [
@@ -616,6 +626,10 @@ async def handle_metabolism_tool(name, arguments):
                             entry.get("layer") == "hypothesis"
                             and fragment.lower() in entry.get("content", "").lower()
                         ):
+                            # Claim ids derive from (timestamp, domain, content)
+                            # only — the retirement annotations below are
+                            # outside the preimage, so the id never shifts.
+                            retired_entries.append((derive_claim_id(entry), dict(entry)))
                             entry["layer"] = "retired"
                             entry["retired_reason"] = reason
                             entry["retired_by"] = replaced_by
@@ -631,6 +645,20 @@ async def handle_metabolism_tool(name, arguments):
                     jsonl_file.write_text("\n".join(updated) + "\n")
 
         if retired:
+            # Reconcile the two liveness systems: the supersession read path
+            # must see retirements. One ledger record per retired entry —
+            # action "retire", successor_id null, reason = what replaced it
+            # (the entry's retired_by pointer). Spec v1.7.0 section 2.
+            ledger_path = CHRONICLE_DIR / "supersessions.jsonl"
+            for claim_id, snapshot in retired_entries:
+                record = build_supersession_record(
+                    action="retire",
+                    superseded_id=claim_id,
+                    successor_id=None,
+                    reason=replaced_by,
+                    predecessor=snapshot,
+                )
+                append_supersession(ledger_path, record)
             return [
                 TextContent(
                     type="text",
