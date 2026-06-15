@@ -51,6 +51,7 @@ from mcp.types import Tool
 from .memory import ExperientialMemory
 from .policies import PolicyRegistry
 from .provenance import (
+    LIVED_VANTAGES,
     derive_claim_id,
     display_id,
     fold_supersessions,
@@ -838,10 +839,15 @@ def season_review(
     )
 
     sentinels = [e for e in entries if _intensity(e) >= SENTINEL_INTENSITY]
+    # Lived-ground-truth exemption (v1.7.2): a human-authored lived/attested
+    # sentinel (vantage in LIVED_VANTAGES) cannot carry an external receipt and
+    # is NOT a hygiene gap. Seat-tag / external / absent vantages are still held
+    # to the receipt expectation.
     unreceipted = [
         e
         for e in sentinels
         if e.get("layer") == "ground_truth"
+        and (e.get("vantage") or "") not in LIVED_VANTAGES
         and not any(
             isinstance(r, dict) and r.get("checked_at_write") == "verified"
             for r in (e.get("verified_by") or [])
@@ -850,11 +856,15 @@ def season_review(
     if unreceipted:
         hyg.append(
             f"  • {len(unreceipted)} unreceipted ground_truth sentinel(s) at >=0.9"
-            " (no receipt stamped 'verified' — attestation-only counts as unreceipted),"
+            " (no receipt stamped 'verified' — attestation-only counts as unreceipted;"
+            " lived vantages exempt),"
             f" e.g. {display_id(derive_claim_id(unreceipted[0]))}"
         )
     else:
-        hyg.append("  ✓ every >=0.9 ground_truth sentinel carries a verified receipt.")
+        hyg.append(
+            "  ✓ every >=0.9 ground_truth sentinel carries a verified receipt"
+            " (or is an exempt lived vantage)."
+        )
 
     entries_by_id = {derive_claim_id(e): e for e in entries}
     pin_losses: list[str] = []

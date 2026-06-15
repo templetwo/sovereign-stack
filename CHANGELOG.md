@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.7.2] - 2026-06-15
+
+### Lived ground truth — receipt-exemption keyed on vantage + the emotional layer
+
+**The chronicle can now hold Anthony's lived experience at full weight without
+nagging it for a receipt it cannot honestly carry.** Four axes, never collapsed:
+`layer` (epistemic role), `vantage` (truth basis), the new emotional layer (felt
+register), and `intensity` (operational salience, untouched).
+
+- **Receipt-exemption keys on `vantage`, never on emotion.** A new
+  `provenance.LIVED_VANTAGES = {human_observation, human_attestation,
+  witnessed_account}` — the three *human-authored* evidence modes. A
+  ground_truth entry at intensity ≥ 0.9 with one of these vantages is exempt
+  from the unreceipted-ground-truth nag in both guardrails (`nape_daemon`
+  low honk + `season_review` hygiene). Nothing else exempts: an absent vantage,
+  a seat tag (hq_filesystem…), `external_web_verified`, and the deliberately
+  deferred `model_observation` all still nag. A model's own read belongs in
+  `layer=hypothesis`, not exempt ground_truth. Neither flag ever blocks or
+  demotes — nag only, same as before.
+- **Vantage vocab adds two evidence modes:** `human_attestation`,
+  `witnessed_account`. `model_observation` / `implementation_verified` deferred
+  until needed. (Known accepted smell: `vantage` overloads seat-identity and
+  evidence-mode; a future cleanup thread tracks splitting them.)
+- **Emotional layer, first-class fields:** `observed_emotion` (list of tags),
+  `emotional_intensity` (0–1, coarse, **never** drives surfacing/ranking),
+  `emotion_source` (anthony_declared | witness_interpreted | anthony_corrected),
+  `emotion_note`. Promoted from metadata to named params because the MCP
+  dispatch drops un-named metadata before it reaches the chronicle — so these
+  now survive the bridge path. Light validation; storage + display only.
+- Tests: `tests/test_lived_ground_truth.py` exercises the bridge dispatch and
+  locks the must-keep-nagging regression guards (absent / seat-tag / external /
+  model_observation vantages all still honk).
+
 ## [1.7.1] - 2026-06-12
 
 ### Reader convergence + web-seat toolkit curation

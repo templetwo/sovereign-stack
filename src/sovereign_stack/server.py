@@ -444,12 +444,14 @@ async def list_tools():
                         "vantage": {
                             "type": "string",
                             "description": (
-                                "Optional. The seat/vantage this claim was made from, so a "
-                                "future reader knows how to weight it (a runtime seat and a "
-                                "filesystem seat see different truths). Controlled vocab: "
-                                "hq_filesystem, bridge_runtime, web_connector, local_jetson, "
-                                "claude_sandbox, openai_bridge, grok_bridge, gemini_connector, "
-                                "human_observation, external_web_verified."
+                                "Optional. The seat/vantage and/or evidence-mode this claim "
+                                "was made from, so a future reader knows how to weight it. "
+                                "Seat tags: hq_filesystem, bridge_runtime, web_connector, "
+                                "local_jetson, claude_sandbox, openai_bridge, grok_bridge, "
+                                "gemini_connector. Evidence modes: external_web_verified "
+                                "(receipt-expected); human_observation, human_attestation, "
+                                "witnessed_account (LIVED, human-authored, receipt-exempt). A "
+                                "model's own read belongs in layer=hypothesis, not here."
                             ),
                         },
                         "verified_by": {
@@ -481,6 +483,38 @@ async def list_tools():
                                 "the successor would lose (<=500 chars). Required with "
                                 "supersedes."
                             ),
+                        },
+                        "observed_emotion": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": (
+                                "Emotional layer (lived entries): open felt-register tags, "
+                                "e.g. ['grief','protective_love']. Descriptive only — NEVER "
+                                "affects surfacing or ranking."
+                            ),
+                        },
+                        "emotional_intensity": {
+                            "type": "number",
+                            "description": (
+                                "Felt-weight 0.0-1.0. Stored, never drives surfacing/ranking "
+                                "(operational 'intensity' alone governs that). Coarse use."
+                            ),
+                        },
+                        "emotion_source": {
+                            "type": "string",
+                            "enum": [
+                                "anthony_declared",
+                                "witness_interpreted",
+                                "anthony_corrected",
+                            ],
+                            "description": (
+                                "Who named the feeling. A model's read is witness_interpreted; "
+                                "Anthony naming/fixing it is anthony_declared/anthony_corrected."
+                            ),
+                        },
+                        "emotion_note": {
+                            "type": "string",
+                            "description": "Optional short nuance string on the feeling.",
                         },
                     },
                     "required": ["domain", "content"],
@@ -2482,6 +2516,10 @@ async def _dispatch_tool(name: str, arguments: dict):
                 verified_by=arguments.get("verified_by"),
                 supersedes=arguments.get("supersedes"),
                 carry_forward_summary=arguments.get("carry_forward_summary"),
+                observed_emotion=arguments.get("observed_emotion"),
+                emotional_intensity=arguments.get("emotional_intensity"),
+                emotion_source=arguments.get("emotion_source"),
+                emotion_note=arguments.get("emotion_note"),
             )
         except ValueError as exc:
             # Receipt/supersession validation failures name the offending
