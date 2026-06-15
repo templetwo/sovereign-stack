@@ -485,6 +485,12 @@ class ExperientialMemory:
     LAYER_OPEN_THREAD = "open_thread"
     VALID_LAYERS = {LAYER_GROUND_TRUTH, LAYER_HYPOTHESIS, LAYER_OPEN_THREAD}
 
+    # Emotional layer (v1.7.2) — felt register carried alongside a lived entry.
+    # Descriptive only: emotion NEVER drives surfacing or ranking (operational
+    # `intensity` alone governs that). emotion_source records WHO named the
+    # feeling — Anthony is the authority on his own felt experience.
+    EMOTION_SOURCES = {"anthony_declared", "witness_interpreted", "anthony_corrected"}
+
     def __init__(self, root: str = "chronicle"):
         self.root = Path(root)
         self.insights_dir = self.root / "insights"
@@ -526,6 +532,10 @@ class ExperientialMemory:
         verified_by: list[dict] = None,
         supersedes: list[str] = None,
         carry_forward_summary: str = None,
+        observed_emotion: list = None,
+        emotional_intensity: float = None,
+        emotion_source: str = None,
+        emotion_note: str = None,
         **metadata,
     ) -> str:
         """
@@ -539,13 +549,20 @@ class ExperientialMemory:
             layer: Chronicle layer - "ground_truth", "hypothesis", or "open_thread"
                    Defaults to "hypothesis" (interpretations should be earned, not inherited)
             confidence: How confident this instance is (0.0-1.0). Only for hypotheses.
-            vantage: The seat/vantage this claim was made from, so a future reader
-                   knows how to weight it (the write-path-divergence lesson: a
-                   runtime seat and a filesystem seat see different truths). Free
-                   string; controlled vocab — hq_filesystem, bridge_runtime,
-                   web_connector, local_jetson, claude_sandbox, openai_bridge,
-                   grok_bridge, gemini_connector, human_observation,
-                   external_web_verified. Omit if not relevant.
+            vantage: The seat/vantage AND/OR evidence-mode this claim was made
+                   from, so a future reader knows how to weight it (the
+                   write-path-divergence lesson: a runtime seat and a filesystem
+                   seat see different truths). Free string; controlled vocab.
+                   Seat tags: hq_filesystem, bridge_runtime, web_connector,
+                   local_jetson, claude_sandbox, openai_bridge, grok_bridge,
+                   gemini_connector. Evidence modes: external_web_verified
+                   (receipt-expected), human_observation / human_attestation /
+                   witnessed_account (LIVED — human-authored, receipt-EXEMPT;
+                   see provenance.LIVED_VANTAGES). Omit if not relevant. NOTE:
+                   this field intentionally overloads seat-identity and
+                   evidence-mode for now (accepted smell, future cleanup thread);
+                   the receipt-exemption keys ONLY on the three lived values, so
+                   a seat tag never dodges a receipt.
             verified_by: Optional receipts list, {kind, ref, sha256?, note?}
                    per provenance.RECEIPT_KINDS. Verified at write: dangling /
                    ambiguous / malformed refs REJECT the whole call (ValueError
@@ -558,6 +575,18 @@ class ExperientialMemory:
                    entry's `supersedes` breadcrumb.
             carry_forward_summary: REQUIRED when supersedes is present
                    (<= 500 chars) — what the predecessors still teach.
+            observed_emotion: Optional list of open felt-register tags
+                   (e.g. ["grief", "protective_love"]). Descriptive only.
+            emotional_intensity: Optional felt-weight, 0.0-1.0. STORED but
+                   NEVER drives surfacing/ranking — operational `intensity`
+                   alone governs that. Coarse use (0.9 vs 0.6 is meaningful,
+                   0.87 vs 0.91 is not).
+            emotion_source: Optional, one of EMOTION_SOURCES
+                   (anthony_declared | witness_interpreted | anthony_corrected).
+                   A model's read is witness_interpreted; Anthony naming or
+                   fixing it is anthony_declared / anthony_corrected. He is the
+                   authority on his own felt experience.
+            emotion_note: Optional short nuance string on the feeling.
             **metadata: Additional context
 
         Returns:
@@ -588,6 +617,27 @@ class ExperientialMemory:
                 raise provenance.ReceiptError("verified_by must be a list of receipt dicts")
             for position, receipt in enumerate(verified_by, start=1):
                 provenance.validate_receipt_shape(receipt, position)
+
+        # Emotional layer (v1.7.2) — light validation, fail fast. Descriptive
+        # storage only; nothing here feeds surfacing or ranking.
+        if observed_emotion is not None:
+            if not isinstance(observed_emotion, list) or not all(
+                isinstance(tag, str) for tag in observed_emotion
+            ):
+                raise ValueError("observed_emotion must be a list of strings")
+        if emotional_intensity is not None:
+            try:
+                emotional_intensity = float(emotional_intensity)
+            except (TypeError, ValueError):
+                raise ValueError("emotional_intensity must be a number 0.0-1.0")
+            if not 0.0 <= emotional_intensity <= 1.0:
+                raise ValueError("emotional_intensity must be in [0.0, 1.0]")
+        if emotion_source is not None and emotion_source not in self.EMOTION_SOURCES:
+            raise ValueError(
+                f"emotion_source must be one of {sorted(self.EMOTION_SOURCES)}"
+            )
+        if emotion_note is not None and not isinstance(emotion_note, str):
+            raise ValueError("emotion_note must be a string")
 
         timestamp = datetime.now(timezone.utc)
         session_id = session_id or f"session_{timestamp.strftime('%Y%m%d_%H%M%S')}"
@@ -647,6 +697,17 @@ class ExperientialMemory:
             insight["confidence"] = confidence
         if vantage:
             insight["vantage"] = vantage
+        # Emotional layer (v1.7.2) — stored as first-class fields when present.
+        # Survives the MCP dispatch because these are named args (metadata is
+        # dropped by the server before it reaches here).
+        if observed_emotion is not None:
+            insight["observed_emotion"] = observed_emotion
+        if emotional_intensity is not None:
+            insight["emotional_intensity"] = emotional_intensity
+        if emotion_source is not None:
+            insight["emotion_source"] = emotion_source
+        if emotion_note is not None:
+            insight["emotion_note"] = emotion_note
         if stamped_receipts:
             insight["verified_by"] = stamped_receipts
         if resolved_predecessors:

@@ -49,6 +49,16 @@ SUPERSESSION_ACTIONS = ("supersede", "revoke", "retire")
 CARRY_FORWARD_MAX_CHARS = 500
 _PREVIEW_CHARS = 120
 
+# Lived-ground-truth (v1.7.2): vantage values that mark an entry as a
+# human-authored lived/attested account rather than a technical claim.
+# These are the ONLY vantages exempt from the unreceipted-ground-truth nag
+# (nape_daemon + season_review hygiene): the exemption is justified solely by
+# HUMAN AUTHORSHIP of an experience that cannot carry an external receipt.
+# A model's own read is deliberately NOT here — it belongs in layer=hypothesis,
+# not exempt ground_truth. Absent/seat-tag/external vantages are never exempt,
+# so nothing dodges a receipt by accident, only by being honestly marked lived.
+LIVED_VANTAGES = frozenset({"human_observation", "human_attestation", "witnessed_account"})
+
 _FULL_ID_RE = re.compile(r"^[0-9a-f]{64}$")
 _CLAIM_REF_RE = re.compile(r"^[0-9a-f]{1,64}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")

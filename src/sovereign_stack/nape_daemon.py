@@ -30,6 +30,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .provenance import LIVED_VANTAGES
+
 # =============================================================================
 # CONSTANTS
 # =============================================================================
@@ -903,6 +905,13 @@ class NapeDaemon:
         except (TypeError, ValueError):
             return []
         if intensity < 0.9:
+            return []
+
+        # Lived-ground-truth exemption (v1.7.2): a human-authored lived/attested
+        # account cannot carry an external receipt and must not be nagged for
+        # lacking one. Keyed ONLY on the three lived vantages — an absent,
+        # seat-tag, or external vantage is NOT exempt and still honks.
+        if (args.get("vantage") or "") in LIVED_VANTAGES:
             return []
 
         match = _RECEIPTS_VERIFIED_RE.search(latest.get("result_str", ""))
