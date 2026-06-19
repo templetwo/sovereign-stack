@@ -23,7 +23,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-SCRIBE_ATTRIBUTION = "scribe-haiku-4-5"
+SCRIBE_ATTRIBUTION = "scribe-sonnet-4-6"
 DEFAULT_TTL_MINUTES = 240
 ARCHIVE_ROOT = (
     Path(os.environ.get("SOVEREIGN_ROOT", str(Path.home() / ".sovereign"))) / "scribe_threads"
@@ -79,6 +79,9 @@ class ScribeSession:
     # reuse it cheaply. Stored on the session so ask_scribe turns can pass
     # the same context the boot used.
     chronicle_context: str = ""
+    # When True the session never expires — used by the resident librarian.
+    # Legacy per-instance sessions leave this False to preserve TTL machinery.
+    immortal: bool = False
 
     # ----- Lifecycle ---------------------------------------------------
 
@@ -89,6 +92,7 @@ class ScribeSession:
         boot_context_summary: str = "",
         ttl_minutes: int = DEFAULT_TTL_MINUTES,
         chronicle_context: str = "",
+        immortal: bool = False,
     ) -> ScribeSession:
         now = _now_iso()
         return cls(
@@ -99,6 +103,7 @@ class ScribeSession:
             last_message_at=now,
             ttl_minutes=ttl_minutes,
             chronicle_context=chronicle_context,
+            immortal=immortal,
         )
 
     @property
@@ -113,6 +118,8 @@ class ScribeSession:
 
     @property
     def expired(self) -> bool:
+        if self.immortal:
+            return False
         return time.time() > self.expires_at_unix
 
     @property

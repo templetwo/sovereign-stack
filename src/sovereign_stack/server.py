@@ -16,6 +16,7 @@ Usage:
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
 import os
@@ -723,6 +724,31 @@ async def list_tools():
                                 "(display-side only; the primary carries a `family` "
                                 "annotation listing folded members). Data-gated: no "
                                 "family ledger, no change."
+                            ),
+                        },
+                        "domain_contains": {
+                            "type": "string",
+                            "description": (
+                                "Case-insensitive substring filter applied against the full "
+                                "thread domain string (file stem). Narrows to threads whose "
+                                "domain contains this token — useful for compound domains like "
+                                "'frank-jones,greene-street,cbd' where a single tag would not "
+                                "exact-match via `domain`. Omit to match all domains."
+                            ),
+                        },
+                        "offset": {
+                            "type": "integer",
+                            "default": 0,
+                            "description": "Skip the first N matched threads (pagination). Default 0.",
+                        },
+                        "with_total": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": (
+                                "When true, return a dict {threads, total, has_more, offset} "
+                                "instead of a plain list. Use this to detect silent cap: if "
+                                "total > len(threads) then more exist beyond this page. "
+                                "Default false preserves the original list return."
                             ),
                         },
                     },
@@ -2588,6 +2614,8 @@ async def _dispatch_tool(name: str, arguments: dict):
             since_last_reflection=since_last_reflection,
             with_ids=arguments.get("with_ids", False),
             exclude_superseded=arguments.get("exclude_superseded", False),
+            domain_contains=arguments.get("domain_contains"),
+            order=arguments.get("order", "newest"),
         )
         return [TextContent(type="text", text=json.dumps(insights, indent=2))]
 
@@ -2637,16 +2665,25 @@ async def _dispatch_tool(name: str, arguments: dict):
         if domain and domain.lower() == "all":
             domain = None  # "all" means no filter
         limit = arguments.get("limit", 10)
-        threads = experiential.get_open_threads(
-            domain, limit, coalesce_families=arguments.get("coalesce_families", True)
+        with_total = arguments.get("with_total", False)
+        result = experiential.get_open_threads(
+            domain,
+            limit,
+            coalesce_families=arguments.get("coalesce_families", True),
+            domain_contains=arguments.get("domain_contains"),
+            offset=arguments.get("offset", 0),
+            with_total=with_total,
         )
-        if not threads:
+        # When with_total=True, result is a dict {threads, total, has_more, offset}.
+        # When with_total=False (default), result is a plain list (backward-compat).
+        threads_list = result["threads"] if with_total else result
+        if not threads_list:
             return [
                 TextContent(
                     type="text", text="No open threads. All questions resolved or none recorded."
                 )
             ]
-        return [TextContent(type="text", text=json.dumps(threads, indent=2))]
+        return [TextContent(type="text", text=json.dumps(result, indent=2))]
 
     if name == "get_inheritable_context":
         context = experiential.get_inheritable_context()
@@ -3032,9 +3069,19 @@ async def _dispatch_tool(name: str, arguments: dict):
 
         boot_text = "\n".join(lines)
 
-        # Scribe integration (SCRIBE_SPEC.md): spawn a ScribeSession on
-        # every boot and run the Haiku greeting. Greeting + metadata land
-        # in ~/.sovereign/scribe_threads/_logs/ regardless of phase.
+        # Ensure the resident scribe is alive (lazy, idempotent). This covers
+        # stdio seats and the edge where SSE booted before the map existed.
+        # Failures are swallowed — a degraded resident never breaks boot.
+        try:
+            from .scribe.resident import ensure_resident_scribe as _ensure_resident
+
+            await asyncio.to_thread(_ensure_resident)
+        except Exception:
+            pass
+
+        # Scribe integration (SCRIBE_SPEC.md): spawn a per-instance ScribeSession
+        # on every boot and run the greeting. Greeting + metadata land in
+        # ~/.sovereign/scribe_threads/_logs/ regardless of phase.
         #
         # Phase 2 (default ON): if the greeting succeeded and the
         # SCRIBE_BOOT_INJECT flag is enabled, inject the SCRIBE block

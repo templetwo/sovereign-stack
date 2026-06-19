@@ -92,7 +92,7 @@ class TestWriteEncounterNote:
         assert entry["domain"] == "scribe,encounter,claude-code"
         assert entry["layer"] == "ground_truth"
         assert entry["intensity"] == DEFAULT_INTENSITY
-        assert entry["source_instance"] == "scribe-haiku-4-5"
+        assert entry["source_instance"] == "scribe-sonnet-4-6"
         assert entry["scribe_session_id"] == session.session_id
         assert entry["scribe_turn_count"] == 2
         assert "claude-code arrived" in entry["content"]

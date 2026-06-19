@@ -11,7 +11,7 @@ Design constraints (all enforced here, not at the prompt level):
   1. READ-ONLY. No tool here writes, deletes, modifies, or executes
      anything. The scribe cannot retire, resolve, or alter chronicle
      entries. The encounter-note write path stays a separate code
-     path attributable to scribe-haiku-4-5 alone.
+     path attributable to scribe-sonnet-4-6 alone.
 
   2. SCOPED. All filesystem access is restricted to under
      ~/.sovereign/chronicle/. Path traversal is rejected before any
@@ -113,6 +113,8 @@ def tool_chronicle_recall(
     layer: str | None = None,
     start_date: str | None = None,
     end_date: str | None = None,
+    domain_contains: str | None = None,
+    order: str = "newest",
 ) -> str:
     """Query the chronicle for insights matching the filters. Returns
     a JSON string for Haiku to read."""
@@ -126,6 +128,8 @@ def tool_chronicle_recall(
         layer_filter=layer,
         start_date=start_date,
         end_date=end_date,
+        domain_contains=domain_contains,
+        order=order,
     )
     # Slim each insight for context efficiency
     slim: list[dict] = []
@@ -197,13 +201,30 @@ def tool_chronicle_list_domains(filter: str | None = None, limit: int = 50) -> s
     )
 
 
-def tool_chronicle_get_threads(domain: str | None = None, limit: int = 20) -> str:
-    """List open threads (unresolved questions) with full question text."""
+def tool_chronicle_get_threads(
+    domain: str | None = None,
+    limit: int = 20,
+    domain_contains: str | None = None,
+) -> str:
+    """List open threads (unresolved questions) with full question text.
+
+    Returns a JSON object with keys: count (threads in this page), total
+    (all matched threads before limit), has_more (boolean), domain_filter,
+    domain_contains_filter, and threads (list of slim dicts).
+    """
     limit = max(1, min(limit, MAX_THREADS_LIMIT))
     memory = ExperientialMemory(root=str(CHRONICLE_ROOT))
-    threads = memory.get_open_threads(domain=domain, limit=limit)
+    result = memory.get_open_threads(
+        domain=domain,
+        limit=limit,
+        domain_contains=domain_contains,
+        with_total=True,
+    )
+    thread_list = result["threads"]
+    total = result["total"]
+    has_more = result["has_more"]
     slim: list[dict] = []
-    for t in threads:
+    for t in thread_list:
         slim.append(
             {
                 "timestamp": (t.get("timestamp") or "")[:19],
@@ -215,7 +236,14 @@ def tool_chronicle_get_threads(domain: str | None = None, limit: int = 20) -> st
     redacted, _counts = redact_structure(slim)
     return _truncate_result(
         json.dumps(
-            {"count": len(redacted), "domain_filter": domain, "threads": redacted},
+            {
+                "count": len(redacted),
+                "total": total,
+                "has_more": has_more,
+                "domain_filter": domain,
+                "domain_contains_filter": domain_contains,
+                "threads": redacted,
+            },
             indent=2,
             ensure_ascii=False,
         )
@@ -283,6 +311,25 @@ SCRIBE_TOOLS: list[ToolSpec] = [
                     "type": "string",
                     "description": "ISO8601 upper bound. Inclusive.",
                 },
+                "domain_contains": {
+                    "type": "string",
+                    "description": (
+                        "Case-insensitive substring matched against the domain directory name. "
+                        "Narrows to entries in any domain whose name contains this token. "
+                        "Useful for compound domains: 'frank-jones' matches "
+                        "'frank-jones,greene-street,cbd'. Omit to search all domains."
+                    ),
+                },
+                "order": {
+                    "type": "string",
+                    "description": (
+                        "Sort order: 'newest' (default, newest-first), "
+                        "'oldest' (oldest-first — reaches entries buried under recent migrations), "
+                        "'relevance' (when query given: ranks by match-term count, no recency boost)."
+                    ),
+                    "enum": ["newest", "oldest", "relevance"],
+                    "default": "newest",
+                },
             },
         },
         handler=tool_chronicle_recall,
@@ -337,19 +384,29 @@ SCRIBE_TOOLS: list[ToolSpec] = [
         name="chronicle_get_threads",
         description=(
             "List open (unresolved) chronicle threads with full question "
-            "text. Optionally filter by domain."
+            "text. Returns count, total, has_more, and threads. Use total "
+            "and has_more to detect the silent cap: if total > count, more "
+            "threads exist beyond this page. Optionally filter by domain."
         ),
         input_schema={
             "type": "object",
             "properties": {
                 "domain": {
                     "type": "string",
-                    "description": "Optional exact domain filter.",
+                    "description": "Optional exact domain filter (comma-element match).",
                 },
                 "limit": {
                     "type": "integer",
                     "description": f"Max threads (1..{MAX_THREADS_LIMIT}). Default 20.",
                     "default": 20,
+                },
+                "domain_contains": {
+                    "type": "string",
+                    "description": (
+                        "Case-insensitive substring matched against the full domain "
+                        "string (file stem). Narrows to threads whose domain contains "
+                        "this token. Omit to match all domains."
+                    ),
                 },
             },
         },

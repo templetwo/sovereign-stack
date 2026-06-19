@@ -1,7 +1,7 @@
 """Encounter-note write path.
 
 The scribe's only write authority. Records small chronicle entries
-describing scribe conversations, attributed to `scribe-haiku-4-5`.
+describing scribe conversations, attributed to `scribe-sonnet-4-6`.
 
 Per SCRIBE_SPEC.md:
   - Default intensity 0.3 (low signal, noise-tolerant)
