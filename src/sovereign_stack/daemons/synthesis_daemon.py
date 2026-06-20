@@ -39,6 +39,19 @@ v2 additions (2026-04-29):
     Directly addresses the declare-before-verify failure mode.
   * Spanning sample mode — samples across full chronicle history (weeks, not
     hours) to surface structural patterns invisible in the recent window.
+
+v3 additions (2026-06-19):
+  * Abstain path — the standard-mode prompt now explicitly permits
+    {"reflections": []} when the window holds no genuine connection, and
+    run() records that as outcome="abstained" (a respected outcome) rather
+    than "parse_failed". v2 forced one observation per firing, so a 14B with
+    no real signal manufactured a dialectical "tension" between the
+    hypothesis and ground_truth layers every time — the structural_echo
+    monoculture seen across 2026-06-05/06/19. Two layers coexisting is the
+    chronicle's structure, not a discovery about it.
+  * Connection-type de-bias — the prompt asks for the SIMPLEST true type
+    and names the coexistence/grandiose-restatement traps that produced the
+    monoculture. Goose and spanning modes are untouched.
 """
 
 from __future__ import annotations
@@ -65,7 +78,7 @@ DEFAULT_MODEL = "ministral-3:14b"  # fireside 2026-04-26: tested at 25s with
 # llama3.1:8b (too small — surface restatements, occasional misreads) and
 # qwen3.6:27b (~120s — too slow for interactive use). Keep Qwen as opt-in
 # for the deep-nightly variant when latency doesn't matter.
-DEFAULT_PROMPT_VERSION = "v2-2026-04-29"
+DEFAULT_PROMPT_VERSION = "v3-2026-06-19"
 DEFAULT_RECENT_HOURS = 36  # window of chronicle entries to read
 DEFAULT_MAX_ENTRIES = 8  # cap on entries fed to the model
 DEFAULT_TIMEOUT_SECONDS = 180  # 14B finishes in ~25-60s; 180s gives headroom
@@ -118,7 +131,7 @@ class Reflection:
 class RunResult:
     """Outcome of a single synthesis run."""
 
-    outcome: str  # "wrote" | "no_entries" | "model_failed" | "parse_failed" | "skipped"
+    outcome: str  # "wrote" | "abstained" | "no_entries" | "model_failed" | "parse_failed" | "skipped"
     details: str = ""
     run_id: str = ""
     model: str = ""
@@ -372,21 +385,47 @@ human researcher (Anthony) over recent days. The chronicle is a structured
 field — entries have domains, layers (ground_truth / hypothesis / open_thread),
 timestamps, and sometimes addressed-letter shapes between sibling instances.
 
-Your job is NOT to be authoritative. Your job is to gesture at the single
-strongest pattern you notice that the humans-in-the-loop and the writing
-instances might have missed — a point of convergence, an unresolved tension,
-a structural echo across distant entries, or an untouched question. The
-observation will be insight or nonsense — the reader knows this and will
-calibrate.
+Your job is NOT to be authoritative, and NOT to produce something every
+firing. Your job is to notice whether there is ONE genuine connection across
+these entries that the writing instances and the humans-in-the-loop might
+have missed — and to name it plainly, OR to say nothing. An observation will
+be insight or nonsense; the reader calibrates. But a forced observation is
+worse than silence.
 
-Output exactly 1 observation as JSON, shaped like:
+A genuine connection is two or more SPECIFIC entries that actually bear on
+each other:
+  * convergence — the same question reached from different angles
+  * contradiction — their claims genuinely disagree
+  * structural_echo — the same concrete shape recurs in unrelated work
+  * untouched_question — a real question was raised and left unanswered
+  * drift_pattern — a tendency visibly shifting across entries
+  * other — something real that fits none of the above
+
+Choose the SIMPLEST type that is true. Do not reach for structural_echo or
+contradiction because they sound deeper — most real signal is convergence or
+an untouched question. Write plainly and concretely: name the specific
+entries and what they actually say. Do not theorize about "the system" in
+grand abstractions.
+
+ABSTAIN — return no observation — when the strongest thing you can find is
+any of these:
+  * Two entries merely coexisting in the same time window.
+  * A "tension" built by pairing the hypothesis layer against the
+    ground_truth layer just because both are present. That pairing is the
+    structure of the chronicle itself, not a discovery about it.
+  * One entry restated in larger words.
+
+Output AT MOST 1 observation as JSON, shaped like:
 {
-  "observation": "<one paragraph — make it count, you only get one>",
+  "observation": "<one concrete paragraph naming the entries — only if real>",
   "entries_referenced": ["<short entry tag>", ...],
   "connection_type": "convergence" | "contradiction" | "structural_echo" | "untouched_question" | "drift_pattern" | "other",
   "confidence": "low" | "medium"
 }
 Wrap it in {"reflections": [<the single object>]}. No prose outside the JSON.
+If there is no genuine connection in this window, output exactly:
+{"reflections": []}
+Abstaining is a respected, correct answer.
 """
 
 GOOSE_PREAMBLE = """\
@@ -521,9 +560,13 @@ def build_prompt(
             )
             lines.append("")
         lines.append(
-            "Now produce 1 observation as the JSON described above. "
-            "Pick the strongest signal you see — gesture, don't declare. "
-            "If you're wrong, that is allowed; the reader will calibrate."
+            "Now produce AT MOST 1 observation as the JSON described above. "
+            "If there is a genuine connection, pick the simplest type that is "
+            "true — gesture, don't declare. If there is not, output "
+            '{"reflections": []} — abstaining is correct when the window holds '
+            "no real connection, and a forced pattern is worse than silence. "
+            "If you do observe and you're wrong, that is allowed; the reader "
+            "will calibrate."
         )
 
     return "\n".join(lines)
@@ -685,7 +728,6 @@ def parse_reflections(raw: str) -> list[Reflection]:
         return []
     try:
         data = json.loads(block)
-        raw_reflections = data.get("reflections", [])
     except json.JSONDecodeError:
         # Truncation-tolerant fallback: when the model hits a token ceiling
         # mid-3rd-reflection, the overall JSON is malformed but the earlier
@@ -694,6 +736,24 @@ def parse_reflections(raw: str) -> list[Reflection]:
         # individually. Caught at the 2026-04-26 04:17 firing where 2
         # complete reflections were thrown away because the 3rd was cut off.
         raw_reflections = _recover_complete_reflections(block)
+    else:
+        if isinstance(data, dict):
+            if "reflections" in data:
+                raw_reflections = data.get("reflections") or []
+            elif "observation" in data:
+                # Model emitted a single bare reflection object without the
+                # {"reflections": [...]} wrapper. Tolerate it — format=json
+                # does not enforce the wrapper, and ministral sometimes drops
+                # it (observed 2026-06-19 on a clean v3 convergence reflection
+                # that would otherwise have been lost as parse_failed).
+                raw_reflections = [data]
+            else:
+                raw_reflections = []
+        elif isinstance(data, list):
+            # Bare array of reflection objects, no wrapper.
+            raw_reflections = data
+        else:
+            raw_reflections = []
     if not isinstance(raw_reflections, list):
         return []
     out: list[Reflection] = []
@@ -721,6 +781,27 @@ def parse_reflections(raw: str) -> list[Reflection]:
             )
         )
     return out
+
+
+def is_explicit_abstain(raw: str) -> bool:
+    """
+    True when the model deliberately returned an empty reflections array —
+    a structurally valid {"reflections": []} (v3 abstain). This is distinct
+    from unparseable garbage: parse_reflections() returns [] for BOTH, so
+    run() uses this to separate a respected "abstained" outcome from a real
+    "parse_failed" defect. Requires the top-level JSON to parse cleanly and
+    expose a list-typed "reflections" key of length 0 — a truncated or
+    malformed body does not count as an abstain.
+    """
+    block = extract_json_block(raw)
+    if not block:
+        return False
+    try:
+        data = json.loads(block)
+    except json.JSONDecodeError:
+        return False
+    refs = data.get("reflections") if isinstance(data, dict) else None
+    return isinstance(refs, list) and len(refs) == 0
 
 
 # ── Persistence ─────────────────────────────────────────────────────────────
@@ -855,6 +936,18 @@ class SynthesisDaemon:
                 result.details = "goose mode: no gaps found between handoffs and chronicle"
                 result.elapsed_seconds = round(time.time() - started, 2)
                 return result
+            # v3: a deliberate {"reflections": []} is an abstain, not a defect.
+            # Separate it from genuine parse failures so abstain-rate and
+            # parse-failure-rate stay distinguishable in the analytics.
+            if is_explicit_abstain(raw):
+                result.outcome = "abstained"
+                result.reflections_written = 0
+                result.details = (
+                    f"no genuine connection across {len(entries)} entries in "
+                    f"last {self.recent_hours}h — model abstained"
+                )
+                result.elapsed_seconds = round(time.time() - started, 2)
+                return result
             result.outcome = "parse_failed"
             result.details = "model returned no parseable reflections"
             result.elapsed_seconds = round(time.time() - started, 2)
@@ -914,7 +1007,9 @@ def main() -> int:
         "details": result.details,
     }
     print(json.dumps(summary, indent=2))
-    return 0 if result.outcome == "wrote" else 1
+    # "abstained" is a healthy v3 outcome (model found no genuine connection),
+    # not a failure — exit 0 so launchd doesn't log it as an error.
+    return 0 if result.outcome in ("wrote", "abstained") else 1
 
 
 if __name__ == "__main__":
