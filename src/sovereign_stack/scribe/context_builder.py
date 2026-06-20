@@ -250,8 +250,8 @@ def _format_lineage_safe(sovereign_root: Path) -> str:
     try:
         lines = format_lineage_layer(
             sovereign_root,
-            reader_instance_id=None,
-            max_letters_per_dir=4,
+            reader_instance=None,
+            limit_per_bucket=4,
             full_content=True,
         )
         return "\n".join(lines) if lines else "(no lineage letters)"
