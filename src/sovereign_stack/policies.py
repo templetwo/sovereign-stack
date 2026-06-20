@@ -145,7 +145,15 @@ class PolicyRegistry:
     retirements are new records.
     """
 
-    def __init__(self, policies_path: str | Path = DEFAULT_POLICIES_PATH):
+    def __init__(self, policies_path: str | Path | None = None):
+        # Resolve DEFAULT_POLICIES_PATH at CALL time, not def time. An
+        # early-bound default (policies_path=DEFAULT_POLICIES_PATH) captures
+        # the path object once at import, so reconfiguring the module
+        # attribute afterward (tests, alternate roots) is silently ignored
+        # and PolicyRegistry() keeps reading the original real path. Late
+        # binding via a None sentinel honors the live module attribute.
+        if policies_path is None:
+            policies_path = DEFAULT_POLICIES_PATH
         self.policies_path = Path(policies_path)
 
     # ── Read path ──
