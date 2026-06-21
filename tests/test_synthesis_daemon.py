@@ -11,8 +11,8 @@ Coverage focus:
     mode preserves prior content)
   * Prompt assembly (entries serialized, long bodies trimmed)
 
-Network-touching paths (call_ollama) are NOT exercised here — they're a
-subprocess/HTTP boundary, tested manually at the fireside on 2026-04-26.
+Network-touching paths (call_anthropic) are NOT exercised here — they're an
+HTTP/API boundary; run()'s outcome handling is tested by monkeypatching it.
 """
 
 from __future__ import annotations
@@ -671,7 +671,7 @@ class TestRunAbstainOutcome:
         self, chronicle_root: Path, tmp_path: Path, monkeypatch
     ):
         monkeypatch.setattr(
-            synthesis_daemon, "call_ollama", lambda *a, **k: (True, '{"reflections": []}')
+            synthesis_daemon, "call_anthropic", lambda *a, **k: (True, '{"reflections": []}')
         )
         result = self._daemon(chronicle_root, tmp_path).run()
         assert result.outcome == "abstained"
@@ -683,20 +683,18 @@ class TestRunAbstainOutcome:
     ):
         # A genuine garbage response must NOT be masked as an abstain.
         monkeypatch.setattr(
-            synthesis_daemon, "call_ollama", lambda *a, **k: (True, "the model rambled, no json")
+            synthesis_daemon, "call_anthropic", lambda *a, **k: (True, "the model rambled, no json")
         )
         result = self._daemon(chronicle_root, tmp_path).run()
         assert result.outcome == "parse_failed"
 
-    def test_real_reflection_still_wrote(
-        self, chronicle_root: Path, tmp_path: Path, monkeypatch
-    ):
+    def test_real_reflection_still_wrote(self, chronicle_root: Path, tmp_path: Path, monkeypatch):
         raw = (
             '{"reflections": [{"observation": "d1 and d2 converge",'
             ' "entries_referenced": ["d1", "d2"],'
             ' "connection_type": "convergence", "confidence": "low"}]}'
         )
-        monkeypatch.setattr(synthesis_daemon, "call_ollama", lambda *a, **k: (True, raw))
+        monkeypatch.setattr(synthesis_daemon, "call_anthropic", lambda *a, **k: (True, raw))
         result = self._daemon(chronicle_root, tmp_path).run()
         assert result.outcome == "wrote"
         assert result.reflections_written == 1
