@@ -22,6 +22,7 @@ from glob import glob as glob_files
 from pathlib import Path
 from typing import Any
 
+from . import protected as protected_module
 from . import provenance
 from .coherence import Coherence
 
@@ -490,36 +491,53 @@ def finalize_read(
     spec (§5.0): the one annotated chokepoint where later record-level
     enforcement (protected-source coupling) will live.
 
-    Behavior (data-gated — preserves the pre-convergence semantics
-    byte-for-byte):
-      - Loads chronicle_root/supersessions.jsonl. EMPTY or absent ledger
-        -> entries pass through UNTOUCHED (identical list object, no
-        derived keys), so a ledger-free chronicle reads exactly as the
-        raw JSONL.
-      - Non-empty ledger, exclude_superseded=False (the raw-query
-        default): superseded/retired entries are RETURNED, annotated in
-        place with `_superseded_by` (full 64-hex; null for retirements)
-        and `_carry_forward_summary` — annotate, never drop.
-      - Non-empty ledger, exclude_superseded=True: superseded/retired
-        entries are DROPPED here (before any caller limit), so successors
-        / other live entries fill the freed slots.
+    Behavior — two stages, in order:
 
-    The caller owns ordering and limiting; this function never reorders
-    and only drops when explicitly asked. Underscore-prefixed keys are
-    derived at read and never persisted (the claim-id preimage is
+    A. Supersession (data-gated — preserves pre-convergence semantics
+       byte-for-byte):
+         - EMPTY/absent supersessions.jsonl -> entries pass through this
+           stage UNTOUCHED (no derived keys), so a ledger-free chronicle
+           reads exactly as the raw JSONL.
+         - non-empty, exclude_superseded=False (the raw-query default):
+           superseded/retired entries are RETURNED, annotated in place
+           with `_superseded_by` and `_carry_forward_summary` — annotate,
+           never drop.
+         - non-empty, exclude_superseded=True: superseded/retired entries
+           are DROPPED here (before any caller limit).
+
+    B. Protected coupling (spec §5.3 — runs UNCONDITIONALLY, NOT gated on
+       the supersession ledger): for any entry the protected ledger marks
+       protected, the stakes are loaded from the archive-coupled pointer
+       and attached inseparably (`_stakes`) in the SAME payload;
+       fail-closed to the typed ProtectedStakesUnavailable sentinel
+       (content withheld) when the stakes can't be verified. A protected
+       record with ZERO supersessions must never slip through bare, so this
+       pass cannot live behind stage A's empty-ledger fast path.
+
+    The caller owns ordering and limiting; this function never reorders and
+    only drops superseded entries when explicitly asked. Underscore-prefixed
+    keys are derived at read and never persisted (the claim-id preimage is
     timestamp+domain+content only, so annotations never shift identity).
     """
-    ledger_path = Path(chronicle_root) / "supersessions.jsonl"
-    ledger_records = provenance.load_supersessions(ledger_path)
-    if not ledger_records:
-        return entries
-    fold = provenance.fold_supersessions(ledger_records)
-    if not fold:
-        return entries
-    if exclude_superseded:
-        live, _superseded = provenance.partition_superseded(entries, fold)
-        return live
-    return provenance.annotate_superseded(entries, fold)
+    root = Path(chronicle_root)
+
+    # Stage A — supersession (data-gated).
+    result = entries
+    ledger_records = provenance.load_supersessions(root / "supersessions.jsonl")
+    if ledger_records:
+        fold = provenance.fold_supersessions(ledger_records)
+        if fold:
+            if exclude_superseded:
+                result, _superseded = provenance.partition_superseded(result, fold)
+            else:
+                result = provenance.annotate_superseded(result, fold)
+
+    # Stage B — protected coupling (unconditional; see protected.enforce_coupling).
+    protected_fold = protected_module.load_protected_fold(root)
+    if protected_fold:
+        result = protected_module.enforce_coupling(result, protected_fold, root)
+
+    return result
 
 
 # =============================================================================
