@@ -471,12 +471,55 @@ def load_entries(chronicle_root: str | Path, *, with_sources: bool = False) -> l
             entry["_domain_dir"] = jsonl_file.parent.name
             entry["_file"] = str(jsonl_file)
         entries.append(entry)
-    ledger_records = provenance.load_supersessions(root / "supersessions.jsonl")
-    if ledger_records:
-        fold = provenance.fold_supersessions(ledger_records)
-        if fold:
-            entries = provenance.annotate_superseded(entries, fold)
-    return entries
+    return finalize_read(entries, root)
+
+
+def finalize_read(
+    entries: list[dict],
+    chronicle_root: str | Path,
+    *,
+    exclude_superseded: bool = False,
+) -> list[dict]:
+    """
+    The shared read-finalization tail — the single supersession chokepoint.
+
+    Every chronicle reader (load_entries AND recall_insights) routes its
+    already-walked / already-filtered / already-sorted entry list through
+    here so the supersession ledger is folded in EXACTLY ONCE, in one
+    place. This is the convergence point named in the protected-source
+    spec (§5.0): the one annotated chokepoint where later record-level
+    enforcement (protected-source coupling) will live.
+
+    Behavior (data-gated — preserves the pre-convergence semantics
+    byte-for-byte):
+      - Loads chronicle_root/supersessions.jsonl. EMPTY or absent ledger
+        -> entries pass through UNTOUCHED (identical list object, no
+        derived keys), so a ledger-free chronicle reads exactly as the
+        raw JSONL.
+      - Non-empty ledger, exclude_superseded=False (the raw-query
+        default): superseded/retired entries are RETURNED, annotated in
+        place with `_superseded_by` (full 64-hex; null for retirements)
+        and `_carry_forward_summary` — annotate, never drop.
+      - Non-empty ledger, exclude_superseded=True: superseded/retired
+        entries are DROPPED here (before any caller limit), so successors
+        / other live entries fill the freed slots.
+
+    The caller owns ordering and limiting; this function never reorders
+    and only drops when explicitly asked. Underscore-prefixed keys are
+    derived at read and never persisted (the claim-id preimage is
+    timestamp+domain+content only, so annotations never shift identity).
+    """
+    ledger_path = Path(chronicle_root) / "supersessions.jsonl"
+    ledger_records = provenance.load_supersessions(ledger_path)
+    if not ledger_records:
+        return entries
+    fold = provenance.fold_supersessions(ledger_records)
+    if not fold:
+        return entries
+    if exclude_superseded:
+        live, _superseded = provenance.partition_superseded(entries, fold)
+        return live
+    return provenance.annotate_superseded(entries, fold)
 
 
 # =============================================================================
@@ -1509,18 +1552,13 @@ class ExperientialMemory:
             # Default "newest" — sort by timestamp descending (backward-compatible).
             insights.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
 
-        # v1.7.0 read path — single chokepoint, data-gated: zero ledger
-        # records, zero change. Annotate-not-drop is the default (the raw
-        # query tool never hides); exclude_superseded drops pre-limit.
-        fold: dict[str, dict] = {}
-        ledger_records = provenance.load_supersessions(self.supersessions_path)
-        if ledger_records:
-            fold = provenance.fold_supersessions(ledger_records)
-        if fold:
-            if exclude_superseded:
-                insights, _superseded = provenance.partition_superseded(insights, fold)
-            else:
-                insights = provenance.annotate_superseded(insights, fold)
+        # Shared read-finalization tail (the single supersession
+        # chokepoint — see finalize_read). Data-gated: zero ledger records,
+        # zero change. Annotate-not-drop is the default (the raw query tool
+        # never hides); exclude_superseded drops pre-limit. Routing through
+        # finalize_read instead of an inline copy means recall_insights and
+        # load_entries fold supersession identically, in ONE place.
+        insights = finalize_read(insights, self.root, exclude_superseded=exclude_superseded)
 
         insights = insights[:limit]
         # Strip internal annotation keys before returning.
