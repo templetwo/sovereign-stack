@@ -1,6 +1,7 @@
 # Protected-Source Layer — Spec (for review)
 
-**Status:** DRAFT, awaiting Anthony's review. Nothing enacted.
+**Status:** Phases 0-2 IMPLEMENTED and shipped in v1.9.0 (the generic mechanism, INERT — no record is designated). The coupled-retrieval invariant (§5.3) is enforced unconditionally at the chokepoint for the two primary readers (`recall_insights`, `load_entries`) and the scribe (§5.7); the decoupling audit (§5.6) is live.
+**Phase 3 (designating the first real record) is HARD-GATED on TWO preconditions:** (a) Anthony's explicit, separate yes, AND (b) closing the §5.4 bypass read paths — `provenance.resolve_claim` (inspect_claim/walk_lineage), `dashboard.read_chronicle_tail`, and `seasons.py`'s direct `iter_chronicle_entries` still read bare and bypass the chokepoint (the `audit_decoupling` tool detects leaks from them, but does not prevent them). Until BOTH preconditions are met, no record is protected and nothing can leak. The §5.4 route-or-refuse coverage of those three paths is the next implementation step (note the provenance↔protected import cycle: resolve_claim needs a lazy import of `protected`).
 **Author:** HQ (opus-4-8 Claude Code seat), 2026-06-23.
 **Decision it implements:** Anthony's locked fork, 2026-06-23 (chronicle: `governance,protected-source`, intensity 0.9, `human_attestation`).
 **Origin:** the 2026-06-22 web-seat session briefing (the protected-non-derivative-source-layer yield).

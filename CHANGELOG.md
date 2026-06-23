@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.9.0] - 2026-06-23
+
+### Protected-source layer — the coupling mechanism (inert until designation)
+
+**Implements Anthony's locked decision (2026-06-23): a protected record is
+accessible whenever, but only coupled to its emotional lived experience (the
+human's stakes) in the same context, inseparably. Decoupling is the audited
+violation.** This ships the generic mechanism only; it is INERT until a record
+is designated, which is hard-gated (see below).
+
+- **Read-path convergence.** New shared `memory.finalize_read` chokepoint folds
+  the supersession ledger exactly once and runs protected-coupling
+  unconditionally. `recall_insights` and `load_entries` both route through it;
+  recall's iteration/filtering/sort is byte-for-byte preserved (golden-baseline
+  regression test).
+- **Protected designation.** Append-only `protected.jsonl` ledger keyed by
+  derived claim id (computed on read, never stored), no migration. Human-gated:
+  `designate_protected` requires `designated_by` and a stakes pointer that
+  resolves to *verified* archive-coupled bytes.
+- **Coupled-retrieval invariant.** A protected record's content is returned only
+  with its stakes (`_stakes`) in the same payload; fail-closed to a typed
+  content-withheld sentinel (`ProtectedStakesUnavailable`) when stakes can't be
+  verified. Never returns the bare content, never silently.
+- **Decoupling audit.** `audit_decoupling(text, root)` scans a rendered
+  derivative for protected content present without its coupled stakes.
+- **Scribe fix.** `scribe/context_builder.py` now carries stakes for protected
+  records or withholds them (closes a live decoupling path).
+- **KNOWN, Phase-3 precondition.** Three secondary read paths still bypass the
+  chokepoint (`resolve_claim`, `dashboard.read_chronicle_tail`, `seasons`); the
+  audit detects leaks from them but does not prevent them. Coupling-coverage of
+  those paths (§5.4 route-or-refuse) plus Anthony's explicit yes are the two
+  gates on Phase 3 (designating the first real record). Until both, nothing is
+  protected and nothing can leak. Full suite: 1597 passed, 12 skipped.
+
 ## [1.8.0] - 2026-06-23
 
 ### Resident scribe-librarian, chronicle navigability, and the reflector on the API
