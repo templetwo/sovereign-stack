@@ -60,6 +60,25 @@ def _format_open_threads(memory: ExperientialMemory, limit: int) -> str:
     return "\n".join(lines)
 
 
+def _append_protected_stakes(lines: list[str], entry: dict) -> None:
+    """Carry the coupled stakes for a protected record into the projection.
+
+    The protected-source invariant (spec §5.3, §5.7): a derivative that
+    surfaces a protected record's CONTENT must carry its STAKES in the same
+    payload, or withhold the content. recall_insights (the chokepoint)
+    already does the coupling — a protected entry arrives carrying ``_stakes``
+    (the lived-experience prose), and a stakes-unloadable record arrives as
+    the ProtectedStakesUnavailable sentinel whose ``content`` is already the
+    withheld notice (no real content to leak). This projector previously
+    dropped everything but ``content`` — the live decoupling violation the
+    spec named. Here we re-attach the stakes so the scribe never sees the
+    words without the weight.
+    """
+    stakes = entry.get("_stakes")
+    if stakes:
+        lines.append(f"  ↳ STAKES (held inseparably): {str(stakes).strip()}")
+
+
 def _format_recent_activity(memory: ExperientialMemory, days: int, limit: int) -> str:
     """Recent insights, newest first, full content."""
     from datetime import datetime, timedelta, timezone
@@ -76,6 +95,7 @@ def _format_recent_activity(memory: ExperientialMemory, days: int, limit: int) -
         content = (i.get("content") or "").strip()
         lines.append(f"[{ts}] [{layer}] [{domain}]")
         lines.append(f"  {content}")
+        _append_protected_stakes(lines, i)
         lines.append("")
     return "\n".join(lines).rstrip()
 
@@ -101,6 +121,7 @@ def _format_persistent_markers(
         content = (i.get("content") or "").strip()
         lines.append(f"[{ts}] [intensity {intensity}] [{domain}]")
         lines.append(f"  {content}")
+        _append_protected_stakes(lines, i)
         lines.append("")
     return "\n".join(lines).rstrip()
 

@@ -407,3 +407,70 @@ def enforce_coupling(
         else:
             out.append(couple_or_withhold(entry, record, chronicle_root))
     return out
+
+
+# ── The decoupling audit (spec §5.6 — the primary safeguard) ─────────────────
+
+
+def audit_decoupling(text: str, chronicle_root: str | Path) -> list[dict]:
+    """
+    Scan a rendered DERIVATIVE (a summary, a projection, a context-builder
+    output string — anything that reaches a model) for the violation: a
+    protected record's content present in the text WITHOUT its coupled
+    stakes prose (spec §5.6).
+
+    The target is reframed from "did protected content escape" to "did
+    protected content escape DECOUPLED from its stakes." This is the honest
+    check: it operates on the ACTUAL string that reaches the model, not a
+    proxy projection, so it cannot pass while the real output leaks.
+
+    For each protected record in the folded ledger:
+      - derive its TRUE content from source (resolve_claim on the chronicle);
+      - if that content does NOT appear in ``text`` -> clean for this record
+        (covers both "not surfaced at all" and the withheld sentinel, whose
+        rendered notice never contains the original content);
+      - if the content DOES appear -> its stakes prose MUST also appear in
+        ``text``; if the stakes are absent, this is a DECOUPLING VIOLATION.
+
+    Returns a list of violation dicts (EMPTY list == clean):
+        {claim_id, domain, reason, stakes_verdict}
+    where reason is "content_present_stakes_absent" (the live violation) or
+    "content_present_stakes_unloadable" (content leaked AND the stakes can't
+    even be loaded to check — strictly worse).
+
+    Note: this audit may read bare protected content from source in order to
+    SEARCH for leaks — that is an internal safety scan, not a decoupled
+    retrieval surface. It never returns the content.
+    """
+    root = Path(chronicle_root)
+    fold = load_protected_fold(root)
+    if not fold or not text:
+        return []
+    violations: list[dict] = []
+    for claim_id, record in fold.items():
+        try:
+            entry, _file, _location = provenance.resolve_claim(claim_id, root)
+        except provenance.ProvenanceError:
+            # The protected record's source can't be resolved (edited /
+            # quarantined away) — there is no content to leak from it.
+            continue
+        content = (entry.get("content") or "").strip()
+        if not content or content not in text:
+            continue  # content not surfaced (or withheld) -> nothing to couple
+        stakes_content, verdict = load_stakes(record.get("stakes_archive_id", ""), root)
+        if verdict == "verified" and stakes_content and stakes_content.strip() in text:
+            continue  # content present AND its stakes present -> coupled, clean
+        reason = (
+            "content_present_stakes_absent"
+            if verdict == "verified"
+            else "content_present_stakes_unloadable"
+        )
+        violations.append(
+            {
+                "claim_id": claim_id,
+                "domain": entry.get("domain", ""),
+                "reason": reason,
+                "stakes_verdict": verdict,
+            }
+        )
+    return violations
