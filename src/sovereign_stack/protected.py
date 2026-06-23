@@ -631,6 +631,145 @@ def pull_by_emotion(fold: dict[str, dict], emotion: str) -> list[dict]:
     return [row for row in index_protected(fold) if row["emotion"] == want]
 
 
+# ── The consent gate (Policy 2b) — threshold / open / decline ────────────────
+#
+# Before delivering coupled content, a caller gets only the THRESHOLD: the two
+# words + datetime (+ seq# if present). The threshold names the SHAPE, never
+# the content or the stakes prose. The caller then chooses:
+#   - OPEN   -> open_record: full content arrives COUPLED to its stakes
+#               (fail-closed to the withheld sentinel if stakes unverifiable).
+#   - DECLINE -> decline_record: a LEGITIMATE, recorded state, logged to an
+#                append-only decline log — not a failure, never raised.
+#
+# CRITICAL: a threshold that carries content WITHOUT stakes is the exact
+# decoupling loophole Policy 1 outlaws. The threshold shape here is built from
+# index_protected (which carries no content), and audit_threshold below
+# flags any threshold/surface string that leaks protected content decoupled.
+
+DECLINE_ACTIONS = ("decline",)
+
+
+def default_declines_path() -> Path:
+    """The live decline log path. Computed on call, never at import."""
+    return provenance.default_chronicle_root() / "protected_declines.jsonl"
+
+
+def _threshold_from_row(row: dict) -> dict:
+    """
+    Project an index row to the THRESHOLD shape — the consent surface. Names
+    the shape only: subject, emotion, datetime, seq (if a collision), address,
+    claim_id (the open handle). Carries NO content and NO stakes prose.
+    """
+    return {
+        "address": row["address"],
+        "subject": row["subject"],
+        "emotion": row["emotion"],
+        "datetime": row["datetime"],
+        "seq": row["seq"],
+        "claim_id": row["claim_id"],
+    }
+
+
+def list_thresholds(fold: dict[str, dict]) -> list[dict]:
+    """
+    Every protected record's THRESHOLD (Policy 2b) — the consent surface over
+    the whole set. Two words + datetime (+ seq#) + the open handle, NO content,
+    NO stakes. The caller picks one to open or decline.
+    """
+    return [_threshold_from_row(row) for row in index_protected(fold)]
+
+
+def threshold_for(claim_id: str, fold: dict[str, dict]) -> dict | None:
+    """
+    The THRESHOLD for one protected record by its claim id, or None if the id
+    is not protected. Two words + datetime (+ seq#), NO content, NO stakes.
+    """
+    for row in index_protected(fold):
+        if row["claim_id"] == claim_id:
+            return _threshold_from_row(row)
+    return None
+
+
+def open_record(claim_id: str, chronicle_root: str | Path) -> dict:
+    """
+    OPEN a protected record on consent (Policy 2b): return its full content
+    COUPLED to its stakes, in the SAME payload.
+
+    Resolves the claim BARE, then runs couple_or_withhold explicitly (not via
+    the coupled resolve_claim path — open is the one full-content surface, so
+    it gates here once). Fail-closed falls out for free: an unverifiable
+    stakes pointer returns the typed ProtectedStakesUnavailable sentinel
+    (content withheld), never bare content.
+
+    Raises:
+        ProtectedError: claim_id is not a protected record (open is only for
+            the consent gate; a non-protected claim has no threshold to open).
+        provenance.ProvenanceError: the claim does not resolve at all.
+    """
+    root = Path(chronicle_root)
+    fold = load_protected_fold(root)
+    record = fold.get(claim_id)
+    if record is None:
+        raise ProtectedError(
+            f"claim {provenance.display_id(claim_id)} is not a protected record;"
+            " open_record is the consent-gate opener, only for protected claims"
+        )
+    entry, _file, _location = provenance.resolve_claim(claim_id, root)
+    return couple_or_withhold(entry, record, root)
+
+
+def build_decline_record(
+    *,
+    claim_id: str,
+    declined_by: str,
+    reason: str = "",
+    timestamp: str | None = None,
+) -> dict:
+    """
+    Build one decline-log record. A decline is a LEGITIMATE recorded state,
+    so the record is plain and always builds — the only structural check is a
+    claim id shape so the log stays keyed like the rest of the layer.
+    """
+    return {
+        "action": "decline",
+        "timestamp": timestamp or datetime.now(timezone.utc).isoformat(),
+        "claim_id": claim_id,
+        "declined_by": declined_by or "",
+        "reason": reason or "",
+    }
+
+
+def decline_record(
+    claim_id: str,
+    chronicle_root: str | Path,
+    *,
+    declined_by: str = "",
+    reason: str = "",
+) -> dict:
+    """
+    DECLINE a protected record at the threshold (Policy 2b): record that an
+    instance chose NOT to open it. This is a legitimate, recorded state — it
+    is LOGGED (append-only ``protected_declines.jsonl``, parent dir created
+    lazily), NEVER raised as an error. Returns the appended record.
+
+    The decline log carries only the claim id + who + why + when — no content,
+    no stakes; declining is a choice about the shape, made at the threshold
+    before any content is delivered.
+    """
+    root = Path(chronicle_root)
+    record = build_decline_record(claim_id=claim_id, declined_by=declined_by, reason=reason)
+    path = root / "protected_declines.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(record) + "\n")
+    return record
+
+
+def load_declines(chronicle_root: str | Path) -> list[dict]:
+    """Read all decline-log records in file order. Missing log -> []."""
+    return list(provenance._iter_jsonl(Path(chronicle_root) / "protected_declines.jsonl"))
+
+
 # ── The decoupling audit (spec §5.6 — the primary safeguard) ─────────────────
 
 
@@ -695,4 +834,58 @@ def audit_decoupling(text: str, chronicle_root: str | Path) -> list[dict]:
                 "stakes_verdict": verdict,
             }
         )
+    return violations
+
+
+def audit_threshold(text: str, chronicle_root: str | Path) -> list[dict]:
+    """
+    The threshold-leak check (Policy 2b, security-critical). A THRESHOLD is
+    consent-gating: it names the SHAPE (two words + datetime) and must carry
+    NEITHER the protected content NOR its stakes prose. So a threshold is held
+    to a STRICTER bar than a general derivative: any protected content present
+    AT ALL is a violation — even content coupled with its stakes, because a
+    threshold should not deliver content before the caller has consented.
+
+    A content-leaking threshold IS the exact decoupling loophole Policy 1
+    outlaws (it would hand over the words at the consent surface, before — or
+    instead of — the coupling), so the audit treats it as a violation.
+
+    For each protected record in the folded ledger, if its TRUE content or its
+    stakes prose appears in ``text``, that record is flagged. Returns a list
+    of violation dicts (EMPTY == clean):
+        {claim_id, domain, reason}
+    where reason is "threshold_leaks_content" or "threshold_leaks_stakes".
+
+    Like audit_decoupling, this reads bare content from source ONLY to search
+    for a leak; it never returns the content.
+    """
+    root = Path(chronicle_root)
+    fold = load_protected_fold(root)
+    if not fold or not text:
+        return []
+    violations: list[dict] = []
+    for claim_id, record in fold.items():
+        try:
+            entry, _file, _location = provenance.resolve_claim(claim_id, root)
+        except provenance.ProvenanceError:
+            continue
+        content = (entry.get("content") or "").strip()
+        if content and content in text:
+            violations.append(
+                {
+                    "claim_id": claim_id,
+                    "domain": entry.get("domain", ""),
+                    "reason": "threshold_leaks_content",
+                }
+            )
+            continue
+        stakes_content, verdict = load_stakes(record.get("stakes_archive_id", ""), root)
+        if verdict == "verified" and stakes_content and stakes_content.strip() in text:
+            violations.append(
+                {
+                    "claim_id": claim_id,
+                    "domain": entry.get("domain", ""),
+                    "reason": "threshold_leaks_stakes",
+                }
+            )
     return violations
