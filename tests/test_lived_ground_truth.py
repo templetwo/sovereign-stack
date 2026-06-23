@@ -56,8 +56,13 @@ class TestNapeExemption:
     @pytest.mark.parametrize("vantage", sorted(LIVED_VANTAGES))
     def test_lived_vantage_exempts(self, vantage):
         self._record(
-            {"layer": GT, "intensity": 0.95, "vantage": vantage,
-             "domain": "memory", "content": "grief carried through his father's art"}
+            {
+                "layer": GT,
+                "intensity": 0.95,
+                "vantage": vantage,
+                "domain": "memory",
+                "content": "grief carried through his father's art",
+            }
         )
         assert _nag_honks(self.d) == [], f"{vantage} should be receipt-exempt"
 
@@ -69,8 +74,13 @@ class TestNapeExemption:
 
     @pytest.mark.parametrize(
         "vantage",
-        ["external_web_verified", "implementation_verified", "hq_filesystem",
-         "bridge_runtime", "model_observation"],
+        [
+            "external_web_verified",
+            "implementation_verified",
+            "hq_filesystem",
+            "bridge_runtime",
+            "model_observation",
+        ],
     )
     def test_non_lived_vantage_still_nags(self, vantage):
         # Ruling-4 (seat tags) + ruling-1 (model_observation deferred, NOT exempt):
@@ -82,8 +92,13 @@ class TestNapeExemption:
 
     def test_lived_vantage_with_verified_receipt_also_silent(self):
         self._record(
-            {"layer": GT, "intensity": 0.95, "vantage": "human_observation",
-             "domain": "memory", "content": "x"},
+            {
+                "layer": GT,
+                "intensity": 0.95,
+                "vantage": "human_observation",
+                "domain": "memory",
+                "content": "x",
+            },
             result=WITH_RECEIPT,
         )
         assert _nag_honks(self.d) == []
@@ -95,8 +110,9 @@ class TestNapeExemption:
     def test_model_observation_is_not_in_the_exempt_set(self):
         # Belt-and-suspenders on ruling 1: the constant itself must exclude it.
         assert "model_observation" not in LIVED_VANTAGES
-        assert LIVED_VANTAGES == frozenset(
-            {"human_observation", "human_attestation", "witnessed_account"}
+        assert (
+            frozenset({"human_observation", "human_attestation", "witnessed_account"})
+            == LIVED_VANTAGES
         )
 
 
@@ -107,8 +123,11 @@ class TestDispatchStoresEmotion:
     def test_emotion_fields_survive_dispatch(self):
         with _isolated_server(SESSION) as (srv, tmp_root):
             args = {
-                "domain": "memory", "content": "grief account", "layer": GT,
-                "intensity": 0.9, "vantage": "human_observation",
+                "domain": "memory",
+                "content": "grief account",
+                "layer": GT,
+                "intensity": 0.9,
+                "vantage": "human_observation",
                 "observed_emotion": ["grief", "protective_love"],
                 "emotional_intensity": 0.95,
                 "emotion_source": "anthony_declared",
@@ -148,8 +167,13 @@ class TestEmotionValidationAndOrdering:
 
     def test_valid_emotion_fields_stored(self):
         p = self.m.record_insight(
-            "memory", "x", layer=GT, observed_emotion=["grief"],
-            emotional_intensity=0.9, emotion_source="anthony_declared", emotion_note="n",
+            "memory",
+            "x",
+            layer=GT,
+            observed_emotion=["grief"],
+            emotional_intensity=0.9,
+            emotion_source="anthony_declared",
+            emotion_note="n",
         )
         entry = json.loads(Path(str(p)).read_text().splitlines()[-1])
         assert entry["observed_emotion"] == ["grief"]
@@ -160,13 +184,21 @@ class TestEmotionValidationAndOrdering:
         # Hard rule: surfacing is governed by operational intensity / timestamp,
         # never by emotional_intensity. Older entry carries the HIGHER felt-weight.
         self.m.record_insight(
-            "memory", "older", layer=GT, emotional_intensity=1.0,
-            vantage="human_observation", session_id="s1",
+            "memory",
+            "older",
+            layer=GT,
+            emotional_intensity=1.0,
+            vantage="human_observation",
+            session_id="s1",
         )
         time.sleep(0.01)
         self.m.record_insight(
-            "memory", "newer", layer=GT, emotional_intensity=0.0,
-            vantage="human_observation", session_id="s2",
+            "memory",
+            "newer",
+            layer=GT,
+            emotional_intensity=0.0,
+            vantage="human_observation",
+            session_id="s2",
         )
         results = self.m.recall_insights(domain="memory", limit=10)
         assert results[0]["content"] == "newer", "recall must stay timestamp-ordered"
@@ -192,13 +224,21 @@ class TestSeasonHygieneExemption:
 
     def test_lived_sentinel_exempt_nonlived_flagged(self):
         self.m.record_insight(
-            "memory", "grief account", layer=GT, intensity=0.95,
-            vantage="human_observation", session_id="lived",
+            "memory",
+            "grief account",
+            layer=GT,
+            intensity=0.95,
+            vantage="human_observation",
+            session_id="lived",
         )
         assert "unreceipted ground_truth sentinel" not in self._review()
 
         self.m.record_insight(
-            "research", "X causes Y", layer=GT, intensity=0.95,
-            vantage="external_web_verified", session_id="tech",
+            "research",
+            "X causes Y",
+            layer=GT,
+            intensity=0.95,
+            vantage="external_web_verified",
+            session_id="tech",
         )
         assert "unreceipted ground_truth sentinel" in self._review()
