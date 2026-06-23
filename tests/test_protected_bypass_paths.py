@@ -82,6 +82,8 @@ def _seed_and_protect(mem: ExperientialMemory) -> dict:
         stakes_archive_id=archive["archive_id"],
         designated_by="Anthony",
         chronicle_root=str(mem.root),
+        subject="father",
+        emotion="loss",
     )
     return {"record": prot, "archive_id": archive["archive_id"]}
 
@@ -236,6 +238,8 @@ class TestSeasonReviewPath:
             stakes_archive_id=archive["archive_id"],
             designated_by="Anthony",
             chronicle_root=str(mem.root),
+            subject="grief",
+            emotion="loss",
         )
         # An ordinary partner sharing most tokens (the would-be predecessor).
         mem.record_insight(

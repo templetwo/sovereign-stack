@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -53,6 +54,35 @@ PROTECTED_ACTIONS = ("protect", "unprotect")
 # Verdict vocabulary for a stakes load, identical to the archive layer's
 # recall_exchange / verify_archive_ref vocabulary.
 STAKES_VERDICTS = ("verified", "mismatch", "missing", "ambiguous", "unknown")
+
+# The two-word index (Policy 2a): each protected record carries a one-word
+# SUBJECT and a one-word EMOTION (e.g. father / loss). A "word" is a single
+# run of letters/digits/hyphen/underscore — no internal whitespace, lowercased
+# on normalize. The pair + datetime is the record's surfaced IDENTITY (the
+# threshold), not its content.
+_INDEX_WORD_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
+
+
+def normalize_index_word(value: str, field: str) -> str:
+    """
+    Validate + lowercase-normalize a one-word index tag (subject | emotion).
+
+    A single non-empty word: lowercased, stripped; rejects empty,
+    whitespace-containing (multi-word), and otherwise-malformed values.
+
+    Raises:
+        ProtectedError: empty / multi-word / malformed.
+    """
+    if not isinstance(value, str):
+        raise ProtectedError(f"{field} must be a single non-empty word, got {value!r}")
+    word = value.strip().lower()
+    if not word:
+        raise ProtectedError(f"{field} must be a single non-empty word (got empty)")
+    if not _INDEX_WORD_RE.match(word):
+        raise ProtectedError(
+            f"{field} must be a single word (letters/digits/-/_; no spaces), got {value!r}"
+        )
+    return word
 
 
 def default_protected_path() -> Path:
@@ -217,6 +247,9 @@ def build_protected_record(
     claim_id: str,
     stakes_archive_id: str,
     designated_by: str,
+    subject: str | None = None,
+    emotion: str | None = None,
+    entry_timestamp: str = "",
     action: str = "protect",
     reason: str = "",
     by: str = "",
@@ -226,10 +259,19 @@ def build_protected_record(
     Build one protected-ledger record in the canonical schema. Validates
     the gate + id core so a hand-built record can't poison the fold.
 
+    The two-word index (Policy 2a): a ``protect`` record carries a one-word
+    ``subject`` + one-word ``emotion`` (validated/normalized) and the
+    underlying entry's timestamp as ``entry_timestamp`` — the INDEX datetime
+    (distinct from the record's own ``timestamp``, which is the designation
+    time). Using the entry timestamp keeps the index datetime consistent with
+    the claim id (timestamp+domain+content), so "the same two words recorded
+    on different datetimes are distinct records" is coherent.
+
     Raises:
         ProtectedGateError: designated_by missing/empty (the human gate).
-        ProtectedError: invalid action, non-64-hex claim_id, or a
-            ``protect`` record without a stakes_archive_id pointer.
+        ProtectedError: invalid action, non-64-hex claim_id, a ``protect``
+            record without a stakes_archive_id pointer, or a ``protect``
+            record whose subject/emotion is missing/multi-word/malformed.
     """
     if not isinstance(designated_by, str) or not designated_by.strip():
         raise ProtectedGateError(
@@ -240,18 +282,28 @@ def build_protected_record(
         raise ProtectedError(f"invalid protected action {action!r} (valid: {PROTECTED_ACTIONS})")
     if not isinstance(claim_id, str) or not provenance._FULL_ID_RE.match(claim_id):
         raise ProtectedError(f"claim_id must be a full 64-hex claim id, got {claim_id!r}")
-    if action == "protect" and (
-        not isinstance(stakes_archive_id, str) or not stakes_archive_id.strip()
-    ):
-        raise ProtectedError(
-            "protect requires stakes_archive_id — the pointer to the"
-            " archive-coupled stakes prose (the coupling vehicle)"
-        )
+
+    norm_subject: str | None = None
+    norm_emotion: str | None = None
+    if action == "protect":
+        if not isinstance(stakes_archive_id, str) or not stakes_archive_id.strip():
+            raise ProtectedError(
+                "protect requires stakes_archive_id — the pointer to the"
+                " archive-coupled stakes prose (the coupling vehicle)"
+            )
+        # The two-word index is required on protect — it IS the surfaced
+        # identity (the threshold) and the retrieval key.
+        norm_subject = normalize_index_word(subject, "subject")
+        norm_emotion = normalize_index_word(emotion, "emotion")
+
     return {
         "action": action,
         "timestamp": timestamp or datetime.now(timezone.utc).isoformat(),
         "claim_id": claim_id,
         "stakes_archive_id": stakes_archive_id.strip() if stakes_archive_id else None,
+        "subject": norm_subject,
+        "emotion": norm_emotion,
+        "entry_timestamp": entry_timestamp or "",
         "designated_by": designated_by.strip(),
         "reason": reason,
         "by": by,
@@ -282,6 +334,8 @@ def designate_protected(
     stakes_archive_id: str,
     designated_by: str,
     chronicle_root: str | Path,
+    subject: str | None = None,
+    emotion: str | None = None,
     reason: str = "",
     by: str = "",
     action: str = "protect",
@@ -304,6 +358,10 @@ def designate_protected(
             The procedural gate; no automated path.
         chronicle_root: The chronicle root (insights/, archives/, the
             ledger all resolve from here).
+        subject / emotion: REQUIRED on protect — the two-word index (each a
+            single word, e.g. "father" / "loss"). Lowercase-normalized;
+            multi-word/empty values are rejected. This pair + the entry's
+            datetime is the record's surfaced identity (the threshold).
         reason / by: Optional locator/attribution (``by`` = recording
             instance, NOT a session_id).
         action: "protect" (default) or "unprotect".
@@ -342,6 +400,9 @@ def designate_protected(
         claim_id=claim_id,
         stakes_archive_id=stakes_archive_id,
         designated_by=designated_by,
+        subject=subject,
+        emotion=emotion,
+        entry_timestamp=provenance._preimage_field(entry, "timestamp"),
         action=action,
         reason=reason,
         by=by,
@@ -464,6 +525,110 @@ def couple_or_withhold_protected(
     if record is None:
         return entry
     return couple_or_withhold(entry, record, chronicle_root)
+
+
+# ── The two-word index (Policy 2a) + the address (the surfaced identity) ──────
+
+_ADDRESS_SEP = "/"
+
+
+def build_address(subject: str, emotion: str, datetime_str: str, seq: int | None = None) -> str:
+    """
+    The record's surfaced IDENTITY: ``subject/emotion/datetime`` (Policy 2a/2b).
+
+    A SEQUENCE NUMBER (``/seqN``) is appended ONLY when supplied — the caller
+    appends it solely on a TRUE collision (two+ records sharing identical
+    subject+emotion+datetime); omitted otherwise. The address names the shape,
+    never the content.
+    """
+    address = _ADDRESS_SEP.join((subject, emotion, datetime_str or ""))
+    if seq is not None:
+        address += f"{_ADDRESS_SEP}seq{seq}"
+    return address
+
+
+def index_protected(fold: dict[str, dict]) -> list[dict]:
+    """
+    The two-word index over the whole protected set (Policy 2a) — the single
+    helper that assigns addresses + collision sequence numbers, so the
+    threshold surface (Policy 2b) and any retrieval reuse one source of truth.
+
+    For each effective ``protect`` record in ``fold`` it produces an index
+    row::
+
+        {claim_id, subject, emotion, datetime, seq, address, record}
+
+    DATETIME is the underlying entry's timestamp (``entry_timestamp``), which
+    distinguishes records that share the same two words (father/loss recorded
+    on two different datetimes are two rows; father/loss and father/pride on
+    the same datetime are also two rows — different emotion). A SEQUENCE
+    NUMBER (``seq``, 1-based) is set ONLY on a TRUE collision: two+ rows whose
+    (subject, emotion, datetime) are identical. For a non-colliding row
+    ``seq`` is None and the address omits it.
+
+    Rows are ordered by (datetime, subject, emotion, claim_id) for stable,
+    deterministic output. unprotect records are already folded away (the fold
+    only carries effective protects).
+    """
+    rows: list[dict] = []
+    for claim_id, record in fold.items():
+        if record.get("action") != "protect":
+            continue
+        subject = record.get("subject")
+        emotion = record.get("emotion")
+        if not subject or not emotion:
+            # A legacy protect record predating the index (defensive — the
+            # build gate requires both, so this only guards hand-built data).
+            continue
+        rows.append(
+            {
+                "claim_id": claim_id,
+                "subject": subject,
+                "emotion": emotion,
+                "datetime": record.get("entry_timestamp") or "",
+                "seq": None,
+                "address": "",  # filled below, after collision detection
+                "record": record,
+            }
+        )
+
+    # Assign sequence numbers ONLY where (subject, emotion, datetime) collide.
+    groups: dict[tuple[str, str, str], list[dict]] = {}
+    for row in rows:
+        key = (row["subject"], row["emotion"], row["datetime"])
+        groups.setdefault(key, []).append(row)
+    for group in groups.values():
+        if len(group) > 1:
+            # True collision — number them 1..N, ordered by claim_id for
+            # determinism (the records are otherwise indistinguishable).
+            for seq, row in enumerate(sorted(group, key=lambda r: r["claim_id"]), start=1):
+                row["seq"] = seq
+    for row in rows:
+        row["address"] = build_address(row["subject"], row["emotion"], row["datetime"], row["seq"])
+
+    rows.sort(key=lambda r: (r["datetime"], r["subject"], r["emotion"], r["claim_id"]))
+    return rows
+
+
+def pull_by_subject(fold: dict[str, dict], subject: str) -> list[dict]:
+    """
+    Every protected index row whose SUBJECT matches (Policy 2a — pull every
+    'father'). ``subject`` is normalized the same way designation normalizes
+    it, so the lookup is case/space-insensitive. Returns index rows (address
+    + locators), NOT content — surfacing content is the consent gate's job.
+    """
+    want = normalize_index_word(subject, "subject")
+    return [row for row in index_protected(fold) if row["subject"] == want]
+
+
+def pull_by_emotion(fold: dict[str, dict], emotion: str) -> list[dict]:
+    """
+    Every protected index row whose EMOTION matches (Policy 2a — pull every
+    'loss'). ``emotion`` is normalized like designation. Returns index rows
+    (address + locators), NOT content.
+    """
+    want = normalize_index_word(emotion, "emotion")
+    return [row for row in index_protected(fold) if row["emotion"] == want]
 
 
 # ── The decoupling audit (spec §5.6 — the primary safeguard) ─────────────────
