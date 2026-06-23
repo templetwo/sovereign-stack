@@ -409,6 +409,63 @@ def enforce_coupling(
     return out
 
 
+# ── Preview-safe withholding (spec §5.4 — truncating/preview surfaces) ────────
+
+# The placeholder a truncating/preview surface substitutes for a protected
+# record's content. The invariant (§5.3) is satisfied only where the FULL
+# content and FULL stakes both travel; a surface that previews/truncates can
+# never carry the full stakes, so an N-char slice of coupled content would
+# itself be a decoupled leak. Such surfaces WITHHOLD to this notice instead —
+# the record is still discoverable (the two-word index + consent gate is the
+# full-content path). The notice deliberately contains NO original content.
+PROTECTED_PREVIEW_NOTICE = "[protected record — open via the consent gate]"
+
+
+def is_protected(entry: dict, fold: dict[str, dict]) -> bool:
+    """True when ``entry`` derives to a claim id the folded ledger protects."""
+    if not fold:
+        return False
+    return provenance.derive_claim_id(entry) in fold
+
+
+def withhold_preview(entry: dict) -> dict:
+    """
+    Return a COPY of ``entry`` with its content replaced by the
+    PROTECTED_PREVIEW_NOTICE — the correct outcome for a truncating or
+    preview surface (a raw tail reader, a lineage preview, a digest line)
+    that cannot carry the full stakes (§5.4). Locator fields (timestamp,
+    domain) survive so the surface can still SAY a protected record is there
+    without leaking WHAT it is. The input entry is never mutated.
+    """
+    out = dict(entry)
+    out["content"] = PROTECTED_PREVIEW_NOTICE
+    out["_protected"] = True
+    out["_stakes_withheld"] = True
+    return out
+
+
+def couple_or_withhold_protected(
+    entry: dict, fold: dict[str, dict], chronicle_root: str | Path
+) -> dict:
+    """
+    Full-content coupling for a SINGLE entry against a folded ledger.
+
+    For a full-content surface (one that returns the entry's whole body —
+    e.g. inspect_claim's ``entry`` field): if ``entry`` is protected, return
+    its coupled-or-withheld form (full content + stakes attached, or the
+    typed ProtectedStakesUnavailable sentinel, fail-closed); otherwise return
+    ``entry`` unchanged. A thin per-entry wrapper around couple_or_withhold so
+    a caller that resolved one bare entry can gate it without re-walking the
+    ledger. Empty fold -> entry unchanged (the byte-identity fast path).
+    """
+    if not fold:
+        return entry
+    record = fold.get(provenance.derive_claim_id(entry))
+    if record is None:
+        return entry
+    return couple_or_withhold(entry, record, chronicle_root)
+
+
 # ── The decoupling audit (spec §5.6 — the primary safeguard) ─────────────────
 
 

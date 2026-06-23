@@ -185,7 +185,9 @@ def iter_chronicle_entries(chronicle_root: Path) -> Iterator[tuple[dict, Path, s
                 yield entry, jsonl_file, location
 
 
-def resolve_claim(claim_ref: str, chronicle_root: Path) -> tuple[dict, Path, str]:
+def resolve_claim(
+    claim_ref: str, chronicle_root: Path, *, couple: bool = False
+) -> tuple[dict, Path, str]:
     """
     Resolve a full claim id or unique prefix (git-style) to its entry.
 
@@ -194,8 +196,26 @@ def resolve_claim(claim_ref: str, chronicle_root: Path) -> tuple[dict, Path, str
     resolve to the first occurrence — ambiguity means multiple DISTINCT
     ids match the prefix.
 
+    Args:
+        claim_ref: full claim id or unique prefix.
+        chronicle_root: the chronicle root.
+        couple: protected-source gate (spec §5.4). Default False — the BARE
+            read internal machinery relies on (the decoupling audit's own
+            content scan, designation, supersedes re-derivation all need the
+            real content/id). Set True ONLY for a FULL-CONTENT model-facing
+            surface (e.g. inspect_claim's ``entry``): when the resolved entry
+            is protected, the returned entry is its coupled-or-withheld form
+            (full content + stakes attached, or the fail-closed
+            ProtectedStakesUnavailable sentinel). A coupled return must NEVER
+            be re-truncated by the caller — a preview of coupled content
+            re-decouples it; preview surfaces withhold instead (see
+            protected.withhold_preview). protected is imported lazily here to
+            avoid the protected->provenance import cycle.
+
     Returns:
         (entry, file, location) — location is "insights" or "quarantine".
+        With couple=True on a protected record, ``entry`` is the coupled /
+        withheld form; ``file`` / ``location`` still point at the source.
 
     Raises:
         ProvenanceError: malformed ref (empty / non-hex / over 64 chars).
@@ -222,7 +242,16 @@ def resolve_claim(claim_ref: str, chronicle_root: Path) -> tuple[dict, Path, str
             f"claim id prefix {claim_ref!r} matches {len(matches)} claims"
             f" ({shown}); supply more characters"
         )
-    return next(iter(matches.values()))
+    entry, jsonl_file, location = next(iter(matches.values()))
+    if couple:
+        # Lazy import — protected imports provenance at module level, so a
+        # top-level import here would cycle. The codebase uses lazy imports
+        # for exactly this (cf. server.py boot-surface imports).
+        from sovereign_stack import protected as _protected
+
+        fold = _protected.load_protected_fold(chronicle_root)
+        entry = _protected.couple_or_withhold_protected(entry, fold, chronicle_root)
+    return entry, jsonl_file, location
 
 
 # ── Receipt grammar ──────────────────────────────────────────────────────────
@@ -696,7 +725,18 @@ def _lineage_row(claim_id: str, role: str, fold: dict[str, dict], chronicle_root
         entry, _file, _location = resolve_claim(claim_id, chronicle_root)
         timestamp = _preimage_field(entry, "timestamp")
         domain = _preimage_field(entry, "domain")
-        preview = _preimage_field(entry, "content")[:_PREVIEW_CHARS]
+        # Protected-source gate (spec §5.4): a lineage row is a 120-char
+        # PREVIEW surface — it can never carry the full stakes, so a slice of
+        # coupled content would re-decouple. A protected entry withholds its
+        # preview to the placeholder (locator fields still surface, so the
+        # lineage shape is intact and the row says a protected record is
+        # there). Lazy import avoids the protected->provenance cycle.
+        from sovereign_stack import protected as _protected
+
+        if _protected.is_protected(entry, _protected.load_protected_fold(chronicle_root)):
+            preview = _protected.PROTECTED_PREVIEW_NOTICE
+        else:
+            preview = _preimage_field(entry, "content")[:_PREVIEW_CHARS]
     except ProvenanceError:
         record = fold.get(claim_id)
         if record:

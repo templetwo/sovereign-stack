@@ -219,12 +219,23 @@ def inspect_claim(
     full_id = prov.derive_claim_id(entry)
     fold = prov.fold_supersessions(prov.load_supersessions(ledger))
 
+    # Protected-source gate (spec §5.4): inspect_claim returns the FULL
+    # entry body, so it is a full-content surface — its `entry` must be
+    # coupled-or-withheld. Integrity / id / receipt views are computed from
+    # the BARE entry above (they need the real content/id and read only
+    # metadata), then the surfaced `entry` is gated. Lazy import avoids the
+    # protected->provenance cycle.
+    from sovereign_stack import protected as _protected
+
+    protected_fold = _protected.load_protected_fold(root)
+    surfaced_entry = _protected.couple_or_withhold_protected(entry, protected_fold, root)
+
     report = {
         "claim_id": full_id,
         "found": True,
         "integrity": "verified" if ref == full_id else "ambiguous",
         "location": location,
-        "entry": entry,
+        "entry": surfaced_entry,
         "receipts": _receipt_views(entry, root, verify_receipts),
     }
 
