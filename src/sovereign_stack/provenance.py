@@ -657,9 +657,21 @@ def annotate_claim_ids(entries: list[dict]) -> list[dict]:
     """
     with_ids=True support: copies with `claim_id` (full 64-hex) derived
     onto each entry. Never persisted.
+
+    Type- and id-preserving for entries that ALREADY carry a `claim_id`
+    (e.g. the protected-source fail-closed sentinel, whose body is withheld
+    so its id must NOT be re-derived from the replacement content). Such
+    entries are returned UNCHANGED — same object, same class, the true id
+    intact. Ordinary entries get a plain-dict copy with the derived id, as
+    before.
     """
     annotated = []
     for entry in entries:
+        if entry.get("claim_id"):
+            # Already carries its true id (and may be a typed dict subclass
+            # whose content is withheld) — never copy-flatten or re-derive.
+            annotated.append(entry)
+            continue
         copy = dict(entry)
         copy["claim_id"] = derive_claim_id(entry)
         annotated.append(copy)

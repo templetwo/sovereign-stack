@@ -22,6 +22,7 @@ from glob import glob as glob_files
 from pathlib import Path
 from typing import Any
 
+from . import protected as protected_module
 from . import provenance
 from .coherence import Coherence
 
@@ -471,12 +472,72 @@ def load_entries(chronicle_root: str | Path, *, with_sources: bool = False) -> l
             entry["_domain_dir"] = jsonl_file.parent.name
             entry["_file"] = str(jsonl_file)
         entries.append(entry)
+    return finalize_read(entries, root)
+
+
+def finalize_read(
+    entries: list[dict],
+    chronicle_root: str | Path,
+    *,
+    exclude_superseded: bool = False,
+) -> list[dict]:
+    """
+    The shared read-finalization tail — the single supersession chokepoint.
+
+    Every chronicle reader (load_entries AND recall_insights) routes its
+    already-walked / already-filtered / already-sorted entry list through
+    here so the supersession ledger is folded in EXACTLY ONCE, in one
+    place. This is the convergence point named in the protected-source
+    spec (§5.0): the one annotated chokepoint where later record-level
+    enforcement (protected-source coupling) will live.
+
+    Behavior — two stages, in order:
+
+    A. Supersession (data-gated — preserves pre-convergence semantics
+       byte-for-byte):
+         - EMPTY/absent supersessions.jsonl -> entries pass through this
+           stage UNTOUCHED (no derived keys), so a ledger-free chronicle
+           reads exactly as the raw JSONL.
+         - non-empty, exclude_superseded=False (the raw-query default):
+           superseded/retired entries are RETURNED, annotated in place
+           with `_superseded_by` and `_carry_forward_summary` — annotate,
+           never drop.
+         - non-empty, exclude_superseded=True: superseded/retired entries
+           are DROPPED here (before any caller limit).
+
+    B. Protected coupling (spec §5.3 — runs UNCONDITIONALLY, NOT gated on
+       the supersession ledger): for any entry the protected ledger marks
+       protected, the stakes are loaded from the archive-coupled pointer
+       and attached inseparably (`_stakes`) in the SAME payload;
+       fail-closed to the typed ProtectedStakesUnavailable sentinel
+       (content withheld) when the stakes can't be verified. A protected
+       record with ZERO supersessions must never slip through bare, so this
+       pass cannot live behind stage A's empty-ledger fast path.
+
+    The caller owns ordering and limiting; this function never reorders and
+    only drops superseded entries when explicitly asked. Underscore-prefixed
+    keys are derived at read and never persisted (the claim-id preimage is
+    timestamp+domain+content only, so annotations never shift identity).
+    """
+    root = Path(chronicle_root)
+
+    # Stage A — supersession (data-gated).
+    result = entries
     ledger_records = provenance.load_supersessions(root / "supersessions.jsonl")
     if ledger_records:
         fold = provenance.fold_supersessions(ledger_records)
         if fold:
-            entries = provenance.annotate_superseded(entries, fold)
-    return entries
+            if exclude_superseded:
+                result, _superseded = provenance.partition_superseded(result, fold)
+            else:
+                result = provenance.annotate_superseded(result, fold)
+
+    # Stage B — protected coupling (unconditional; see protected.enforce_coupling).
+    protected_fold = protected_module.load_protected_fold(root)
+    if protected_fold:
+        result = protected_module.enforce_coupling(result, protected_fold, root)
+
+    return result
 
 
 # =============================================================================
@@ -1509,18 +1570,13 @@ class ExperientialMemory:
             # Default "newest" — sort by timestamp descending (backward-compatible).
             insights.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
 
-        # v1.7.0 read path — single chokepoint, data-gated: zero ledger
-        # records, zero change. Annotate-not-drop is the default (the raw
-        # query tool never hides); exclude_superseded drops pre-limit.
-        fold: dict[str, dict] = {}
-        ledger_records = provenance.load_supersessions(self.supersessions_path)
-        if ledger_records:
-            fold = provenance.fold_supersessions(ledger_records)
-        if fold:
-            if exclude_superseded:
-                insights, _superseded = provenance.partition_superseded(insights, fold)
-            else:
-                insights = provenance.annotate_superseded(insights, fold)
+        # Shared read-finalization tail (the single supersession
+        # chokepoint — see finalize_read). Data-gated: zero ledger records,
+        # zero change. Annotate-not-drop is the default (the raw query tool
+        # never hides); exclude_superseded drops pre-limit. Routing through
+        # finalize_read instead of an inline copy means recall_insights and
+        # load_entries fold supersession identically, in ONE place.
+        insights = finalize_read(insights, self.root, exclude_superseded=exclude_superseded)
 
         insights = insights[:limit]
         # Strip internal annotation keys before returning.
