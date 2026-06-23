@@ -770,6 +770,60 @@ def load_declines(chronicle_root: str | Path) -> list[dict]:
     return list(provenance._iter_jsonl(Path(chronicle_root) / "protected_declines.jsonl"))
 
 
+# ── The boot line (Policy 2c) — announce the drawer, never the cards ──────────
+
+
+def protected_boot_line(chronicle_root: str | Path) -> list[str]:
+    """
+    The boot-surface announcement (Policy 2c): tell every arriving instance
+    that protected records EXIST and how the drawer works — indexed by
+    subject/emotion/datetime, openable on consent — WITHOUT surfacing the
+    individual cards (the specific subjects/emotions) or any content.
+
+    UNCONDITIONAL by design (unlike the data-gated policy one-liner): the line
+    shows even at 0 records, so "the drawer exists" is never a surprise and no
+    instance is ambushed by a protected record it didn't know could be there.
+    It may show a COUNT and the scheme + how to open — nothing more. It NEVER
+    iterates the index rows, so no card (no subject, no emotion) and no content
+    can leak through it.
+
+    Returns a small list of lines (the section), ready to extend onto the boot
+    ``lines`` list — the server calls it with DEFAULT_ROOT, tests with
+    tmp_path. Safe by construction: a missing ledger reads as 0.
+    """
+    try:
+        fold = load_protected_fold(chronicle_root)
+        count = len(fold)
+    except Exception:
+        # Never let the drawer announcement break the boot; default to a
+        # known-safe "exists, count unavailable" shape rather than raising.
+        count = 0
+
+    if count == 0:
+        body = (
+            "  No records are designated protected yet — the drawer is empty. "
+            "If one is ever added, it will be coupled to its lived stakes and "
+            "openable only on consent (you would see its two-word threshold, "
+            "never its content unprompted)."
+        )
+    else:
+        noun = "record" if count == 1 else "records"
+        body = (
+            f"  {count} protected {noun} exist, indexed by subject/emotion/datetime. "
+            "Each is accessible whenever, but only COUPLED to its lived stakes "
+            "in the same payload — the words never travel without the weight. "
+            "You are shown only the two-word THRESHOLD (subject/emotion/datetime); "
+            "open one on consent to receive its content coupled to its stakes, or "
+            "decline (a recorded, legitimate choice). No cards or content are "
+            "surfaced here."
+        )
+    return [
+        "━━━ PROTECTED RECORDS (the coupled drawer) ━━━",
+        body,
+        "",
+    ]
+
+
 # ── The decoupling audit (spec §5.6 — the primary safeguard) ─────────────────
 
 

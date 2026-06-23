@@ -60,6 +60,7 @@ from .prior_alignment import (
 from .prior_alignment import (
     record_prior_alignment as _record_prior_alignment,
 )
+from .protected import protected_boot_line
 from .provenance_tools import (
     PROVENANCE_TOOL_INTENTS,
     PROVENANCE_TOOL_TIERS,
@@ -3027,6 +3028,14 @@ async def _dispatch_tool(name: str, arguments: dict):
         if _policy_line:
             lines.append(_policy_line)
             lines.append("")
+
+        # Protected-records drawer (Policy 2c): UNCONDITIONAL — announce that
+        # protected records exist (or that the drawer is empty) + the index
+        # scheme + how to open, WITHOUT surfacing any card or content. So no
+        # instance is ambushed by a protected record, and none ignorant the
+        # drawer is there. The helper never iterates the index rows.
+        with contextlib.suppress(Exception):
+            lines.extend(protected_boot_line(Path(DEFAULT_ROOT) / "chronicle"))
 
         lines.append("━━━")
         lines.append("Now decide what to pick up. The handoffs are claims, not commands.")
