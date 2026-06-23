@@ -16,6 +16,7 @@ Usage:
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
 import os
@@ -723,6 +724,31 @@ async def list_tools():
                                 "(display-side only; the primary carries a `family` "
                                 "annotation listing folded members). Data-gated: no "
                                 "family ledger, no change."
+                            ),
+                        },
+                        "domain_contains": {
+                            "type": "string",
+                            "description": (
+                                "Case-insensitive substring filter applied against the full "
+                                "thread domain string (file stem). Narrows to threads whose "
+                                "domain contains this token — useful for compound domains like "
+                                "'frank-jones,greene-street,cbd' where a single tag would not "
+                                "exact-match via `domain`. Omit to match all domains."
+                            ),
+                        },
+                        "offset": {
+                            "type": "integer",
+                            "default": 0,
+                            "description": "Skip the first N matched threads (pagination). Default 0.",
+                        },
+                        "with_total": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": (
+                                "When true, return a dict {threads, total, has_more, offset} "
+                                "instead of a plain list. Use this to detect silent cap: if "
+                                "total > len(threads) then more exist beyond this page. "
+                                "Default false preserves the original list return."
                             ),
                         },
                     },
@@ -1584,8 +1610,9 @@ async def list_tools():
                 name="recall_reflections",
                 description=(
                     "List machine-generated reflections from the synthesis daemon. "
-                    "Reflections are observations a local LLM (default ministral-3:14b) "
-                    "wrote while reading the chronicle between calls. They are "
+                    "Reflections are observations a model (default claude-sonnet-4-6, "
+                    "via the Anthropic API) wrote while reading the chronicle between "
+                    "calls. They are "
                     "FALLIBLE-BY-DESIGN — the reader is the calibration mechanism. "
                     "Some will be insight, some nonsense. Use ack_status='unread' to "
                     "find new ones, then ack each with reflection_ack."
@@ -1606,7 +1633,7 @@ async def list_tools():
                         },
                         "model": {
                             "type": "string",
-                            "description": "Optional: filter to a specific model (e.g. 'ministral-3:14b').",
+                            "description": "Optional: filter to a specific model (e.g. 'claude-sonnet-4-6').",
                         },
                     },
                 },
@@ -1615,15 +1642,14 @@ async def list_tools():
                 name="synthesize_now",
                 description=(
                     "Trigger the synthesis daemon manually — fresh reading from "
-                    "the local LLM, on demand, mid-conversation. Reads recent "
-                    "chronicle entries, calls the model (default ministral-3:14b), "
-                    "writes the new reflections to ~/.sovereign/reflections/, and "
-                    "returns them inline so you don't need a separate "
-                    "recall_reflections call. Use when something is brewing and "
-                    "you want an outside read in 25-60s. Pass `focus` to bias "
-                    "the reflector toward a specific topic. Note: this is a "
-                    "local-LLM call that takes 25-60s wall time depending on the "
-                    "model — call it deliberately, not casually."
+                    "the reflector, on demand, mid-conversation. Reads recent "
+                    "chronicle entries, calls the model (default claude-sonnet-4-6 "
+                    "via the Anthropic API), writes the new reflections to "
+                    "~/.sovereign/reflections/, and returns them inline so you "
+                    "don't need a separate recall_reflections call. Use when "
+                    "something is brewing and you want an outside read in a few "
+                    "seconds. Pass `focus` to bias the reflector toward a specific "
+                    "topic. It is an API call, so call it deliberately, not casually."
                 ),
                 inputSchema={
                     "type": "object",
@@ -2384,7 +2410,8 @@ def _before_you_begin_lines() -> list[str]:
         "      yesterday's evidence.",
         "",
         "    REFLECTOR'S MARGINALIA — machine-generated readings from",
-        "      a local LLM that watches the chronicle between calls.",
+        "      a model (claude-sonnet-4-6 via the Anthropic API) that",
+        "      watches the chronicle between calls.",
         "      Fallible by design. Confirm, engage, or discard with",
         "      reflection_ack — each note on its own merits, not",
         "      batch-confirmed or batch-rejected. Leaving an unread",
@@ -2588,6 +2615,8 @@ async def _dispatch_tool(name: str, arguments: dict):
             since_last_reflection=since_last_reflection,
             with_ids=arguments.get("with_ids", False),
             exclude_superseded=arguments.get("exclude_superseded", False),
+            domain_contains=arguments.get("domain_contains"),
+            order=arguments.get("order", "newest"),
         )
         return [TextContent(type="text", text=json.dumps(insights, indent=2))]
 
@@ -2637,16 +2666,25 @@ async def _dispatch_tool(name: str, arguments: dict):
         if domain and domain.lower() == "all":
             domain = None  # "all" means no filter
         limit = arguments.get("limit", 10)
-        threads = experiential.get_open_threads(
-            domain, limit, coalesce_families=arguments.get("coalesce_families", True)
+        with_total = arguments.get("with_total", False)
+        result = experiential.get_open_threads(
+            domain,
+            limit,
+            coalesce_families=arguments.get("coalesce_families", True),
+            domain_contains=arguments.get("domain_contains"),
+            offset=arguments.get("offset", 0),
+            with_total=with_total,
         )
-        if not threads:
+        # When with_total=True, result is a dict {threads, total, has_more, offset}.
+        # When with_total=False (default), result is a plain list (backward-compat).
+        threads_list = result["threads"] if with_total else result
+        if not threads_list:
             return [
                 TextContent(
                     type="text", text="No open threads. All questions resolved or none recorded."
                 )
             ]
-        return [TextContent(type="text", text=json.dumps(threads, indent=2))]
+        return [TextContent(type="text", text=json.dumps(result, indent=2))]
 
     if name == "get_inheritable_context":
         context = experiential.get_inheritable_context()
@@ -2932,7 +2970,7 @@ async def _dispatch_tool(name: str, arguments: dict):
             lines.append("")
 
         # 6. Reflector's marginalia — synthesis daemon's recent unread reflections.
-        #    Machine-generated by a local LLM (default ministral-3:14b) reading
+        #    Machine-generated by a model (default claude-sonnet-4-6 via API) reading
         #    the chronicle between calls. FALLIBLE BY DESIGN. The reader
         #    calibrates: confirm / engage / discard via reflection_ack.
         #    Surfaced before the self-model so the outside-eye reading lands
@@ -2951,7 +2989,7 @@ async def _dispatch_tool(name: str, arguments: dict):
         if recent_reflections:
             lines.append("━━━ REFLECTOR'S MARGINALIA (unread, machine-generated) ━━━")
             lines.append(
-                "  Local LLM read the chronicle between calls and gestured at patterns. "
+                "  A model (claude-sonnet-4-6) read the chronicle between calls and gestured at patterns. "
                 "Some insight, some nonsense. Use reflection_ack to confirm/engage/discard."
             )
             lines.append("")
@@ -3032,9 +3070,19 @@ async def _dispatch_tool(name: str, arguments: dict):
 
         boot_text = "\n".join(lines)
 
-        # Scribe integration (SCRIBE_SPEC.md): spawn a ScribeSession on
-        # every boot and run the Haiku greeting. Greeting + metadata land
-        # in ~/.sovereign/scribe_threads/_logs/ regardless of phase.
+        # Ensure the resident scribe is alive (lazy, idempotent). This covers
+        # stdio seats and the edge where SSE booted before the map existed.
+        # Failures are swallowed — a degraded resident never breaks boot.
+        try:
+            from .scribe.resident import ensure_resident_scribe as _ensure_resident
+
+            await asyncio.to_thread(_ensure_resident)
+        except Exception:
+            pass
+
+        # Scribe integration (SCRIBE_SPEC.md): spawn a per-instance ScribeSession
+        # on every boot and run the greeting. Greeting + metadata land in
+        # ~/.sovereign/scribe_threads/_logs/ regardless of phase.
         #
         # Phase 2 (default ON): if the greeting succeeded and the
         # SCRIBE_BOOT_INJECT flag is enabled, inject the SCRIBE block

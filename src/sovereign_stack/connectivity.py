@@ -122,13 +122,9 @@ ENDPOINTS: list[Endpoint] = [
         cadence_seconds=300,
         log_path=str(Path.home() / ".sovereign" / "comms_listener.log"),
     ),
-    Endpoint(
-        name="ollama",
-        label="com.ollama.server",
-        kind=KIND_ALWAYS_ON,
-        description="Ollama model server (port 11434, localhost-only)",
-        health_url="http://127.0.0.1:11434/",
-    ),
+    # ollama removed 2026-06-20: decommissioned as redundant compute when the
+    # synthesis reflector moved to the Anthropic API. Re-add an Endpoint here if
+    # a local model server is ever reintroduced.
 ]
 
 

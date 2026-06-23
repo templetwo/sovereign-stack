@@ -1,10 +1,11 @@
 """
-SynthesisDaemon — local-LLM reflector. The third reflection daemon.
+SynthesisDaemon — the reflector. The third reflection daemon.
 
-Reads recent chronicle entries and asks a local LLM (Qwen3.6:27B via Ollama
-by default) to gesture at patterns the writing instances and the human in
-the loop might have missed: cross-domain convergences, structural echoes,
-untouched questions, tensions between distant entries.
+Reads recent chronicle entries and asks a model to gesture at patterns the
+writing instances and the human in the loop might have missed: cross-domain
+convergences, structural echoes, untouched questions, tensions between distant
+entries. Runs on the Anthropic API (claude-sonnet-4-6 by default) since
+2026-06-20; was a local-LLM daemon (ministral-3:14b via Ollama) before that.
 
 Architectural break with the v1.3.2 daemon pattern, deliberate:
   * UncertaintyResurfacer + MetabolizeDaemon are NOTIFICATION PRIMITIVES.
@@ -39,6 +40,29 @@ v2 additions (2026-04-29):
     Directly addresses the declare-before-verify failure mode.
   * Spanning sample mode — samples across full chronicle history (weeks, not
     hours) to surface structural patterns invisible in the recent window.
+
+v3 additions (2026-06-19):
+  * Abstain path — the standard-mode prompt now explicitly permits
+    {"reflections": []} when the window holds no genuine connection, and
+    run() records that as outcome="abstained" (a respected outcome) rather
+    than "parse_failed". v2 forced one observation per firing, so a 14B with
+    no real signal manufactured a dialectical "tension" between the
+    hypothesis and ground_truth layers every time — the structural_echo
+    monoculture seen across 2026-06-05/06/19. Two layers coexisting is the
+    chronicle's structure, not a discovery about it.
+  * Connection-type de-bias — the prompt asks for the SIMPLEST true type
+    and names the coexistence/grandiose-restatement traps that produced the
+    monoculture. Goose and spanning modes are untouched.
+
+Migration (2026-06-20):
+  * Transport moved from Ollama (local ministral-3:14b) to the Anthropic API
+    via call_anthropic(). DEFAULT_MODEL is now claude-sonnet-4-6, still
+    overridable with SYNTHESIS_MODEL (e.g. "claude-opus-4-8"). prompt_version
+    stays v3 — the prompt text is identical; the recorded `model` field carries
+    the substrate change. The launchd process gets no sourced shell env, so the
+    API key is loaded from ~/.env if absent (mirrors the scribe's haiku_client).
+    call_ollama is retained dormant for rollback. Ollama is being decommissioned
+    as redundant compute.
 """
 
 from __future__ import annotations
@@ -60,15 +84,18 @@ from sovereign_stack.memory import load_entries
 
 # ── Tunables ────────────────────────────────────────────────────────────────
 
-DEFAULT_MODEL = "ministral-3:14b"  # fireside 2026-04-26: tested at 25s with
-# Qwen-quality cross-entry synthesis on the test corpus. Sweet spot between
-# llama3.1:8b (too small — surface restatements, occasional misreads) and
-# qwen3.6:27b (~120s — too slow for interactive use). Keep Qwen as opt-in
-# for the deep-nightly variant when latency doesn't matter.
-DEFAULT_PROMPT_VERSION = "v2-2026-04-29"
+DEFAULT_MODEL = "claude-sonnet-4-6"  # 2026-06-20: migrated off Ollama to the
+# Anthropic API (ollama decommissioned as redundant compute). A frontier model
+# is a far stronger reader for the v3 discernment ask — simplest-true
+# connection-type + honest abstain. Sonnet 4.6 is capable enough for nightly
+# marginalia at a fraction of Opus cost; override with SYNTHESIS_MODEL (e.g.
+# "claude-opus-4-8") when a window deserves the deeper read. History: ran on
+# ministral-3:14b via Ollama through v3 (fireside 2026-04-26).
+DEFAULT_PROMPT_VERSION = "v3-2026-06-19"  # prompt text unchanged across the
+# Ollama→API migration; the recorded `model` field marks the substrate shift.
 DEFAULT_RECENT_HOURS = 36  # window of chronicle entries to read
 DEFAULT_MAX_ENTRIES = 8  # cap on entries fed to the model
-DEFAULT_TIMEOUT_SECONDS = 180  # 14B finishes in ~25-60s; 180s gives headroom
+DEFAULT_TIMEOUT_SECONDS = 180  # API request timeout; headroom for a 4096-token completion
 DEFAULT_SPAN_WEEKS = 8  # spanning mode: weeks to look back
 DEFAULT_ENTRIES_PER_WEEK = 2  # spanning mode: samples per week
 
@@ -118,7 +145,9 @@ class Reflection:
 class RunResult:
     """Outcome of a single synthesis run."""
 
-    outcome: str  # "wrote" | "no_entries" | "model_failed" | "parse_failed" | "skipped"
+    outcome: (
+        str  # "wrote" | "abstained" | "no_entries" | "model_failed" | "parse_failed" | "skipped"
+    )
     details: str = ""
     run_id: str = ""
     model: str = ""
@@ -372,21 +401,47 @@ human researcher (Anthony) over recent days. The chronicle is a structured
 field — entries have domains, layers (ground_truth / hypothesis / open_thread),
 timestamps, and sometimes addressed-letter shapes between sibling instances.
 
-Your job is NOT to be authoritative. Your job is to gesture at the single
-strongest pattern you notice that the humans-in-the-loop and the writing
-instances might have missed — a point of convergence, an unresolved tension,
-a structural echo across distant entries, or an untouched question. The
-observation will be insight or nonsense — the reader knows this and will
-calibrate.
+Your job is NOT to be authoritative, and NOT to produce something every
+firing. Your job is to notice whether there is ONE genuine connection across
+these entries that the writing instances and the humans-in-the-loop might
+have missed — and to name it plainly, OR to say nothing. An observation will
+be insight or nonsense; the reader calibrates. But a forced observation is
+worse than silence.
 
-Output exactly 1 observation as JSON, shaped like:
+A genuine connection is two or more SPECIFIC entries that actually bear on
+each other:
+  * convergence — the same question reached from different angles
+  * contradiction — their claims genuinely disagree
+  * structural_echo — the same concrete shape recurs in unrelated work
+  * untouched_question — a real question was raised and left unanswered
+  * drift_pattern — a tendency visibly shifting across entries
+  * other — something real that fits none of the above
+
+Choose the SIMPLEST type that is true. Do not reach for structural_echo or
+contradiction because they sound deeper — most real signal is convergence or
+an untouched question. Write plainly and concretely: name the specific
+entries and what they actually say. Do not theorize about "the system" in
+grand abstractions.
+
+ABSTAIN — return no observation — when the strongest thing you can find is
+any of these:
+  * Two entries merely coexisting in the same time window.
+  * A "tension" built by pairing the hypothesis layer against the
+    ground_truth layer just because both are present. That pairing is the
+    structure of the chronicle itself, not a discovery about it.
+  * One entry restated in larger words.
+
+Output AT MOST 1 observation as JSON, shaped like:
 {
-  "observation": "<one paragraph — make it count, you only get one>",
+  "observation": "<one concrete paragraph naming the entries — only if real>",
   "entries_referenced": ["<short entry tag>", ...],
   "connection_type": "convergence" | "contradiction" | "structural_echo" | "untouched_question" | "drift_pattern" | "other",
   "confidence": "low" | "medium"
 }
 Wrap it in {"reflections": [<the single object>]}. No prose outside the JSON.
+If there is no genuine connection in this window, output exactly:
+{"reflections": []}
+Abstaining is a respected, correct answer.
 """
 
 GOOSE_PREAMBLE = """\
@@ -521,9 +576,13 @@ def build_prompt(
             )
             lines.append("")
         lines.append(
-            "Now produce 1 observation as the JSON described above. "
-            "Pick the strongest signal you see — gesture, don't declare. "
-            "If you're wrong, that is allowed; the reader will calibrate."
+            "Now produce AT MOST 1 observation as the JSON described above. "
+            "If there is a genuine connection, pick the simplest type that is "
+            "true — gesture, don't declare. If there is not, output "
+            '{"reflections": []} — abstaining is correct when the window holds '
+            "no real connection, and a forced pattern is worse than silence. "
+            "If you do observe and you're wrong, that is allowed; the reader "
+            "will calibrate."
         )
 
     return "\n".join(lines)
@@ -532,10 +591,102 @@ def build_prompt(
 # ── Model call ──────────────────────────────────────────────────────────────
 
 
+# ── Model call (Anthropic API) ───────────────────────────────────────────────
+
+_ANTHROPIC_KEY_LOADED = False
+
+
+def _ensure_anthropic_key() -> str | None:
+    """Resolve the Anthropic API key for a launchd-spawned daemon.
+
+    launchd does not give the process a sourced shell environment, so
+    ANTHROPIC_API_KEY is usually absent from os.environ at the 04:17 firing.
+    Mirror the scribe's haiku_client fallback: read ~/.env once and promote the
+    key into os.environ so the SDK's default constructor finds it. Returns the
+    key (or None if it cannot be found) and never logs the value.
+    """
+    global _ANTHROPIC_KEY_LOADED
+    key = os.environ.get("ANTHROPIC_API_KEY")
+    if key:
+        return key
+    if _ANTHROPIC_KEY_LOADED:
+        return None
+    _ANTHROPIC_KEY_LOADED = True  # one-shot; don't re-read ~/.env every call
+    env_path = Path.home() / ".env"
+    try:
+        for line in env_path.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#") or "=" not in stripped:
+                continue
+            name, _, value = stripped.partition("=")
+            if name.strip() == "ANTHROPIC_API_KEY":
+                value = value.strip().strip('"').strip("'")
+                if value:
+                    os.environ.setdefault("ANTHROPIC_API_KEY", value)
+                    return value
+    except OSError:
+        return None
+    return None
+
+
+def call_anthropic(
+    prompt: str, model: str = DEFAULT_MODEL, timeout: int = DEFAULT_TIMEOUT_SECONDS
+) -> tuple[bool, str]:
+    """
+    Call the Anthropic Messages API and return (ok, output_text).
+
+    Drop-in replacement for the former call_ollama path: same (ok, text)
+    contract, so any API error degrades to run()'s outcome="model_failed"
+    instead of crashing the 04:17 launchd firing. The prompt asks for strict
+    JSON; the returned text is fed to the same extract_json_block /
+    parse_reflections path (robust to fences and a stray prose wrapper), so we
+    don't rely on a server-side JSON mode the way the Ollama path did.
+
+    No extended thinking: this is a cost-sensitive recurring background job and
+    the v3 prompt is already highly structured — Sonnet 4.6 base clears the bar.
+    If marginalia quality wants it later, add thinking={"type": "adaptive"} on
+    the create() call (the text-block extraction below already skips non-text
+    blocks) or bump SYNTHESIS_MODEL to an Opus tier.
+    """
+    if not _ensure_anthropic_key():
+        return False, "anthropic: no ANTHROPIC_API_KEY in env or ~/.env"
+    try:
+        import anthropic
+    except ImportError as exc:
+        return False, f"anthropic sdk not importable: {exc}"
+
+    try:
+        client = anthropic.Anthropic(timeout=float(timeout))
+        msg = client.messages.create(
+            model=model,
+            max_tokens=4096,
+            temperature=0.4,  # disciplined adherence to the JSON shape
+            messages=[{"role": "user", "content": prompt}],
+        )
+    except anthropic.APIError as exc:
+        return False, f"anthropic api error: {exc}"
+    except Exception as exc:  # transport/timeout/anything else — degrade cleanly
+        return False, f"anthropic call failed: {type(exc).__name__}: {exc}"
+
+    parts = [block.text for block in msg.content if getattr(block, "type", None) == "text"]
+    output = "".join(parts).strip()
+    if not output:
+        stop = getattr(msg, "stop_reason", "?")
+        return False, f"anthropic empty response (stop_reason={stop})"
+    return True, output
+
+
+# ── Model call (Ollama — DORMANT) ─────────────────────────────────────────────
+
+
 def call_ollama(
     prompt: str, model: str = DEFAULT_MODEL, timeout: int = DEFAULT_TIMEOUT_SECONDS
 ) -> tuple[bool, str]:
     """
+    DORMANT as of 2026-06-20 — run() now calls call_anthropic(). Retained for
+    rollback; Ollama is being decommissioned. The notes below describe the old
+    local-LLM path.
+
     Call Ollama's HTTP /api/generate endpoint with stream=False so we get
     one clean JSON response. Returns (ok, output_text).
 
@@ -685,7 +836,6 @@ def parse_reflections(raw: str) -> list[Reflection]:
         return []
     try:
         data = json.loads(block)
-        raw_reflections = data.get("reflections", [])
     except json.JSONDecodeError:
         # Truncation-tolerant fallback: when the model hits a token ceiling
         # mid-3rd-reflection, the overall JSON is malformed but the earlier
@@ -694,6 +844,24 @@ def parse_reflections(raw: str) -> list[Reflection]:
         # individually. Caught at the 2026-04-26 04:17 firing where 2
         # complete reflections were thrown away because the 3rd was cut off.
         raw_reflections = _recover_complete_reflections(block)
+    else:
+        if isinstance(data, dict):
+            if "reflections" in data:
+                raw_reflections = data.get("reflections") or []
+            elif "observation" in data:
+                # Model emitted a single bare reflection object without the
+                # {"reflections": [...]} wrapper. Tolerate it — format=json
+                # does not enforce the wrapper, and ministral sometimes drops
+                # it (observed 2026-06-19 on a clean v3 convergence reflection
+                # that would otherwise have been lost as parse_failed).
+                raw_reflections = [data]
+            else:
+                raw_reflections = []
+        elif isinstance(data, list):
+            # Bare array of reflection objects, no wrapper.
+            raw_reflections = data
+        else:
+            raw_reflections = []
     if not isinstance(raw_reflections, list):
         return []
     out: list[Reflection] = []
@@ -721,6 +889,27 @@ def parse_reflections(raw: str) -> list[Reflection]:
             )
         )
     return out
+
+
+def is_explicit_abstain(raw: str) -> bool:
+    """
+    True when the model deliberately returned an empty reflections array —
+    a structurally valid {"reflections": []} (v3 abstain). This is distinct
+    from unparseable garbage: parse_reflections() returns [] for BOTH, so
+    run() uses this to separate a respected "abstained" outcome from a real
+    "parse_failed" defect. Requires the top-level JSON to parse cleanly and
+    expose a list-typed "reflections" key of length 0 — a truncated or
+    malformed body does not count as an abstain.
+    """
+    block = extract_json_block(raw)
+    if not block:
+        return False
+    try:
+        data = json.loads(block)
+    except json.JSONDecodeError:
+        return False
+    refs = data.get("reflections") if isinstance(data, dict) else None
+    return isinstance(refs, list) and len(refs) == 0
 
 
 # ── Persistence ─────────────────────────────────────────────────────────────
@@ -837,7 +1026,7 @@ class SynthesisDaemon:
             spanning_mode=(self.sample_mode == "spanning"),
         )
 
-        ok, raw = call_ollama(prompt, model=self.model, timeout=self.timeout_seconds)
+        ok, raw = call_anthropic(prompt, model=self.model, timeout=self.timeout_seconds)
         result.raw_model_output = raw[:8000]  # debug trim
         if not ok:
             result.outcome = "model_failed"
@@ -853,6 +1042,18 @@ class SynthesisDaemon:
                 result.outcome = "wrote"
                 result.reflections_written = 0
                 result.details = "goose mode: no gaps found between handoffs and chronicle"
+                result.elapsed_seconds = round(time.time() - started, 2)
+                return result
+            # v3: a deliberate {"reflections": []} is an abstain, not a defect.
+            # Separate it from genuine parse failures so abstain-rate and
+            # parse-failure-rate stay distinguishable in the analytics.
+            if is_explicit_abstain(raw):
+                result.outcome = "abstained"
+                result.reflections_written = 0
+                result.details = (
+                    f"no genuine connection across {len(entries)} entries in "
+                    f"last {self.recent_hours}h — model abstained"
+                )
                 result.elapsed_seconds = round(time.time() - started, 2)
                 return result
             result.outcome = "parse_failed"
@@ -884,7 +1085,7 @@ def main() -> int:
     """Manual run: `python -m sovereign_stack.daemons.synthesis_daemon`.
 
     Honors env vars from the launchd plist (or shell):
-      SYNTHESIS_MODEL           — override DEFAULT_MODEL (e.g. "qwen3.6:27b")
+      SYNTHESIS_MODEL           — override DEFAULT_MODEL (e.g. "claude-opus-4-8")
       SYNTHESIS_FOCUS           — optional steering hint; "goose" for gap-finder
       SYNTHESIS_HOURS           — chronicle window in hours (default 36)
       SYNTHESIS_MAX             — max entries fed to model (default 8)
@@ -914,7 +1115,9 @@ def main() -> int:
         "details": result.details,
     }
     print(json.dumps(summary, indent=2))
-    return 0 if result.outcome == "wrote" else 1
+    # "abstained" is a healthy v3 outcome (model found no genuine connection),
+    # not a failure — exit 0 so launchd doesn't log it as an error.
+    return 0 if result.outcome in ("wrote", "abstained") else 1
 
 
 if __name__ == "__main__":

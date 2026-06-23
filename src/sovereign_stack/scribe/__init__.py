@@ -1,4 +1,4 @@
-"""The Sovereign Stack scribe — Haiku 4.5 conversational liaison.
+"""The Sovereign Stack scribe — Sonnet 4.6 conversational liaison.
 
 Per SCRIBE_SPEC.md: a per-instance scribe spawned on every arriving
 instance's boot, greeting injected into where_did_i_leave_off output,

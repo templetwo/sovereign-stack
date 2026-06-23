@@ -5,6 +5,7 @@ HTTP/SSE transport layer for remote access via Cloudflare tunnel.
 Runs alongside stdio server for local Claude Code access.
 """
 
+import asyncio
 import hmac
 import json
 import logging
@@ -12,6 +13,7 @@ import os
 import sys
 import threading
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import parse_qs
 
@@ -448,7 +450,33 @@ async def grok_bridge_info(request: Request) -> JSONResponse:
     return JSONResponse(GROK_MANIFEST)
 
 
-# Create Starlette app with SSE and health routes
+@asynccontextmanager
+async def _lifespan(app):
+    """Starlette lifespan: boot-launch the resident scribe at SSE startup.
+
+    IMPORTANT: uvicorn.run() must use workers=1 (the default, never set
+    workers>1). The resident scribe is a module-level in-memory singleton;
+    it only holds at exactly one worker process. If workers>1, each worker
+    gets its own resident and cross-worker routing breaks.
+
+    The ensure_resident_scribe() call runs on a thread to avoid blocking the
+    event loop on Anthropic API latency. Failures are logged but never fatal —
+    the SSE server starts regardless.
+    """
+    try:
+        from .scribe.resident import ensure_resident_scribe
+
+        await asyncio.to_thread(ensure_resident_scribe)
+        logger.info("scribe resident established at SSE boot")
+    except Exception as exc:
+        logger.warning("scribe resident boot-launch failed (non-fatal): %s", exc)
+    yield
+
+
+# Create Starlette app with SSE and health routes.
+# WORKERS=1 NOTE: uvicorn.run() is called without workers= argument below,
+# which defaults to 1. This is load-bearing: the resident scribe is an
+# in-memory singleton that only holds at one worker.
 _inner_app = Starlette(
     debug=False,
     routes=[
@@ -456,6 +484,7 @@ _inner_app = Starlette(
         Route("/openai/info", bridge_info, methods=["GET"]),
         Route("/grok/info", grok_bridge_info, methods=["GET"]),
     ],
+    lifespan=_lifespan,
 )
 
 # Wrap with message handler middleware
@@ -469,11 +498,17 @@ def main(host: str = "127.0.0.1", port: int = 3434):
     Args:
         host: Host to bind to (default: 127.0.0.1 — tunnel handles external)
         port: Port to listen on (default: 3434)
+
+    NOTE: uvicorn.run() does NOT pass workers=; this defaults to 1 worker.
+    The resident scribe requires uvicorn workers=1 — it is an in-memory
+    singleton and will not coordinate across multiple workers.
     """
     logger.info(f"Sovereign Stack SSE Server starting on {host}:{port}")
     logger.info(f"SSE endpoint: http://{host}:{port}/sse")
     logger.info(f"Health check: http://{host}:{port}/health")
+    logger.info("scribe resident requires uvicorn workers=1 (singleton in-memory)")
 
+    # workers= intentionally omitted (defaults to 1); see docstring above.
     uvicorn.run(app, host=host, port=port, log_level="info", access_log=True)
 
 

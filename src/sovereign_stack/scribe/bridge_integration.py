@@ -257,7 +257,7 @@ def format_scribe_block(session: ScribeSession) -> str:
     lines: list[str] = [
         "━━━ SCRIBE — OPTIONAL ━━━",
         "",
-        "  A Haiku 4.5 scribe has been reading alongside you. It is here",
+        "  A Sonnet 4.6 scribe has been reading alongside you. It is here",
         "  to help you land well, not to direct. You can ignore this",
         "  entire section. The boot above is complete; the scribe is an",
         "  additional resource if you want one.",
@@ -294,49 +294,182 @@ def format_scribe_block(session: ScribeSession) -> str:
 
 
 # ----------------------------------------------------------------------
-# ask_scribe handler
+# ask_scribe handler — Fork-D navigational payload
 # ----------------------------------------------------------------------
 
 
-def _format_response(text: str, result_meta: dict, session: ScribeSession) -> str:
-    """Compose the ask_scribe response with a small stats footer."""
-    return (
-        f"{text}\n\n"
-        f"---\n"
-        f"scribe: turn {session.turn_count}, "
-        f"tokens {result_meta['tokens_in']}/{result_meta['tokens_out']} "
-        f"(cache read {result_meta['tokens_cache_read']}), "
-        f"this turn ${result_meta['cost_usd']:.4f}, "
-        f"session total ${session.total_cost_usd:.4f}"
-    )
+def _known_map_route_names() -> set[str]:
+    """Read the primary_routes.md and extract route names (first word on bullet lines).
+
+    Used to constrain suggested_calls so they cannot be invented by the model.
+    Returns empty set if the map is unavailable.
+    """
+    map_path = SOVEREIGN_ROOT / "stack_map" / "primary_routes.md"
+    if not map_path.exists():
+        return set()
+    try:
+        text = map_path.read_text(encoding="utf-8")
+    except OSError:
+        return set()
+    names: set[str] = set()
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("- "):
+            # Route lines: "- route_name (kind): description..."
+            body = stripped[2:]
+            name_part = body.split(" ")[0].split("(")[0].strip()
+            if name_part:
+                names.add(name_part)
+                # Also add the tool call form
+                names.add(f"{name_part}()")
+    return names
+
+
+def _format_navigational_payload(result, session: ScribeSession, meta: dict) -> str:
+    """Build the Fork-D JSON-in-text navigational payload.
+
+    The model's text is expected to be a JSON object with keys:
+      synthesis, routes, entries, suggested_calls, gaps, meta
+
+    If the model returned plain prose (not JSON), it is wrapped into the
+    envelope so the contract never breaks for prose-treating callers.
+
+    meta is built server-side and is authoritative (the model's meta, if any,
+    is ignored to prevent model-injected data from overriding cost/token info).
+    """
+    import re
+
+    known_routes = _known_map_route_names()
+    text = result.text.strip() if result.text else ""
+
+    parsed: dict = {}
+    # Try to parse JSON from the model output
+    try:
+        # Strip markdown code fences if present
+        cleaned = re.sub(r"^```(?:json)?\s*", "", text, flags=re.MULTILINE)
+        cleaned = re.sub(r"\s*```$", "", cleaned, flags=re.MULTILINE)
+        parsed = json.loads(cleaned.strip())
+        if not isinstance(parsed, dict):
+            parsed = {}
+    except (json.JSONDecodeError, ValueError):
+        pass
+
+    # Extract fields; synthesize defaults when absent
+    synthesis = (parsed.get("synthesis") or text or "").strip()
+    if not synthesis:
+        synthesis = "(no synthesis returned)"
+
+    routes = parsed.get("routes") or []
+    if not isinstance(routes, list):
+        routes = []
+
+    entries = parsed.get("entries") or []
+    if not isinstance(entries, list):
+        entries = []
+
+    gaps = parsed.get("gaps") or []
+    if not isinstance(gaps, list):
+        gaps = []
+
+    # Constrain suggested_calls to names present in the map (def #582 + spec)
+    raw_calls = parsed.get("suggested_calls") or []
+    if not isinstance(raw_calls, list):
+        raw_calls = []
+    if known_routes:
+
+        def _in_map(c: str) -> bool:
+            # Exact match first (e.g. "my_toolkit()")
+            if c in known_routes:
+                return True
+            # Strip everything from the first '(' to handle parameterized calls
+            # e.g. "recall_insights(query=...)" -> "recall_insights"
+            base = c.split("(")[0].strip()
+            return base in known_routes or f"{base}()" in known_routes
+
+        suggested_calls = [c for c in raw_calls if _in_map(c)]
+    else:
+        # Map unavailable: fail closed. Without a known-route allowlist we
+        # cannot prevent a model-generated path or invented tool name from
+        # appearing in suggested_calls. Empty is safe; unvalidated raw_calls
+        # is not (Guarantee 3 — suggested_calls cannot smuggle a path).
+        suggested_calls = []
+
+    payload = {
+        "synthesis": synthesis,
+        "routes": routes,
+        "entries": entries,
+        "suggested_calls": suggested_calls,
+        "gaps": gaps,
+        "meta": meta,
+    }
+    return json.dumps(payload, ensure_ascii=False, indent=2)
 
 
 def ask_scribe(session_id: str | None, message: str) -> str:
-    """Handle an ask_scribe call. Returns plain text response.
+    """Handle an ask_scribe call. Returns a Fork-D navigational JSON payload.
 
-    Session resolution: if session_id given, look up exact session.
-    Otherwise, fall back to the most-recently-active session (single-
-    process server pattern — works while one MCP server is serving one
-    seat).
+    Session resolution (Fork A semantics — no 404):
+      - Resolve the resident via ensure_resident_scribe() (idempotent).
+      - If session_id is given, it is a caller-thread namespace (optional).
+        Unknown or expired session_id never 404s — silently uses resident.
+      - If session_id is omitted, single-shot against the resident.
+
+    The resident holds the shared chronicle context. Per-session turn history
+    is lightweight and layered on top of the shared context.
+
+    Returns the Fork-D JSON string (synthesis-first) or a plain error string
+    on hard failure (client init failed, etc.).
     """
     if not message or not message.strip():
         return "ask_scribe error: 'message' is required and must be non-empty"
 
+    # Resolve (or spawn) the resident — idempotent, never raises
+    try:
+        from .resident import ensure_resident_scribe, refresh_if_stale
+
+        resident = ensure_resident_scribe()
+        if resident is not None:
+            refresh_if_stale(resident)
+    except Exception as exc:
+        logger.warning("scribe: resident resolution failed: %s", exc)
+        resident = None
+
+    # Determine the conversation session and whether this is a stateful or
+    # stateless (single-shot) call.
+    #
+    # Fork A semantics — no 404:
+    #   - session_id given AND found → stateful multi-turn (mutate that session)
+    #   - session_id given BUT unknown/expired → stateless single-shot against
+    #     resident context (never 404; resident accumulates nothing)
+    #   - session_id omitted → stateless single-shot against resident context
+    #
+    # "Stateless single-shot" means: use resident.chronicle_context as the
+    # cached system block, pass empty history, and do NOT append turns to
+    # the resident.  This prevents cross-seat bleed and unbounded turn growth
+    # on the process-lifetime session (spec Fork A, line 17).
+
+    stateless = False  # True → do not mutate any session's turn list
+
     if session_id:
         session = _scribe_store.get(session_id)
         if session is None:
-            return (
-                f"ask_scribe error: session {session_id} not found or expired. "
-                "Call where_did_i_leave_off to spawn a fresh scribe handle."
-            )
+            # Unknown or expired id: use resident context, single-shot
+            session = resident
+            stateless = True
     else:
+        # No id: single-shot against resident
+        session = resident
+        stateless = True
+
+    # Last-resort fallback: if still no session (resident spawn failed), try
+    # to find any active session for this process.
+    if session is None:
         active = list(_scribe_store.active_sessions())
-        if not active:
-            return (
-                "ask_scribe error: no active scribe session. "
-                "Call where_did_i_leave_off to spawn one."
-            )
-        session = max(active, key=lambda s: s.last_message_at)
+        if active:
+            session = max(active, key=lambda s: s.last_message_at)
+            # Only mark stateless if we fell back to the resident's kind of session
+            if getattr(session, "immortal", False):
+                stateless = True
 
     client = get_client()
     if client is None:
@@ -347,18 +480,33 @@ def ask_scribe(session_id: str | None, message: str) -> str:
             f"in ~/.env."
         )
 
-    # Redact the incoming message before it ever reaches Haiku.
-    redacted = redact(message)
-    session.append_user_turn(redacted.text, redaction_counts=redacted.counts)
+    if session is None:
+        return (
+            "ask_scribe error: no active scribe session and resident spawn failed. "
+            "Restart the stack or call where_did_i_leave_off to spawn a session."
+        )
 
-    # Build conversation history (all turns BEFORE the just-added user turn).
-    history = [{"role": turn.role, "content": turn.message} for turn in session.turns[:-1]]
+    # Redact the incoming message before it ever reaches Sonnet.
+    redacted = redact(message)
+
+    if stateless:
+        # Single-shot: empty history (no prior turns shared with this caller),
+        # resident chronicle_context as the cached system block.
+        history: list[dict] = []
+        chronicle_context = session.chronicle_context
+        turn_count = 0
+    else:
+        # Stateful multi-turn: append user turn, build history from previous turns.
+        session.append_user_turn(redacted.text, redaction_counts=redacted.counts)
+        history = [{"role": turn.role, "content": turn.message} for turn in session.turns[:-1]]
+        chronicle_context = session.chronicle_context
+        turn_count = session.turn_count
 
     try:
         result = client.generate_response(
             conversation_history=history,
             user_message=redacted.text,
-            chronicle_context=session.chronicle_context,
+            chronicle_context=chronicle_context,
             tools=anthropic_tool_definitions(),
             tool_dispatch=dispatch_tool,
             max_tool_iterations=5,
@@ -366,14 +514,19 @@ def ask_scribe(session_id: str | None, message: str) -> str:
     except Exception as exc:
         return f"ask_scribe error: {type(exc).__name__}: {exc}"
 
-    session.append_assistant_turn(
-        result.text,
-        tokens_in=result.tokens_in,
-        tokens_out=result.tokens_out,
-        cost_usd=result.cost_usd,
-    )
+    if not stateless:
+        # Only persist the assistant turn for stateful sessions
+        session.append_assistant_turn(
+            result.text,
+            tokens_in=result.tokens_in,
+            tokens_out=result.tokens_out,
+            cost_usd=result.cost_usd,
+        )
+        turn_count = session.turn_count
 
-    meta = {
+    # Build authoritative meta (server-side; model meta never trusted)
+    resident_session_id = getattr(resident, "session_id", None)
+    meta: dict = {
         "tokens_in": result.tokens_in,
         "tokens_out": result.tokens_out,
         "tokens_cache_creation": result.tokens_cache_creation,
@@ -381,8 +534,13 @@ def ask_scribe(session_id: str | None, message: str) -> str:
         "cost_usd": result.cost_usd,
         "model": result.model,
         "stop_reason": result.stop_reason,
+        "tools_fired": len(result.tool_calls_made),
+        "tool_calls": result.tool_calls_made,
+        "resident_session_id": resident_session_id,
+        "turn": turn_count,
+        "stateless": stateless,
     }
-    return _format_response(result.text, meta, session)
+    return _format_navigational_payload(result, session, meta)
 
 
 async def ask_scribe_async(session_id: str | None, message: str) -> str:

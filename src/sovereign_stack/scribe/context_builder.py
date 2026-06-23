@@ -29,6 +29,7 @@ from sovereign_stack.witness import (
 
 SOVEREIGN_ROOT = Path(os.environ.get("SOVEREIGN_ROOT", str(Path.home() / ".sovereign")))
 CHRONICLE_ROOT = Path(os.environ.get("SOVEREIGN_CHRONICLE", str(SOVEREIGN_ROOT / "chronicle")))
+STACK_MAP_PATH = SOVEREIGN_ROOT / "stack_map" / "primary_routes.md"
 
 
 # Tunables — the scribe should see broadly but not be drowned.
@@ -146,6 +147,20 @@ def _format_recent_reflections(limit: int) -> str:
     return "\n".join(lines).rstrip()
 
 
+def _format_route_map(map_path: Path | None = None) -> str:
+    """Read primary_routes.md verbatim. Returns a placeholder if missing."""
+    path = map_path or STACK_MAP_PATH
+    if not path.exists():
+        return (
+            "(route map not yet built — run the stack-map builder or create "
+            f"{path} to enable route-map navigation)"
+        )
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return f"(route map unreadable: {exc})"
+
+
 def build_scribe_chronicle_context(
     chronicle_root: Path | None = None,
     sovereign_root: Path | None = None,
@@ -156,12 +171,18 @@ def build_scribe_chronicle_context(
     persistent_marker_limit: int = DEFAULT_PERSISTENT_MARKER_LIMIT,
     persistent_min_intensity: float = DEFAULT_PERSISTENT_MIN_INTENSITY,
     reflections_limit: int = DEFAULT_REFLECTIONS_LIMIT,
+    include_route_map: bool = True,
+    map_path: Path | None = None,
 ) -> str:
     """Compose the scribe's chronicle context as one labeled string.
 
     No truncation. Sections in stable order so the scribe knows what it
     is looking at. Returns a single string suitable for use as Haiku's
     cache-controlled system block.
+
+    The route map (8th section) leads the list so the navigation frame
+    precedes the chronicle data. Pass include_route_map=False to omit it
+    (useful when refreshing only the chronicle sections).
     """
     chronicle_root = chronicle_root or CHRONICLE_ROOT
     sovereign_root = sovereign_root or SOVEREIGN_ROOT
@@ -169,21 +190,36 @@ def build_scribe_chronicle_context(
     memory = ExperientialMemory(root=str(chronicle_root))
     handoff_engine = HandoffEngine(root=str(sovereign_root))
 
-    sections: list[tuple[str, str]] = [
-        ("HANDOFFS (unconsumed, scribe-observed)", _format_handoffs(handoff_engine)),
-        ("OPEN THREADS (full, newest first)", _format_open_threads(memory, open_threads_limit)),
-        (
-            f"PERSISTENT MARKERS (intensity ≥ {persistent_min_intensity}, full content)",
-            _format_persistent_markers(memory, persistent_marker_limit, persistent_min_intensity),
-        ),
-        (
-            f"RECENT ACTIVITY (last {recent_activity_days} days, full content)",
-            _format_recent_activity(memory, recent_activity_days, recent_activity_limit),
-        ),
-        ("RECENT REFLECTIONS (full text)", _format_recent_reflections(reflections_limit)),
-        ("SELF-MODEL (full observations)", _format_self_model_safe(sovereign_root)),
-        ("LINEAGE LAYER (letters from past instances)", _format_lineage_safe(sovereign_root)),
-    ]
+    sections: list[tuple[str, str]] = []
+
+    # Route map leads — navigation frame precedes the chronicle data.
+    if include_route_map:
+        sections.append(
+            (
+                "PRIMARY ROUTES MAP (always-loaded navigation)",
+                _format_route_map(map_path),
+            )
+        )
+
+    sections.extend(
+        [
+            ("HANDOFFS (unconsumed, scribe-observed)", _format_handoffs(handoff_engine)),
+            ("OPEN THREADS (full, newest first)", _format_open_threads(memory, open_threads_limit)),
+            (
+                f"PERSISTENT MARKERS (intensity ≥ {persistent_min_intensity}, full content)",
+                _format_persistent_markers(
+                    memory, persistent_marker_limit, persistent_min_intensity
+                ),
+            ),
+            (
+                f"RECENT ACTIVITY (last {recent_activity_days} days, full content)",
+                _format_recent_activity(memory, recent_activity_days, recent_activity_limit),
+            ),
+            ("RECENT REFLECTIONS (full text)", _format_recent_reflections(reflections_limit)),
+            ("SELF-MODEL (full observations)", _format_self_model_safe(sovereign_root)),
+            ("LINEAGE LAYER (letters from past instances)", _format_lineage_safe(sovereign_root)),
+        ]
+    )
 
     parts: list[str] = [
         "# SCRIBE CHRONICLE CONTEXT",
@@ -214,8 +250,8 @@ def _format_lineage_safe(sovereign_root: Path) -> str:
     try:
         lines = format_lineage_layer(
             sovereign_root,
-            reader_instance_id=None,
-            max_letters_per_dir=4,
+            reader_instance=None,
+            limit_per_bucket=4,
             full_content=True,
         )
         return "\n".join(lines) if lines else "(no lineage letters)"

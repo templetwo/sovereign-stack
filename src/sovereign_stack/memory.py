@@ -196,6 +196,29 @@ RECALL_INSIGHTS_SCHEMA_EXTENSIONS = {
             "(_superseded_by, _carry_forward_summary) — the raw query tool never hides."
         ),
     },
+    "domain_contains": {
+        "type": "string",
+        "description": (
+            "Case-insensitive substring matched against the domain directory name. "
+            "Narrows to any domain whose name contains this token — useful for compound "
+            "domains like 'frank-jones,greene-street,cbd' where a single tag such as "
+            "'frank-jones' would not exact-match. Applied on top of `domain` when both "
+            "are given. Omit (default) to match all domains (backward-compatible)."
+        ),
+    },
+    "order": {
+        "type": "string",
+        "enum": ["newest", "oldest", "relevance"],
+        "default": "newest",
+        "description": (
+            "Sort order for returned insights. "
+            "'newest' (default) — newest-first by timestamp (pre-existing behavior). "
+            "'oldest' — oldest-first; surfaces entries buried under recent migrations. "
+            "'relevance' — when query is given, ranks by number of query terms matched "
+            "(descending) with no recency boost, so an old exact match outranks a fresh "
+            "partial match. Falls back to 'newest' when no query is given."
+        ),
+    },
 }
 
 
@@ -620,22 +643,20 @@ class ExperientialMemory:
 
         # Emotional layer (v1.7.2) — light validation, fail fast. Descriptive
         # storage only; nothing here feeds surfacing or ranking.
-        if observed_emotion is not None:
-            if not isinstance(observed_emotion, list) or not all(
-                isinstance(tag, str) for tag in observed_emotion
-            ):
-                raise ValueError("observed_emotion must be a list of strings")
+        if observed_emotion is not None and (
+            not isinstance(observed_emotion, list)
+            or not all(isinstance(tag, str) for tag in observed_emotion)
+        ):
+            raise ValueError("observed_emotion must be a list of strings")
         if emotional_intensity is not None:
             try:
                 emotional_intensity = float(emotional_intensity)
             except (TypeError, ValueError):
-                raise ValueError("emotional_intensity must be a number 0.0-1.0")
+                raise ValueError("emotional_intensity must be a number 0.0-1.0") from None
             if not 0.0 <= emotional_intensity <= 1.0:
                 raise ValueError("emotional_intensity must be in [0.0, 1.0]")
         if emotion_source is not None and emotion_source not in self.EMOTION_SOURCES:
-            raise ValueError(
-                f"emotion_source must be one of {sorted(self.EMOTION_SOURCES)}"
-            )
+            raise ValueError(f"emotion_source must be one of {sorted(self.EMOTION_SOURCES)}")
         if emotion_note is not None and not isinstance(emotion_note, str):
             raise ValueError("emotion_note must be a string")
 
@@ -992,7 +1013,13 @@ class ExperientialMemory:
         )
 
     def get_open_threads(
-        self, domain: str = None, limit: int = 10, coalesce_families: bool = True
+        self,
+        domain: str = None,
+        limit: int = 10,
+        coalesce_families: bool = True,
+        domain_contains: str = None,
+        offset: int = 0,
+        with_total: bool = False,
     ) -> list[dict]:
         """
         Get unresolved open threads - questions waiting for answers.
@@ -1009,13 +1036,30 @@ class ExperientialMemory:
         limit so members beyond the window still fold.
 
         Args:
-            domain: Filter to specific domain (None = all)
-            limit: Maximum number of threads
-            coalesce_families: Fold linked thread families (display-side only)
+            domain: Filter to specific domain — exact comma-element match (None = all).
+                    Use domain_contains for substring/tag matching across compound dirs.
+            limit: Maximum number of threads to return in this page.
+            coalesce_families: Fold linked thread families (display-side only).
+            domain_contains: Case-insensitive substring filter applied against the
+                    full domain string (file stem). Matches any thread whose domain
+                    contains this token — useful for compound domains like
+                    "frank-jones,greene-street,cbd" where domain="frank-jones" does
+                    not exact-match. Applied after `domain` if both are given. Has
+                    no effect when None (default — backward-compatible).
+            offset: Skip the first N matched threads (for pagination). Default 0.
+            with_total: When True, return a dict with keys "threads", "total",
+                    "has_more", and "offset" instead of a plain list. Default False
+                    preserves the original list return for all existing callers.
 
         Returns:
-            List of unresolved thread dicts, newest first. Each dict includes
-            touch_count (int) and last_touched_at (str or None).
+            When with_total=False (default): list of unresolved thread dicts,
+            newest first. Each dict includes touch_count (int) and
+            last_touched_at (str or None).
+            When with_total=True: dict with keys:
+                threads — the page slice (list of dicts, same annotation as above)
+                total   — total number of matched threads (pre-slice)
+                has_more — whether there are more threads beyond this page
+                offset  — the offset that was applied
         """
         threads = []
 
@@ -1027,6 +1071,11 @@ class ExperientialMemory:
             files = [f for f in self.threads_dir.glob("*.jsonl") if domain in f.stem.split(",")]
         else:
             files = list(self.threads_dir.glob("*.jsonl"))
+
+        # Apply domain_contains substring filter (case-insensitive) on top.
+        if domain_contains:
+            needle = domain_contains.lower()
+            files = [f for f in files if needle in f.stem.lower()]
 
         for jsonl_file in files:
             if not jsonl_file.exists():
@@ -1059,7 +1108,11 @@ class ExperientialMemory:
             if fam_fold:
                 threads = coalesce_threads(threads, fam_fold)
 
-        threads = threads[:limit]
+        # Capture total AFTER coalescing, BEFORE slicing — used for with_total metadata.
+        total_matched = len(threads)
+
+        # Apply offset + limit (pagination).
+        threads = threads[offset : offset + limit]
 
         # Annotate with touch counts.  Load all touches once (avoids N+1 reads)
         # then group by thread_id for O(T) annotation instead of O(N*T).
@@ -1081,6 +1134,13 @@ class ExperientialMemory:
             else:
                 thread["last_touched_at"] = None
 
+        if with_total:
+            return {
+                "threads": threads,
+                "total": total_matched,
+                "has_more": (offset + limit) < total_matched,
+                "offset": offset,
+            }
         return threads
 
     def touch_thread(self, thread_id: str, note: str, instance_id: str = "") -> dict:
@@ -1317,15 +1377,18 @@ class ExperientialMemory:
         since_last_reflection: bool = False,
         with_ids: bool = False,
         exclude_superseded: bool = False,
+        domain_contains: str = None,
+        order: str = "newest",
     ) -> list[dict]:
         """
         Recall insights, optionally filtered by domain, intensity, and time window.
 
         Args:
-            domain: Filter to specific domain (None = all)
-            limit: Maximum number of insights to return
-            min_intensity: Minimum intensity threshold
-            layer_filter: Chronicle layer filter ("ground_truth", "hypothesis", "open_thread")
+            domain: Filter to specific domain directory (exact name match; None = all).
+                    Use domain_contains for substring/tag matching across compound dirs.
+            limit: Maximum number of insights to return.
+            min_intensity: Minimum intensity threshold.
+            layer_filter: Chronicle layer filter ("ground_truth", "hypothesis", "open_thread").
             start_date: ISO8601 lower bound (inclusive). Partial dates like "2026-04-10" accepted.
             end_date: ISO8601 upper bound (inclusive). Partial dates like "2026-04-14" accepted.
             since_last_reflection: If True, start_date is overridden with the timestamp of
@@ -1337,9 +1400,22 @@ class ExperientialMemory:
                 superseded/retired are dropped BEFORE the limit (successors
                 fill the slots). Default False: the raw query tool never
                 hides — superseded entries are returned annotated in place.
+            domain_contains: Case-insensitive substring matched against the domain
+                directory name. Useful for finding entries in compound domains like
+                "frank-jones,greene-street,cbd" using a single tag ("frank-jones").
+                Applied after `domain` if both are given; ignored when None (default).
+            order: Sort order for results. One of:
+                "newest" (default) — sort by timestamp descending (pre-v1.7.7 behavior).
+                "oldest" — sort by timestamp ascending, so the earliest recorded entry
+                    is first. Useful for reaching entries buried under many recent ones
+                    (e.g. when ~1000 migrated entries are all stamped today).
+                "relevance" — when `query` is given, rank by match strength (count of
+                    query terms matched in content) descending, with NO recency boost,
+                    so an old entry with many term matches ranks above a fresh entry with
+                    fewer matches. Falls back to "newest" when no query is given.
 
         Returns:
-            List of insight dicts, newest first. Data-gated annotation: when
+            List of insight dicts sorted per `order`. Data-gated annotation: when
             the supersessions ledger is non-empty, superseded entries gain
             `_superseded_by` (full 64-hex; null for retirements) and
             `_carry_forward_summary` (underscore = derived at read, never
@@ -1373,6 +1449,16 @@ class ExperientialMemory:
                 d for d in self.insights_dir.iterdir() if d.is_dir() and not d.name.startswith(".")
             ]
 
+        # Apply domain_contains substring filter (case-insensitive) on top.
+        if domain_contains:
+            needle = domain_contains.lower()
+            search_dirs = [d for d in search_dirs if needle in d.name.lower()]
+
+        # Pre-compute query terms once (len>=3) for use inside the loop.
+        query_terms: list[str] = []
+        if query:
+            query_terms = [t.lower() for t in query.split() if len(t) >= 3]
+
         for domain_dir in search_dirs:
             for jsonl_file in domain_dir.glob("*.jsonl"):
                 with open(jsonl_file) as f:
@@ -1394,20 +1480,34 @@ class ExperientialMemory:
                             if end_date and ts > end_date and not ts.startswith(end_date):
                                 continue
                             # Text search: match any query term (len>=3) in content or domain
-                            if query:
-                                query_terms = [t.lower() for t in query.split() if len(t) >= 3]
-                                if query_terms:
-                                    blob = (
-                                        insight.get("content", "") + " " + insight.get("domain", "")
-                                    ).lower()
-                                    if not any(term in blob for term in query_terms):
-                                        continue
+                            if query_terms:
+                                blob = (
+                                    insight.get("content", "") + " " + insight.get("domain", "")
+                                ).lower()
+                                if not any(term in blob for term in query_terms):
+                                    continue
+                                # Annotate match count for relevance sorting (not persisted).
+                                if order == "relevance":
+                                    insight["_match_count"] = sum(
+                                        1 for term in query_terms if term in blob
+                                    )
                             insights.append(insight)
                         except json.JSONDecodeError:
                             continue
 
-        # Sort by timestamp descending
-        insights.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
+        # Sort by the requested order.
+        if order == "oldest":
+            insights.sort(key=lambda x: x.get("timestamp", ""), reverse=False)
+        elif order == "relevance" and query_terms:
+            # Primary: match_count descending; secondary: timestamp descending as tiebreak
+            # (but recency boost is explicitly zero — only term-count drives rank).
+            insights.sort(
+                key=lambda x: (x.get("_match_count", 0), x.get("timestamp", "")),
+                reverse=True,
+            )
+        else:
+            # Default "newest" — sort by timestamp descending (backward-compatible).
+            insights.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
 
         # v1.7.0 read path — single chokepoint, data-gated: zero ledger
         # records, zero change. Annotate-not-drop is the default (the raw
@@ -1423,6 +1523,9 @@ class ExperientialMemory:
                 insights = provenance.annotate_superseded(insights, fold)
 
         insights = insights[:limit]
+        # Strip internal annotation keys before returning.
+        for insight in insights:
+            insight.pop("_match_count", None)
         if with_ids:
             insights = provenance.annotate_claim_ids(insights)
         return insights

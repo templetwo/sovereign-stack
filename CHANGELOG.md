@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.8.0] - 2026-06-23
+
+### Resident scribe-librarian, chronicle navigability, and the reflector on the API
+
+**The scribe became a durable resident librarian, chronicle navigation got
+sharper, and the synthesis reflector moved off local Ollama onto the Anthropic
+API.** This release bundles the `feat/resident-scribe-librarian` wave.
+
+- **Resident Sonnet scribe-librarian.** The scribe is now one durable resident
+  Sonnet 4.6 that boots with the SSE process and persists for its lifetime
+  (no longer ephemeral per-instance). Holds the full chronicle context plus a
+  route map in its prompt cache, refreshes on map-mtime + TTL, and serves
+  distilled navigational JSON via `ask_scribe`. Read-only, redaction-gated.
+- **Chronicle navigability.** Improvements to the chronicle query layer for
+  `recall_insights` / `get_open_threads`.
+- **Synthesis reflector migrated to the Anthropic API.** The reflector
+  (`synthesis_daemon`) now calls the Anthropic Messages API (default
+  `claude-sonnet-4-6`, override `SYNTHESIS_MODEL`) instead of local Ollama.
+  The launchd job loads the key from `~/.env` (no sourced shell env at 04:17).
+  Any API error degrades to `model_failed` rather than crashing the run.
+  `prompt_version` stays v3 (prompt unchanged); the recorded `model` field
+  marks the substrate shift.
+- **v3 reflector behavior.** Abstain path (`{"reflections": []}` recorded as
+  `outcome="abstained"`, not `parse_failed`) plus connection-type de-bias to
+  break the structural-echo monoculture.
+- **Ollama decommissioned.** Removed from the connectivity `ENDPOINTS` and from
+  the `connectivity_status` description; the local Ollama (CLI + GUI) was shut
+  down as redundant compute.
+- **Boot disclaimers made current.** The boot-surfaced reflector marginalia
+  disclaimer and the `recall_reflections` / `synthesize_now` tool descriptions
+  now say "claude-sonnet-4-6 via the Anthropic API" instead of "local LLM /
+  ministral / 25-60s." Fallible-by-design framing unchanged.
+- **Fixes.** Scribe resident now loads its lineage letters (corrected
+  `format_lineage_layer` kwargs); `PolicyRegistry()` honors a reconfigured
+  path (late-bound default).
+- **Design doc landed for the next release.** `docs/implementation/PROTECTED_SOURCE_SPEC.md`
+  (the protected-source layer; implemented in 1.9.0).
+
 ## [1.7.2] - 2026-06-15
 
 ### Lived ground truth — receipt-exemption keyed on vantage + the emotional layer

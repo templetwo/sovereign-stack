@@ -31,7 +31,7 @@ CONNECTIVITY_TOOLS = [
         name="connectivity_status",
         description=(
             "Show the live state of all Sovereign Stack endpoints "
-            "(SSE, bridge, tunnel, dispatcher, listener, ollama). "
+            "(SSE, bridge, tunnel, dispatcher, listener). "
             "Returns per-endpoint status (ok/degraded/down/stale/unknown) "
             "with pid, http status, and notes. Read-only — no side effects. "
             "Use this when you want to confirm the stack is reachable + "

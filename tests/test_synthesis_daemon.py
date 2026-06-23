@@ -11,8 +11,8 @@ Coverage focus:
     mode preserves prior content)
   * Prompt assembly (entries serialized, long bodies trimmed)
 
-Network-touching paths (call_ollama) are NOT exercised here — they're a
-subprocess/HTTP boundary, tested manually at the fireside on 2026-04-26.
+Network-touching paths (call_anthropic) are NOT exercised here — they're an
+HTTP/API boundary; run()'s outcome handling is tested by monkeypatching it.
 """
 
 from __future__ import annotations
@@ -23,11 +23,14 @@ from pathlib import Path
 
 import pytest
 
+from sovereign_stack.daemons import synthesis_daemon
 from sovereign_stack.daemons.synthesis_daemon import (
     Reflection,
+    SynthesisDaemon,
     _recover_complete_reflections,
     build_prompt,
     extract_json_block,
+    is_explicit_abstain,
     parse_reflections,
     read_ack_history,
     read_recent_chronicle,
@@ -255,6 +258,38 @@ class TestParseReflections:
 
     def test_unparseable_returns_empty(self):
         assert parse_reflections("garbage {{{") == []
+
+    def test_bare_object_without_wrapper_tolerated(self):
+        # ministral sometimes drops the {"reflections": [...]} wrapper and
+        # emits a single bare reflection object. format=json doesn't enforce
+        # the wrapper, so the parser must accept it rather than lose a good
+        # reflection to parse_failed (observed live 2026-06-19).
+        raw = json.dumps(
+            {
+                "observation": "d1 and d2 converge on the same correction",
+                "entries_referenced": ["ENTRY_2", "ENTRY_5"],
+                "connection_type": "convergence",
+                "confidence": "medium",
+            }
+        )
+        result = parse_reflections(raw)
+        assert len(result) == 1
+        assert result[0].connection_type == "convergence"
+        assert result[0].observation.startswith("d1 and d2")
+
+    def test_bare_array_without_wrapper_tolerated(self):
+        # A top-level array of one object (no wrapper) is also accepted.
+        raw = '[{"observation": "lone", "connection_type": "other", "confidence": "low"}]'
+        result = parse_reflections(raw)
+        assert len(result) == 1
+        assert result[0].observation == "lone"
+
+    def test_dict_without_reflections_or_observation_is_empty(self):
+        # A structurally valid dict that is neither a wrapper nor a bare
+        # reflection (e.g. {"reflections": []} abstain, or unrelated keys)
+        # yields no reflections — abstain/parse_failed is decided upstream.
+        assert parse_reflections('{"reflections": []}') == []
+        assert parse_reflections('{"unrelated": "data"}') == []
 
     def test_entries_referenced_truncated_per_item(self):
         long_ref = "x" * 200
@@ -504,6 +539,23 @@ class TestBuildPrompt:
         assert "quiet observer" in prompt
         assert "gesture, don't declare" in prompt
 
+    def test_v3_abstain_permission_present(self):
+        # v3: standard-mode prompt must explicitly offer the empty-array
+        # abstain in both the preamble and the closing instruction, so a 14B
+        # stops manufacturing one dialectical tension per firing.
+        prompt = build_prompt([])
+        assert '{"reflections": []}' in prompt
+        assert "Abstaining is a respected, correct answer." in prompt
+        assert "abstaining is correct" in prompt  # closing instruction
+        # The forcing line from v2 must be gone.
+        assert "make it count, you only get one" not in prompt
+
+    def test_v3_abstain_absent_from_goose(self):
+        # Goose mode is untouched — it has its own no-gaps path and must not
+        # inherit the standard-mode abstain prose.
+        prompt = build_prompt([], focus="goose")
+        assert "Abstaining is a respected, correct answer." not in prompt
+
     def test_confirmed_patterns_injected(self):
         prompt = build_prompt([], confirmed_patterns=["the operational holism pattern"])
         assert "ALREADY CONFIRMED" in prompt
@@ -561,6 +613,91 @@ class TestBuildPrompt:
         assert "register-drift" in prompt
         # Goose preamble must not appear.
         assert "gap-finder" not in prompt
+
+
+# ── is_explicit_abstain ─────────────────────────────────────────────────────
+
+
+class TestIsExplicitAbstain:
+    """v3: distinguish a deliberate {"reflections": []} (abstain) from
+    unparseable garbage (parse_failed). parse_reflections() returns [] for
+    both; this predicate is what run() uses to tell them apart."""
+
+    def test_empty_array_is_abstain(self):
+        assert is_explicit_abstain('{"reflections": []}') is True
+
+    def test_empty_array_with_prose_and_fence_is_abstain(self):
+        # extract_json_block strips thinking traces / fences first.
+        assert is_explicit_abstain('thinking...done thinking.\n{"reflections": []}') is True
+        assert is_explicit_abstain('```json\n{"reflections": []}\n```') is True
+
+    def test_nonempty_array_is_not_abstain(self):
+        raw = '{"reflections": [{"observation": "x", "connection_type": "other"}]}'
+        assert is_explicit_abstain(raw) is False
+
+    def test_garbage_is_not_abstain(self):
+        assert is_explicit_abstain("just prose, no json") is False
+        assert is_explicit_abstain("") is False
+
+    def test_missing_key_is_not_abstain(self):
+        assert is_explicit_abstain('{"unrelated": "data"}') is False
+
+    def test_truncated_body_is_not_abstain(self):
+        # A cut-off body is a real failure, not a clean abstain.
+        assert is_explicit_abstain('{"reflections": [{"observation": "cut') is False
+
+
+# ── run() outcome wiring (model call mocked) ─────────────────────────────────
+
+
+class TestRunAbstainOutcome:
+    """End-to-end run() wiring for the v3 abstain path. The model call is
+    monkeypatched — these prove the plumbing (empty array -> 'abstained',
+    garbage -> 'parse_failed', real reflection -> 'wrote'). Behavioral proof
+    that the live model actually abstains is a separate fresh-process firing,
+    not a unit test."""
+
+    def _daemon(self, chronicle_root: Path, tmp_path: Path) -> SynthesisDaemon:
+        now = datetime.now(timezone.utc)
+        _write_entry(chronicle_root, "d1", now, "an entry", layer="hypothesis")
+        _write_entry(chronicle_root, "d2", now, "another entry", layer="ground_truth")
+        return SynthesisDaemon(
+            chronicle_root=chronicle_root,
+            reflections_dir=tmp_path / "reflections",
+            recent_hours=48,
+        )
+
+    def test_explicit_empty_array_records_abstained(
+        self, chronicle_root: Path, tmp_path: Path, monkeypatch
+    ):
+        monkeypatch.setattr(
+            synthesis_daemon, "call_anthropic", lambda *a, **k: (True, '{"reflections": []}')
+        )
+        result = self._daemon(chronicle_root, tmp_path).run()
+        assert result.outcome == "abstained"
+        assert result.reflections_written == 0
+        assert result.reflections_path is None
+
+    def test_unparseable_output_still_parse_failed(
+        self, chronicle_root: Path, tmp_path: Path, monkeypatch
+    ):
+        # A genuine garbage response must NOT be masked as an abstain.
+        monkeypatch.setattr(
+            synthesis_daemon, "call_anthropic", lambda *a, **k: (True, "the model rambled, no json")
+        )
+        result = self._daemon(chronicle_root, tmp_path).run()
+        assert result.outcome == "parse_failed"
+
+    def test_real_reflection_still_wrote(self, chronicle_root: Path, tmp_path: Path, monkeypatch):
+        raw = (
+            '{"reflections": [{"observation": "d1 and d2 converge",'
+            ' "entries_referenced": ["d1", "d2"],'
+            ' "connection_type": "convergence", "confidence": "low"}]}'
+        )
+        monkeypatch.setattr(synthesis_daemon, "call_anthropic", lambda *a, **k: (True, raw))
+        result = self._daemon(chronicle_root, tmp_path).run()
+        assert result.outcome == "wrote"
+        assert result.reflections_written == 1
 
 
 # ── read_spanning_chronicle ─────────────────────────────────────────────────
