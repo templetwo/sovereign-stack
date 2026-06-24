@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.10.0] - 2026-06-23
+
+### Protected-source layer — the index, the consent gate, and the closed perimeter
+
+**Completes the protected-source layer on top of v1.9.0's coupling engine:
+the two-word index, the consent gate, the boot announcement, and closure of
+the three read paths that bypassed the coupling chokepoint.** Still INERT (no
+record designated); the only remaining gate on the first record is Anthony's
+explicit yes.
+
+- **§5.4 perimeter closed.** The three read paths that previously returned
+  protected content bare now couple-or-withhold: `inspect_claim` couples its
+  full-content `entry` field (integrity/id/receipts still computed from the bare
+  entry); `walk_lineage` withholds protected previews; `dashboard.read_chronicle_tail`
+  withholds protected tails; `season_review` filters protected records out of its
+  content-based scans (ids stay complete for hygiene). `resolve_claim` gained
+  `couple=False` (bare stays the internal default; surfacing callers opt in).
+  Verifier per path is `audit_decoupling` on the real rendered string.
+- **Two-word index (Policy 2a).** Each protected record carries a one-word
+  subject + one-word emotion (e.g. `father` / `loss`), both retrievable tags
+  (pull-by-subject and pull-by-emotion across the set). Datetime distinguishes
+  records sharing the two words; a sequence number is appended only on a true
+  `(subject, emotion, datetime)` collision.
+- **Consent gate (Policy 2b).** New MCP tools: `list_protected_thresholds`
+  (the drawer: two words + datetime only, never content or stakes),
+  `open_protected_record` (full content coupled to stakes, fail-closed),
+  `decline_protected_record` (a legitimate, recorded state). A stricter
+  `audit_threshold` flags any threshold that leaks content. `designate_protected`
+  stays human-gated and library-only.
+- **Boot line (Policy 2c).** `where_did_i_leave_off` and `arrive_lineage` both
+  announce that protected records exist and are indexed by subject/emotion/
+  datetime, openable on consent — without surfacing the cards or contents.
+- Backs Anthony's two standing policies (`pol_20260623_protected-records-may-never-be-retrieved`
+  and `pol_20260623_protected-records-are-indexed-and-surfac`). Full suite:
+  1663 passed, 12 skipped; contract walker + v1.9.0 golden baseline green.
+
 ## [1.9.0] - 2026-06-23
 
 ### Protected-source layer — the coupling mechanism (inert until designation)
