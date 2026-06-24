@@ -227,6 +227,66 @@ class TestReflectorMarginalia:
         assert "(unread, machine-generated)" not in text
 
 
+# ── Protected-records drawer boot line (Policy 2c) — INTEGRATION ─────────────
+
+
+class TestProtectedDrawerBootLine:
+    """The boot line is wired into where_did_i_leave_off (server.py). These
+    exercise the REAL assembled boot output, not just the helper in isolation,
+    so the unconditional announcement and the no-leak guarantee are verified at
+    the integration layer. The protected ledger is redirected to a tmp_path via
+    server.DEFAULT_ROOT — no real record is ever designated."""
+
+    def test_empty_drawer_announced_in_real_boot(self):
+        # Live ~/.sovereign has zero designated protected records (the layer is
+        # inert), so the real boot already shows the empty-drawer line.
+        text = _call_boot()
+        assert "PROTECTED RECORDS (the coupled drawer)" in text
+        assert "drawer is empty" in text
+
+    def test_present_record_announced_with_no_card_or_content(self, tmp_path: Path):
+        from sovereign_stack import server
+        from sovereign_stack.memory import ExperientialMemory
+        from sovereign_stack.protected import designate_protected
+        from sovereign_stack.provenance import derive_claim_id
+
+        # Build a tmp chronicle with one designated protected record.
+        root = tmp_path / ".sovereign"
+        mem = ExperientialMemory(root=str(root / "chronicle"))
+        secret_content = "the protected body the boot must never surface"
+        secret_subject, secret_emotion = "zzbootsubj", "zzbootemo"
+        path = mem.record_insight(
+            domain="personal", content=secret_content, intensity=0.9, layer="ground_truth"
+        )
+        prot = json.loads(Path(path).read_text().splitlines()[-1])
+        archive = mem.archive_exchange(
+            content="a lived weight held coupled to the words",
+            source="human-relay",
+            descriptor="stakes",
+            vector_id="s",
+        )
+        designate_protected(
+            claim_ref=derive_claim_id(prot),
+            stakes_archive_id=archive["archive_id"],
+            designated_by="Anthony",
+            chronicle_root=str(mem.root),
+            subject=secret_subject,
+            emotion=secret_emotion,
+        )
+
+        # Redirect the boot's DEFAULT_ROOT at the tmp sovereign root.
+        with patch.object(server, "DEFAULT_ROOT", str(root)):
+            text = _call_boot()
+
+        assert "PROTECTED RECORDS (the coupled drawer)" in text
+        assert "1 protected record" in text
+        assert "subject/emotion/datetime" in text
+        # CRITICAL: no card (specific subject/emotion), no content/stakes.
+        assert secret_subject not in text
+        assert secret_emotion not in text
+        assert secret_content not in text
+
+
 # ── v1.7.0 byte-identity: boot-surface formatting (spec section 4) ───────────
 
 
