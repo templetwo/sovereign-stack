@@ -58,6 +58,8 @@ def _seed_and_protect(mem: ExperientialMemory, *, intensity: float = 0.9) -> dic
         stakes_archive_id=archive["archive_id"],
         designated_by="Anthony",
         chronicle_root=str(mem.root),
+        subject="father",
+        emotion="loss",
     )
     return {"record": prot, "archive_id": archive["archive_id"]}
 

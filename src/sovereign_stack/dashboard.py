@@ -39,7 +39,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from . import connectivity
+from . import connectivity, protected
 
 # ── Defaults / paths ────────────────────────────────────────────────────────
 
@@ -336,8 +336,21 @@ def read_recent_honks(path: Path, *, limit: int = 5) -> list[dict]:
     return out
 
 
-def read_chronicle_tail(path: Path) -> dict | None:
-    """Read the last record from a chronicle JSONL file, or None."""
+def read_chronicle_tail(path: Path, chronicle_root: Path | None = None) -> dict | None:
+    """
+    Read the last record from a chronicle JSONL file, or None.
+
+    Protected-source gate (spec §5.4): every caller of this tail reader
+    truncates the content (``content[:80]`` in the feed/TUI), so the dashboard
+    tail is a PREVIEW surface — it can never carry the full stakes, and an
+    80-char slice of coupled content would re-decouple. When ``chronicle_root``
+    is supplied and the tail record is protected, the content is WITHHELD to
+    the placeholder (locator fields survive, so the feed still shows that a
+    protected record landed). ``chronicle_root`` defaults to None for the
+    non-insight callers (open_threads/halts tails carry no insight content and
+    are not in the protected claim space); the empty-fold fast path keeps
+    ordinary records byte-identical.
+    """
     try:
         text = path.read_text(encoding="utf-8")
     except OSError:
@@ -351,6 +364,10 @@ def read_chronicle_tail(path: Path) -> dict | None:
             last = json.loads(line)
         except json.JSONDecodeError:
             continue
+    if last is not None and chronicle_root is not None:
+        fold = protected.load_protected_fold(chronicle_root)
+        if protected.is_protected(last, fold):
+            return protected.withhold_preview(last)
     return last
 
 
@@ -418,12 +435,20 @@ class DashboardState:
 
 
 def _newest_jsonl_record(
-    directory: Path, *, recursive: bool = False, glob: str = "*.jsonl"
+    directory: Path,
+    *,
+    recursive: bool = False,
+    glob: str = "*.jsonl",
+    chronicle_root: Path | None = None,
 ) -> dict | None:
     """
     Find the most-recently-modified JSONL file under `directory` and
     return its tail record (newest line). Returns None if no JSONL
     files exist or every file is empty/malformed.
+
+    `chronicle_root` is forwarded to read_chronicle_tail so a protected
+    insight tail withholds its content (§5.4); pass it for the insight
+    snapshot, leave None for non-insight directories.
     """
     if not directory.exists():
         return None
@@ -433,7 +458,7 @@ def _newest_jsonl_record(
         reverse=True,
     )
     for f in files:
-        rec = read_chronicle_tail(f)
+        rec = read_chronicle_tail(f, chronicle_root)
         if rec is not None:
             return rec
     return None
@@ -477,6 +502,7 @@ def collect_latest_entries(sovereign_root: Path) -> dict[str, dict | None]:
     insight = _newest_jsonl_record(
         sovereign_root / "chronicle" / "insights",
         recursive=True,
+        chronicle_root=sovereign_root / "chronicle",
     )
     if insight:
         out["insight"] = {
@@ -873,7 +899,9 @@ async def run_loop(
             for jsonl in chronicle_index.diff(
                 _list_paths(root / "chronicle" / "insights", "*.jsonl", recursive=True),
             ):
-                tail = read_chronicle_tail(jsonl)
+                # §5.4: insight tails pass chronicle_root so protected records
+                # withhold their content before the 80-char feed slice.
+                tail = read_chronicle_tail(jsonl, root / "chronicle")
                 if tail:
                     layer = tail.get("layer", "?")
                     content = (tail.get("content") or "")[:80]

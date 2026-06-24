@@ -50,6 +50,7 @@ from mcp.types import Tool
 
 from .memory import ExperientialMemory
 from .policies import PolicyRegistry
+from .protected import load_protected_fold
 from .provenance import (
     LIVED_VANTAGES,
     derive_claim_id,
@@ -644,7 +645,21 @@ def season_review(
 
     scanned = list(iter_chronicle_entries(root))
     entries = [entry for entry, _file, location in scanned if location == "insights"]
+    # ids_present must stay COMPLETE — the hygiene dangling-pointer / receipt
+    # claim-ref checks key off it, so filtering protected ids here would make
+    # ledger-referenced protected claims look falsely dangling.
     ids_present = {derive_claim_id(entry) for entry, _file, _location in scanned}
+    # §5.4: season_review is a model-facing digest that PREVIEWS insight content
+    # in its candidate scans (supersession / policy lines render _preview(...)).
+    # A preview surface cannot carry the full stakes, so it cannot honor the
+    # coupling invariant — it WITHHOLDS by filtering protected records out of
+    # the content-based scans entirely (the consent gate is the full-content
+    # path; bulk supersession/policy suggestions for a protected record belong
+    # there, not here). ids_present above stays complete. Empty fold -> no-op,
+    # so a protected-free chronicle reads byte-identical (golden baseline).
+    protected_fold = load_protected_fold(root)
+    if protected_fold:
+        entries = [e for e in entries if derive_claim_id(e) not in protected_fold]
     sup_fold = fold_supersessions(load_supersessions(root / "supersessions.jsonl"))
     fam_fold = fold_families(load_families(families_path))
     threads = _load_threads_readonly(root)

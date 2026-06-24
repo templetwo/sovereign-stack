@@ -162,6 +162,12 @@ REQUIRED_ARGS: dict = {
     },
     "context_retrieve": lambda root: {"current_focus": "contract walker default probe"},
     "watch_resample": lambda root: {"watch_id": "nonexistent-watch"},
+    # decline_protected_record short-circuits on an empty claim_id before its
+    # defaulted params (declined_by / note) are reached, so without a real
+    # claim_id the walker would pass vacuously. Supply one so the default path
+    # actually runs (decline_record never validates the claim_id shape and never
+    # raises — it writes + returns, exercising the defaults).
+    "decline_protected_record": lambda root: {"claim_id": "contract-walker-claim"},
 }
 
 

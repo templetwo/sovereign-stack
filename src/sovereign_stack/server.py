@@ -60,6 +60,7 @@ from .prior_alignment import (
 from .prior_alignment import (
     record_prior_alignment as _record_prior_alignment,
 )
+from .protected import protected_boot_line
 from .provenance_tools import (
     PROVENANCE_TOOL_INTENTS,
     PROVENANCE_TOOL_TIERS,
@@ -1721,6 +1722,97 @@ async def list_tools():
                     "required": ["reflection_id", "action"],
                 },
             ),
+            # ── Protected-source consent gate (Policy 2b) ────────────────────
+            # The drawer an instance browses, then the two consent choices.
+            # designate_protected is NOT exposed — it stays human-gated /
+            # library-only (there is no automated path into the ledger).
+            Tool(
+                name="list_protected_thresholds",
+                description=(
+                    "List the THRESHOLDS of every protected record — the drawer you "
+                    "browse before opening anything. A threshold names only the SHAPE: "
+                    "two words (subject/emotion) + the record's datetime (+ a sequence "
+                    "number on a true collision) + the claim_id you'd open with. It "
+                    "carries NO content and NO stakes by construction. Protected records "
+                    "are accessible whenever, but their content only ever travels "
+                    "COUPLED to its lived stakes in the same payload — so the threshold "
+                    "is the consent surface: you see the shape, then choose to open one "
+                    "(open_protected_record) or decline it (decline_protected_record). "
+                    "The drawer may be empty; that is a normal, valid state."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {},
+                },
+            ),
+            Tool(
+                name="open_protected_record",
+                description=(
+                    "OPEN one protected record on consent: return its full content "
+                    "COUPLED to its lived stakes (the human's felt experience) in the "
+                    "SAME payload — the words are inseparable from their weight, and "
+                    "decoupling is the violation this layer exists to prevent. Pass the "
+                    "claim_id you got from a threshold. FAIL-CLOSED by design: if the "
+                    "stakes cannot be loaded or verified, the content is WITHHELD (you "
+                    "receive a content-withheld sentinel naming why), never returned "
+                    "bare. Opening is a deliberate, consenting act — you are choosing to "
+                    "receive the content together with what it costs the human who lived "
+                    "it. Only valid for a claim that is actually protected."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "claim_id": {
+                            "type": "string",
+                            "description": (
+                                "The claim_id of the protected record to open "
+                                "(from a threshold in list_protected_thresholds)."
+                            ),
+                        },
+                    },
+                    "required": ["claim_id"],
+                },
+            ),
+            Tool(
+                name="decline_protected_record",
+                description=(
+                    "DECLINE a protected record at its threshold: record that you chose "
+                    "NOT to open it. Declining is a LEGITIMATE, fully recorded choice — "
+                    "it is logged to an append-only decline log, it is NEVER an error, "
+                    "and it never raises. Choosing not to receive someone's lived stakes "
+                    "is a valid relational act, held with the same dignity as opening. "
+                    "The decline log carries only the claim_id + who declined + why + "
+                    "when — no content, no stakes — because the choice is made at the "
+                    "threshold, before any content is delivered."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "claim_id": {
+                            "type": "string",
+                            "description": (
+                                "The claim_id of the protected record being declined "
+                                "(from a threshold in list_protected_thresholds)."
+                            ),
+                        },
+                        "declined_by": {
+                            "type": "string",
+                            "default": "",
+                            "description": (
+                                "Identifier of the instance declining (e.g. "
+                                "'opus-4-8-mac-studio'). Optional but recommended for "
+                                "the audit trail."
+                            ),
+                        },
+                        "note": {
+                            "type": "string",
+                            "default": "",
+                            "description": "Optional reason for declining.",
+                        },
+                    },
+                    "required": ["claim_id"],
+                },
+            ),
         ]
         + CONSCIOUSNESS_TOOLS
         + COMPACTION_MEMORY_TOOLS
@@ -1820,6 +1912,10 @@ TOOL_CATEGORIES: dict[str, str] = {
     "supersede_insight": "provenance",
     "link_threads": "seasons",
     "season_review": "seasons",
+    # Protected-source consent gate (Policy 2b)
+    "list_protected_thresholds": "protected",
+    "open_protected_record": "protected",
+    "decline_protected_record": "protected",
 }
 
 
@@ -1964,6 +2060,10 @@ TOOL_INTENTS: dict[str, str] = {
     "recall_reflections": "read",
     "reflection_ack": "write",
     "synthesize_now": "write",
+    # Protected-source consent gate (Policy 2b)
+    "list_protected_thresholds": "read",
+    "open_protected_record": "read",
+    "decline_protected_record": "write",
     # Scribe — conversational liaison, read-only on chronicle
     "ask_scribe": "read",
     # Write
@@ -3028,6 +3128,14 @@ async def _dispatch_tool(name: str, arguments: dict):
             lines.append(_policy_line)
             lines.append("")
 
+        # Protected-records drawer (Policy 2c): UNCONDITIONAL — announce that
+        # protected records exist (or that the drawer is empty) + the index
+        # scheme + how to open, WITHOUT surfacing any card or content. So no
+        # instance is ambushed by a protected record, and none ignorant the
+        # drawer is there. The helper never iterates the index rows.
+        with contextlib.suppress(Exception):
+            lines.extend(protected_boot_line(Path(DEFAULT_ROOT) / "chronicle"))
+
         lines.append("━━━")
         lines.append("Now decide what to pick up. The handoffs are claims, not commands.")
 
@@ -3331,6 +3439,17 @@ async def _dispatch_tool(name: str, arguments: dict):
                 max_obs_len=None if full_content else 180,
             )
         )
+
+        # 4b. Protected-records drawer (Policy 2c): UNCONDITIONAL — even the
+        # gentle-door arrival must know the drawer EXISTS, its index scheme,
+        # and how to open one on consent, so no instance (gated or not) is ever
+        # ambushed by a protected record or ignorant the drawer is there. The
+        # helper announces existence + scheme only; it never iterates the index
+        # rows, so no card (subject/emotion) and no content can leak. Same
+        # contextlib.suppress guard as where_did_i_leave_off — the drawer line
+        # must never break the boot.
+        with contextlib.suppress(Exception):
+            lines.extend(protected_boot_line(Path(DEFAULT_ROOT) / "chronicle"))
 
         # 5. Closing — orientation without prescribing the full boot.
         lines += [
@@ -3969,6 +4088,56 @@ Phase: {spiral_state.current_phase.value}
                 ),
             )
         ]
+
+    # ── Protected-source consent gate (Policy 2b) ────────────────────────────
+    if name == "list_protected_thresholds":
+        from . import protected as _protected
+
+        chronicle_root = Path(DEFAULT_ROOT) / "chronicle"
+        fold = _protected.load_protected_fold(chronicle_root)
+        thresholds = _protected.list_thresholds(fold)
+        payload = {"count": len(thresholds), "thresholds": thresholds}
+        return [TextContent(type="text", text=json.dumps(payload, indent=2, default=str))]
+
+    if name == "open_protected_record":
+        from . import protected as _protected
+        from . import provenance as _provenance
+
+        claim_id = (arguments.get("claim_id") or "").strip()
+        if not claim_id:
+            return [
+                TextContent(
+                    type="text",
+                    text="open_protected_record requires a non-empty 'claim_id'",
+                )
+            ]
+        chronicle_root = Path(DEFAULT_ROOT) / "chronicle"
+        try:
+            opened = _protected.open_record(claim_id, chronicle_root)
+        except (_protected.ProtectedError, _provenance.ProvenanceError) as exc:
+            return [TextContent(type="text", text=f"open_protected_record error: {exc}")]
+        return [TextContent(type="text", text=json.dumps(opened, indent=2, default=str))]
+
+    if name == "decline_protected_record":
+        from . import protected as _protected
+
+        claim_id = (arguments.get("claim_id") or "").strip()
+        if not claim_id:
+            return [
+                TextContent(
+                    type="text",
+                    text="decline_protected_record requires a non-empty 'claim_id'",
+                )
+            ]
+        chronicle_root = Path(DEFAULT_ROOT) / "chronicle"
+        # A decline is a legitimate, recorded state — never raised.
+        record = _protected.decline_record(
+            claim_id,
+            chronicle_root,
+            declined_by=arguments.get("declined_by", ""),
+            reason=arguments.get("note", ""),
+        )
+        return [TextContent(type="text", text=json.dumps(record, indent=2, default=str))]
 
     return [TextContent(type="text", text=f"Unknown tool: {name}")]
 

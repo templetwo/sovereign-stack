@@ -83,6 +83,8 @@ def _protect(mem: ExperientialMemory, recs: dict, archive_id: str) -> dict:
         stakes_archive_id=archive_id,
         designated_by="Anthony",
         chronicle_root=str(mem.root),
+        subject="father",
+        emotion="loss",
         reason="phase-1 test designation",
     )
 

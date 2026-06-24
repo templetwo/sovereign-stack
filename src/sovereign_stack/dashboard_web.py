@@ -133,7 +133,9 @@ def _watcher_loop() -> None:
                     recursive=True,
                 )
             ):
-                tail = dashboard.read_chronicle_tail(jsonl)
+                # §5.4: insight tails pass chronicle_root so protected records
+                # withhold their content before the 80-char feed slice.
+                tail = dashboard.read_chronicle_tail(jsonl, root / "chronicle")
                 if tail:
                     layer = tail.get("layer", "?")
                     content = (tail.get("content") or "")[:80]
