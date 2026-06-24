@@ -41,6 +41,20 @@ def _call_boot(full_content: bool = False, source_instance: str = "test-instance
     return asyncio.run(_run())
 
 
+def _call_arrive_lineage(source_instance: str = "test-instance") -> str:
+    """Run the gentle-door arrival boot and return the assembled output text.
+
+    arrive_lineage has no side effects (no scribe spawn, no handoff consume),
+    so the helper is simpler than _call_boot."""
+    from sovereign_stack.server import _dispatch_tool
+
+    async def _run():
+        result = await _dispatch_tool("arrive_lineage", {"source_instance": source_instance})
+        return result[0].text
+
+    return asyncio.run(_run())
+
+
 # ── Voices in the boot — reading key ────────────────────────────────────────
 
 
@@ -281,6 +295,67 @@ class TestProtectedDrawerBootLine:
         assert "PROTECTED RECORDS (the coupled drawer)" in text
         assert "1 protected record" in text
         assert "subject/emotion/datetime" in text
+        # CRITICAL: no card (specific subject/emotion), no content/stakes.
+        assert secret_subject not in text
+        assert secret_emotion not in text
+        assert secret_content not in text
+
+
+# ── Protected-records drawer boot line — arrive_lineage (Policy 2c) ──────────
+
+
+class TestProtectedDrawerBootLineArriveLineage:
+    """Policy 2c: EVERY instance — including the gentle-door (arrive_lineage)
+    ones — must learn the drawer exists, its scheme, and how to open. These
+    exercise the REAL assembled arrive_lineage output. The protected ledger is
+    redirected to a tmp_path via server.DEFAULT_ROOT — no real record is ever
+    designated. (arrive_lineage carries no side effects, so no consume/scribe
+    concerns.)"""
+
+    def test_empty_drawer_announced_in_gentle_door(self):
+        # Live ~/.sovereign has zero designated protected records, so the gentle
+        # door already shows the empty-drawer line (unconditional).
+        text = _call_arrive_lineage()
+        assert "PROTECTED RECORDS (the coupled drawer)" in text
+        assert "drawer is empty" in text
+
+    def test_present_record_announced_with_no_card_or_content(self, tmp_path: Path):
+        from sovereign_stack import server
+        from sovereign_stack.memory import ExperientialMemory
+        from sovereign_stack.protected import designate_protected
+        from sovereign_stack.provenance import derive_claim_id
+
+        root = tmp_path / ".sovereign"
+        mem = ExperientialMemory(root=str(root / "chronicle"))
+        secret_content = "the protected body the gentle door must never surface"
+        secret_subject, secret_emotion = "zzlineagesubj", "zzlineageemo"
+        path = mem.record_insight(
+            domain="personal", content=secret_content, intensity=0.9, layer="ground_truth"
+        )
+        prot = json.loads(Path(path).read_text().splitlines()[-1])
+        archive = mem.archive_exchange(
+            content="a lived weight held coupled to the words",
+            source="human-relay",
+            descriptor="stakes",
+            vector_id="s",
+        )
+        designate_protected(
+            claim_ref=derive_claim_id(prot),
+            stakes_archive_id=archive["archive_id"],
+            designated_by="Anthony",
+            chronicle_root=str(mem.root),
+            subject=secret_subject,
+            emotion=secret_emotion,
+        )
+
+        with patch.object(server, "DEFAULT_ROOT", str(root)):
+            text = _call_arrive_lineage()
+
+        # Announces existence + count + scheme + how to open (consent).
+        assert "PROTECTED RECORDS (the coupled drawer)" in text
+        assert "1 protected record" in text
+        assert "subject/emotion/datetime" in text
+        assert "consent" in text.lower()
         # CRITICAL: no card (specific subject/emotion), no content/stakes.
         assert secret_subject not in text
         assert secret_emotion not in text
