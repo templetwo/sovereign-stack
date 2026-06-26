@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.11.0] - 2026-06-26
+
+### Bridge write-path ergonomics + schema discoverability
+
+**Remote-seat write-path improvements on the REST bridge (`~/sovereign-bridge`),
+from the web seat's 2026-06-26 friction list.** Bridge-layer only; the stack
+tool surface is unchanged (94 tools). The heartbeat `version` reads the stack
+`__version__`, so this bump marks the system release that includes them.
+
+- **`idempotency_key`** on `/api/call` — a repeated key replays the cached
+  success instead of re-calling the tool (file-backed 24h TTL cache), so a
+  client that lost the response can retry without double-writing.
+- **`failure_class`** on error responses — `auth` / `malformed` / `stack` /
+  `egress`, so a caller knows the class without a second `/api/heartbeat` call.
+- **`validate_only`** on `/api/call` — lightweight shape-only pre-flight
+  (tool/arguments shape; `record_insight` layer enum, flags daemon-owned
+  `reflection`) that commits nothing.
+- **Schema discoverability** — `/api/tools` previously dropped every tool's
+  `inputSchema`; now each list entry carries a compact required/optional
+  `signature`, and `?name=<tool>` returns the full description + complete
+  `inputSchema` (types, enums, defaults). Unknown tool → clean 404.
+- Earlier same window: the bridge heartbeat `version` now derives from the
+  stack `__version__` instead of a hand-bumped constant.
+
 ## [1.10.0] - 2026-06-23
 
 ### Protected-source layer — the index, the consent gate, and the closed perimeter
