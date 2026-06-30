@@ -323,7 +323,7 @@ class TestHygiene:
     def test_sentinel_budget_vs_boot_slots(self, season_root):
         report = review(season_root)
         assert re.search(
-            r"sentinel budget: 2 marker\(s\) at >=0\.9 competing for 5 boot slots", report
+            r"sentinel budget: 2 marker\(s\) at >=0\.9 competing for 7 boot slots", report
         )
 
 

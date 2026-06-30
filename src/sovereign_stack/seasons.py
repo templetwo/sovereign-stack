@@ -77,7 +77,7 @@ FAMILIES_FILENAME = "thread_families.jsonl"
 SUPERSESSION_OVERLAP = 0.5  # insight token-Jaccard
 THREAD_OVERLAP = 0.45  # thread-question token-Jaccard
 SENTINEL_INTENSITY = 0.9  # "persistent marker" threshold
-BOOT_SENTINEL_SLOTS = 5  # where_did_i_leave_off limit (server.py:2743)
+BOOT_SENTINEL_SLOTS = 7  # where_did_i_leave_off format_sentinels limit (server.py)
 _POLICY_REGISTRY_OVERLAP = 0.5  # "already registered" similarity
 
 SEASON_FOOTER = (
