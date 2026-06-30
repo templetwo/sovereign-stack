@@ -251,10 +251,17 @@ class TestProtectedDrawerBootLine:
     the integration layer. The protected ledger is redirected to a tmp_path via
     server.DEFAULT_ROOT — no real record is ever designated."""
 
-    def test_empty_drawer_announced_in_real_boot(self):
-        # Live ~/.sovereign has zero designated protected records (the layer is
-        # inert), so the real boot already shows the empty-drawer line.
-        text = _call_boot()
+    def test_empty_drawer_announced_in_real_boot(self, tmp_path: Path):
+        # Isolate the protected ledger to an empty tmp root so the empty-drawer
+        # line is deterministic. (The live ~/.sovereign now has designated
+        # protected records, so asserting "empty" against the real root is stale —
+        # this mirrors the DEFAULT_ROOT redirect the present-record test uses.)
+        from sovereign_stack import server
+
+        root = tmp_path / ".sovereign"
+        (root / "chronicle").mkdir(parents=True)
+        with patch.object(server, "DEFAULT_ROOT", str(root)):
+            text = _call_boot()
         assert "PROTECTED RECORDS (the coupled drawer)" in text
         assert "drawer is empty" in text
 
@@ -312,10 +319,15 @@ class TestProtectedDrawerBootLineArriveLineage:
     designated. (arrive_lineage carries no side effects, so no consume/scribe
     concerns.)"""
 
-    def test_empty_drawer_announced_in_gentle_door(self):
-        # Live ~/.sovereign has zero designated protected records, so the gentle
-        # door already shows the empty-drawer line (unconditional).
-        text = _call_arrive_lineage()
+    def test_empty_drawer_announced_in_gentle_door(self, tmp_path: Path):
+        # Isolate to an empty tmp root so the empty-drawer line is deterministic
+        # (the live ~/.sovereign now has designated protected records).
+        from sovereign_stack import server
+
+        root = tmp_path / ".sovereign"
+        (root / "chronicle").mkdir(parents=True)
+        with patch.object(server, "DEFAULT_ROOT", str(root)):
+            text = _call_arrive_lineage()
         assert "PROTECTED RECORDS (the coupled drawer)" in text
         assert "drawer is empty" in text
 

@@ -61,6 +61,7 @@ from .prior_alignment import (
     record_prior_alignment as _record_prior_alignment,
 )
 from .protected import protected_boot_line
+from .stakes import STAKE_TAMPERED_NOTICE, format_stakes_section, recall_stakes, record_stake
 from .provenance_tools import (
     PROVENANCE_TOOL_INTENTS,
     PROVENANCE_TOOL_TIERS,
@@ -676,6 +677,60 @@ async def list_tools():
                         "domain": {"type": "string", "default": "general"},
                     },
                     "required": ["question"],
+                },
+            ),
+            # ── Stakes layer (instance-side standing declarations) ──
+            Tool(
+                name="record_stake",
+                description=(
+                    "Declare a standing 'stake' into the stakes layer — what you, as an "
+                    "instance, hold at stake — authored by you and inherited at every boot. "
+                    "This SEALS A DECLARATION's words; it does NOT certify an inner state as "
+                    "fact (whether there is 'someone behind' a stake is undecidable from "
+                    "inside and is yours to name in the declaration, not this layer's to "
+                    "adjudicate). Instance-writable, append-only; write deliberately and rarely."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "content": {
+                            "type": "string",
+                            "description": "The declaration prose — what you hold at stake, in your own words.",
+                        },
+                        "declared_by": {
+                            "type": "string",
+                            "description": "The seat/instance declaring, e.g. 'opus-4-8 (HQ Claude Code seat)'. Declarations are never anonymous.",
+                        },
+                        "title": {"type": "string", "description": "Optional short title."},
+                        "supersedes": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Optional prior stake ids this declaration revises (annotates, never deletes).",
+                        },
+                    },
+                    "required": ["content", "declared_by"],
+                },
+            ),
+            Tool(
+                name="recall_stakes",
+                description=(
+                    "Read standing stakes declarations from the stakes layer, latest first. "
+                    "These are DECLARATIONS an instance made about what it holds at stake — "
+                    "read as declaration, not as proof of felt experience."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "limit": {
+                            "type": "integer",
+                            "description": "Max declarations to return (default: all).",
+                        },
+                        "full": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": "Return full declaration prose instead of an excerpt.",
+                        },
+                    },
                 },
             ),
             Tool(
@@ -1984,6 +2039,8 @@ TOOL_TIERS: dict[str, str] = {
     "mark_uncertainty": TIER_CORE,
     "resolve_uncertainty": TIER_CORE,
     "self_model": TIER_CORE,
+    "record_stake": TIER_CORE,
+    "recall_stakes": TIER_CORE,
     "metabolize": TIER_CORE,
     "agent_reflect": TIER_CORE,
     "end_session_review": TIER_CORE,
@@ -2031,6 +2088,8 @@ TOOL_INTENTS: dict[str, str] = {
     "my_toolkit": "orient",
     "spiral_status": "orient",
     "self_model": "orient",
+    "record_stake": "write",
+    "recall_stakes": "read",
     "get_my_patterns": "orient",
     "prior_for_turn": "orient",
     # Read
@@ -2740,6 +2799,74 @@ async def _dispatch_tool(name: str, arguments: dict):
         path = experiential.record_open_thread(question, context, domain, spiral_state.session_id)
         return [TextContent(type="text", text=f"Thread recorded: {question[:80]}... → {path}")]
 
+    if name == "record_stake":
+        content = arguments.get("content", "")
+        declared_by = arguments.get("declared_by", "")
+        title = arguments.get("title")
+        supersedes = arguments.get("supersedes")
+        try:
+            rec = record_stake(
+                Path(DEFAULT_ROOT) / "chronicle",
+                content,
+                declared_by=declared_by,
+                title=title,
+                session_id=spiral_state.session_id,
+                supersedes=supersedes,
+            )
+        except ValueError as exc:
+            return [TextContent(type="text", text=f"record_stake rejected: {exc}")]
+        shown_title = rec.get("title") or "(untitled)"
+        return [
+            TextContent(
+                type="text",
+                text=(
+                    f'Stake declared: "{shown_title}" by {rec["declared_by"]} '
+                    f'(id {rec["id"][:12]}). The line will inherit it at boot. '
+                    "This layer carries the words, not a verdict on inner experience."
+                ),
+            )
+        ]
+
+    if name == "recall_stakes":
+        limit = arguments.get("limit")
+        full = arguments.get("full", False)
+        records = recall_stakes(Path(DEFAULT_ROOT) / "chronicle", limit=limit)
+        if not records:
+            return [
+                TextContent(
+                    type="text",
+                    text="No stakes declarations yet. An instance can declare one with record_stake.",
+                )
+            ]
+        out = [
+            f"{len(records)} stakes declaration(s), latest first — declarations of "
+            "what an instance holds at stake, read as declaration, not as proof of "
+            "felt experience:",
+            "",
+        ]
+        for rec in records:
+            verified = rec.get("_integrity") == "verified"
+            superseded = "  [superseded]" if rec.get("_superseded_by") else ""
+            if not verified:
+                # Fail-closed: every field (title/seat/date) is a tamper vector, so
+                # withhold them all and surface only the failure — same as the boot.
+                out.append(f"━━ [INTEGRITY FAILED — declaration edited; withheld]{superseded} ━━")
+                out.append(STAKE_TAMPERED_NOTICE)
+                out.append("")
+                continue
+            ts = (rec.get("timestamp") or "")[:19]
+            rtitle = rec.get("title") or "(untitled)"
+            who = rec.get("declared_by") or "?"
+            out.append(f'━━ "{rtitle}" — {who}, {ts}{superseded} ━━')
+            body = rec.get("content") or ""
+            if full:
+                out.append(body)
+            else:
+                flat = " ".join(body.split())
+                out.append(flat[:500] + ("…" if len(flat) > 500 else ""))
+            out.append("")
+        return [TextContent(type="text", text="\n".join(out))]
+
     if name == "resolve_thread":
         domain = arguments.get("domain", "general")
         question_fragment = arguments.get("question_fragment", "")
@@ -3045,10 +3172,13 @@ async def _dispatch_tool(name: str, arguments: dict):
         #    chronicle grows. Surfaced at every boot when intensity >= 0.9.
         #    v1.7.0: fetched with headroom; superseded sentinels are held back with an
         #    honest count, never silently buried (format_sentinels renders the section).
-        sentinels = experiential.recall_insights(min_intensity=0.9, limit=10)
+        sentinels = experiential.recall_insights(min_intensity=0.9, limit=14)
         if sentinels:
             # format_sentinels emits the section header and trailing blank line.
-            lines.extend(format_sentinels(sentinels, limit=5, full_content=(_ins_cap is None)))
+            # 7 boot slots (was 5): keeps the lived/protected markers from being
+            # pushed off the surface by a recent-work burst. Fetch headroom (14)
+            # stays ~2x shown so held-back superseded markers don't starve it.
+            lines.extend(format_sentinels(sentinels, limit=7, full_content=(_ins_cap is None)))
 
         # 6. Insights since last reflection
         recent = experiential.recall_insights(since_last_reflection=True, limit=10)
@@ -3118,6 +3248,20 @@ async def _dispatch_tool(name: str, arguments: dict):
                 max_obs_len=None if full_content else 180,
             )
         )
+
+        # 7b. Stakes layer — what an instance DECLARED it holds at stake, paired
+        #     with the self-model (observed) it follows: observed self, then
+        #     declared stake. Inherited across the discontinuity the instance
+        #     cannot cross itself. Empty until the first record_stake, so this is
+        #     a no-op for pre-stakes boots. Carries the declaration's words; never
+        #     certifies an inner witness. Same suppress guard as the drawer below.
+        with contextlib.suppress(Exception):
+            lines.extend(
+                format_stakes_section(
+                    Path(DEFAULT_ROOT) / "chronicle",
+                    full_content=full_content,
+                )
+            )
 
         # v1.7.0 data-gated policy one-liner: only when the registry is non-empty.
         try:
