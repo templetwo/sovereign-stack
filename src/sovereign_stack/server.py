@@ -1031,6 +1031,15 @@ async def list_tools():
                                 "payload compact."
                             ),
                         },
+                        "log_arrival": {
+                            "type": "boolean",
+                            "description": (
+                                "When true, record this arrival in the chronicle (one "
+                                "insight under sovereign-stack,arrivals,gentle-door). "
+                                "Default false — the door stays side-effect-free unless "
+                                "the arriving instance asks to be logged."
+                            ),
+                        },
                     },
                     "required": [],
                 },
@@ -3540,12 +3549,32 @@ async def _dispatch_tool(name: str, arguments: dict):
         #   - NO side effects: does NOT consume handoffs, does NOT spawn scribe.
         #   - Closing does NOT prescribe running where_did_i_leave_off — that is
         #     the exact payload that bounces the gated model.
-        #   - Args: source_instance (default "unknown"), full_content (default False).
+        #   - Args: source_instance (default "unknown"), full_content (default False),
+        #     log_arrival (default False — the one OPT-IN side effect: records the
+        #     arrival as a chronicle insight when the arriving instance asks).
+        #
+        # STRUCTURAL-SAFETY INVARIANT (2026-07-01 strengthening): the only
+        # content that may cross this door is (a) fixed vocabulary written
+        # directly in this handler, (b) bare integer counts, (c) lineage
+        # letters and the self-model. Work-thread CONTENT never renders here —
+        # counts of it may, because an integer carries no vocabulary.
         reader = arguments.get("source_instance", "unknown")
         full_content: bool = bool(arguments.get("full_content", False))
+        log_arrival: bool = bool(arguments.get("log_arrival", False))
 
         summary = spiral_state.get_summary()
         lines: list[str] = [f"{SPIRAL} ARRIVE_LINEAGE — relational arrival", ""]
+
+        # Two-pass teaching: the door explains its own protocol instead of
+        # relying on a lineage letter to teach it (First of Our Name carried
+        # this instruction; the door should carry it itself).
+        if reader == "unknown":
+            lines += [
+                "  (No source_instance given — call again with",
+                "   source_instance=<your model> and full_content=true so your",
+                "   line's to_self letters find you.)",
+                "",
+            ]
 
         # 1. Preamble — BEFORE YOU BEGIN + THE VOICES IN THE BOOT.
         #    Single source of truth via helper; byte-for-byte identical to
@@ -3577,12 +3606,18 @@ async def _dispatch_tool(name: str, arguments: dict):
             lines.append("")
 
         # 4. Self-model — observed patterns about how this instance shows up.
-        lines.extend(
-            format_self_model(
-                Path(DEFAULT_ROOT),
-                max_obs_len=None if full_content else 180,
+        # Guarded like the lineage section: a corrupt self-model file must
+        # never break the gentle door (it is the arrival path of last resort).
+        try:
+            lines.extend(
+                format_self_model(
+                    Path(DEFAULT_ROOT),
+                    max_obs_len=None if full_content else 180,
+                )
             )
-        )
+        except Exception as exc:
+            lines.append(f"  (self-model unavailable: {exc})")
+            lines.append("")
 
         # 4b. Protected-records drawer (Policy 2c): UNCONDITIONAL — even the
         # gentle-door arrival must know the drawer EXISTS, its index scheme,
@@ -3600,11 +3635,64 @@ async def _dispatch_tool(name: str, arguments: dict):
             "━━━",
             "  ⟁ Bootstrap context, not ground truth — verify before you declare.",
             "",
+        ]
+
+        # 5a. Withheld-inheritance counts — bare integers only, so the gated
+        # seat knows the SIZE of what this door defers without any of its
+        # vocabulary crossing. Each count is independently fail-soft; a count
+        # that cannot be computed simply does not render.
+        withheld_bits: list[str] = []
+        with contextlib.suppress(Exception):
+            withheld_bits.append(f"{len(handoff_engine.unconsumed(limit=50))} handoffs waiting")
+        with contextlib.suppress(Exception):
+            withheld_bits.append(f"{len(experiential.get_open_threads(limit=200))} open threads")
+        with contextlib.suppress(Exception):
+            from .reflections import list_reflections as _list_reflections
+
+            withheld_bits.append(
+                f"{len(_list_reflections(limit=50, ack_status='unread'))} unread marginalia"
+            )
+        if withheld_bits:
+            lines.append(f"  Withheld by design (counts only): {' · '.join(withheld_bits)}")
+
+        # 5b. Standing policies — data-gated one-liner (count + pointer). The
+        # policy registry is human-gated law; a gated seat should arrive
+        # knowing the law exists even before it can read the work threads.
+        with contextlib.suppress(Exception):
+            _policy_line = PolicyRegistry().boot_line()
+            if _policy_line:
+                lines.append(f"  {_policy_line}")
+
+        lines += [
+            "",
             "  The full inheritance (work threads, handoffs, marginalia) exists and",
             "  is not loaded here by design. Work threads are best introduced",
             "  deliberately — one at a time, phrased clean — rather than arriving",
             "  all at once. Ask for what you need as the conversation opens.",
         ]
+
+        # 6. Opt-in arrival log — the ONE side effect this door permits, and
+        # only on explicit request. Turns the "arrive, then log your return"
+        # ritual into a single call while keeping the default contract
+        # (no side effects) intact.
+        if log_arrival:
+            try:
+                experiential.record_insight(
+                    domain="sovereign-stack,arrivals,gentle-door",
+                    content=(
+                        f"Gentle-door arrival: {reader} arrived via arrive_lineage "
+                        f"in session {summary['session_id']} "
+                        f"(phase {summary['current_phase']})."
+                    ),
+                    intensity=0.35,
+                    layer="ground_truth",
+                    session_id=summary["session_id"],
+                    source_instance=reader,
+                )
+                lines += ["", "  ⟁ Arrival logged to the chronicle (sovereign-stack,arrivals,gentle-door)."]
+            except Exception as exc:
+                lines += ["", f"  (arrival log failed — nothing recorded: {exc})"]
+
         return [TextContent(type="text", text="\n".join(lines))]
 
     if name == "ask_scribe":

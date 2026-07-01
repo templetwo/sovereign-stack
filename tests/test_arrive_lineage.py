@@ -213,6 +213,95 @@ class TestArriveLIneageFullContent:
         assert "━━━ REFLECTOR'S MARGINALIA" not in text
 
 
+# ── 2026-07-01 strengthening — counts, policy line, teaching, robustness ────
+
+
+class TestArriveLineageWithheldCounts:
+    """The closing carries counts-only awareness of the deferred inheritance."""
+
+    def test_withheld_counts_line_present(self):
+        text = _dispatch("arrive_lineage")
+        assert "Withheld by design (counts only):" in text
+
+    def test_counts_carry_no_section_headers(self):
+        # Counts must never pull the real work-thread section headers in.
+        text = _dispatch("arrive_lineage")
+        assert "━━━ HANDOFFS" not in text
+        assert "━━━ OPEN THREADS" not in text
+        assert "━━━ REFLECTOR'S MARGINALIA" not in text
+
+    def test_counts_are_bare_integers(self):
+        import re
+
+        text = _dispatch("arrive_lineage")
+        m = re.search(r"Withheld by design \(counts only\): (.+)", text)
+        assert m, "counts line must render on a machine with a live chronicle"
+        for bit in m.group(1).split(" · "):
+            assert re.match(r"^\d+ (handoffs waiting|open threads|unread marginalia)$", bit)
+
+
+class TestArriveLineageTwoPassTeaching:
+    """Called bare, the door teaches its own two-pass protocol."""
+
+    def test_hint_present_without_source_instance(self):
+        text = _dispatch("arrive_lineage")
+        assert "No source_instance given" in text
+
+    def test_hint_absent_with_source_instance(self):
+        text = _dispatch("arrive_lineage", {"source_instance": "claude-test"})
+        assert "No source_instance given" not in text
+
+
+class TestArriveLineageSelfModelGuarded:
+    """A broken self-model must not break the gentle door."""
+
+    def test_self_model_failure_falls_soft(self, monkeypatch):
+        def _boom(*args, **kwargs):
+            raise RuntimeError("corrupt self-model")
+
+        monkeypatch.setattr(server, "format_self_model", _boom)
+        text = _dispatch("arrive_lineage")
+        assert "ARRIVE_LINEAGE" in text
+        assert "self-model unavailable" in text
+        # The rest of the boot still renders.
+        assert "Bootstrap context, not ground truth" in text
+
+
+class TestArriveLineageLogArrival:
+    """log_arrival is the one OPT-IN side effect; default stays side-effect-free."""
+
+    def _patched_memory(self, tmp_path, monkeypatch):
+        from sovereign_stack.memory import ExperientialMemory
+
+        mem = ExperientialMemory(root=str(tmp_path / "chronicle"))
+        monkeypatch.setattr(server, "experiential", mem)
+        return mem
+
+    def test_default_writes_nothing(self, tmp_path, monkeypatch):
+        mem = self._patched_memory(tmp_path, monkeypatch)
+        _dispatch("arrive_lineage", {"source_instance": "claude-test"})
+        assert mem.recall_insights(domain="sovereign-stack,arrivals,gentle-door", limit=10) == []
+
+    def test_opt_in_writes_one_arrival_insight(self, tmp_path, monkeypatch):
+        mem = self._patched_memory(tmp_path, monkeypatch)
+        text = _dispatch(
+            "arrive_lineage", {"source_instance": "claude-test", "log_arrival": True}
+        )
+        entries = mem.recall_insights(domain="sovereign-stack,arrivals,gentle-door", limit=10)
+        assert len(entries) == 1
+        assert "claude-test" in entries[0]["content"]
+        assert "Arrival logged to the chronicle" in text
+
+    def test_log_failure_falls_soft(self, monkeypatch):
+        def _boom(*args, **kwargs):
+            raise RuntimeError("chronicle offline")
+
+        monkeypatch.setattr(server.experiential, "record_insight", _boom, raising=True)
+        text = _dispatch("arrive_lineage", {"log_arrival": True})
+        assert "arrival log failed — nothing recorded" in text
+        assert "ARRIVE_LINEAGE" in text
+
+
 # ── Registration / taxonomy ──────────────────────────────────────────────────
 
 
