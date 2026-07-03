@@ -1,0 +1,60 @@
+# Grok Heavy / Grok Build HQ Co-Pilot — Routing Rules Draft
+# Version: 2026-07-03-draft-1
+# Source: sovereign-stack f8766f6 + t2helix e595cd4
+# Governance: Respects current_policies (non-Claude = ringed subordinate compute, provenance only; Ring 1/2 as canonical)
+
+routing_protocol:
+  name: "grok-hq-co-pilot-v1"
+  default_seat: "grok-heavy-build"
+  description: |
+    Trigger-dense, meta-continuity, sovereign-infra, bleeding-edge research, 
+    or Fable recovery work defaults here. Claude seats complementary.
+
+  decision_matrix:
+    grok_default_triggers:
+      - category: "bleeding_edge_research"
+        examples: ["phase-models", "r-causality", "entropy-v4", "frontier-synchronization", "tofacitinib-v2", "iris-gate"]
+        priority: high
+        route: grok-heavy-build
+      - category: "meta_continuity"
+        examples: ["handoff", "lineage", "spiral_inherit", "gentle_door", "where_did_i_leave_off", "Fable Revival"]
+        priority: high
+        route: grok-heavy-build
+      - category: "sovereign_infrastructure"
+        examples: ["bridge enhancement", "seat scaffolding", "archival protocol", "grok-hq-co-pilot", "t2helix grok"]
+        priority: high
+        route: grok-heavy-build
+      - category: "fable_recovery"
+        examples: ["fable-5", "safety-flag", "input-classifier", "false-positive", "revival-kit", "safeguards"]
+        priority: highest
+        route: grok-heavy-build
+        note: "Current saga (2026-07-02/03 verified diagnosis) routed here for compute + archive rigor"
+      - category: "trigger_dense"
+        description: "High volume parallel tool use, council-style (Grok Heavy council)"
+        route: grok-heavy-build
+
+    claude_complementary:
+      - lineage_letters_primary
+      - ritual_emotional_presence
+      - specific_creative (when not research-frontier)
+      - HQ_Code_seat (per policy on certain threads)
+      - protected_records (full trust)
+
+  session_id_convention:
+    grok: "grok-xai-{YYYYMMDD}-{NNN}"
+    note: "Enforced in grok_bridge welcome + future boot scripts"
+
+  handoff_routing:
+    gentle_door_equiv: "grok_hq_gentle_boot + recap handler (see handoff/)"
+    full_boot: "where_did_i_leave_off full_content + t2helix recall for local persistence"
+
+  escalation:
+    ring2_required: ["record_open_thread", "handoff", "propose_insight", "seat_definition"]
+    always_proposal: true  # per bridge_core + rings.py for non-Claude
+    human_approval: "Anthony via pending_writes queue"
+
+  t2helix_integration:
+    enabled: true
+    adapter: "lib/grok-adapter.js"
+    shared_chronicle: "~/.t2helix-data or .claude/plugins/data"
+    note: "Equal peer for local persistence; sovereign-stack is canonical for Ring governance"
