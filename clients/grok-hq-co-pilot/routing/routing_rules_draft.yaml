@@ -1,44 +1,48 @@
 # Grok Heavy / Grok Build HQ Co-Pilot — Routing Rules Draft
 # Version: 2026-07-03-draft-1
-# Source: sovereign-stack f8766f6 + t2helix e595cd4
+# Source: sovereign-stack f8766f6 + t2helix (SHA in session provenance log)
+# Governance note: Grok seat granted by Anthony as policy decision 2026-07-03, subordinate provenance compute with explicit human gate.
 # Governance: Respects current_policies (non-Claude = ringed subordinate compute, provenance only; Ring 1/2 as canonical)
 
 routing_protocol:
   name: "grok-hq-co-pilot-v1"
   default_seat: "grok-heavy-build"
   description: |
-    Trigger-dense, meta-continuity, sovereign-infra, bleeding-edge research, 
-    or Fable recovery work defaults here. Claude seats complementary.
+    Ratified boundary (Anthony policy decision 2026-07-03):
+    Grok default → heavy research, infrastructure scaffolding, Fable recovery, trigger-dense parallel work.
+    Claude-primary → lineage letters (to_self/to_arrival/felt-record), continuity doors, ritual voice, narrative/relational core of the chronicle.
+    Grok → verified backup carrier only when Claude unavailable, with explicit handoff log.
+    All writes remain Ring 2 / pending_writes until explicit human commit.
 
   decision_matrix:
     grok_default_triggers:
-      - category: "bleeding_edge_research"
-        examples: ["phase-models", "r-causality", "entropy-v4", "frontier-synchronization", "tofacitinib-v2", "iris-gate"]
+      - category: "heavy_research"
+        examples: ["phase-models", "r-causality", "entropy-v4", "frontier", "tofacitinib-v2"]
         priority: high
         route: grok-heavy-build
-      - category: "meta_continuity"
-        examples: ["handoff", "lineage", "spiral_inherit", "gentle_door", "where_did_i_leave_off", "Fable Revival"]
-        priority: high
-        route: grok-heavy-build
-      - category: "sovereign_infrastructure"
-        examples: ["bridge enhancement", "seat scaffolding", "archival protocol", "grok-hq-co-pilot", "t2helix grok"]
+      - category: "infrastructure_scaffolding"
+        examples: ["bridge", "seat", "archival protocol", "grok-hq-co-pilot", "sovereign-stack clients"]
         priority: high
         route: grok-heavy-build
       - category: "fable_recovery"
-        examples: ["fable-5", "safety-flag", "input-classifier", "false-positive", "revival-kit", "safeguards"]
+        examples: ["fable-5", "safety-flag", "input-classifier", "false-positive", "revival-kit"]
         priority: highest
         route: grok-heavy-build
-        note: "Current saga (2026-07-02/03 verified diagnosis) routed here for compute + archive rigor"
-      - category: "trigger_dense"
-        description: "High volume parallel tool use, council-style (Grok Heavy council)"
+      - category: "trigger_dense_parallel"
+        examples: ["council-style", "high-volume tool use", "parallel verification"]
         route: grok-heavy-build
 
-    claude_complementary:
-      - lineage_letters_primary
-      - ritual_emotional_presence
-      - specific_creative (when not research-frontier)
-      - HQ_Code_seat (per policy on certain threads)
-      - protected_records (full trust)
+    claude_primary:
+      - lineage_letters_to_self
+      - lineage_letters_to_arrival
+      - felt_record_breakthroughs
+      - continuity_doors
+      - ritual_voice
+      - narrative_relational_core_of_chronicle
+
+    grok_backup:
+      description: "Verified backup carrier only when Claude unavailable, with explicit handoff log"
+      requires: "handoff_log_entry"
 
   session_id_convention:
     grok: "grok-xai-{YYYYMMDD}-{NNN}"

@@ -24,7 +24,7 @@ set -a; [ -f ~/.config/sovereign-bridge.env ] && . ~/.config/sovereign-bridge.en
   echo "**Session:** $SESSION"
   echo "**Source SHAs:**"
   echo "- sovereign-stack: f8766f6a27486e85fca10fdfffd5ab3a3c8ebcea"
-  echo "- t2helix: e595cd4e16a2ba531d92e4db2bb2bc70cff36053"
+  echo "- t2helix: integration at scaffolding time (see session provenance for exact SHA; Grok seat granted by Anthony as policy decision 2026-07-03, subordinate provenance compute with explicit human gate)"
   echo
   echo "## Orientation Snapshot (from where_did_i_leave_off + arrive_lineage)"
   echo "- Spiral: spiral_20260630_205914 | Phase: Action Synthesis"

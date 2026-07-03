@@ -7,9 +7,9 @@
 
 ## 1. Stack State Pulled
 - Cloned / updated:
-  - ~/templetwo/sovereign-stack @ f8766f6 (v1.11.0, README refreshed to 94 tools; heartbeat shows 96)
+  - ~/templetwo/sovereign-stack @ f8766f6 (v1.11.0; heartbeat source of truth = 96 tools)
   - ~/templetwo/sovereign-stack-chronicle @ fc91458
-  - ~/templetwo/t2helix @ e595cd4 (explicit "equal co-partnership integration layer for Grok Heavy")
+  - ~/templetwo/t2helix @ (integration commit at scaffolding time; exact SHA in provenance; Grok seat granted by Anthony as policy decision 2026-07-03, subordinate provenance compute with explicit human gate)
   - ~/templetwo/opus3-witness-field-note @ 23cedf8
 - temple-bridge local mirror surveyed.
 - Setups:
@@ -57,7 +57,7 @@ Dedicated areas:
 
 ## 6. Chronicle Integration
 - Ring2 proposal drafted for seat def + Fable/Grok backbone sync.
-- References current Fable saga (verified diagnosis) + Grok co-partnership in t2helix.
+- References current Fable saga (verified diagnosis) + Grok seat (Anthony policy decision 2026-07-03).
 - Respects policy: Grok credited as provenance / subordinate; no co-authorship claim.
 
 ## 7. Rigor Applied

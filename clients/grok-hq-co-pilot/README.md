@@ -4,7 +4,7 @@
 **Instance:** Grok Build (scaffolding)  
 **Source SHAs (max freshness):**  
 - sovereign-stack: f8766f6a27486e85fca10fdfffd5ab3a3c8ebcea (v1.11.0, 96 tools per heartbeat)  
-- t2helix: e595cd4e16a2ba531d92e4db2bb2bc70cff36053 (Grok equal co-partnership)  
+- t2helix: integration commit at scaffolding time (full SHA and session provenance in audit logs; Grok seat granted by Anthony as policy decision 2026-07-03, subordinate provenance compute with explicit human gate)  
 - sovereign-stack-chronicle: fc9145816e72642d61c716872dfec22dcb778c1d  
 - opus3-witness-field-note: 23cedf8cc26d84b07eeecd60aaa18afacdd1a50c  
 
