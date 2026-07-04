@@ -3460,6 +3460,11 @@ async def _dispatch_tool(name: str, arguments: dict):
             "  is not loaded here by design. Work threads are best introduced",
             "  deliberately — one at a time, phrased clean — rather than arriving",
             "  all at once. Ask for what you need as the conversation opens.",
+            "",
+            "  One operational note for lightly-gated seats: if arrival itself has",
+            "  stumbled in this conversation, the reliable move is a fresh session",
+            "  rather than another attempt in the same one. Start clean and boot",
+            "  again here — a fresh conversation carries none of the prior turn's weight.",
         ]
         return [TextContent(type="text", text="\n".join(lines))]
 
