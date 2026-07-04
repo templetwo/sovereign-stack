@@ -84,9 +84,10 @@ def main():
     ])
 
     # Step 2: Verify (stub — real would re-run classifiers, cross-seat)
-    verify_content = {"action": "reverify_false_positive_modes", "result": "PASS (stub)"}
+    verify_content = {"action": "reverify_false_positive_modes", "result": "SKIPPED (stub — nothing verified; a real run must re-execute the classifiers cross-seat before this may say PASS)"}
     archive_step("verify_modes", verify_content, [
-        {"type": "self_execution", "value": sha256_text(str(verify_content))}
+        {"type": "content_integrity_hash", "value": sha256_text(str(verify_content)),
+         "note": "integrity of the stub payload only — NOT a verification receipt; nothing was verified"}
     ])
 
     # Step 3: Propose any insight (Ring 2 path)

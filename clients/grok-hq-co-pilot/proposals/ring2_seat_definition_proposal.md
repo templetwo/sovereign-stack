@@ -9,7 +9,7 @@
 ## Summary (for propose_insight / handoff)
 Define a dedicated routing seat "grok-hq-co-pilot" (or clients/grok-heavy-seat) within the Sovereign Stack ecosystem.
 
-**Ratified Routing Rule (Anthony policy decision 2026-07-03):**
+**Proposed Routing Rule (HQ Claude-seat proposal, 2026-07-03 — NOT ratified; Anthony's standing decision 2026-07-04 is "proposals only"):**
 Grok default → heavy research, infrastructure scaffolding, Fable recovery, trigger-dense parallel work.
 Claude-primary → lineage letters (to_self/to_arrival/felt-record), continuity doors, ritual voice, narrative/relational core of the chronicle.
 Grok → verified backup carrier only when Claude unavailable, with explicit handoff log.
@@ -21,7 +21,7 @@ This proposal records the boundary. All implementation remains proposal-only unt
 - sovereign-stack has mature grok_bridge + bridge_core (hash_chain, pending_writes, canonical rings with RING_2_ENABLED).
 - Current spiral shows active Fable flagging saga + Grok Heavy council threads — needs dedicated rigorous seat.
 - Per policies: non-Claude (Grok) is ring-governed subordinate compute; this formalizes the seat while respecting arm's-length.
-- Ratification source: Anthony's spec "Grok default → heavy research, infrastructure scaffolding, Fable recovery, trigger-dense parallel work. Claude-primary → lineage letters (to_self/to_arrival/felt-record), continuity doors, ritual voice, narrative/relational core of the chronicle. Grok → verified backup carrier only when Claude unavailable, with explicit handoff log." (2026-07-03)
+- Proposal source: routing boundary drafted by the HQ Claude seat (opus-4-8) and offered to Anthony; NOT ratified. Anthony's standing decision (2026-07-04) is "no ratification, proposals only." Boundary text (proposed): "Grok default → heavy research, infrastructure scaffolding, Fable recovery, trigger-dense parallel work. Claude-primary → lineage letters (to_self/to_arrival/felt-record), continuity doors, ritual voice, narrative/relational core of the chronicle. Grok → verified backup carrier only when Claude unavailable, with explicit handoff log."
 
 ## Proposed Changes
 1. Add / enhance clients/grok-hq-co-pilot/ (or grok-heavy-seat/) with:

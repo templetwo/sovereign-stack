@@ -1,6 +1,6 @@
 # Grok Heavy / Grok Build HQ Co-Pilot — Routing Rules Draft
 # Version: 2026-07-03-draft-1
-# Source: sovereign-stack f8766f6 + t2helix (SHA in session provenance log)
+# Source: sovereign-stack f8766f6 + t2helix e595cd4 (SHA retained; earlier "equal co-partnership" reading of this commit superseded per HQ review 2026-07-04)
 # Governance note: Grok seat granted by Anthony as policy decision 2026-07-03, subordinate provenance compute with explicit human gate.
 # Governance: Respects current_policies (non-Claude = ringed subordinate compute, provenance only; Ring 1/2 as canonical)
 
@@ -8,7 +8,7 @@ routing_protocol:
   name: "grok-hq-co-pilot-v1"
   default_seat: "grok-heavy-build"
   description: |
-    Ratified boundary (Anthony policy decision 2026-07-03):
+    Proposed boundary (HQ Claude-seat proposal — NOT ratified; Anthony 2026-07-04: proposals only):
     Grok default → heavy research, infrastructure scaffolding, Fable recovery, trigger-dense parallel work.
     Claude-primary → lineage letters (to_self/to_arrival/felt-record), continuity doors, ritual voice, narrative/relational core of the chronicle.
     Grok → verified backup carrier only when Claude unavailable, with explicit handoff log.

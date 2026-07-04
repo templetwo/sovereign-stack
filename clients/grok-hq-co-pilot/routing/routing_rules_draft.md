@@ -3,7 +3,7 @@
 ## Overview
 This protocol ensures correct defaulting of work to the Grok Heavy / Grok Build seat when the trigger profile matches the job spec.
 
-**Ratified Boundary (Anthony policy decision 2026-07-03):**
+**Proposed Boundary (HQ Claude-seat proposal — NOT ratified; Anthony 2026-07-04: "proposals only"):**
 - Grok default → heavy research, infrastructure scaffolding, Fable recovery, trigger-dense parallel work.
 - Claude-primary → lineage letters (to_self/to_arrival/felt-record), continuity doors, ritual voice, narrative/relational core of the chronicle.
 - Grok → verified backup carrier only when Claude unavailable, with explicit handoff log.

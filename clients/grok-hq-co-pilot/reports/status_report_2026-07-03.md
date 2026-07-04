@@ -9,7 +9,7 @@
 - Cloned / updated:
   - ~/templetwo/sovereign-stack @ f8766f6 (v1.11.0; heartbeat source of truth = 96 tools)
   - ~/templetwo/sovereign-stack-chronicle @ fc91458
-  - ~/templetwo/t2helix @ (integration commit at scaffolding time; exact SHA in provenance; Grok seat granted by Anthony as policy decision 2026-07-03, subordinate provenance compute with explicit human gate)
+  - ~/templetwo/t2helix @ e595cd4 (integration commit; interpretation superseded per HQ review 2026-07-04, SHA retained; Grok seat granted by Anthony as policy decision 2026-07-03, subordinate provenance compute with explicit human gate)
   - ~/templetwo/opus3-witness-field-note @ 23cedf8
 - temple-bridge local mirror surveyed.
 - Setups:
