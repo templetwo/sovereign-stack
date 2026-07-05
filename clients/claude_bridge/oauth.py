@@ -54,10 +54,12 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import hmac
 import json
 import logging
 import os
 import secrets
+import time
 import urllib.parse
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -65,6 +67,67 @@ from pathlib import Path
 from bridge_core import register_token_validator
 
 logger = logging.getLogger(__name__)
+
+
+# ── Approval-secret + single-use consent nonce ────────────────────────────────
+
+
+def approval_enabled() -> bool:
+    """True iff an operator secret is configured. When False, /authorize
+    fail-closes (mints nothing) — never anonymous-approves."""
+    return bool(CLAUDE_AUTHORIZE_SECRET)
+
+
+def _approval_secret_ok(presented: str) -> bool:
+    if not CLAUDE_AUTHORIZE_SECRET:
+        return False
+    return hmac.compare_digest(presented or "", CLAUDE_AUTHORIZE_SECRET)
+
+
+def _mint_nonce() -> str:
+    """A single-use, self-verifying consent nonce: <random>.<exp>.<hmac>. No
+    server-side store needed — the HMAC is the integrity, the exp is the TTL,
+    and single-use is enforced by consuming the exact nonce string on POST."""
+    rnd = secrets.token_urlsafe(16)
+    exp = str(int(time.time()) + NONCE_TTL_SECONDS)
+    mac = hmac.new(_NONCE_SIGNING_KEY.encode(), f"{rnd}.{exp}".encode(), hashlib.sha256).hexdigest()
+    return f"{rnd}.{exp}.{mac}"
+
+
+def _nonce_valid(nonce: str) -> bool:
+    if not _NONCE_SIGNING_KEY or not nonce:
+        return False
+    parts = nonce.split(".")
+    if len(parts) != 3:
+        return False
+    rnd, exp, mac = parts
+    expected = hmac.new(
+        _NONCE_SIGNING_KEY.encode(), f"{rnd}.{exp}".encode(), hashlib.sha256
+    ).hexdigest()
+    if not hmac.compare_digest(expected, mac):
+        return False
+    try:
+        return time.time() < int(exp)
+    except ValueError:
+        return False
+
+
+# Consumed nonces (single-use). Bounded in-memory set; process-local is fine
+# because the SSE server is a load-bearing single worker (see sse_server.py).
+_used_nonces: set[str] = set()
+
+
+def _consume_nonce(nonce: str) -> bool:
+    """Validate then burn a nonce. Returns False on invalid/expired/reused."""
+    if not _nonce_valid(nonce):
+        return False
+    if nonce in _used_nonces:
+        return False
+    if len(_used_nonces) > 10000:
+        _used_nonces.clear()  # coarse GC; nonces self-expire via TTL anyway
+    _used_nonces.add(nonce)
+    return True
+
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
@@ -79,8 +142,24 @@ CODE_TTL_SECONDS = 600  # 10 minutes, single-use
 ACCESS_TOKEN_TTL_SECONDS = int(os.environ.get("CLAUDE_ACCESS_TOKEN_TTL", "3600"))
 REFRESH_TOKEN_TTL_SECONDS = int(os.environ.get("CLAUDE_REFRESH_TOKEN_TTL", str(30 * 86400)))
 MAX_REGISTERED_CLIENTS = int(os.environ.get("CLAUDE_MAX_REGISTERED_CLIENTS", "50"))
+MAX_OAUTH_BODY_BYTES = int(os.environ.get("CLAUDE_MAX_OAUTH_BODY_BYTES", str(64 * 1024)))
 SUBSTRATE = "claude-ai-bridge"
 DEFAULT_SCOPE = "native"
+
+# ── Resource-owner authentication (the load-bearing control) ──────────────────
+# OAuth authenticates the *client*, never the human. Without an approver secret,
+# completing the OAuth dance would equal "Anthony consented", so ANY internet
+# caller could self-approve, mint a token, and reach the base tool tier (full
+# chronicle read + write). The approval secret closes that: the POST /authorize
+# approval is refused unless it carries the operator secret AND a single-use,
+# HMAC-signed nonce minted by the matching GET render. FAIL CLOSED: if the
+# secret is unset, /authorize refuses to mint any code at all — the connector
+# simply cannot be authorized until the operator sets it.
+CLAUDE_AUTHORIZE_SECRET = os.environ.get("CLAUDE_AUTHORIZE_SECRET", "")
+# Signs the GET->POST consent nonce. Falls back to the approver secret so a
+# single env var is enough to stand the bridge up.
+_NONCE_SIGNING_KEY = os.environ.get("CLAUDE_AUTHORIZE_NONCE_KEY", "") or CLAUDE_AUTHORIZE_SECRET
+NONCE_TTL_SECONDS = 900  # 15 min: a consent page must be submitted promptly
 
 # Issuer used in discovery metadata. The MCP endpoint is at /claude/mcp;
 # the OAuth AS is at the parent path.
@@ -98,17 +177,24 @@ PINNED_REDIRECT_URIS = frozenset(
     }
 )
 
-# RFC 8252 §7.3 loopback redirect for Claude Code (http allowed on loopback
-# interfaces only, any port). Opt-out via env.
-_ALLOW_LOOPBACK = os.environ.get("CLAUDE_ALLOW_LOOPBACK_REDIRECT", "true").strip().lower() == "true"
+# RFC 8252 §7.3 loopback redirect for Claude Code (http on loopback interfaces
+# only). DEFAULT OFF on a public deployment: a loopback redirect lets a
+# self-approved code be read straight out of the 302 by a curl-controlled
+# endpoint, so it is opt-in for local Claude Code dev only.
+_ALLOW_LOOPBACK = (
+    os.environ.get("CLAUDE_ALLOW_LOOPBACK_REDIRECT", "false").strip().lower() == "true"
+)
 
 # Initialize storage at import, with restrictive permissions (auth membrane).
+# A filesystem error here must NOT crash import — that would take down the whole
+# SSE server (all bridges + native /sse). Fail soft; the handlers surface errors
+# per-request instead.
 for _d in (_CODES_DIR, _TOKENS_DIR, _REFRESH_DIR):
-    _d.mkdir(parents=True, exist_ok=True)
     try:
+        _d.mkdir(parents=True, exist_ok=True)
         os.chmod(_d, 0o700)
     except OSError as _e:  # best-effort hardening; never block import
-        logger.warning("could not chmod %s: %s", _d, _e)
+        logger.warning("claude_bridge storage init could not prepare %s: %s", _d, _e)
 try:
     os.chmod(_OAUTH_DIR, 0o700)
     os.chmod(_CLAUDE_DIR, 0o700)
@@ -304,8 +390,38 @@ def _verify_pkce_s256(code_verifier: str, code_challenge: str) -> bool:
 # ── Token issue / validation ─────────────────────────────────────────────────
 
 
+def _prune_expired(limit: int = 500) -> None:
+    """Opportunistic sweep of expired access tokens, expired refresh tokens, and
+    long-dead refresh tombstones. Called on each mint so the token dirs cannot
+    grow without bound between the periodic revoke-all — a lightweight guard
+    against disk/inode exhaustion on an unauthenticated mint surface. Bounded by
+    `limit` files per dir per call so a mint never turns into a huge scan."""
+    now = _now()
+    tombstone_cutoff = now - timedelta(seconds=REFRESH_TOKEN_TTL_SECONDS)
+    for base, is_refresh in ((_TOKENS_DIR, False), (_REFRESH_DIR, True)):
+        for i, path in enumerate(base.glob("*.json")):
+            if i >= limit:
+                break
+            try:
+                data = json.loads(path.read_text())
+            except (OSError, json.JSONDecodeError):
+                path.unlink(missing_ok=True)
+                continue
+            drop = _expired(data)
+            if is_refresh and not drop and data.get("status") in ("rotated", "revoked"):
+                # Retire tombstones once they are older than a full refresh TTL:
+                # by then no legitimate rotation could still reference them.
+                try:
+                    drop = datetime.fromisoformat(data["issued_at"]) < tombstone_cutoff
+                except (KeyError, ValueError):
+                    drop = True
+            if drop:
+                path.unlink(missing_ok=True)
+
+
 def _mint_token_pair(client_id: str, scope: str, audience: str, family_id: str) -> dict:
     """Mint a short-lived access token + rotating refresh token for one family."""
+    _prune_expired()
     now = _now()
     access_token = secrets.token_hex(32)
     refresh_token = "cbr_" + secrets.token_urlsafe(32)
@@ -444,14 +560,31 @@ async def _redirect(send, url: str) -> None:
     await send({"type": "http.response.body", "body": b""})
 
 
+class _BodyTooLarge(Exception):
+    """Raised when a request body exceeds MAX_OAUTH_BODY_BYTES."""
+
+
 async def _read_body(receive) -> bytes:
+    """Read the request body with a hard byte ceiling. These endpoints are
+    unauthenticated and public; do not rely on Cloudflare to cap them."""
     body = b""
     while True:
         msg = await receive()
         body += msg.get("body", b"")
+        if len(body) > MAX_OAUTH_BODY_BYTES:
+            raise _BodyTooLarge()
         if not msg.get("more_body", False):
             break
     return body
+
+
+async def _read_body_or_413(receive, send) -> bytes | None:
+    """_read_body wrapper that emits a 413 and returns None on overflow."""
+    try:
+        return await _read_body(receive)
+    except _BodyTooLarge:
+        await _send_json(send, 413, {"error": "request_entity_too_large"})
+        return None
 
 
 def _q(scope: dict) -> dict:
@@ -475,7 +608,9 @@ async def handle_register(scope, receive, send) -> None:
         await _send_json(send, 405, {"error": "method_not_allowed"})
         return
 
-    raw = await _read_body(receive)
+    raw = await _read_body_or_413(receive, send)
+    if raw is None:
+        return
     try:
         meta = json.loads(raw.decode() or "{}")
     except json.JSONDecodeError:
@@ -485,24 +620,6 @@ async def handle_register(scope, receive, send) -> None:
             {
                 "error": "invalid_client_metadata",
                 "error_description": "Body must be a JSON object",
-            },
-        )
-        return
-
-    # Registry growth cap: DCR is unauthenticated by protocol design, so an
-    # IP-rotating client could otherwise grow oauth_clients.json unboundedly.
-    # Legitimate use registers a handful of clients, ever.
-    clients = _load_clients()
-    if len(clients) >= MAX_REGISTERED_CLIENTS:
-        await _send_json(
-            send,
-            429,
-            {
-                "error": "registration_limit_reached",
-                "error_description": (
-                    "Client registry is full. HQ can prune with "
-                    "'python -m clients.claude_bridge.cli revoke-all'."
-                ),
             },
         )
         return
@@ -534,11 +651,42 @@ async def handle_register(scope, receive, send) -> None:
             )
             return
 
+    client_name = meta.get("client_name", "Claude MCP connector")
+    clients = _load_clients()
+
+    # Idempotent DCR: an identical (redirect_uris, client_name) request returns
+    # the existing registration instead of minting a new one. Collapses the
+    # retry/junk-fill vector — repeated identical registrations do not grow the
+    # registry (openai/grok-style clients re-register on reconnect).
+    for existing_id, rec in clients.items():
+        if rec.get("redirect_uris") == redirect_uris and rec.get("client_name") == client_name:
+            await _send_json(send, 201, _dcr_response(existing_id, rec))
+            return
+
+    # Bounded registry: rather than hard-locking-out legitimate onboarding when
+    # full (an availability DoS an unauthenticated attacker could trigger),
+    # LRU-evict the oldest client that never completed a token exchange. A
+    # client that HAS issued a token (has a live family on disk) is never
+    # evicted this way.
+    if len(clients) >= MAX_REGISTERED_CLIENTS and not _evict_one_stale_client(clients):
+        await _send_json(
+            send,
+            429,
+            {
+                "error": "registration_limit_reached",
+                "error_description": (
+                    "Client registry is full of active clients. HQ can prune "
+                    "with 'python -m clients.claude_bridge.cli revoke-all'."
+                ),
+            },
+        )
+        return
+
     client_id = "claude-" + secrets.token_urlsafe(16)
     issued_at = int(_now().timestamp())
     record = {
         "client_id": client_id,
-        "client_name": meta.get("client_name", "Claude MCP connector"),
+        "client_name": client_name,
         "redirect_uris": redirect_uris,
         "token_endpoint_auth_method": "none",
         "grant_types": ["authorization_code", "refresh_token"],
@@ -547,22 +695,55 @@ async def handle_register(scope, receive, send) -> None:
         "client_id_issued_at": issued_at,
         "registered_by": "dcr",
     }
-    clients = _load_clients()
     clients[client_id] = record
     _save_clients(clients)
     logger.info("OAuth DCR: registered client_id=%s redirect_uris=%s", client_id, redirect_uris)
 
-    response = {
+    await _send_json(send, 201, _dcr_response(client_id, record))
+
+
+def _dcr_response(client_id: str, record: dict) -> dict:
+    """RFC 7591 registration response for a stored client record."""
+    return {
         "client_id": client_id,
-        "client_id_issued_at": issued_at,
-        "redirect_uris": redirect_uris,
+        "client_id_issued_at": record.get("client_id_issued_at"),
+        "redirect_uris": record.get("redirect_uris", []),
         "token_endpoint_auth_method": "none",
         "grant_types": ["authorization_code", "refresh_token"],
         "response_types": ["code"],
-        "client_name": record["client_name"],
-        "scope": record["scope"],
+        "client_name": record.get("client_name"),
+        "scope": record.get("scope", DEFAULT_SCOPE),
     }
-    await _send_json(send, 201, response)
+
+
+def _client_has_live_family(client_id: str) -> bool:
+    """True if this client has ever been issued a token (a token file names it).
+    Such clients are never LRU-evicted by a registration flood."""
+    for base in (_TOKENS_DIR, _REFRESH_DIR):
+        for path in base.glob("*.json"):
+            try:
+                if json.loads(path.read_text()).get("client_id") == client_id:
+                    return True
+            except (OSError, json.JSONDecodeError):
+                continue
+    return False
+
+
+def _evict_one_stale_client(clients: dict) -> bool:
+    """Evict the oldest DCR client that never completed a token exchange.
+    Mutates `clients`. Returns True if one was evicted (room made)."""
+    candidates = [
+        (rec.get("client_id_issued_at", 0), cid)
+        for cid, rec in clients.items()
+        if rec.get("registered_by") == "dcr" and not _client_has_live_family(cid)
+    ]
+    if not candidates:
+        return False
+    candidates.sort()
+    _, victim = candidates[0]
+    clients.pop(victim, None)
+    logger.warning("OAuth DCR: LRU-evicted stale unused client %s to make room", victim)
+    return True
 
 
 # ── Authorize endpoint ───────────────────────────────────────────────────────
@@ -626,12 +807,24 @@ async def _authorize_get(scope, send) -> None:
         await _send_text(send, 400, error)
         return
 
+    # Fail closed: with no operator secret configured, this AS refuses to render
+    # an approval path at all — an anonymous approval must never mint a code.
+    if not approval_enabled():
+        await _send_text(
+            send,
+            503,
+            "Authorization is disabled: the operator has not set CLAUDE_AUTHORIZE_SECRET. "
+            "No connector can be authorized until it is configured.",
+        )
+        return
+
     safe_client = _esc(client_id)
     safe_redirect = _esc(redirect_uri)
     safe_scope = _esc(scope_str or f"{DEFAULT_SCOPE} (full native surface; destructive tier gated)")
     safe_state = _esc(state)
     safe_challenge = _esc(code_challenge)
     safe_resource = _esc(resource)
+    nonce = _esc(_mint_nonce())
 
     html = f"""<!doctype html>
 <html lang="en">
@@ -677,6 +870,8 @@ quarantine, protected records, service control) additionally require a per-use
 step-up approval on your phone. Access tokens expire hourly and rotate via
 refresh; revoke everything at any time with
 <code>python -m clients.claude_bridge.cli revoke-all</code>.</p>
+<p class="muted"><strong>Only the operator can approve.</strong> Enter the
+Sovereign Stack approval passphrase to confirm this is you.</p>
 <form method="post" action="/claude/oauth/authorize">
 <input type="hidden" name="client_id" value="{safe_client}"/>
 <input type="hidden" name="redirect_uri" value="{safe_redirect}"/>
@@ -685,6 +880,10 @@ refresh; revoke everything at any time with
 <input type="hidden" name="state" value="{safe_state}"/>
 <input type="hidden" name="scope" value="{_esc(scope_str)}"/>
 <input type="hidden" name="resource" value="{safe_resource}"/>
+<input type="hidden" name="nonce" value="{nonce}"/>
+<p><input type="password" name="approval_secret" placeholder="approval passphrase"
+   autocomplete="off" style="padding:0.6em;width:100%;box-sizing:border-box;
+   border:1px solid #ccc;border-radius:6px;font-size:1em;"/></p>
 <button type="submit" name="action" value="approve">Approve</button>
 <button type="submit" name="action" value="deny" class="deny">Deny</button>
 </form>
@@ -695,7 +894,9 @@ refresh; revoke everything at any time with
 
 
 async def _authorize_post(receive, send) -> None:
-    body = await _read_body(receive)
+    body = await _read_body_or_413(receive, send)
+    if body is None:
+        return
     form = {k: v[0] for k, v in urllib.parse.parse_qs(body.decode()).items()}
 
     action = form.get("action", "")
@@ -706,6 +907,8 @@ async def _authorize_post(receive, send) -> None:
     state = form.get("state", "")
     scope_str = form.get("scope", "")
     resource = form.get("resource", "")
+    approval_secret = form.get("approval_secret", "")
+    nonce = form.get("nonce", "")
 
     if action != "approve":
         params = {"error": "access_denied"}
@@ -716,6 +919,34 @@ async def _authorize_post(receive, send) -> None:
             await _redirect(send, _append_params(redirect_uri, params))
         else:
             await _send_text(send, 400, "redirect_uri not allowed")
+        return
+
+    # Fail closed: no operator secret => no code, ever.
+    if not approval_enabled():
+        await _send_text(send, 503, "Authorization is disabled (CLAUDE_AUTHORIZE_SECRET unset).")
+        return
+
+    # THE resource-owner authentication. OAuth authenticates the client; this
+    # authenticates the human. Without both the operator passphrase and a
+    # single-use nonce minted by the matching GET render, an anonymous approve
+    # POST cannot mint a code — closing the self-approval token-minting hole.
+    # Order: consume the nonce first (single-use even on a wrong passphrase, so
+    # a captured page cannot be brute-forced by replay), then check the secret.
+    nonce_ok = _consume_nonce(nonce)
+    secret_ok = _approval_secret_ok(approval_secret)
+    if not (nonce_ok and secret_ok):
+        logger.warning(
+            "OAuth: authorize approval REFUSED (nonce_ok=%s secret_ok=%s) client=%s",
+            nonce_ok,
+            secret_ok,
+            client_id,
+        )
+        await _send_text(
+            send,
+            403,
+            "Approval refused: invalid passphrase or expired consent page. "
+            "Reload the authorization page and try again.",
+        )
         return
 
     # Re-validate everything (defence in depth — POST data could be tampered).
@@ -765,7 +996,9 @@ async def handle_token(scope, receive, send) -> None:
         await _send_json(send, 405, {"error": "method_not_allowed"})
         return
 
-    body = await _read_body(receive)
+    body = await _read_body_or_413(receive, send)
+    if body is None:
+        return
     form = {k: v[0] for k, v in urllib.parse.parse_qs(body.decode()).items()}
     grant_type = form.get("grant_type", "")
 
@@ -962,7 +1195,9 @@ async def handle_revoke(scope, receive, send) -> None:
         await _send_json(send, 405, {"error": "method_not_allowed"})
         return
 
-    body = await _read_body(receive)
+    body = await _read_body_or_413(receive, send)
+    if body is None:
+        return
     form = {k: v[0] for k, v in urllib.parse.parse_qs(body.decode()).items()}
     token = form.get("token", "")
     client_id = form.get("client_id", "")

@@ -18,6 +18,22 @@ model from the other two:
 > through the Door That Asks, and every credential is short-lived,
 > audience-bound, and one-call revocable.
 
+### Resource-owner authentication (the load-bearing control)
+
+OAuth authenticates the *client*, never the human. So "completed the OAuth
+flow" must NOT be treated as "the operator approved" — otherwise any internet
+caller could self-register, self-approve, and mint a base-tier token to the
+private chronicle. (An adversarial review caught exactly this as a critical
+before deploy.) The fix: **`POST /claude/oauth/authorize` mints a code only
+when the approval carries the operator passphrase (`CLAUDE_AUTHORIZE_SECRET`)
+AND a single-use, HMAC-signed nonce** minted by the matching consent-page
+render. It **fails closed** — with no secret set, the authorize endpoint
+refuses to mint any code at all (503), so the connector simply cannot be
+authorized until the operator configures it. Loopback redirect URIs default
+**off** (`CLAUDE_ALLOW_LOOPBACK_REDIRECT=false`) so a self-approved code can't
+be read straight out of the 302 by a curl-controlled endpoint; enable only for
+local Claude Code dev.
+
 ## Spec → implementation map
 
 | Spec item | Implementation | Where |
@@ -31,9 +47,22 @@ model from the other two:
 | (7) Robustness | Form-urlencoded token endpoint; refresh rotation returns the successor in the invalidating response; reuse of a rotated refresh token revokes the whole family; prompt definitive JSON errors everywhere; per-IP rate limits on all /claude/* + root well-known paths; every discovery shape (incl. openid-configuration, both RFC path forms) answers 200 | `oauth.py`, `sse_server.py` |
 
 Token lifetimes: access 1h (`CLAUDE_ACCESS_TOKEN_TTL`), refresh 30d rotating
-(`CLAUDE_REFRESH_TOKEN_TTL`), elevation 15min (`CLAUDE_ELEVATION_TTL`). No new
-static secrets: the bridge never accepts `BRIDGE_TOKEN` (deliberately — the
-master token is quadruple-duty already and must not gain a public route).
+(`CLAUDE_REFRESH_TOKEN_TTL`), elevation is single-use (consumed per call). The
+bridge never accepts `BRIDGE_TOKEN` (deliberately — the master token is
+quadruple-duty already and must not gain a public route).
+
+### Environment
+
+| Var | Default | Purpose |
+|---|---|---|
+| `CLAUDE_AUTHORIZE_SECRET` | *(unset → authorize fails closed)* | **Required to deploy.** The operator approval passphrase typed on the consent page. |
+| `CLAUDE_ALLOW_LOOPBACK_REDIRECT` | `false` | Allow `http://127.0.0.1`/`localhost` redirect URIs (local Claude Code only). |
+| `CLAUDE_ACCESS_TOKEN_TTL` | `3600` | Access-token lifetime (seconds). |
+| `CLAUDE_REFRESH_TOKEN_TTL` | `2592000` | Refresh-token lifetime (seconds). |
+| `CLAUDE_ELEVATION_TTL` | `900` | Max age of an unused elevation before it re-prompts. |
+| `CLAUDE_MAX_REGISTERED_CLIENTS` | `50` | DCR registry cap (LRU-evicts stale unused clients when full). |
+| `CLAUDE_MAX_OAUTH_BODY_BYTES` | `65536` | Hard body cap on the OAuth POST endpoints. |
+| `CLAUDE_BRIDGE_ISSUER` | `https://stack.templetwo.com/claude` | OAuth issuer / resource base. |
 
 ## Architecture decisions (and why)
 
@@ -56,19 +85,24 @@ master token is quadruple-duty already and must not gain a public route).
   discarded unused; plaintext-once holds). A destructive call without a live
   elevation returns a structured `step_up_required` refusal carrying the
   two-word pairing code; the model re-calls after Anthony's tap.
-- **Fail-closed tiers.** `DESTRUCTIVE_TOOLS` (11) and `BASE_TOOLS` (83) were
-  frozen from the live registry; a tool in neither set requires step-up. The
-  registry-drift test (`tests/test_claude_bridge_tiers.py`) fails CI when the
-  native registry changes, forcing explicit classification.
-- **Known side effect, documented not gated:** `where_did_i_leave_off`
-  consumes handoffs. Remote seats are steered to `arrive_lineage` (the
-  side-effect-free door) by the existing boot guidance.
+- **Fail-closed tiers.** `DESTRUCTIVE_TOOLS` (12) and `BASE_TOOLS` (82) were
+  frozen from the live registry; a real tool in neither set requires step-up,
+  and a fabricated tool name is rejected as `method_not_found` before the tier
+  gate. The registry-drift test (`tests/test_claude_bridge_tiers.py`) fails CI
+  when the native registry changes, forcing explicit classification.
+- **Single-use, argument-bound elevation.** An approval authorizes exactly one
+  call with the exact arguments Anthony saw (bound to a hash of the arguments,
+  which are summarized into the phone push); the next call re-prompts.
+- **Handoff-consuming side effect gated.** `where_did_i_leave_off` consumes
+  handoffs, so on the remote surface it is in the step-up tier — a remote
+  consume needs a tap. Ordinary remote boots use `arrive_lineage` (base tier).
 
 ## Destructive tier (step-up required)
 
 `set_policy`, `govern`, `supersede_insight`, `retire_hypothesis`,
 `guardian_quarantine`, `guardian_baseline`, `metabolize`, `synthesize_now`,
-`watch_cancel`, `watch_resample`, `open_protected_record`.
+`watch_cancel`, `watch_resample`, `open_protected_record`,
+`where_did_i_leave_off` (handoff-consuming).
 
 Rationale mapping: policy mutation / deletion-retirement / service control &
 cost-bearing triggers / protected-drawer content. No native MCP tool mints
@@ -86,7 +120,12 @@ The code path is inert until deployed: routes exist only in the new sse
 process, and public reachability requires the tunnel ingress addition.
 
 1. **Merge the PR** (main is branch-protected; review first).
-2. **Cloudflared ingress** — add to `~/.cloudflared/config.yml` *before* the
+2. **Set the operator secret** in the sse launchd env (this is what makes the
+   connector authorizable — without it, authorize fail-closes):
+   add `CLAUDE_AUTHORIZE_SECRET` to the `EnvironmentVariables` block of
+   `~/Library/LaunchAgents/com.templetwo.sovereign-sse.plist` (a strong random
+   passphrase you'll type once on the consent page).
+3. **Cloudflared ingress** — add to `~/.cloudflared/config.yml` *before* the
    `service: http://localhost:8100` catch-all (paths are unanchored regexes;
    these two rules cover all /claude/* and the root well-known forms):
 
@@ -98,22 +137,24 @@ process, and public reachability requires the tunnel ingress addition.
          noTLSVerify: true
          disableChunkedEncoding: true
      - hostname: stack.templetwo.com
-       path: /.well-known/
+       path: /.well-known/.*claude
        service: http://localhost:3434
        originRequest:
          noTLSVerify: true
    ```
 
-   (8100 serves nothing under `/.well-known/` — today those requests 404 at
-   the FastAPI catch-all, which is exactly the #4030 retry-loop fuel; routing
-   them to 3434 lets the bridge answer discovery definitively.)
-3. **Restart services:**
+   (The `/.well-known/.*claude` rule is scoped to the claude discovery forms so
+   it doesn't disturb the existing openai/grok well-known routes or send other
+   root well-knowns to 3434; without it those claude discovery probes 404 at the
+   8100 FastAPI catch-all — the #4030 retry-loop fuel.)
+4. **Reinstall editable so the heartbeat reports 1.12.0, then restart:**
 
    ```bash
+   cd ~/sovereign-stack && ./venv/bin/pip install -e . --no-deps -q
    launchctl kickstart -k gui/$(id -u)/com.templetwo.sovereign-sse
    launchctl kickstart -k gui/$(id -u)/com.templetwo.cloudflared-tunnel
    ```
-4. **Verify (local, then public):**
+5. **Verify (local, then public):**
 
    ```bash
    curl -s http://127.0.0.1:3434/claude/info | head -c 300
@@ -121,10 +162,11 @@ process, and public reachability requires the tunnel ingress addition.
    curl -si -X POST http://127.0.0.1:3434/claude/mcp | head -5   # expect 401 + WWW-Authenticate
    curl -s https://stack.templetwo.com/.well-known/oauth-protected-resource/claude/mcp
    ```
-5. **Connect claude.ai:** Settings → Connectors → Add custom connector →
-   `https://stack.templetwo.com/claude/mcp`. The OAuth consent page will open
-   in your browser; Approve is the human gate for the initial grant.
-6. **Revocation drill (recommended once):**
+6. **Connect claude.ai:** Settings → Connectors → Add custom connector →
+   `https://stack.templetwo.com/claude/mcp`. The OAuth consent page opens in
+   your browser; enter the `CLAUDE_AUTHORIZE_SECRET` passphrase and Approve —
+   that is the human gate for the initial grant.
+7. **Revocation drill (recommended once):**
    `python -m clients.claude_bridge.cli revoke-all` — the connector must 401
    on its next call and re-prompt for authorization.
 
@@ -150,13 +192,20 @@ Gemini's audit b69882fb". On-disk reality (verified 2026-07-04):
 
 ## Test coverage
 
-`tests/test_claude_bridge_oauth.py` (47 tests: PKCE both ends, RFC 8707 at
-authorize/token/route, rotation + reuse family revocation, DCR pinning,
-single-use/TTL codes, revocation endpoint, discovery), plus
-`test_claude_bridge_mcp_gate.py`, `test_claude_bridge_elevation.py`,
+`tests/test_claude_bridge_oauth.py` (62 tests: resource-owner auth gate —
+secret + single-use nonce + fail-closed, PKCE both ends, RFC 8707 at
+authorize/token/route, rotation + reuse family revocation, redirect pinning +
+loopback-default-off, DCR dedupe/LRU-evict, body cap, revocation, discovery),
+plus `test_claude_bridge_mcp_gate.py` (auth gate, registry validation,
+single-use argument-bound elevation), `test_claude_bridge_elevation.py`,
 `test_claude_bridge_routes.py` (routing, rate limits, 401 shape,
 openai/grok-unaffected guards), `test_claude_bridge_tiers.py` (fail-closed +
 registry drift guard), and `clients/claude_bridge/_smoke_test.py` (manual,
-offline-safe). Pre-existing failures NOT from this branch: 2 in
+offline-safe). A pre-deploy adversarial multi-agent security review (5 lenses,
+each finding independently verified) found one critical (authorize had no
+resource-owner authentication) plus several highs/mediums — all confirmed
+findings are fixed and covered by tests; the resource-owner fix is
+additionally proven end-to-end against a live server (anonymous self-approve
+now 403). Pre-existing failures NOT from this branch: 2 in
 `tests/test_boot_ritual.py` (protected-drawer boot-line tests, fail on clean
 origin/main too — environment-tied).

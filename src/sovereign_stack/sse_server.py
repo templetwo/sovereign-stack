@@ -131,7 +131,10 @@ try:
     )
 
     _CLAUDE_BRIDGE_ENABLED = True
-except ImportError as _claude_e:
+except Exception as _claude_e:
+    # Broad by design: a module-level side-effect failure (bad env, filesystem)
+    # must disable the claude bridge, never collapse the whole SSE server
+    # (all bridges + native /sse). Fail closed with a warning.
     _CLAUDE_BRIDGE_ENABLED = False
     handle_claude_mcp = None
     claude_session_manager = None

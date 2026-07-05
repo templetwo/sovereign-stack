@@ -153,17 +153,23 @@ class TestAuthGate:
 
 @pytest.fixture
 def native_calls(monkeypatch):
-    """Stub the native handler delegation; returns the call recorder."""
-    calls = []
+    """Stub only the native EXECUTION delegation; keep the REAL registry for
+    list_tools so `_known_tool` validates against the live tool surface (an
+    in-process call, no network). This exercises the fabricated-name rejection
+    for the right reason — the name is genuinely absent from the registry, not
+    because the registry was stubbed empty. Returns the handle_tool recorder."""
+    from sovereign_stack.server import list_tools as real_list_tools
 
-    async def fake_list_tools():
-        return []
+    calls = []
 
     async def fake_handle_tool(name, arguments):
         calls.append((name, arguments))
         return [TextContent(type="text", text="native-ok")]
 
-    monkeypatch.setattr(mcp_native, "_native", lambda: (fake_list_tools, fake_handle_tool))
+    monkeypatch.setattr(mcp_native, "_native", lambda: (real_list_tools, fake_handle_tool))
+    # Reset the module-global registry cache so it can't carry a stale (or
+    # stubbed-empty) frozenset in from another test; monkeypatch restores it.
+    monkeypatch.setattr(mcp_native, "_registry_names", None)
     return calls
 
 
@@ -188,7 +194,7 @@ class TestTierGate:
         assert result[0].text == "native-ok"
 
     def test_destructive_tool_pending_returns_step_up_refusal(self, native_calls, monkeypatch):
-        async def fake_ensure(tool, family_id, client_id):
+        async def fake_ensure(tool, family_id, client_id, req_hash, summary=""):
             return ElevationStatus("pending", "waiting", code="oak-river")
 
         monkeypatch.setattr(mcp_native.elevation, "ensure_elevation", fake_ensure)
@@ -200,7 +206,12 @@ class TestTierGate:
         assert native_calls == []
 
     def test_destructive_tool_active_executes_and_audits(self, native_calls, monkeypatch):
-        async def fake_ensure(tool, family_id, client_id):
+        seen = {}
+
+        async def fake_ensure(tool, family_id, client_id, req_hash, summary=""):
+            # Capture what the gate computed so we can pin the binding contract.
+            seen["ensure_req_hash"] = req_hash
+            seen["summary"] = summary
             return ElevationStatus("active", "ok")
 
         recorded = []
@@ -214,6 +225,12 @@ class TestTierGate:
         assert native_calls == [("set_policy", {"policy": "x"})]
         assert result[0].text == "native-ok"
         assert len(recorded) == 1
+        # The SAME computed argument-hash flows to both ensure_elevation and the
+        # single-use consume — that binding is the point of summarize_and_hash.
+        assert recorded[0]["req_hash"] == seen["ensure_req_hash"]
+        # And it is the real hash of these exact arguments.
+        _, expected_hash = elevation.summarize_and_hash("set_policy", {"policy": "x"})
+        assert seen["ensure_req_hash"] == expected_hash
 
     def test_no_grant_bound_fails_closed(self, native_calls):
         result = _call_tool("recall_insights", {}, None)
@@ -221,16 +238,20 @@ class TestTierGate:
         assert payload["error"] == "no_grant_bound"
         assert native_calls == []
 
-    def test_unknown_tool_is_treated_as_destructive(self, native_calls, monkeypatch):
+    def test_unknown_tool_returns_method_not_found(self, native_calls, monkeypatch):
+        # A fabricated tool name is rejected against the live registry BEFORE
+        # tier classification, so it never reaches the Door / step-up path.
+        # (Previously the fail-closed default treated it as destructive; now
+        # the name must be a real registered tool to get that far.)
         seen = []
 
-        async def fake_ensure(tool, family_id, client_id):
+        async def fake_ensure(tool, family_id, client_id, req_hash, summary=""):
             seen.append(tool)
             return ElevationStatus("pending", "waiting", code="oak-river")
 
         monkeypatch.setattr(mcp_native.elevation, "ensure_elevation", fake_ensure)
         result = _call_tool("tool_added_next_release", {}, GRANT)
         payload = json.loads(result[0].text)
-        assert payload["error"] == "step_up_required"
-        assert seen == ["tool_added_next_release"]
-        assert native_calls == []
+        assert payload["error"] == "method_not_found"
+        assert seen == []  # never reached tier classification / the Door
+        assert native_calls == []  # never delegated to the native handler

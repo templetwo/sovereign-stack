@@ -32,10 +32,11 @@ Spec-category mapping (ratified 2026-07-04 build spec, item 6):
                          endpoints and the Door itself, which carry their
                          own human gates.
 
-Known side-effect note (not gated, documented): where_did_i_leave_off
-CONSUMES unconsumed handoffs on read. A remote Claude seat booting with it
-will eat handoffs addressed to whoever boots next at HQ. arrive_lineage is
-the side-effect-free door and is what remote seats are steered toward.
+Handoff-consuming side effect: where_did_i_leave_off CONSUMES unconsumed
+handoffs on read. To stop a remote Claude seat from silently eating handoffs
+addressed to whoever boots next at HQ, it is placed in the STEP-UP tier (a
+remote consume requires a human tap). Ordinary remote boots use the
+side-effect-free arrive_lineage, which is base tier.
 """
 
 from __future__ import annotations
@@ -57,10 +58,15 @@ DESTRUCTIVE_TOOLS: frozenset[str] = frozenset(
         "guardian_baseline",
         # protected drawer content
         "open_protected_record",
+        # side-effect: CONSUMES unconsumed handoffs on read. A remote claude.ai
+        # seat must not silently eat handoffs addressed to whoever boots next at
+        # HQ — require a step-up tap. Remote seats are steered to the
+        # side-effect-free arrive_lineage (base tier) for ordinary boots.
+        "where_did_i_leave_off",
     }
 )
 
-# The remainder of the live registry at freeze time (94 - 11 = 83 tools).
+# The remainder of the live registry at freeze time (94 - 12 = 82 tools).
 BASE_TOOLS: frozenset[str] = frozenset(
     {
         "route",
@@ -81,7 +87,6 @@ BASE_TOOLS: frozenset[str] = frozenset(
         "get_inheritable_context",
         "handoff",
         "close_session",
-        "where_did_i_leave_off",
         "arrive",
         "arrive_delta",
         "arrive_lineage",

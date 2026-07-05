@@ -56,6 +56,26 @@ def _native():
     return list_tools, handle_tool
 
 
+_registry_names: frozenset[str] | None = None
+
+
+async def _known_tool(name: str) -> bool:
+    """True iff `name` is a real tool in the live native registry. Cached — the
+    registry is static after import. Used to reject fabricated tool names BEFORE
+    tier classification, so an attacker cannot author the Door approval text via
+    an arbitrary tool name (a bogus name never reaches the Door)."""
+    global _registry_names
+    if _registry_names is None:
+        native_list_tools, _ = _native()
+        tools = await native_list_tools()
+        _registry_names = frozenset(t.name for t in tools)
+    return name in _registry_names
+
+
+def _err(payload: dict):
+    return [TextContent(type="text", text=json.dumps(payload, indent=2))]
+
+
 claude_server: Server = Server("sovereign-stack-claude")
 
 
@@ -73,47 +93,47 @@ async def claude_call_tool(name: str, arguments: dict):
         # The gate always sets a grant before handle_request; reaching this
         # means a wiring bug. Fail closed, loudly.
         logger.error("claude_call_tool reached with no grant bound — refusing %s", name)
-        return [
-            TextContent(
-                type="text",
-                text=json.dumps(
-                    {
-                        "error": "no_grant_bound",
-                        "detail": "Internal gate error: no authenticated grant for this request.",
-                    }
-                ),
-            )
-        ]
+        return _err(
+            {
+                "error": "no_grant_bound",
+                "detail": "Internal gate error: no authenticated grant for this request.",
+            }
+        )
+
+    # Reject fabricated tool names before anything else: a name that is not a
+    # real registered tool never reaches the tier gate or the Door push.
+    if not await _known_tool(name):
+        return _err({"error": "method_not_found", "detail": f"Unknown tool: {name}"})
 
     if tiers.classify(name) == tiers.TIER_STEP_UP:
+        summary, req_hash = elevation.summarize_and_hash(name, arguments)
         status = await elevation.ensure_elevation(
             tool=name,
             family_id=grant.get("family_id", ""),
             client_id=grant.get("client_id", ""),
+            req_hash=req_hash,
+            summary=summary,
         )
         if status.state != "active":
             # Structured refusal instead of an exception: the calling model
             # reads this, relays the pairing code to the human, and re-calls
             # the tool after approval. An MCP client cannot block on a human.
-            return [
-                TextContent(
-                    type="text",
-                    text=json.dumps(
-                        {
-                            "error": "step_up_required",
-                            "tool": name,
-                            "state": status.state,
-                            "pairing_code": status.code,
-                            "detail": status.detail,
-                        },
-                        indent=2,
-                    ),
-                )
-            ]
+            return _err(
+                {
+                    "error": "step_up_required",
+                    "tool": name,
+                    "state": status.state,
+                    "pairing_code": status.code,
+                    "detail": status.detail,
+                }
+            )
+        # Consume the single-use elevation as we execute (per-use, not
+        # per-window): the next call re-prompts for a fresh tap.
         elevation.record_destructive_execution(
             tool=name,
             family_id=grant.get("family_id", ""),
             client_id=grant.get("client_id", ""),
+            req_hash=req_hash,
         )
 
     _, native_handle_tool = _native()

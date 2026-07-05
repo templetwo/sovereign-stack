@@ -87,9 +87,13 @@ def _pkce_pair():
 CALLBACK = "https://claude.ai/api/mcp/auth_callback"
 
 
+APPROVAL_SECRET = "operator-passphrase-under-test"
+
+
 @pytest.fixture
 def oauth_env(tmp_path, monkeypatch):
-    """Hermetic storage + a registered client. Returns the client_id."""
+    """Hermetic storage + a registered client + configured approval secret.
+    Returns the client_id."""
     codes = tmp_path / "codes"
     tokens = tmp_path / "tokens"
     refresh = tmp_path / "refresh"
@@ -99,6 +103,11 @@ def oauth_env(tmp_path, monkeypatch):
     monkeypatch.setattr(oauth, "_TOKENS_DIR", tokens)
     monkeypatch.setattr(oauth, "_REFRESH_DIR", refresh)
     monkeypatch.setattr(oauth, "_CLIENTS_FILE", tmp_path / "oauth_clients.json")
+    # Resource-owner auth: configure the operator secret + nonce key, and clear
+    # the process-global consumed-nonce set so tests don't leak into each other.
+    monkeypatch.setattr(oauth, "CLAUDE_AUTHORIZE_SECRET", APPROVAL_SECRET)
+    monkeypatch.setattr(oauth, "_NONCE_SIGNING_KEY", APPROVAL_SECRET)
+    oauth._used_nonces.clear()
     client_id = "claude-test-client"
     oauth._save_clients(
         {
@@ -106,14 +115,17 @@ def oauth_env(tmp_path, monkeypatch):
                 "client_id": client_id,
                 "redirect_uris": [CALLBACK],
                 "grant_types": ["authorization_code", "refresh_token"],
+                "registered_by": "dcr",
+                "client_id_issued_at": 1,
             }
         }
     )
     return client_id
 
 
-def _authorize_code(client_id: str, challenge: str, resource: str = "", scope_str: str = "") -> str:
-    """Run the approve POST and return the minted code from the redirect."""
+def _approve_form(
+    client_id, challenge, resource="", scope_str="", secret=APPROVAL_SECRET, nonce=None
+):
     form = {
         "action": "approve",
         "client_id": client_id,
@@ -122,9 +134,18 @@ def _authorize_code(client_id: str, challenge: str, resource: str = "", scope_st
         "code_challenge_method": "S256",
         "state": "st4te",
         "scope": scope_str,
+        "approval_secret": secret,
+        "nonce": nonce if nonce is not None else oauth._mint_nonce(),
     }
     if resource:
         form["resource"] = resource
+    return form
+
+
+def _authorize_code(client_id: str, challenge: str, resource: str = "", scope_str: str = "") -> str:
+    """Run the approve POST (with a valid operator secret + fresh nonce) and
+    return the minted code from the redirect."""
+    form = _approve_form(client_id, challenge, resource=resource, scope_str=scope_str)
     sent = _run(oauth.handle_authorize, _scope(method="POST"), body=_form(form))
     assert _status(sent) == 302, _body(sent)
     location = _headers(sent)[b"location"].decode()
@@ -167,7 +188,15 @@ class TestRedirectPinning:
         assert not oauth.redirect_uri_pinned("https://evil.example/api/mcp/auth_callback")
         assert not oauth.redirect_uri_pinned("https://claude.ai.evil.example/callback")
 
-    def test_loopback_allowed(self):
+    def test_loopback_default_off(self):
+        # Hardened default: loopback redirects are OFF unless explicitly enabled
+        # for local Claude Code dev (else a self-approved code can be read out of
+        # the 302 by a curl-controlled endpoint).
+        assert oauth._ALLOW_LOOPBACK is False
+        assert not oauth.redirect_uri_pinned("http://localhost:8123/callback")
+
+    def test_loopback_allowed_when_enabled(self, monkeypatch):
+        monkeypatch.setattr(oauth, "_ALLOW_LOOPBACK", True)
         assert oauth.redirect_uri_pinned("http://localhost:8123/callback")
         assert oauth.redirect_uri_pinned("http://127.0.0.1:41999/callback")
 
@@ -213,15 +242,50 @@ class TestDCR:
         )
         assert _status(sent) == 400
 
-    def test_registry_cap_refuses_new_clients(self, oauth_env, monkeypatch):
-        monkeypatch.setattr(oauth, "MAX_REGISTERED_CLIENTS", 1)  # fixture registered one
-        sent = _run(
+    def _register(self, name):
+        return _run(
             oauth.handle_register,
             _scope(method="POST", path="/claude/oauth/register"),
-            body=json.dumps({"redirect_uris": [CALLBACK]}).encode(),
+            body=json.dumps({"redirect_uris": [CALLBACK], "client_name": name}).encode(),
         )
+
+    def test_identical_registration_is_idempotent(self, oauth_env):
+        # An identical (redirect_uris, client_name) returns the SAME client_id
+        # instead of growing the registry — collapses the retry/junk-fill vector.
+        s1 = self._register("claude.ai")
+        s2 = self._register("claude.ai")
+        assert _status(s1) == 201 and _status(s2) == 201
+        assert _json(s1)["client_id"] == _json(s2)["client_id"]
+
+    def test_cap_evicts_stale_unused_client_not_lockout(self, oauth_env, monkeypatch):
+        # At cap, a distinct new registration evicts the oldest stale (never
+        # token-issued) client rather than 429-locking-out onboarding.
+        monkeypatch.setattr(
+            oauth, "MAX_REGISTERED_CLIENTS", 1
+        )  # fixture registered one stale client
+        sent = self._register("a-different-client")
+        assert _status(sent) == 201
+        # The stale fixture client was evicted to make room.
+        assert not oauth._is_known_client(oauth_env)
+        assert oauth._is_known_client(_json(sent)["client_id"])
+
+    def test_cap_locks_out_only_when_all_active(self, oauth_env, monkeypatch):
+        # If every client has issued a token (non-evictable), the cap 429s —
+        # bounded growth without evicting a live client.
+        monkeypatch.setattr(oauth, "MAX_REGISTERED_CLIENTS", 1)
+        # give the fixture client a live token family so it cannot be evicted
+        oauth._mint_token_pair(oauth_env, "native", oauth.CANONICAL_RESOURCE, secrets.token_hex(8))
+        sent = self._register("cannot-fit")
         assert _status(sent) == 429
         assert _json(sent)["error"] == "registration_limit_reached"
+
+    def test_oversize_body_413(self, oauth_env, monkeypatch):
+        monkeypatch.setattr(oauth, "MAX_OAUTH_BODY_BYTES", 128)
+        big = json.dumps({"redirect_uris": [CALLBACK], "junk": "x" * 500}).encode()
+        sent = _run(
+            oauth.handle_register, _scope(method="POST", path="/claude/oauth/register"), body=big
+        )
+        assert _status(sent) == 413
 
 
 # ── Authorize: PKCE S256 mandatory + RFC 8707 ─────────────────────────────────
@@ -290,17 +354,14 @@ class TestAuthorizePost:
         assert data["audience"] == oauth._normalize_resource(oauth.CANONICAL_RESOURCE)
 
     def test_post_revalidates_pkce(self, oauth_env):
-        form = {
-            "action": "approve",
-            "client_id": oauth_env,
-            "redirect_uri": CALLBACK,
-            "code_challenge": "",
-            "code_challenge_method": "S256",
-        }
+        # Valid operator secret + nonce, but a missing challenge → PKCE re-check
+        # (400) after the approval gate passes.
+        form = _approve_form(oauth_env, challenge="")
         sent = _run(oauth.handle_authorize, _scope(method="POST"), body=_form(form))
         assert _status(sent) == 400
 
     def test_deny_redirects_access_denied(self, oauth_env):
+        # Deny short-circuits before the approval gate — no secret needed to say no.
         form = {"action": "deny", "client_id": oauth_env, "redirect_uri": CALLBACK, "state": "s"}
         sent = _run(oauth.handle_authorize, _scope(method="POST"), body=_form(form))
         assert _status(sent) == 302
@@ -310,6 +371,80 @@ class TestAuthorizePost:
         form = {"action": "deny", "client_id": oauth_env, "redirect_uri": "https://evil.example/cb"}
         sent = _run(oauth.handle_authorize, _scope(method="POST"), body=_form(form))
         assert _status(sent) == 400
+
+
+class TestResourceOwnerAuth:
+    """The load-bearing control: an anonymous approve POST must never mint a
+    code. Requires the operator secret AND a single-use signed nonce."""
+
+    _, _CHAL = _pkce_pair()
+
+    def test_get_renders_secret_field(self, oauth_env):
+        params = {
+            "response_type": "code",
+            "client_id": oauth_env,
+            "redirect_uri": CALLBACK,
+            "code_challenge": self._CHAL,
+            "code_challenge_method": "S256",
+        }
+        sent = _run(oauth.handle_authorize, _scope(query=urllib.parse.urlencode(params)))
+        assert _status(sent) == 200
+        body = _body(sent)
+        assert b'name="approval_secret"' in body
+        assert b'name="nonce"' in body
+
+    def test_missing_secret_refused(self, oauth_env):
+        form = _approve_form(oauth_env, self._CHAL, secret="")
+        sent = _run(oauth.handle_authorize, _scope(method="POST"), body=_form(form))
+        assert _status(sent) == 403
+
+    def test_wrong_secret_refused(self, oauth_env):
+        form = _approve_form(oauth_env, self._CHAL, secret="not-the-passphrase")
+        sent = _run(oauth.handle_authorize, _scope(method="POST"), body=_form(form))
+        assert _status(sent) == 403
+
+    def test_missing_nonce_refused(self, oauth_env):
+        form = _approve_form(oauth_env, self._CHAL, nonce="")
+        sent = _run(oauth.handle_authorize, _scope(method="POST"), body=_form(form))
+        assert _status(sent) == 403
+
+    def test_forged_nonce_refused(self, oauth_env):
+        form = _approve_form(oauth_env, self._CHAL, nonce="deadbeef.9999999999.forged")
+        sent = _run(oauth.handle_authorize, _scope(method="POST"), body=_form(form))
+        assert _status(sent) == 403
+
+    def test_nonce_is_single_use(self, oauth_env):
+        nonce = oauth._mint_nonce()
+        f1 = _approve_form(oauth_env, self._CHAL, nonce=nonce)
+        assert _status(_run(oauth.handle_authorize, _scope(method="POST"), body=_form(f1))) == 302
+        # Replaying the same nonce (even with the right secret) is refused.
+        f2 = _approve_form(oauth_env, self._CHAL, nonce=nonce)
+        assert _status(_run(oauth.handle_authorize, _scope(method="POST"), body=_form(f2))) == 403
+
+    def test_expired_nonce_refused(self, oauth_env, monkeypatch):
+        monkeypatch.setattr(oauth, "NONCE_TTL_SECONDS", -1)  # already expired at mint
+        form = _approve_form(oauth_env, self._CHAL, nonce=oauth._mint_nonce())
+        sent = _run(oauth.handle_authorize, _scope(method="POST"), body=_form(form))
+        assert _status(sent) == 403
+
+    def test_fail_closed_when_secret_unset_get(self, oauth_env, monkeypatch):
+        monkeypatch.setattr(oauth, "CLAUDE_AUTHORIZE_SECRET", "")
+        params = {
+            "response_type": "code",
+            "client_id": oauth_env,
+            "redirect_uri": CALLBACK,
+            "code_challenge": self._CHAL,
+            "code_challenge_method": "S256",
+        }
+        sent = _run(oauth.handle_authorize, _scope(query=urllib.parse.urlencode(params)))
+        assert _status(sent) == 503
+
+    def test_fail_closed_when_secret_unset_post(self, oauth_env, monkeypatch):
+        # A valid-looking approve cannot mint a code if no operator secret exists.
+        form = _approve_form(oauth_env, self._CHAL)
+        monkeypatch.setattr(oauth, "CLAUDE_AUTHORIZE_SECRET", "")
+        sent = _run(oauth.handle_authorize, _scope(method="POST"), body=_form(form))
+        assert _status(sent) == 503
 
 
 # ── Token endpoint: authorization_code grant ──────────────────────────────────

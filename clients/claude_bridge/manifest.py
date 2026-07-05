@@ -33,15 +33,24 @@ MANIFEST = {
         "refresh_rotation": "single-use; reuse revokes the token family",
         "scopes": [DEFAULT_SCOPE],
     },
+    "resource_owner_auth": (
+        "the OAuth consent requires the operator approval passphrase "
+        "(CLAUDE_AUTHORIZE_SECRET) plus a single-use signed nonce — completing "
+        "the OAuth dance alone does NOT equal operator consent"
+    ),
     "access_model": {
         "base_tier": "every native tool except the destructive tier",
         "destructive_tier": sorted(DESTRUCTIVE_TOOLS),
         "step_up": (
             "destructive tools return step_up_required with a two-word pairing "
             "code; Anthony approves on his phone via the Door That Asks; re-call "
-            "the tool after approval (elevation lasts 15 minutes per tool per grant)"
+            "the tool after approval. Single-use and argument-bound: one tap "
+            "authorizes exactly one call with the arguments Anthony saw"
         ),
-        "unknown_tools": "fail closed — tools not classified at review time require step-up",
+        "unknown_tools": (
+            "fabricated tool names return method_not_found; a real tool not "
+            "classified at review time fails closed to step-up"
+        ),
     },
     "revocation": "python -m clients.claude_bridge.cli revoke-all (HQ) or POST oauth/revoke (client)",
 }

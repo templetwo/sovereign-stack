@@ -30,6 +30,10 @@ from claude_bridge import elevation, oauth  # noqa: E402
 TOOL = "set_policy"
 FAMILY = "fam0123456789abcdef0123"
 CLIENT = "client_test_abc"
+# A fixed 64-hex argument-hash standing in for one concrete call's arguments.
+# The elevation record's on-disk name is discriminated by req_hash[:16], so any
+# stable hex string keeps _save/_load/_elev_path in lockstep.
+REQ_HASH = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
 HAPPY_REQUEST_BODY = {
     "arrival_request_id": "arq_x",
@@ -132,17 +136,18 @@ def door(monkeypatch):
     return door
 
 
-def _ensure():
-    return asyncio.run(elevation.ensure_elevation(TOOL, FAMILY, CLIENT))
+def _ensure(req_hash=REQ_HASH, summary=""):
+    return asyncio.run(elevation.ensure_elevation(TOOL, FAMILY, CLIENT, req_hash, summary))
 
 
-def _write_record(**overrides):
+def _write_record(req_hash=REQ_HASH, **overrides):
     """Write an elevation record directly (bypassing the Door)."""
     rec = {
         "elevation_id": "abcd1234",
         "tool": TOOL,
         "family_id": FAMILY,
         "client_id": CLIENT,
+        "req_hash": req_hash,
         "rid": "arq_x",
         "code": "harbor-juniper",
         "status": "pending",
@@ -151,12 +156,12 @@ def _write_record(**overrides):
         "notification_sent": True,
     }
     rec.update(overrides)
-    elevation._save_elevation(TOOL, FAMILY, rec)
+    elevation._save_elevation(TOOL, FAMILY, req_hash, rec)
     return rec
 
 
-def _read_record():
-    return json.loads(elevation._elev_path(TOOL, FAMILY).read_text())
+def _read_record(req_hash=REQ_HASH):
+    return json.loads(elevation._elev_path(TOOL, FAMILY, req_hash).read_text())
 
 
 def _audit_events():
@@ -262,3 +267,100 @@ class TestActiveLifecycle:
         assert status.state == "active"
         assert door.post_calls == []
         assert door.get_calls == []
+
+
+class TestSingleUse:
+    """One human tap authorizes exactly one execution. After the destructive
+    call runs, record_destructive_execution CONSUMES the elevation, so the very
+    next call — same tool, same arguments — re-enters the Door."""
+
+    def test_execution_consumes_elevation_and_next_call_re_requests(self, door):
+        # Start from a fresh, valid active elevation.
+        _write_record(status="active", approved_at=_now().isoformat(), receipt_token_id="tok123")
+        status = _ensure()
+        assert status.state == "active"
+        assert door.post_calls == []  # active → no Door call
+
+        # Execute → consume the single-use elevation.
+        elevation.record_destructive_execution(TOOL, FAMILY, CLIENT, REQ_HASH)
+        assert not elevation._elev_path(TOOL, FAMILY, REQ_HASH).exists()
+
+        # A subsequent call with the SAME req_hash finds no record and asks the
+        # Door anew — per-use consent, not per-window.
+        door.post_responses.append(FakeResponse(201, dict(HAPPY_REQUEST_BODY)))
+        status = _ensure()
+        assert status.state == "pending"
+        assert len(door.post_calls) == 1
+
+    def test_execution_is_audited_before_consuming(self, door):
+        _write_record(status="active", approved_at=_now().isoformat(), receipt_token_id="tok123")
+        _ensure()
+        elevation.record_destructive_execution(TOOL, FAMILY, CLIENT, REQ_HASH)
+        events = [e["event"] for e in _audit_events()]
+        assert "destructive_executed" in events
+
+
+class TestArgumentBinding:
+    """The approval binds to the exact call the human saw: a different-argument
+    call gets a different hash → a different record → its own fresh tap."""
+
+    def test_hash_differs_by_arguments_and_is_stable(self):
+        _, h_a = elevation.summarize_and_hash(TOOL, {"policy": "a"})
+        _, h_b = elevation.summarize_and_hash(TOOL, {"policy": "b"})
+        _, h_a2 = elevation.summarize_and_hash(TOOL, {"policy": "a"})
+        assert h_a != h_b  # different arguments → different hash
+        assert h_a == h_a2  # identical arguments → identical hash
+
+    def test_active_elevation_for_one_hash_does_not_satisfy_another(self, door):
+        _, hash_a = elevation.summarize_and_hash(TOOL, {"policy": "a"})
+        _, hash_b = elevation.summarize_and_hash(TOOL, {"policy": "b"})
+
+        # An ACTIVE elevation bound to arguments A (approved_at is load-bearing:
+        # its absence would make ensure treat the record as stale).
+        _write_record(
+            req_hash=hash_a,
+            status="active",
+            approved_at=_now().isoformat(),
+            receipt_token_id="tok123",
+        )
+
+        # A call for arguments B lands on a DIFFERENT file → no record → the
+        # Door is asked anew.
+        door.post_responses.append(FakeResponse(201, dict(HAPPY_REQUEST_BODY)))
+        status_b = asyncio.run(elevation.ensure_elevation(TOOL, FAMILY, CLIENT, hash_b))
+        assert status_b.state == "pending"
+        assert len(door.post_calls) == 1
+
+        # …while the A elevation is untouched and still active (no Door call).
+        status_a = asyncio.run(elevation.ensure_elevation(TOOL, FAMILY, CLIENT, hash_a))
+        assert status_a.state == "active"
+        assert len(door.post_calls) == 1  # unchanged — A never hit the Door
+
+
+class TestSummary:
+    """The redacted summary is what Anthony sees at the Door: scalars pass
+    (truncated), non-scalars collapse to <type>, and it reaches the payload."""
+
+    def test_truncates_long_values_and_redacts_non_scalars(self):
+        summary, _ = elevation.summarize_and_hash(
+            TOOL,
+            {"long": "x" * 100, "obj": {"nested": 1}, "scalar": 42},
+        )
+        # Long scalar is truncated with an ellipsis (never leaked whole).
+        assert "…" in summary
+        assert "x" * 100 not in summary
+        # Non-scalar values are redacted to their type, not serialized.
+        assert "obj=<dict>" in summary
+        assert "nested" not in summary
+        # Plain scalars pass through.
+        assert "scalar=42" in summary
+
+    def test_summary_reaches_door_seat_description(self, door):
+        summary, req_hash = elevation.summarize_and_hash(TOOL, {"policy": "coherence"})
+        assert summary == "policy=coherence"
+        door.post_responses.append(FakeResponse(201, dict(HAPPY_REQUEST_BODY)))
+        asyncio.run(elevation.ensure_elevation(TOOL, FAMILY, CLIENT, req_hash, summary))
+
+        _, posted = door.post_calls[0]
+        assert summary in posted["seat_description"]
+        assert "policy=coherence" in posted["seat_description"]

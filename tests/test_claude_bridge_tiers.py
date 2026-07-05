@@ -24,11 +24,17 @@ class TestTierSets:
     def test_sets_are_disjoint(self):
         assert not (DESTRUCTIVE_TOOLS & BASE_TOOLS)
 
-    def test_where_did_i_leave_off_is_base(self):
+    def test_where_did_i_leave_off_is_destructive(self):
         # Deliberate, documented side-effect: it CONSUMES unconsumed handoffs
-        # on read. It stays base tier — remote seats are steered toward
-        # arrive_lineage instead, but the tool itself is not destructive-gated.
-        assert "where_did_i_leave_off" in BASE_TOOLS
+        # on read. A remote claude.ai seat must not silently eat handoffs
+        # addressed to whoever boots next at HQ, so it is now STEP-UP gated
+        # (a remote consume requires a human tap). Ordinary remote boots use
+        # the side-effect-free arrive_lineage, which stays base tier.
+        assert "where_did_i_leave_off" in DESTRUCTIVE_TOOLS
+        assert "where_did_i_leave_off" not in BASE_TOOLS
+        assert classify("where_did_i_leave_off") == TIER_STEP_UP
+        assert "arrive_lineage" in BASE_TOOLS
+        assert classify("arrive_lineage") == TIER_BASE
 
     def test_spec_named_destructive_tools(self):
         for tool in (

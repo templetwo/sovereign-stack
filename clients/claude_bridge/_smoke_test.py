@@ -145,16 +145,27 @@ def run() -> bool:
     )
     results.append(
         check(
-            "http loopback allowed (RFC 8252)",
-            oauth.redirect_uri_pinned("http://localhost:8123/callback"),
+            "http loopback OFF by default (hardened)",
+            not oauth.redirect_uri_pinned("http://localhost:8123/callback"),
         )
     )
-    results.append(
-        check(
-            "http on LAN address refused",
-            not oauth.redirect_uri_pinned("http://192.168.1.5/callback"),
+    _saved_loopback = oauth._ALLOW_LOOPBACK
+    oauth._ALLOW_LOOPBACK = True
+    try:
+        results.append(
+            check(
+                "http loopback allowed when enabled (RFC 8252)",
+                oauth.redirect_uri_pinned("http://localhost:8123/callback"),
+            )
         )
-    )
+        results.append(
+            check(
+                "http on LAN address refused even when loopback enabled",
+                not oauth.redirect_uri_pinned("http://192.168.1.5/callback"),
+            )
+        )
+    finally:
+        oauth._ALLOW_LOOPBACK = _saved_loopback
 
     print("\n── Mint / validate / expire cycle (temp storage) ────────────────")
 

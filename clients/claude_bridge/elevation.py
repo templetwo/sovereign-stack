@@ -33,6 +33,7 @@ tools are never touched by this module.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import logging
 import os
@@ -92,13 +93,46 @@ def audit(event: str, **fields) -> None:
 #   denied   — Anthony denied, or the Door expired/voided the request
 
 
-def _elev_path(tool: str, family_id: str) -> Path:
-    # Deterministic per (tool, family) so re-calls find the same record.
-    return _ELEV_DIR / f"{family_id[:16]}__{tool}.json"
+def summarize_and_hash(tool: str, arguments: dict) -> tuple[str, str]:
+    """Build (redacted human summary, canonical argument hash) for a call.
+
+    The hash BINDS an approval to the exact call the human saw: a
+    different-argument call has a different hash, so it will not match a live
+    elevation and re-prompts. The summary is a compact, truncated key=value of
+    the scalar arguments — enough for Anthony to see WHAT is being approved
+    (e.g. which policy, which record) without leaking bulky/sensitive bodies.
+    """
+    try:
+        canonical = json.dumps(arguments or {}, sort_keys=True, default=str)
+    except (TypeError, ValueError):
+        canonical = repr(arguments)
+    arg_hash = hashlib.sha256(f"{tool}\n{canonical}".encode()).hexdigest()
+
+    parts = []
+    for k in sorted((arguments or {}).keys()):
+        v = arguments[k]
+        if isinstance(v, (str, int, float, bool)) or v is None:
+            s = str(v)
+            s = s if len(s) <= 40 else s[:37] + "…"
+            parts.append(f"{k}={s}")
+        else:
+            parts.append(f"{k}=<{type(v).__name__}>")
+        if len(parts) >= 6:
+            break
+    summary = ", ".join(parts) if parts else "(no arguments)"
+    if len(summary) > 200:
+        summary = summary[:197] + "…"
+    return summary, arg_hash
 
 
-def _load_elevation(tool: str, family_id: str) -> dict | None:
-    path = _elev_path(tool, family_id)
+def _elev_path(tool: str, family_id: str, req_hash: str) -> Path:
+    # Deterministic per (tool, family, argument-hash) so a re-call with the SAME
+    # arguments finds the same record, but a different-argument call does not.
+    return _ELEV_DIR / f"{family_id[:16]}__{req_hash[:16]}.json"
+
+
+def _load_elevation(tool: str, family_id: str, req_hash: str) -> dict | None:
+    path = _elev_path(tool, family_id, req_hash)
     if not path.exists():
         return None
     try:
@@ -107,8 +141,12 @@ def _load_elevation(tool: str, family_id: str) -> dict | None:
         return None
 
 
-def _save_elevation(tool: str, family_id: str, data: dict) -> None:
-    _write_secure(_elev_path(tool, family_id), json.dumps(data, indent=2))
+def _save_elevation(tool: str, family_id: str, req_hash: str, data: dict) -> None:
+    _write_secure(_elev_path(tool, family_id, req_hash), json.dumps(data, indent=2))
+
+
+def _delete_elevation(tool: str, family_id: str, req_hash: str) -> None:
+    _elev_path(tool, family_id, req_hash).unlink(missing_ok=True)
 
 
 @dataclass
@@ -121,12 +159,14 @@ class ElevationStatus:
 # ── Door client ───────────────────────────────────────────────────────────────
 
 
-async def _door_request(tool: str, family_id: str, client_id: str) -> ElevationStatus:
+async def _door_request(
+    tool: str, family_id: str, client_id: str, req_hash: str, summary: str
+) -> ElevationStatus:
     """Create the step-up request at the Door and record it pending."""
     payload = {
         "source_instance": "claude-ai-bridge",
         "seat_description": (
-            f"STEP-UP: destructive tool '{tool}' — claude.ai connector, "
+            f"STEP-UP: '{tool}' [{summary}] — claude.ai connector, "
             f"grant {family_id[:8]}, client {client_id[:20]}"
         ),
         # The svs_ token the Door mints at approval is a RECEIPT here, not a
@@ -165,11 +205,14 @@ async def _door_request(tool: str, family_id: str, client_id: str) -> ElevationS
     _save_elevation(
         tool,
         family_id,
+        req_hash,
         {
             "elevation_id": secrets.token_hex(8),
             "tool": tool,
             "family_id": family_id,
             "client_id": client_id,
+            "req_hash": req_hash,
+            "summary": summary,
             "rid": rid,
             "code": code,
             "status": "pending",
@@ -178,7 +221,14 @@ async def _door_request(tool: str, family_id: str, client_id: str) -> ElevationS
             "notification_sent": bool(body.get("notification_sent")),
         },
     )
-    audit("step_up_requested", tool=tool, family=family_id[:12], rid=rid, code=code)
+    audit(
+        "step_up_requested",
+        tool=tool,
+        family=family_id[:12],
+        rid=rid,
+        code=code,
+        summary=summary,
+    )
     note = (
         ""
         if body.get("notification_sent")
@@ -195,7 +245,7 @@ async def _door_request(tool: str, family_id: str, client_id: str) -> ElevationS
     )
 
 
-async def _door_poll(rec: dict, tool: str, family_id: str) -> ElevationStatus:
+async def _door_poll(rec: dict, tool: str, family_id: str, req_hash: str) -> ElevationStatus:
     """Poll a pending request, honoring the Door's polling discipline."""
     code = rec.get("code", "")
     last_poll = rec.get("last_poll_at")
@@ -215,7 +265,7 @@ async def _door_poll(rec: dict, tool: str, family_id: str) -> ElevationStatus:
             )
 
     rec["last_poll_at"] = _now().isoformat()
-    _save_elevation(tool, family_id, rec)
+    _save_elevation(tool, family_id, req_hash, rec)
 
     try:
         async with httpx.AsyncClient(timeout=_DOOR_TIMEOUT_SECONDS) as client:
@@ -254,7 +304,7 @@ async def _door_poll(rec: dict, tool: str, family_id: str) -> ElevationStatus:
         rec["approved_at"] = _now().isoformat()
         rec["receipt_token_id"] = body.get("token_id", "")
         rec["decided_via"] = (body.get("grant") or {}).get("decided_via", "")
-        _save_elevation(tool, family_id, rec)
+        _save_elevation(tool, family_id, req_hash, rec)
         audit(
             "step_up_approved",
             tool=tool,
@@ -271,7 +321,7 @@ async def _door_poll(rec: dict, tool: str, family_id: str) -> ElevationStatus:
         if rec.get("status") == "active":
             return ElevationStatus("active", f"Step-up '{code}' approved.", code=code)
         rec["status"] = "denied"
-        _save_elevation(tool, family_id, rec)
+        _save_elevation(tool, family_id, req_hash, rec)
         return ElevationStatus(
             "denied", f"Step-up '{code}' was already consumed; request again.", code=code
         )
@@ -279,7 +329,7 @@ async def _door_poll(rec: dict, tool: str, family_id: str) -> ElevationStatus:
     # denied / expired / anything else → closed.
     rec["status"] = "denied"
     rec["resolved_status"] = status
-    _save_elevation(tool, family_id, rec)
+    _save_elevation(tool, family_id, req_hash, rec)
     audit("step_up_refused", tool=tool, family=family_id[:12], door_status=status)
     return ElevationStatus(
         "denied",
@@ -292,13 +342,20 @@ async def _door_poll(rec: dict, tool: str, family_id: str) -> ElevationStatus:
 # ── Public surface ────────────────────────────────────────────────────────────
 
 
-async def ensure_elevation(tool: str, family_id: str, client_id: str) -> ElevationStatus:
+async def ensure_elevation(
+    tool: str, family_id: str, client_id: str, req_hash: str, summary: str = ""
+) -> ElevationStatus:
     """
-    The one call the tier gate makes for a destructive tool. Returns the
-    current elevation state for (tool, token-family), advancing it where
+    The one call the tier gate makes for a destructive tool. Returns the current
+    elevation state for (tool, token-family, argument-hash), advancing it where
     possible: active → allow; pending → poll; absent/stale → request anew.
+
+    The elevation is bound to req_hash (the exact arguments) AND is single-use:
+    record_destructive_execution consumes it after the call runs, so the next
+    destructive call — even the same tool with the same arguments — re-prompts
+    for a fresh human tap. One tap authorizes exactly one execution.
     """
-    rec = _load_elevation(tool, family_id)
+    rec = _load_elevation(tool, family_id, req_hash)
 
     if rec is not None and rec.get("status") == "active":
         try:
@@ -322,19 +379,24 @@ async def ensure_elevation(tool: str, family_id: str, client_id: str) -> Elevati
         if stale:
             rec = None
         else:
-            return await _door_poll(rec, tool, family_id)
+            return await _door_poll(rec, tool, family_id, req_hash)
 
     if rec is not None and rec.get("status") == "denied":
         # A denied/expired record does not block a fresh request — Anthony may
         # simply have missed the first push. Fall through.
         pass
 
-    return await _door_request(tool, family_id, client_id)
+    return await _door_request(tool, family_id, client_id, req_hash, summary)
 
 
-def record_destructive_execution(tool: str, family_id: str, client_id: str) -> None:
-    """Audit-log an actual destructive-tier execution under a live elevation."""
-    rec = _load_elevation(tool, family_id) or {}
+def record_destructive_execution(tool: str, family_id: str, client_id: str, req_hash: str) -> None:
+    """Audit-log a destructive-tier execution and CONSUME its elevation.
+
+    Single-use: deleting the record here means the next call to the same tool
+    with the same arguments re-enters the Door and requires a fresh tap. This
+    is what makes the consent 'per-use', not 'per-window'.
+    """
+    rec = _load_elevation(tool, family_id, req_hash) or {}
     audit(
         "destructive_executed",
         tool=tool,
@@ -342,7 +404,9 @@ def record_destructive_execution(tool: str, family_id: str, client_id: str) -> N
         client=client_id[:20],
         elevation_id=rec.get("elevation_id"),
         receipt_token_id=rec.get("receipt_token_id"),
+        summary=rec.get("summary"),
     )
+    _delete_elevation(tool, family_id, req_hash)
 
 
 def revoke_all_elevations() -> int:
