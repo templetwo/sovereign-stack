@@ -13,7 +13,7 @@ import os
 import sys
 import threading
 import time
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
 from urllib.parse import parse_qs
 
@@ -105,6 +105,57 @@ except ImportError as _grok_e:
     GROK_MANIFEST = None
     logging.getLogger("sovereign-stack-sse").warning("Grok bridge not loaded: %s", _grok_e)
 
+# Claude bridge — native surface over Streamable HTTP, OAuth 2.1-gated.
+# Independently importable; failure doesn't disable the other bridges.
+try:
+    from claude_bridge.manifest import MANIFEST as CLAUDE_MANIFEST
+    from claude_bridge.mcp_native import handle_claude_mcp
+    from claude_bridge.mcp_native import session_manager as claude_session_manager
+    from claude_bridge.oauth import (
+        handle_authorization_server_metadata as handle_claude_oauth_as_meta,
+    )
+    from claude_bridge.oauth import (
+        handle_authorize as handle_claude_oauth_authorize,
+    )
+    from claude_bridge.oauth import (
+        handle_protected_resource_metadata as handle_claude_oauth_pr_meta,
+    )
+    from claude_bridge.oauth import (
+        handle_register as handle_claude_oauth_register,
+    )
+    from claude_bridge.oauth import (
+        handle_revoke as handle_claude_oauth_revoke,
+    )
+    from claude_bridge.oauth import (
+        handle_token as handle_claude_oauth_token,
+    )
+
+    _CLAUDE_BRIDGE_ENABLED = True
+except ImportError as _claude_e:
+    _CLAUDE_BRIDGE_ENABLED = False
+    handle_claude_mcp = None
+    claude_session_manager = None
+    handle_claude_oauth_authorize = None
+    handle_claude_oauth_token = None
+    handle_claude_oauth_register = None
+    handle_claude_oauth_revoke = None
+    handle_claude_oauth_as_meta = None
+    handle_claude_oauth_pr_meta = None
+    CLAUDE_MANIFEST = None
+    logging.getLogger("sovereign-stack-sse").warning("Claude bridge not loaded: %s", _claude_e)
+
+# Root-level well-known paths (RFC 8414 §3.1 / RFC 9728 §3.1 path-insertion
+# forms) that MCP clients probe for the claude bridge. Answering every
+# discovery shape with a definitive 200 is the #4030 retry-loop hardening.
+_CLAUDE_ROOT_AS_META_PATHS = (
+    "/.well-known/oauth-authorization-server/claude",
+    "/.well-known/openid-configuration/claude",
+)
+_CLAUDE_ROOT_PR_META_PATHS = (
+    "/.well-known/oauth-protected-resource/claude/mcp",
+    "/.well-known/oauth-protected-resource/claude",
+)
+
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("sovereign-stack-sse")
@@ -172,25 +223,53 @@ def _public_ip(scope: dict) -> str | None:
     return ip or None
 
 
-def _connect_rate_ok(ip: str) -> bool:
-    """Consume one connect token for ip. True if the connect may proceed."""
+def _bucket_ok(
+    buckets: dict[str, tuple[float, float]],
+    ip: str,
+    burst: float,
+    refill_per_sec: float,
+) -> bool:
+    """Consume one token from a per-IP bucket. True if the request may proceed."""
     now = time.monotonic()
     with _connect_lock:
-        if len(_connect_buckets) > 10000:
-            stale = [k for k, (_, last) in _connect_buckets.items() if now - last > 600]
+        if len(buckets) > 10000:
+            stale = [k for k, (_, last) in buckets.items() if now - last > 600]
             for k in stale:
-                del _connect_buckets[k]
-        tokens, last = _connect_buckets.get(ip, (_SSE_CONNECT_BURST, now))
-        tokens = min(_SSE_CONNECT_BURST, tokens + (now - last) * _SSE_CONNECT_REFILL_PER_SEC)
+                del buckets[k]
+        tokens, last = buckets.get(ip, (burst, now))
+        tokens = min(burst, tokens + (now - last) * refill_per_sec)
         if tokens >= 1.0:
-            _connect_buckets[ip] = (tokens - 1.0, now)
+            buckets[ip] = (tokens - 1.0, now)
             return True
-        _connect_buckets[ip] = (tokens, now)
+        buckets[ip] = (tokens, now)
         return False
 
 
+def _connect_rate_ok(ip: str) -> bool:
+    """Consume one connect token for ip. True if the connect may proceed."""
+    return _bucket_ok(_connect_buckets, ip, _SSE_CONNECT_BURST, _SSE_CONNECT_REFILL_PER_SEC)
+
+
+# Claude-bridge rate limits: the MCP endpoint sees one POST per tool call
+# (legitimately chatty — generous bucket); the OAuth + discovery endpoints
+# see a handful of requests per handshake (strict bucket; this is the
+# surface the #4030 retry loop hammered).
+_CLAUDE_MCP_BURST = float(os.environ.get("CLAUDE_MCP_BURST", "30"))
+_CLAUDE_MCP_REFILL_PER_SEC = float(os.environ.get("CLAUDE_MCP_PER_MIN", "120")) / 60.0
+_CLAUDE_OAUTH_BURST = float(os.environ.get("CLAUDE_OAUTH_BURST", "10"))
+_CLAUDE_OAUTH_REFILL_PER_SEC = float(os.environ.get("CLAUDE_OAUTH_PER_MIN", "30")) / 60.0
+_claude_mcp_buckets: dict[str, tuple[float, float]] = {}
+_claude_oauth_buckets: dict[str, tuple[float, float]] = {}
+
+
+def _claude_rate_ok(ip: str, path: str) -> bool:
+    if path == "/claude/mcp":
+        return _bucket_ok(_claude_mcp_buckets, ip, _CLAUDE_MCP_BURST, _CLAUDE_MCP_REFILL_PER_SEC)
+    return _bucket_ok(_claude_oauth_buckets, ip, _CLAUDE_OAUTH_BURST, _CLAUDE_OAUTH_REFILL_PER_SEC)
+
+
 async def _send_429(send) -> None:
-    body = b'{"error":"Too Many Requests","detail":"Per-IP connect rate exceeded. Back off and retry."}'
+    body = b'{"error":"Too Many Requests","detail":"Per-IP request rate exceeded. Back off and retry."}'
     await send(
         {
             "type": "http.response.start",
@@ -341,6 +420,19 @@ class SovereignAsgiMiddleware:
                 await _send_429(send)
                 return
 
+        # Claude-bridge rate limit (all methods — Streamable HTTP is POST-heavy
+        # and the OAuth/discovery surface is the #4030 retry-loop target).
+        if scope.get("type") == "http" and (
+            path.startswith("/claude/")
+            or path in _CLAUDE_ROOT_AS_META_PATHS
+            or path in _CLAUDE_ROOT_PR_META_PATHS
+        ):
+            client_ip = _public_ip(scope)
+            if client_ip and not _claude_rate_ok(client_ip, path):
+                logger.warning(f"429 claude-bridge rate limit for {client_ip} on {path}")
+                await _send_429(send)
+                return
+
         if scope["type"] == "http" and path == "/messages" and method == "POST":
             logger.info("Message received")
             await sse.handle_post_message(scope, receive, send)
@@ -430,6 +522,42 @@ class SovereignAsgiMiddleware:
             and method == "GET"
         ):
             await handle_openai_oauth_pr_meta(scope, receive, send)
+        elif (
+            _CLAUDE_BRIDGE_ENABLED and path == "/claude/mcp" and method in ("POST", "GET", "DELETE")
+        ):
+            # Streamable HTTP: one path, three methods. Auth (audience-bound
+            # bearer) is enforced inside handle_claude_mcp before the session
+            # manager ever sees the request.
+            await handle_claude_mcp(scope, receive, send)
+        elif _CLAUDE_BRIDGE_ENABLED and path == "/claude/oauth/authorize":
+            # GET shows consent page; POST receives consent submission
+            await handle_claude_oauth_authorize(scope, receive, send)
+        elif _CLAUDE_BRIDGE_ENABLED and path == "/claude/oauth/token" and method == "POST":
+            await handle_claude_oauth_token(scope, receive, send)
+        elif _CLAUDE_BRIDGE_ENABLED and path == "/claude/oauth/register" and method == "POST":
+            await handle_claude_oauth_register(scope, receive, send)
+        elif _CLAUDE_BRIDGE_ENABLED and path == "/claude/oauth/revoke" and method == "POST":
+            await handle_claude_oauth_revoke(scope, receive, send)
+        elif (
+            _CLAUDE_BRIDGE_ENABLED
+            and method == "GET"
+            and path
+            in (
+                "/claude/.well-known/oauth-authorization-server",
+                "/claude/.well-known/openid-configuration",
+            )
+        ):
+            await handle_claude_oauth_as_meta(scope, receive, send)
+        elif (
+            _CLAUDE_BRIDGE_ENABLED
+            and path == "/claude/.well-known/oauth-protected-resource"
+            and method == "GET"
+        ):
+            await handle_claude_oauth_pr_meta(scope, receive, send)
+        elif _CLAUDE_BRIDGE_ENABLED and method == "GET" and path in _CLAUDE_ROOT_AS_META_PATHS:
+            await handle_claude_oauth_as_meta(scope, receive, send)
+        elif _CLAUDE_BRIDGE_ENABLED and method == "GET" and path in _CLAUDE_ROOT_PR_META_PATHS:
+            await handle_claude_oauth_pr_meta(scope, receive, send)
         else:
             await self.app(scope, receive, send)
 
@@ -450,27 +578,47 @@ async def grok_bridge_info(request: Request) -> JSONResponse:
     return JSONResponse(GROK_MANIFEST)
 
 
+async def claude_bridge_info(request: Request) -> JSONResponse:
+    """Bridge manifest — what's exposed on /claude/mcp."""
+    if not _CLAUDE_BRIDGE_ENABLED:
+        return JSONResponse({"error": "Claude bridge not loaded"}, status_code=503)
+    return JSONResponse(CLAUDE_MANIFEST)
+
+
 @asynccontextmanager
 async def _lifespan(app):
-    """Starlette lifespan: boot-launch the resident scribe at SSE startup.
+    """Starlette lifespan: start the claude-bridge session manager and
+    boot-launch the resident scribe at SSE startup.
 
     IMPORTANT: uvicorn.run() must use workers=1 (the default, never set
     workers>1). The resident scribe is a module-level in-memory singleton;
     it only holds at exactly one worker process. If workers>1, each worker
-    gets its own resident and cross-worker routing breaks.
+    gets its own resident and cross-worker routing breaks. (The claude
+    session manager is likewise per-process state.)
+
+    The StreamableHTTPSessionManager contract: run() must be entered exactly
+    once, here, before any handle_request — otherwise the /claude/mcp route
+    raises RuntimeError.
 
     The ensure_resident_scribe() call runs on a thread to avoid blocking the
     event loop on Anthropic API latency. Failures are logged but never fatal —
     the SSE server starts regardless.
     """
-    try:
-        from .scribe.resident import ensure_resident_scribe
+    async with AsyncExitStack() as stack:
+        if _CLAUDE_BRIDGE_ENABLED:
+            try:
+                await stack.enter_async_context(claude_session_manager.run())
+                logger.info("claude bridge streamable-http session manager started")
+            except Exception as exc:
+                logger.warning("claude session manager failed to start (non-fatal): %s", exc)
+        try:
+            from .scribe.resident import ensure_resident_scribe
 
-        await asyncio.to_thread(ensure_resident_scribe)
-        logger.info("scribe resident established at SSE boot")
-    except Exception as exc:
-        logger.warning("scribe resident boot-launch failed (non-fatal): %s", exc)
-    yield
+            await asyncio.to_thread(ensure_resident_scribe)
+            logger.info("scribe resident established at SSE boot")
+        except Exception as exc:
+            logger.warning("scribe resident boot-launch failed (non-fatal): %s", exc)
+        yield
 
 
 # Create Starlette app with SSE and health routes.
@@ -483,6 +631,7 @@ _inner_app = Starlette(
         Route("/health", health, methods=["GET"]),
         Route("/openai/info", bridge_info, methods=["GET"]),
         Route("/grok/info", grok_bridge_info, methods=["GET"]),
+        Route("/claude/info", claude_bridge_info, methods=["GET"]),
     ],
     lifespan=_lifespan,
 )
