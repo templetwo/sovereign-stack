@@ -26,6 +26,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .witness import days_old
+
 SOVEREIGN_ROOT = Path(os.path.expanduser("~/.sovereign"))
 REFLECTIONS_DIR = SOVEREIGN_ROOT / "reflections"
 
@@ -222,6 +224,70 @@ def latest_dream_boot_block(
         f"  {obs}\n"
         f"  (full text: recall_reflections, or ~/.sovereign/reflections/{day}.jsonl)"
     )
+
+
+def list_dreams(
+    reflections_dir: Path | None = None,
+    max_age_days: int = 45,
+    ack_statuses: tuple[str, ...] = ("unread", "engage"),
+) -> list[dict]:
+    """Dream records as raw dicts, newest-first, filtered by age + ack_status.
+
+    A "dream" is a reflection written by the dream daemon
+    (daemons/dream_daemon.py): kind == "dream" (connection_type "dream"
+    too — same detection rule as latest_dream above). Returns RAW dicts,
+    not ReflectionRecord, so dream-only fields (title, dream_full,
+    domains) the dataclass does not model survive intact for callers
+    such as reflexive.py's resonant_dreams bucket, which needs domains
+    for tag-overlap scoring.
+
+    Args:
+        reflections_dir: Override for tests. None resolves to the
+            module-level REFLECTIONS_DIR AT CALL TIME — same pattern as
+            _iter_all_records, so patching the module attribute works.
+        max_age_days: Drop dreams older than this many days (by
+            timestamp). A dream that ages out is simply omitted.
+        ack_statuses: Only include dreams whose ack_status is one of
+            these. Default (unread, engage) excludes confirm/discard —
+            a settled dream stops pushing at the right moment.
+
+    Returns:
+        List of raw dream dicts, newest-first by timestamp. Fail-soft:
+        a missing directory, unreadable file, or malformed line is
+        skipped rather than raised — mirrors _iter_all_records/
+        latest_dream's tolerance for a messy reflections tree.
+    """
+    if reflections_dir is None:
+        reflections_dir = REFLECTIONS_DIR
+    if not reflections_dir.exists():
+        return []
+    allowed_statuses = set(ack_statuses) if ack_statuses else None
+    dreams: list[dict] = []
+    for path in sorted(reflections_dir.glob("*.jsonl"), reverse=True):
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                data = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(data, dict):
+                continue
+            if data.get("kind") != "dream" and data.get("connection_type") != "dream":
+                continue
+            status = data.get("ack_status", "unread")
+            if allowed_statuses is not None and status not in allowed_statuses:
+                continue
+            if max_age_days is not None and days_old(data.get("timestamp")) > max_age_days:
+                continue
+            dreams.append(data)
+    dreams.sort(key=lambda d: str(d.get("timestamp", "")), reverse=True)
+    return dreams
 
 
 def list_reflections(

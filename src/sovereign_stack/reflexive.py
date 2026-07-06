@@ -33,6 +33,7 @@ from typing import Any
 
 from .handoff import HandoffEngine
 from .memory import ExperientialMemory, _parse_iso
+from .reflections import list_dreams
 from .witness import days_old as _days_old
 
 
@@ -177,7 +178,8 @@ class ReflexiveSurface:
         Returns:
             Dict with keys:
               matched_open_threads, relevant_handoffs, recent_mistakes,
-              related_insights, total_candidates_scanned, scoring_explanation.
+              related_insights, resonant_dreams, total_candidates_scanned,
+              scoring_explanation.
         """
         limit_per_bucket = max(1, int(limit_per_bucket))
         caller_tags = [t.strip().lower() for t in (domain_tags or []) if t.strip()]
@@ -228,15 +230,38 @@ class ReflexiveSurface:
             context_fields=["content"],
         )
 
+        # ── Bucket 5: resonant dreams ──
+        # Domain-matched, novelty-boosted — NOT usefulness-scored. A dream
+        # earns its place by being in tagged territory, same strict
+        # zero-overlap drop as the buckets above. Wrapped defensively (on
+        # top of list_dreams' own per-file fail-soft behavior) so a broken
+        # reflections tree can never break surface() as a whole.
+        try:
+            raw_dreams = list_dreams(reflections_dir=self.sovereign_root / "reflections")
+        except Exception:
+            raw_dreams = []
+        try:
+            scored_dreams = self._score_and_sort_dreams(raw_dreams, caller_tags, project)
+        except Exception:
+            scored_dreams = []
+
         total_candidates = (
-            len(raw_threads) + len(raw_handoffs) + len(raw_mistakes) + len(raw_insights)
+            len(raw_threads)
+            + len(raw_handoffs)
+            + len(raw_mistakes)
+            + len(raw_insights)
+            + len(raw_dreams)
         )
 
         scoring_explanation = (
             f"Scored {len(raw_threads)} open_threads, {len(raw_handoffs)} handoffs, "
-            f"{len(raw_mistakes)} mistakes, {len(raw_insights)} insights; "
+            f"{len(raw_mistakes)} mistakes, {len(raw_insights)} insights, "
+            f"{len(raw_dreams)} dreams; "
             f"returned top {limit_per_bucket} per bucket ranked by "
-            f"tag_overlap*2 + recency_boost(1-days/30) + project_match(+0.5)."
+            f"tag_overlap*2 + recency_boost(1-days/30) + project_match(+0.5); "
+            f"dreams are scored by tag_overlap*2 + recency_boost only, no "
+            f"project_match (domain-match + novelty, not usefulness), plus "
+            f"+0.5 while unread."
         )
 
         return {
@@ -244,6 +269,7 @@ class ReflexiveSurface:
             "relevant_handoffs": scored_handoffs[:limit_per_bucket],
             "recent_mistakes": scored_mistakes[:limit_per_bucket],
             "related_insights": scored_insights[:limit_per_bucket],
+            "resonant_dreams": scored_dreams[:limit_per_bucket],
             "total_candidates_scanned": total_candidates,
             "scoring_explanation": scoring_explanation,
         }
@@ -287,6 +313,80 @@ class ReflexiveSurface:
             # keeping it would dilute results with off-topic noise.
             if caller_tags and tag_overlap == 0.0:
                 continue
+            result.append(
+                {
+                    **item,
+                    "_score": round(score, 4),
+                    "_tag_overlap": round(tag_overlap, 4),
+                }
+            )
+
+        result.sort(
+            key=lambda r: (r["_score"], r.get("timestamp", "")),
+            reverse=True,
+        )
+        return result
+
+    def _score_and_sort_dreams(
+        self,
+        items: list[dict],
+        caller_tags: list[str],
+        project: str | None,
+    ) -> list[dict]:
+        """
+        Score dream candidates with the same formula + strict tag-overlap
+        filter as _score_and_sort, minus project_match, plus an
+        unread-novelty boost.
+
+        Dreams carry their tags as a "domains" LIST (dream_daemon.py's
+        write shape), unlike every other bucket's comma-string domain
+        field. Rather than teach _score_item/_compute_tag_overlap a
+        second input shape, each item is scored against a synthetic
+        comma-joined string built from "domains" — the shared helpers
+        stay untouched and behave identically to the other four buckets.
+
+        `project` is accepted for call-site symmetry with the other
+        buckets but deliberately NOT forwarded to _score_item: the design
+        guardrail is that dreams are filtered by domain match + novelty,
+        NOT by usefulness-to-the-current-goal, and project_match (+0.5 if
+        the caller's project string appears in the dream's text) is
+        exactly that on-task signal. Passing it through would let a
+        dream that happens to namedrop the current project outrank one
+        that doesn't, on top of tag overlap — the one thing this bucket
+        must not do. tag_overlap and recency_boost (novelty) still apply
+        via _score_item; only project_match is withheld.
+
+        Unread-novelty boost: +0.5 while ack_status == "unread", applied
+        AFTER the zero-overlap drop below — an off-territory dream is
+        dropped regardless of freshness, per the rail's domain-match
+        design. Gone once the dream is acked (confirm/engage/discard all
+        lose the boost), so a fresh unconsumed dream leans forward
+        without permanently re-surfacing.
+
+        Returns:
+            New list of dicts with _score + _tag_overlap attached, sorted
+            by score desc / timestamp desc — same contract as
+            _score_and_sort.
+        """
+        del project  # intentionally unused — see docstring; kept for call-site symmetry
+        result = []
+        for item in items:
+            domains_list = item.get("domains") or []
+            scoring_item = {**item, "_domain_str": ",".join(str(d) for d in domains_list)}
+            score, tag_overlap = _score_item(
+                scoring_item,
+                caller_tags,
+                project=None,
+                domain_field="_domain_str",
+                context_fields=["title", "observation"],
+            )
+            # Strict tag-required filter, same semantics as _score_and_sort:
+            # a zero-overlap dream is off-topic by construction and is
+            # dropped, no matter how fresh or unread it is.
+            if caller_tags and tag_overlap == 0.0:
+                continue
+            if item.get("ack_status") == "unread":
+                score += 0.5
             result.append(
                 {
                     **item,
@@ -354,6 +454,10 @@ def _item_signature(kind: str, item: dict) -> str:
         hid = item.get("honk_id")
         if hid:
             return f"honk:{hid}"
+    if kind == "dream":
+        did = item.get("id")
+        if did:
+            return f"dream:{did}"
     # Fallback: kind + first 80 chars of main text field + timestamp.
     text_fields = ["question", "what", "content", "observation", "pattern"]
     body = ""
@@ -524,6 +628,30 @@ class PerTurnPriors:
                 )
                 kept_threads += 1
 
+            # Dream section — fixed at k=1 regardless of the caller's k.
+            # "At most one dream per turn" is the class's own k=1 design
+            # applied strictly: a speculative, machine-generated connection
+            # that kept re-surfacing would launder itself into believed
+            # truth by repetition, so dreams get the tightest cap on the
+            # rail, not the caller-tunable one threads/insights use.
+            DREAM_K = 1
+            kept_dreams = 0
+            for dream in resonance.get("resonant_dreams", [])[: DREAM_K + 2]:
+                if kept_dreams >= DREAM_K:
+                    break
+                sig = _item_signature("dream", dream)
+                if sig in stale:
+                    skipped.append(sig)
+                    continue
+                sections.append(
+                    {
+                        "priority": 2.5,  # between thread (2) and insight (3)
+                        "text": self._format_dream(dream),
+                        "sig": sig,
+                    }
+                )
+                kept_dreams += 1
+
             kept_insights = 0
             for ins in resonance.get("related_insights", [])[: k + 2]:
                 if kept_insights >= k:
@@ -596,6 +724,7 @@ class PerTurnPriors:
             "uncertainty": "uncertainty",
             "thread": "thread",
             "insight": "insight",
+            "dream": "dream",
         }
         final_sources = []
         seen = set()
@@ -646,6 +775,17 @@ class PerTurnPriors:
         score = ins.get("_score", 0.0)
         days = _days_old(ins.get("timestamp"))
         return f"insight: [{score:.2f} | {days}d] {content}"
+
+    def _format_dream(self, dream: dict) -> str:
+        raw = str(dream.get("observation") or dream.get("dream_full") or "")
+        obs = (raw if getattr(self, "_full_content", False) else raw[:120]).replace("\n", " ")
+        title = str(dream.get("title") or "untitled").strip()
+        score = dream.get("_score", 0.0)
+        days = _days_old(dream.get("timestamp"))
+        unread = " unread" if dream.get("ack_status") == "unread" else ""
+        return (
+            f'dream (fallible, machine-generated): [{score:.2f} | {days}d{unread}] "{title}" {obs}'
+        )
 
     @staticmethod
     def _short_time(ts: str | None) -> str:
