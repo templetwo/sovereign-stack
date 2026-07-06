@@ -48,6 +48,20 @@ def boot_inject_enabled() -> bool:
     return raw not in {"off", "0", "false", "no", "disabled"}
 
 
+def boot_greeting_enabled() -> bool:
+    """Whether the at-boot scribe greeting fires at all. Default ON.
+
+    Distinct from SCRIBE_BOOT_INJECT: that flag only suppresses injecting the
+    greeting TEXT into the boot output — the greeting session still spawns and
+    the model call still bills (SCRIBE_BOOT_INJECT=off is NOT a cost kill).
+    Set SCRIBE_BOOT_GREETING=off (or 0 / false / no) to skip the greeting
+    entirely: no session spawn, no model call, no spend. This is the real
+    cost kill switch for the per-boot greeting.
+    """
+    raw = os.environ.get("SCRIBE_BOOT_GREETING", "on").strip().lower()
+    return raw not in {"off", "0", "false", "no", "disabled"}
+
+
 # ----------------------------------------------------------------------
 # Singleton session store
 # ----------------------------------------------------------------------
