@@ -158,6 +158,72 @@ def _iter_all_records(reflections_dir: Path | None = None) -> list[ReflectionRec
     return records
 
 
+def latest_dream(reflections_dir: Path | None = None) -> dict | None:
+    """The newest dream record as its raw dict, or None.
+
+    A "dream" is a reflection written by the dream daemon
+    (daemons/dream_daemon.py): kind == "dream" (connection_type "dream" too).
+    Returns the RAW dict, not a ReflectionRecord, so callers see the
+    dream-only fields (title, dream_full, domains) the dataclass does not
+    model. Newest-first by timestamp across all date files.
+    """
+    if reflections_dir is None:
+        reflections_dir = REFLECTIONS_DIR
+    if not reflections_dir.exists():
+        return None
+    best: dict | None = None
+    for path in sorted(reflections_dir.glob("*.jsonl"), reverse=True):
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                data = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if data.get("kind") == "dream" or data.get("connection_type") == "dream":
+                if best is None or str(data.get("timestamp", "")) > str(
+                    best.get("timestamp", "")
+                ):
+                    best = data
+    return best
+
+
+def latest_dream_boot_block(
+    reflections_dir: Path | None = None, max_chars: int = 360
+) -> str | None:
+    """A short, fallibility-framed boot block for the newest dream — it takes
+    the retired scribe-greeting's slot at boot. Returns None when there is no
+    dream yet or DREAM_BOOT_SHOW is off (env kill switch, default on). Always
+    reflects the single newest dream; a new night bumps the previous one off.
+    """
+    if os.environ.get("DREAM_BOOT_SHOW", "on").strip().lower() in {
+        "off", "0", "false", "no", "disabled",
+    }:
+        return None
+    d = latest_dream(reflections_dir)
+    if not d:
+        return None
+    obs = str(d.get("observation") or "").strip()
+    if not obs:
+        return None
+    title = str(d.get("title") or "untitled").strip()
+    if len(obs) > max_chars:
+        obs = obs[:max_chars].rsplit(" ", 1)[0].rstrip() + "…"
+    day = str(d.get("timestamp") or "")[:10]
+    return (
+        f"━━━ LAST NIGHT'S DREAM ({day}) ━━━\n"
+        "  machine-generated, fallible — some insight, some nonsense; you calibrate.\n"
+        f'  "{title}"\n'
+        f"  {obs}\n"
+        f"  (full text: recall_reflections, or ~/.sovereign/reflections/{day}.jsonl)"
+    )
+
+
 def list_reflections(
     limit: int = 10,
     ack_status: str | None = None,

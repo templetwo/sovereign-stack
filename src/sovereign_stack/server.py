@@ -3222,6 +3222,21 @@ async def _dispatch_tool(name: str, arguments: dict):
             except Exception:
                 pass
 
+        # The nightly dream takes the retired greeting's slot at boot: the
+        # single newest dream, truncated, until a new night bumps it off —
+        # a free local dream in place of the retired Sonnet hello. Fail-soft:
+        # boot never breaks if there is no dream or the read fails.
+        try:
+            from .reflections import latest_dream_boot_block as _latest_dream_block
+
+            dream_block = _latest_dream_block()
+            if dream_block:
+                marker = "━━━\nNow decide what to pick up"
+                if marker in boot_text:
+                    boot_text = boot_text.replace(marker, f"{dream_block}\n\n{marker}", 1)
+        except Exception:
+            pass
+
         return [TextContent(type="text", text=boot_text)]
 
     if name == "arrive":
