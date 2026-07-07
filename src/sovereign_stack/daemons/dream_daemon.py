@@ -12,10 +12,26 @@ Once a night, on a local Ollama model, this daemon:
      connection, freeform (phase 1 — hot, temperature 0.9).
   4. Sends the raw dream back to the still-warm model to condense + tag it
      into a structured record (phase 2 — cool, temperature 0.3, JSON mode).
-     keep_alive:0 on this second call is what unloads the model — the
+     keep_alive:0 on this second call is what unloads the DREAMER — the
      unload rides the last request.
-  5. Writes exactly ONE dream record to ~/.sovereign/reflections/, then
-     verifies the model actually unloaded (backstop `ollama stop`).
+  5. Runs a CROSS-MODEL NOVELTY CRITIC on a DIFFERENT model (gemma4:26b) —
+     the dreamer never grades its own homework. The critic scores the dream
+     on NOVELTY + COHERENCE ONLY (never usefulness/on-task-ness — a dream is
+     allowed to be useless and strange). It runs only after
+     `_await_model_unloaded` reports the dreamer is NOT confirmed still
+     resident (one-model-peak: ~17GB each on a 36GB box), with its own
+     keep_alive:0 so the critic unloads too. FAIL-SAFE on POSITIVE evidence:
+     if the dreamer is CONFIRMED still resident after the bounded wait, the
+     critic is SKIPPED entirely for that run — the second ~17GB model is
+     never loaded — and the dream is kept with critic_status="skipped_memory".
+     Otherwise (confirmed unloaded, or the barrier couldn't verify) this
+     stays FAIL-OPEN as before: a clean verdict=="abstain" is the ONLY thing
+     that drops a dream; any critic failure keeps it
+     (critic_status="unavailable"). DREAM_CRITIC=off disables the pass
+     entirely (rollback to phase-2 behavior).
+  6. Writes exactly ONE dream record to ~/.sovereign/reflections/ (with the
+     critic fields when the critic was engaged), then verifies BOTH models
+     actually unloaded (backstop `ollama stop` for the dreamer AND the critic).
 
 Phase 1 scope, deliberately: no delivery/surfacing wiring. The dream lands
 on disk with ack_status="unread" so HQ can read a few nights of real output
@@ -102,8 +118,34 @@ DEFAULT_DREAM_NUM_PREDICT = 6144
 DEFAULT_CONDENSE_NUM_PREDICT = 2048
 DREAM_CALL_TIMEOUT_SECONDS = 900
 CONDENSE_CALL_TIMEOUT_SECONDS = 300
+
+# ── Phase-3 cross-model novelty critic (gemma4:26b) ─────────────────────────
+# A DIFFERENT model grades the qwen dream on NOVELTY + COHERENCE only (never
+# usefulness — see CRITIC_PREAMBLE). Cross-model so the dreamer never grades
+# its own homework. DREAM_CRITIC=off disables it entirely (rollback switch).
+DREAM_CRITIC_MODEL = os.getenv("DREAM_CRITIC_MODEL", "gemma4:26b")
+DREAM_CRITIC_PROMPT_VERSION = "critic-v1"
+DEFAULT_CRITIC_NUM_PREDICT = 1024  # the verdict JSON is small; a sentence of reason
+CRITIC_CALL_TIMEOUT_SECONDS = 300
+CRITIC_NUM_CTX_MIN = 4096
+CRITIC_NUM_CTX_MAX = DREAM_NUM_CTX  # ceiling; the critic prompt is one dream,
+# not a 40-entry survey, so it sizes DOWN from here — but never below what the
+# prompt needs (an undersized num_ctx silently truncates, the exact failure
+# _warn_if_context_truncated exists to catch).
+CRITIC_UNLOAD_WAIT_SECONDS = 40.0  # bounded, fail-open barrier: confirm the
+# ~17GB dreamer has unloaded before loading the ~17GB critic (one-model-peak
+# invariant on a 36GB box). Expiring the wait does NOT block the dream.
+CRITIC_UNLOAD_POLL_INTERVAL = 4.0
+
 MEMORY_PRESSURE_BYTES = 8 * 1024**3  # 8GB — a model already this big resident
 # means qwen3.6:27b (18GB) would contend for GPU memory; skip the night.
+
+
+def _critic_enabled_from_env() -> bool:
+    """DREAM_CRITIC=off (case-insensitive) disables the critic; anything else
+    (including unset) leaves it enabled. The one rollback switch to current
+    Phase-2 behavior."""
+    return os.getenv("DREAM_CRITIC", "").strip().lower() != "off"
 
 SOVEREIGN_ROOT = Path(os.path.expanduser("~/.sovereign"))
 CHRONICLE_DIR = SOVEREIGN_ROOT / "chronicle"
@@ -153,9 +195,10 @@ class RunResult:
     """Outcome of a single dream run."""
 
     outcome: (
-        str  # "wrote" | "abstained" | "duplicate" | "no_entries" | "model_failed"
-        # | "parse_failed" | "skipped_temple_core_unmounted"
-        # | "skipped_memory_pressure" | "skipped_already_dreamed" | "skipped"
+        str  # "wrote" | "abstained" | "abstained_critic" | "duplicate"
+        # | "no_entries" | "model_failed" | "parse_failed"
+        # | "skipped_temple_core_unmounted" | "skipped_memory_pressure"
+        # | "skipped_already_dreamed" | "skipped"
     )
     details: str = ""
     run_id: str = ""
@@ -167,6 +210,14 @@ class RunResult:
     survey_entry_count: int = 0
     distant_pair_count: int = 0
     elapsed_seconds: float = 0.0
+    # Cross-model critic outcome (empty when critic disabled): "keep" |
+    # "abstain" | "unavailable" (fail-open) | "skipped_memory" (fail-safe: the
+    # dreamer was CONFIRMED still resident, so the critic was never invoked).
+    # novel/coherent are None whenever the critic didn't actually run/parse.
+    critic_status: str = ""
+    critic_novel: bool | None = None
+    critic_coherent: bool | None = None
+    critic_reason: str = ""
 
 
 @dataclass
@@ -178,6 +229,27 @@ class DreamSurvey:
     total_chronicle_entries: int
     freshness_excluded_count: int
     budget: int
+
+
+@dataclass
+class CriticResult:
+    """Verdict from the cross-model novelty critic.
+
+    status is the load-bearing field: "abstain" is the ONLY value that
+    suppresses a dream, and it is reachable ONLY from a cleanly-parsed
+    verdict=="abstain". "keep" writes with the critic fields; "unavailable"
+    (fail-open) also writes — a broken critic must never silently kill dreams.
+    "skipped_memory" (fail-safe) also writes — it means the critic was never
+    invoked at all because the dreamer was CONFIRMED still resident (positive
+    evidence of a two-model memory peak), not that it ran and failed.
+    novel/coherent are None whenever the critic didn't actually run/parse.
+    """
+
+    status: str  # "keep" | "abstain" | "unavailable"
+    novel: bool | None = None
+    coherent: bool | None = None
+    reason: str = ""
+    model: str = ""
 
 
 # ── Chronicle projection (extends synthesis_daemon._project_entry) ──────────
@@ -635,6 +707,73 @@ def build_condense_prompt(dream_full: str, allowed_tags: set[str]) -> str:
     )
 
 
+# The critic preamble is a PLAIN constant (no .format), so its literal JSON
+# braces are safe as-is. GUARDRAIL (load-bearing, mirrors the delivery-rail
+# guardrail): the critic must score novelty + coherence and NEVER usefulness /
+# on-task-ness. A dream is allowed to be useless and strange — penalizing that
+# would destroy the elasticity the whole layer exists to protect.
+CRITIC_PREAMBLE = """\
+You are a NOVELTY CRITIC for a machine "dream" — an associative connection one
+model drew across distant entries in a long research chronicle. A DIFFERENT
+model dreamed it; your only job is to grade it, so the dreamer never grades its
+own homework.
+
+Judge the dream on exactly TWO axes, and NOTHING else:
+
+  1. NOVELTY — is the connection genuinely non-obvious? A real dream links
+     things that have no business touching and surfaces something nobody has
+     already written down. Score it NOT novel if it is a restatement of a
+     single entry, two entries merely coexisting in the same window, a truism,
+     or a link anyone would draw immediately.
+
+  2. COHERENCE — does the connection hold together AS A CLAIM? A coherent
+     dream is one intelligible idea you could restate in your own words. Score
+     it NOT coherent if it is word-salad, self-contradictory, a non-sequitur,
+     or so vague it asserts nothing.
+
+HARD RULE — you must NOT judge USEFULNESS. Do NOT consider whether the dream is
+relevant to any goal, actionable, on-topic, practical, provable, true, or
+important. A dream is ALLOWED to be useless, strange, purposeless, or idle —
+that elasticity is the entire point, and penalizing a dream for not being
+on-task would destroy the very thing you are here to protect. A
+useless-but-novel-and-coherent dream is a KEEP. The ONLY grounds to abstain are
+lack of novelty or lack of coherence.
+
+Output STRICT JSON, no prose outside it:
+{
+  "novel": true or false,
+  "coherent": true or false,
+  "verdict": "keep" or "abstain",
+  "reason": "<one sentence, grounded ONLY in novelty and coherence>"
+}
+
+Set "verdict" to "keep" if the dream is BOTH novel and coherent. Set it to
+"abstain" ONLY if it fails novelty or fails coherence. Never abstain for a
+dream being useless, idle, or off-goal.
+"""
+
+
+def build_critic_prompt(title: str, observation: str, dream_full: str) -> str:
+    """Assemble the critic prompt from the dream ALONE.
+
+    The critic sees only the dream's title, condensed observation, and raw
+    text — never the survey, the seed entries, or any "what are we working on"
+    goal/project context. That absence is structural: with nothing to be
+    on-task toward, the critic cannot reward on-task-ness even if it tried to.
+    """
+    return (
+        f"{CRITIC_PREAMBLE}\n"
+        "═══ THE DREAM TO GRADE ═══\n\n"
+        f"TITLE: {title}\n\n"
+        "CONDENSED CONNECTION (what a future reader would see):\n"
+        f"{observation}\n\n"
+        "RAW DREAM (the unedited version, for judging coherence):\n"
+        f"{dream_full}\n\n"
+        "═══ END DREAM ═══\n\n"
+        "Now output the JSON verdict described above, and nothing else."
+    )
+
+
 # ── Model calls (Ollama) ─────────────────────────────────────────────────────
 
 
@@ -748,6 +887,56 @@ def call_ollama_condense(
     return ok, text, meta
 
 
+def _num_ctx_for(prompt: str, num_predict: int) -> int:
+    """
+    Size num_ctx to FIT this prompt plus its expected output — "sized to the
+    dream text" means fit it, never shrink below what it needs. Estimates
+    prompt tokens conservatively (~3 chars/token → slight over-estimate, the
+    safe direction), adds num_predict + headroom, rounds up to a 1024 boundary,
+    and clamps to [CRITIC_NUM_CTX_MIN, CRITIC_NUM_CTX_MAX]. The dream_full can
+    be up to DEFAULT_DREAM_NUM_PREDICT tokens, so this must be able to grow to
+    several thousand — an undersized ceiling would silently truncate.
+    """
+    est_prompt_tokens = int(len(prompt) / 3.0) + 256
+    needed = est_prompt_tokens + max(num_predict, 0)
+    rounded = ((needed + 1023) // 1024) * 1024
+    return max(CRITIC_NUM_CTX_MIN, min(CRITIC_NUM_CTX_MAX, rounded))
+
+
+def call_ollama_critic(
+    prompt: str,
+    *,
+    model: str = DREAM_CRITIC_MODEL,
+    num_predict: int = DEFAULT_CRITIC_NUM_PREDICT,
+    timeout: int = CRITIC_CALL_TIMEOUT_SECONDS,
+) -> tuple[bool, str, dict]:
+    """
+    Phase-3 CROSS-MODEL CRITIC call — a DIFFERENT model (gemma4:26b by default)
+    grades the qwen dream on novelty + coherence. Structured and cool,
+    format="json", think=false. keep_alive:0 unloads the critic when its
+    response returns — the unload rides this request, same mechanism as the
+    condense pass. num_ctx is sized to THIS prompt (one dream, not a 40-entry
+    survey), so peak GPU stays at one model and the load is short.
+    """
+    num_ctx = _num_ctx_for(prompt, num_predict)
+    payload = {
+        "model": model,
+        "prompt": prompt,
+        "stream": False,
+        "think": False,
+        "format": "json",
+        "keep_alive": 0,
+        "options": {
+            "num_predict": num_predict,
+            "temperature": 0.2,
+            "num_ctx": num_ctx,
+        },
+    }
+    ok, text, meta = _ollama_generate(payload, timeout)
+    _warn_if_context_truncated(meta, num_ctx, "critic")
+    return ok, text, meta
+
+
 # ── Output parsing ────────────────────────────────────────────────────────────
 
 
@@ -791,6 +980,98 @@ def _constrain_domains(domains: list[str], allowed_tags: set[str]) -> list[str]:
 
 def is_degenerate(text: str, min_chars: int = 40) -> bool:
     return len((text or "").strip()) < min_chars
+
+
+# ── Cross-model critic parsing + orchestration ───────────────────────────────
+
+
+def _coerce_bool(value: object) -> bool | None:
+    """Tolerant bool from a JSON-mode model: real bools, 0/1, and the usual
+    string spellings. Returns None on anything unrecognized (recorded as-is;
+    never treated as an abstain signal)."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        v = value.strip().lower()
+        if v in ("true", "yes", "y", "1", "novel", "coherent"):
+            return True
+        if v in ("false", "no", "n", "0"):
+            return False
+    return None
+
+
+def parse_critic(raw: str) -> dict | None:
+    """
+    Parse the critic JSON into {"novel","coherent","verdict","reason"}, or
+    None. None is the FAIL-OPEN signal — the caller KEEPS the dream and marks
+    it critic_status="unavailable". A missing or non-literal verdict returns
+    None ON PURPOSE: a garbage verdict must never be read as an abstain. Only a
+    verdict that parses cleanly as exactly "keep" or "abstain" is honored, and
+    only "abstain" can drop a dream.
+    """
+    block = extract_json_block(raw)
+    if not block:
+        return None
+    try:
+        data = json.loads(block)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    verdict = str(data.get("verdict") or "").strip().lower()
+    if verdict not in ("keep", "abstain"):
+        return None  # fail-open: unparseable/garbage verdict → KEEP, never a silent abstain
+    return {
+        "novel": _coerce_bool(data.get("novel")),
+        "coherent": _coerce_bool(data.get("coherent")),
+        "verdict": verdict,
+        "reason": str(data.get("reason") or "").strip()[:500],
+    }
+
+
+def run_critic(
+    title: str,
+    observation: str,
+    dream_full: str,
+    *,
+    model: str = DREAM_CRITIC_MODEL,
+    num_predict: int = DEFAULT_CRITIC_NUM_PREDICT,
+    timeout: int = CRITIC_CALL_TIMEOUT_SECONDS,
+) -> CriticResult:
+    """
+    Run the cross-model critic and return a CriticResult. FAIL-OPEN by
+    contract: any failure — model unreachable/absent, empty response,
+    unparseable JSON, missing/garbage verdict — returns status="unavailable",
+    which the caller treats as KEEP. The ONLY status that suppresses a dream is
+    "abstain", reachable ONLY from a cleanly-parsed verdict=="abstain". A broken
+    critic must NEVER silently abstain every dream.
+
+    Trusts the model's `verdict` field as authoritative (per spec) rather than
+    reconciling it against novel/coherent; all four are recorded for later
+    analysis regardless.
+    """
+    prompt = build_critic_prompt(title, observation, dream_full)
+    ok, text, _meta = call_ollama_critic(
+        prompt, model=model, num_predict=num_predict, timeout=timeout
+    )
+    if not ok:
+        return CriticResult(
+            status="unavailable", reason=f"critic call failed: {text[:200]}", model=model
+        )
+    parsed = parse_critic(text)
+    if parsed is None:
+        return CriticResult(
+            status="unavailable", reason="critic verdict unparseable", model=model
+        )
+    return CriticResult(
+        status=parsed["verdict"],  # "keep" | "abstain"
+        novel=parsed["novel"],
+        coherent=parsed["coherent"],
+        reason=parsed["reason"],
+        model=model,
+    )
 
 
 # ── Dedupe against recent nights ─────────────────────────────────────────────
@@ -911,6 +1192,58 @@ def _already_dreamed_today(reflections_dir: Path, today: date) -> bool:
 _OLLAMA_BIN = shutil.which("ollama") or "/usr/local/bin/ollama"
 
 
+def _await_model_unloaded(
+    model: str,
+    max_wait_seconds: float = CRITIC_UNLOAD_WAIT_SECONDS,
+    poll_interval: float = CRITIC_UNLOAD_POLL_INTERVAL,
+) -> bool | None:
+    """
+    Bounded, 3-state barrier enforcing the one-model-peak invariant. The
+    condense pass's keep_alive:0 unloads the ~17GB dreamer; before loading the
+    ~17GB critic onto a 36GB box we CONFIRM the dreamer is actually gone (34GB
+    resident at once risks the exact GPU-memory contention the preflight
+    guards against). Polls /api/ps until `model` is absent, up to
+    max_wait_seconds.
+
+    Returns a 3-state signal — the caller MUST distinguish these, never
+    collapse them to a single bool:
+      True  — CONFIRMED UNLOADED: `model` was absent from /api/ps before the
+              deadline. Safe to proceed with the critic.
+      False — CONFIRMED STILL RESIDENT: /api/ps stayed reachable for the
+              whole wait and `model` was present at the deadline. This is
+              POSITIVE evidence of a two-model memory peak — the caller MUST
+              NOT load a second model on top of it (fail SAFE).
+      None  — COULDN'T VERIFY: /api/ps was unreachable at some point during
+              the wait. No evidence either way — the caller proceeds exactly
+              as before this barrier existed (fail OPEN).
+
+    Conflating False and None here would either needlessly block dreams on a
+    flaky /api/ps (if None were treated as risk) or, as originally shipped,
+    silently allow a confirmed-resident dreamer to be loaded alongside the
+    critic (if False were treated as safe-to-proceed) — this return value is
+    the fix for exactly that bug. _cleanup_model remains the backstop for
+    anything left resident regardless of this barrier's outcome. (time.sleep
+    here is fine — this runs in the daemon process.)
+    """
+    deadline = time.time() + max_wait_seconds
+    while True:
+        models = _ollama_ps()
+        if models is None:
+            return None  # can't verify — fail-open, proceed as before
+        if model not in [m.get("name") for m in models]:
+            return True  # confirmed unloaded
+        if time.time() >= deadline:
+            print(
+                f"DREAM DAEMON: WARNING — {model} still resident after "
+                f"{max_wait_seconds:.0f}s wait; SKIPPING the cross-model "
+                "critic this run to avoid a two-model memory peak "
+                "(cleanup backstop will unload any lingering models).",
+                file=sys.stderr,
+            )
+            return False  # confirmed still resident — fail SAFE, caller must skip
+        time.sleep(poll_interval)
+
+
 def _cleanup_model(model: str) -> None:
     """
     Best-effort unload verification. keep_alive=0 on the phase-2 call is the
@@ -958,6 +1291,11 @@ def write_dream(
     dream_full: str,
     seed_entries: list[dict],
     domains: list[str],
+    critic_status: str | None = None,
+    critic_model: str | None = None,
+    critic_novel: bool | None = None,
+    critic_coherent: bool | None = None,
+    critic_reason: str | None = None,
     out_dir: Path = REFLECTIONS_DIR,
     now: datetime | None = None,
 ) -> Path:
@@ -966,6 +1304,13 @@ def write_dream(
     Never writes to the chronicle proper (no record_insight) — promotion
     stays human/Claude-gated later, same layer hygiene as reflections.py's
     module docstring already establishes for synthesis reflections.
+
+    Critic fields are injected ONLY when critic_status is not None (i.e. the
+    critic pass was reached — this includes "skipped_memory", where the
+    critic pass was reached but the critic model was deliberately never
+    invoked). When DREAM_CRITIC=off, none are passed and the record is
+    byte-identical to a pre-critic dream — the suite has byte-identity
+    regressions, so the disabled path must not drift.
     """
     out_dir.mkdir(parents=True, exist_ok=True)
     now = now or datetime.now(timezone.utc)
@@ -986,6 +1331,12 @@ def write_dream(
         "confidence": "low",
         "ack_status": "unread",
     }
+    if critic_status is not None:
+        record["critic_status"] = critic_status  # "keep" | "unavailable" | "skipped_memory"
+        record["critic_model"] = critic_model
+        record["critic_novel"] = critic_novel
+        record["critic_coherent"] = critic_coherent
+        record["critic_reason"] = critic_reason
     with path.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(record, ensure_ascii=False) + "\n")
     return path
@@ -1004,6 +1355,10 @@ class DreamDaemon:
     condense_num_predict: int = DEFAULT_CONDENSE_NUM_PREDICT
     dream_timeout: int = DREAM_CALL_TIMEOUT_SECONDS
     condense_timeout: int = CONDENSE_CALL_TIMEOUT_SECONDS
+    critic_model: str = DREAM_CRITIC_MODEL
+    critic_enabled: bool = field(default_factory=_critic_enabled_from_env)
+    critic_num_predict: int = DEFAULT_CRITIC_NUM_PREDICT
+    critic_timeout: int = CRITIC_CALL_TIMEOUT_SECONDS
     force: bool = False  # bypass the one-dream-per-night cap — testing only
     skip_preflight: bool = False  # bypass mount/memory-pressure checks — testing only
     seed: int | None = None
@@ -1109,8 +1464,79 @@ class DreamDaemon:
                 result.observation = observation
                 return result
 
+            # ── Phase 3: cross-model NOVELTY CRITIC (gemma4:26b) ─────────────
+            # Runs AFTER dedupe (never grades a dream we'd drop anyway) and
+            # AFTER the condense pass's keep_alive:0 unloaded the dreamer.
+            # _await_model_unloaded returns a 3-state signal that MUST be
+            # honored (this is the fix for a prior bug where its return value
+            # was ignored and gemma4 loaded unconditionally, risking ~34GB
+            # resident on a 36GB box):
+            #   False (confirmed-still-resident) → FAIL SAFE: skip the critic
+            #     entirely, never load gemma4, keep the dream as
+            #     critic_status="skipped_memory".
+            #   True (confirmed-unloaded) or None (couldn't-verify) → FAIL
+            #     OPEN as before: run the critic normally. A clean
+            #     verdict=="abstain" is the ONLY outcome that suppresses a
+            #     dream; every critic failure keeps it. Scores novelty +
+            #     coherence ONLY, never usefulness (see CRITIC_PREAMBLE).
+            critic: CriticResult | None = None
+            if self.critic_enabled:
+                unload_signal = _await_model_unloaded(self.model)
+                if unload_signal is False:
+                    # POSITIVE evidence the dreamer is still resident — the
+                    # invariant is non-negotiable: do NOT load the critic.
+                    skip_reason = (
+                        f"{self.model} confirmed still resident after "
+                        f"{CRITIC_UNLOAD_WAIT_SECONDS:.0f}s wait; skipped the "
+                        "cross-model critic this run to avoid a two-model "
+                        "memory peak (gemma4 was never loaded)."
+                    )
+                    print(f"DREAM DAEMON: {skip_reason}", file=sys.stderr)
+                    critic = CriticResult(
+                        status="skipped_memory", reason=skip_reason, model=self.critic_model
+                    )
+                    result.critic_status = critic.status
+                    result.critic_reason = critic.reason
+                else:
+                    critic = run_critic(
+                        title,
+                        observation,
+                        dream_full,
+                        model=self.critic_model,
+                        num_predict=self.critic_num_predict,
+                        timeout=self.critic_timeout,
+                    )
+                    result.critic_status = critic.status
+                    result.critic_novel = critic.novel
+                    result.critic_coherent = critic.coherent
+                    result.critic_reason = critic.reason
+                    if critic.status == "abstain":
+                        result.outcome = "abstained_critic"
+                        result.title = title
+                        result.observation = observation
+                        result.details = (
+                            f"cross-model critic ({self.critic_model}) abstained: "
+                            f"novel={critic.novel} coherent={critic.coherent} — {critic.reason}"
+                        )[:500]
+                        return result
+
             domains = _constrain_domains(condensed["domains"], allowed_tags)
             seed_entries = survey_seed_entries(survey)
+
+            critic_fields: dict = {}
+            if critic is not None:
+                # Present whenever the critic pass was reached: "keep" or
+                # "unavailable" (fail-open) or "skipped_memory" (fail-safe —
+                # the critic was never invoked because the dreamer was
+                # confirmed still resident). Absent entirely when
+                # DREAM_CRITIC=off.
+                critic_fields = {
+                    "critic_status": critic.status,
+                    "critic_model": self.critic_model,
+                    "critic_novel": critic.novel,
+                    "critic_coherent": critic.coherent,
+                    "critic_reason": critic.reason,
+                }
 
             path = write_dream(
                 run_id=run_id,
@@ -1122,14 +1548,22 @@ class DreamDaemon:
                 domains=domains,
                 out_dir=self.reflections_dir,
                 now=now,
+                **critic_fields,
             )
             result.outcome = "wrote"
             result.dream_path = str(path)
             result.title = title
             result.observation = observation
+            critic_note = ""
+            if critic is not None:
+                critic_note = (
+                    f", critic={critic.status}"
+                    if critic.status != "unavailable"
+                    else ", critic=unavailable (fail-open, kept)"
+                )
             result.details = (
                 f"wrote 1 dream from {len(survey.entries)} seed entries, "
-                f"{len(survey.distant_pairs)} distant pairs"
+                f"{len(survey.distant_pairs)} distant pairs{critic_note}"
             )
             return result
         except Exception as exc:
@@ -1149,8 +1583,18 @@ class DreamDaemon:
         finally:
             result.elapsed_seconds = round(time.time() - started, 2)
             # Always verify — cheap, idempotent, and this is the memory-health
-            # backstop regardless of how the run above concluded.
-            _cleanup_model(self.model)
+            # backstop regardless of how the run above concluded. Covers BOTH
+            # the ~17GB dreamer and (when the critic was enabled) the ~17GB
+            # cross-model critic — either could be left resident under the
+            # morning stack. When the critic ran, keep_alive:0 on its call is
+            # the PRIMARY unload; this is the backstop for a critic call that
+            # never got a response. When disabled, the critic model was never
+            # loaded, so its cleanup is a cheap /api/ps no-op.
+            models_to_clean = [self.model]
+            if self.critic_enabled and self.critic_model not in models_to_clean:
+                models_to_clean.append(self.critic_model)
+            for _m in models_to_clean:
+                _cleanup_model(_m)
 
 
 # ── Survey report (for --survey-only) ────────────────────────────────────────
@@ -1211,6 +1655,9 @@ def main(argv: list[str] | None = None) -> int:
       DREAM_CONDENSE_NUM_PREDICT — phase-2 num_predict override
       DREAM_REFLECTIONS_DIR      — override the reflections output dir
       DREAM_CHRONICLE_ROOT       — override the chronicle insights/ dir
+      DREAM_CRITIC               — set to "off" to disable the cross-model critic
+      DREAM_CRITIC_MODEL         — critic model (default gemma4:26b)
+      DREAM_CRITIC_NUM_PREDICT   — critic num_predict override (fast tests)
       OLLAMA_BASE_URL            — Ollama base URL (default http://127.0.0.1:11434)
     CLI flags take precedence over env vars.
     """
@@ -1260,6 +1707,22 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Bypass the Temple_Core-mount and memory-pressure checks (testing only).",
     )
+    parser.add_argument(
+        "--critic-model",
+        default=os.getenv("DREAM_CRITIC_MODEL", DREAM_CRITIC_MODEL),
+        help="Cross-model novelty critic model (default gemma4:26b).",
+    )
+    parser.add_argument(
+        "--critic-num-predict",
+        type=int,
+        default=_env_int("DREAM_CRITIC_NUM_PREDICT", DEFAULT_CRITIC_NUM_PREDICT),
+        help="Critic num_predict override, for fast test runs.",
+    )
+    parser.add_argument(
+        "--no-critic",
+        action="store_true",
+        help="Disable the cross-model critic (same as DREAM_CRITIC=off) — rollback switch.",
+    )
     args = parser.parse_args(argv)
 
     if args.survey_only:
@@ -1271,12 +1734,19 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(_survey_report(survey), indent=2, ensure_ascii=False))
         return 0
 
+    # Enabled unless DREAM_CRITIC=off OR --no-critic. --no-critic is the CLI
+    # rollback switch; the env var is the launchd/plist one.
+    critic_enabled = _critic_enabled_from_env() and not args.no_critic
+
     daemon = DreamDaemon(
         model=args.model,
         chronicle_root=args.chronicle_root,
         reflections_dir=args.reflections_dir,
         dream_num_predict=args.num_predict,
         condense_num_predict=args.condense_num_predict,
+        critic_model=args.critic_model,
+        critic_enabled=critic_enabled,
+        critic_num_predict=args.critic_num_predict,
         force=args.force,
         skip_preflight=args.skip_preflight,
         seed=args.seed,
@@ -1290,13 +1760,25 @@ def main(argv: list[str] | None = None) -> int:
         "title": result.title,
         "survey_entry_count": result.survey_entry_count,
         "distant_pair_count": result.distant_pair_count,
+        "critic_enabled": critic_enabled,
+        "critic_model": args.critic_model if critic_enabled else None,
+        "critic_status": result.critic_status or None,
+        "critic_novel": result.critic_novel,
+        "critic_coherent": result.critic_coherent,
+        "critic_reason": result.critic_reason or None,
         "elapsed_seconds": result.elapsed_seconds,
         "details": result.details,
     }
     print(json.dumps(summary, indent=2, ensure_ascii=False))
-    # "abstained"/"duplicate"/"skipped_already_dreamed" are healthy outcomes,
-    # not failures — exit 0 so launchd doesn't log them as errors.
-    return 0 if result.outcome in ("wrote", "abstained", "duplicate", "skipped_already_dreamed") else 1
+    # "abstained"/"abstained_critic"/"duplicate"/"skipped_already_dreamed" are
+    # healthy, respected outcomes, not failures — exit 0 so launchd doesn't log
+    # them as errors.
+    return (
+        0
+        if result.outcome
+        in ("wrote", "abstained", "abstained_critic", "duplicate", "skipped_already_dreamed")
+        else 1
+    )
 
 
 if __name__ == "__main__":
