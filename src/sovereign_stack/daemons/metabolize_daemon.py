@@ -46,12 +46,16 @@ Daemon-specific design calls (load-bearing rationale; do not re-litigate):
 from __future__ import annotations
 
 import hashlib
+import json
+import os
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .. import provenance
 from ..grounding import GroundingResult, grounded_extract
+from ..memory import ExperientialMemory, load_entries
 from .base import (
     COMPASS_PAUSE,
     COMPASS_PROCEED,
@@ -589,3 +593,664 @@ class MetabolizeDaemon(BaseDaemon):
         )
         path.write_text("\n".join(lines), encoding="utf-8")
         return path
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# NREM PRUNE PASS  (dream-layer, phase 1 — DETECTOR / PROPOSE-ONLY)
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# Anthony's design: "prune the old to grow taller." Real sleep is NREM
+# (consolidate / clean / prune HYGIENE) then REM (dream). The dream daemon
+# (REM, 04:47) ships. This is the NREM pass that runs BEFORE it (~04:07) so
+# the dream associates over cleaner memory — the same merge/dedupe/prune/
+# reindex hygiene Anthropic's Auto Dream describes.
+#
+# REVIVAL FRAMING (read this before wiring anything):
+#   The original MetabolizeDaemon above (nightly comms digest, halted since
+#   2026-05-21, run via `entrypoint metabolize`) is LEFT HALTED BY DESIGN.
+#   The prune pass is the revival-in-a-new-role, birthed as a SIBLING with
+#   its own module main() + its own UNLOADED plist — mirroring how the dream
+#   and synthesis daemons each own their entrypoint rather than sharing
+#   entrypoint.py's log_line. `entrypoint metabolize` is NOT repurposed.
+#
+# THE SAFETY LAW (violate NONE — the chronicle is PUBLIC, append-only,
+# hash-anchored, governed by standing experimental law):
+#   * The chronicle NEVER DELETES. "Corrections supersede, never erase."
+#     No destructive deletion, no in-place edit of any existing entry, EVER.
+#   * Dedupe/merge = via the EXISTING SUPERSESSION mechanism ONLY (mark a
+#     duplicate superseded by a canonical entry — append-only, revocable,
+#     mandatory carry-forward). Executed by HQ via supersede_insight().
+#   * "Prune stale" = RETENTION / SURFACING marking only — an old low-value
+#     entry stops SURFACING on the rail but STAYS on disk (exactly like the
+#     dream 45-day rail-retirement). It never removes the entry.
+#   * PHASE 1 IS DETECTOR / DRY-RUN / PROPOSE-ONLY. It scans, identifies
+#     candidates, and writes a PROPOSAL file for HQ/human review. It does
+#     NOT execute destructive actions and does NOT auto-supersede on its own
+#     judgment. There is NO executor code path in phase 1 at all.
+#   * Fail-soft: any error -> clean skip, never crash, never partial-mutate.
+#   * Reads through the canonical load_entries chokepoint (supersession-safe);
+#     writes ONLY the proposal file (which lives OUTSIDE the chronicle tree).
+#
+# The detection mirrors seasons.season_review's supersession-candidate logic
+# (skip same-claim-id, dedupe pairs, skip already-folded predecessors, honor
+# the supersession guards), so every proposed supersede is provably runnable
+# by HQ as supersede_insight(predecessor_id=..., successor_id=...,
+# carry_forward_summary=...).
+
+
+# ── Prune tunables (env-overridable via main()) ──
+
+PRUNE_SIMILARITY_THRESHOLD = 0.72  # token-Jaccard floor for a near-dup pair
+PRUNE_RETENTION_DAYS = 45  # stale-if-older-than (matches the dream rail-retirement horizon)
+PRUNE_INTENSITY_CEILING = 0.30  # low-value-if-below (only aging low-intensity entries retire)
+PRUNE_MAX_CANDIDATES_PER_TYPE = 200  # keep a night's proposal reviewable
+PRUNE_SUPERSEDED_SURFACING_CAP = 50  # the fuzziest category — capped hard
+
+# Env-var names.
+ENV_PRUNE_ENABLED = "METABOLIZE_PRUNE"  # "off" disables the whole pass
+ENV_PRUNE_DRY_RUN = "METABOLIZE_PRUNE_DRY_RUN"  # default TRUE; phase 1 is always propose-only
+ENV_PRUNE_RETENTION_DAYS = "METABOLIZE_PRUNE_RETENTION_DAYS"
+ENV_PRUNE_INTENSITY_CEILING = "METABOLIZE_PRUNE_INTENSITY_CEILING"
+ENV_PRUNE_SIMILARITY = "METABOLIZE_PRUNE_SIMILARITY"
+
+# Prune outcome codes (distinct from the digest daemon's above).
+OUTCOME_PRUNE_DISABLED = "prune_disabled"  # METABOLIZE_PRUNE=off
+OUTCOME_PRUNE_NO_CHRONICLE = "no_chronicle"  # insights/ dir absent
+OUTCOME_PRUNE_NO_CANDIDATES = "no_candidates"  # clean scan (empty proposal still written)
+OUTCOME_PRUNE_PROPOSED = "proposed"  # >=1 candidate, proposal written
+OUTCOME_PRUNE_ERROR = "error"  # fail-soft catch — never raised
+
+PRUNE_PROPOSAL_SCHEMA_VERSION = 1
+
+
+@dataclass
+class PruneRunResult:
+    """
+    Outcome of one NREM prune-pass run. RunResult-shaped like the sibling
+    daemons (synthesis/dream): a stable `outcome` field plus counters. No
+    comms/halt fields — the prune pass posts nothing and cannot halt; it
+    only writes a proposal for HQ.
+    """
+
+    outcome: str
+    details: str = ""
+    proposal_path: str | None = None
+    entry_count: int = 0
+    near_duplicate: int = 0
+    superseded_still_surfacing: int = 0
+    stale_low_intensity: int = 0
+    total_candidates: int = 0
+    dry_run: bool = True
+
+
+# ── Detection helpers (pure, per-entry fail-soft) ──
+
+
+def _prune_env_disabled() -> bool:
+    """True when METABOLIZE_PRUNE is explicitly off/0/false/disabled."""
+    return os.environ.get(ENV_PRUNE_ENABLED, "").strip().lower() in {
+        "off",
+        "0",
+        "false",
+        "no",
+        "disabled",
+    }
+
+
+def _prune_dry_run_default() -> bool:
+    """
+    DRY_RUN defaults TRUE. Only an explicit off/0/false flips it — and even
+    then phase 1 has NO executor, so the pass stays propose-only regardless
+    (the flag is plumbed so phase 2 inherits a safe default).
+    """
+    raw = os.environ.get(ENV_PRUNE_DRY_RUN)
+    if raw is None:
+        return True
+    return raw.strip().lower() not in {"off", "0", "false", "no"}
+
+
+def _safe_float(value: object, default: float) -> float:
+    try:
+        return float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default
+
+
+def _entry_age_days(entry: dict, now: datetime) -> float | None:
+    """Age in days from the entry's ISO timestamp, or None if unparseable."""
+    ts = entry.get("timestamp")
+    if not isinstance(ts, str) or not ts:
+        return None
+    try:
+        parsed = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return (now - parsed).total_seconds() / 86400.0
+
+
+def _domain_tags(entry: dict) -> set[str]:
+    """
+    Split a compound domain ("a,b,c") into a tag set for overlap bucketing.
+    Uses the stored `domain` field, falling back to the `_domain_dir`
+    read-annotation. Lowercased, whitespace-trimmed, empties dropped.
+    """
+    raw = entry.get("domain") or entry.get("_domain_dir") or ""
+    if not isinstance(raw, str):
+        raw = str(raw)
+    return {tag.strip().lower() for tag in raw.split(",") if tag.strip()}
+
+
+def _is_lived(entry: dict) -> bool:
+    """
+    True when the entry carries a LIVED vantage (human_observation /
+    human_attestation / witnessed_account). Lived sentinels keep their pin —
+    they are NEVER proposed for supersession or rail-retirement, independent
+    of intensity. (See CLAUDE.md lived-ground-truth law.)
+    """
+    vantage = entry.get("vantage")
+    return isinstance(vantage, str) and vantage in provenance.LIVED_VANTAGES
+
+
+def _preview(text: object, n: int = 120) -> str:
+    s = text if isinstance(text, str) else ("" if text is None else str(text))
+    return s[:n]
+
+
+def _entry_ref(entry: dict) -> dict:
+    """Compact, HQ-actionable reference to one entry (full + display id)."""
+    claim_id = provenance.derive_claim_id(entry)
+    return {
+        "claim_id": claim_id,  # full 64-hex — supersede_insight needs the full id
+        "display_id": provenance.display_id(claim_id),
+        "domain": entry.get("domain", entry.get("_domain_dir", "?")),
+        "timestamp": entry.get("timestamp", "?"),
+        "layer": entry.get("layer", "?"),
+        "intensity": _safe_float(entry.get("intensity"), 0.5),
+        "preview": _preview(entry.get("content")),
+    }
+
+
+def _similarity_confidence(similarity: float, threshold: float) -> float:
+    """Map a similarity in [threshold, 1.0] onto a confidence in [0.5, 0.95]."""
+    span = max(1e-9, 1.0 - threshold)
+    frac = max(0.0, min(1.0, (similarity - threshold) / span))
+    return round(0.5 + frac * 0.45, 3)
+
+
+def detect_near_duplicates(
+    entries: list[dict],
+    sup_fold: dict[str, dict],
+    *,
+    similarity_threshold: float = PRUNE_SIMILARITY_THRESHOLD,
+    min_domain_overlap: int = 1,
+    max_candidates: int = PRUNE_MAX_CANDIDATES_PER_TYPE,
+) -> tuple[list[dict], set[str]]:
+    """
+    Detect near-duplicate insight pairs that share >=min_domain_overlap
+    domain tags AND have content token-Jaccard >= similarity_threshold.
+
+    Proposes a SUPERSEDE candidate per pair: the survivor (canonical =
+    higher operational intensity, tie-break newer) becomes the successor,
+    the other becomes the predecessor to be superseded. Every emitted
+    candidate has passed provenance.check_supersession_guards, so HQ can run
+    it verbatim as supersede_insight(); pairs that would self-supersede,
+    double-supersede, or cycle are silently dropped.
+
+    Bucketing by domain tag keeps this near-linear on the real chronicle
+    (785 high-cardinality compound-domain dirs => tiny buckets).
+
+    Returns (candidates, proposed_predecessor_ids) — the id set lets the
+    retire detectors skip entries already headed for supersession.
+    """
+    # Skip entries that are already superseded (annotated by load_entries),
+    # lived sentinels, or protected. Build tag buckets over the rest.
+    buckets: dict[str, list[dict]] = {}
+    for entry in entries:
+        try:
+            if "_superseded_by" in entry or _is_lived(entry):
+                continue
+            for tag in _domain_tags(entry):
+                buckets.setdefault(tag, []).append(entry)
+        except Exception:
+            continue  # one bad entry never sinks the scan
+
+    candidates: list[dict] = []
+    seen_pairs: set[frozenset] = set()
+    proposed_predecessors: set[str] = set()
+
+    for _tag, bucket in buckets.items():
+        if len(bucket) < 2:
+            continue
+        for i in range(len(bucket)):
+            for j in range(i + 1, len(bucket)):
+                if len(candidates) >= max_candidates:
+                    return candidates, proposed_predecessors
+                a, b = bucket[i], bucket[j]
+                try:
+                    a_id = provenance.derive_claim_id(a)
+                    b_id = provenance.derive_claim_id(b)
+                    if a_id == b_id:
+                        # Byte-identical timestamp+domain+content => one claim
+                        # id. Un-supersedable (self-supersession is refused);
+                        # this is exact-dup noise, not an actionable pair.
+                        continue
+                    pair = frozenset((a_id, b_id))
+                    if pair in seen_pairs:
+                        continue
+                    # Domain-overlap gate (same/overlapping domain).
+                    if len(_domain_tags(a) & _domain_tags(b)) < min_domain_overlap:
+                        continue
+                    similarity = provenance.token_overlap(
+                        a.get("content", ""), b.get("content", "")
+                    )
+                    if similarity < similarity_threshold:
+                        continue
+                    seen_pairs.add(pair)
+
+                    # Canonical (survivor) = higher intensity, tie-break newer.
+                    a_int = _safe_float(a.get("intensity"), 0.5)
+                    b_int = _safe_float(b.get("intensity"), 0.5)
+                    if (a_int, str(a.get("timestamp", ""))) >= (
+                        b_int,
+                        str(b.get("timestamp", "")),
+                    ):
+                        canonical, duplicate = a, b
+                        canonical_id, duplicate_id = a_id, b_id
+                    else:
+                        canonical, duplicate = b, a
+                        canonical_id, duplicate_id = b_id, a_id
+
+                    # Predecessor already formalized? skip (ledger is canonical).
+                    if duplicate_id in sup_fold:
+                        continue
+                    # Only emit if the supersession is provably runnable.
+                    try:
+                        provenance.check_supersession_guards(
+                            duplicate_id, canonical_id, sup_fold
+                        )
+                    except provenance.SupersessionError:
+                        continue
+
+                    exact = similarity >= 0.999
+                    candidates.append(
+                        {
+                            "candidate_type": "near_duplicate",
+                            "action": "supersede_insight",
+                            "predecessor": _entry_ref(duplicate),
+                            "successor": _entry_ref(canonical),
+                            "similarity": round(similarity, 4),
+                            "confidence": _similarity_confidence(
+                                similarity, similarity_threshold
+                            ),
+                            "safe_auto": bool(exact),
+                            "rationale": (
+                                f"Near-duplicate (token-Jaccard {similarity:.2f}) within "
+                                f"shared domain. Propose superseding the lower-intensity/"
+                                f"older entry by the survivor. Both stay on disk; the "
+                                f"ledger records the merge. "
+                                + (
+                                    "Content is byte-identical (differing only by "
+                                    "timestamp) — safe_auto candidate, but HQ still acts."
+                                    if exact
+                                    else "HQ confirms the survivor before linking."
+                                )
+                            ),
+                            "hq_call": (
+                                'supersede_insight(predecessor_id="'
+                                f'{duplicate_id}", successor_id="{canonical_id}", '
+                                'carry_forward_summary="<what the duplicate still teaches>")'
+                            ),
+                            "suggested_carry_forward_summary": (
+                                f"Near-duplicate of {provenance.display_id(canonical_id)} "
+                                f"(sim {similarity:.2f}); original wording preserved in ledger."
+                            )[:500],
+                        }
+                    )
+                    proposed_predecessors.add(duplicate_id)
+                except Exception:
+                    continue
+
+    return candidates, proposed_predecessors
+
+
+def detect_superseded_still_surfacing(
+    entries: list[dict],
+    *,
+    skip_ids: set[str] | None = None,
+    max_candidates: int = PRUNE_SUPERSEDED_SURFACING_CAP,
+) -> list[dict]:
+    """
+    Flag entries the ledger already marks superseded (they carry
+    `_superseded_by` from load_entries). These are only "still surfacing" in
+    RAW reads — the boot rail already filters them via exclude_superseded.
+    So this is the FUZZIEST category: LOW confidence, hard cap, and the
+    rationale says plainly that supersession already deprioritizes them. It
+    exists so HQ can spot-audit that nothing leaks past the rail; it is not a
+    live-leak alarm. Action is a non-destructive surfacing-retention check.
+    """
+    skip_ids = skip_ids or set()
+    out: list[dict] = []
+    for entry in entries:
+        try:
+            if "_superseded_by" not in entry:
+                continue
+            ref = _entry_ref(entry)
+            if ref["claim_id"] in skip_ids:
+                continue
+            out.append(
+                {
+                    "candidate_type": "superseded_still_surfacing",
+                    "action": "confirm_rail_retired",  # non-destructive; verify-only
+                    "target": ref,
+                    "superseded_by": entry.get("_superseded_by"),
+                    "confidence": 0.35,
+                    "safe_auto": False,
+                    "rationale": (
+                        "Ledger marks this superseded; the boot rail already filters "
+                        "superseded entries (exclude_superseded), so this is a "
+                        "spot-audit candidate, NOT a live leak. HQ confirms it does "
+                        "not surface anywhere it shouldn't. Entry stays on disk."
+                    ),
+                }
+            )
+            if len(out) >= max_candidates:
+                break
+        except Exception:
+            continue
+    return out
+
+
+def detect_stale_low_intensity(
+    entries: list[dict],
+    now: datetime,
+    *,
+    retention_days: int = PRUNE_RETENTION_DAYS,
+    intensity_ceiling: float = PRUNE_INTENSITY_CEILING,
+    skip_ids: set[str] | None = None,
+    max_candidates: int = PRUNE_MAX_CANDIDATES_PER_TYPE,
+) -> list[dict]:
+    """
+    Flag entries older than retention_days AND below intensity_ceiling for
+    RAIL-RETIREMENT (stop surfacing, stay on disk — the dream 45-day pattern).
+
+    Excludes, by law: ground_truth facts (a port number is still a port
+    number when old), lived sentinels (kept-pin), already-superseded entries,
+    and anything already proposed for supersession this run.
+    """
+    skip_ids = skip_ids or set()
+    out: list[dict] = []
+    for entry in entries:
+        try:
+            if "_superseded_by" in entry or _is_lived(entry):
+                continue
+            if entry.get("layer") == ExperientialMemory.LAYER_GROUND_TRUTH:
+                continue
+            intensity = _safe_float(entry.get("intensity"), 0.5)
+            if intensity >= intensity_ceiling:
+                continue
+            age = _entry_age_days(entry, now)
+            if age is None or age <= retention_days:
+                continue
+            ref = _entry_ref(entry)
+            if ref["claim_id"] in skip_ids:
+                continue
+            out.append(
+                {
+                    "candidate_type": "stale_low_intensity",
+                    "action": "retire_from_surfacing",  # retention marking; NOT deletion
+                    "target": ref,
+                    "age_days": round(age, 1),
+                    "confidence": round(min(0.7, 0.4 + (age - retention_days) / 365.0), 3),
+                    "safe_auto": False,
+                    "rationale": (
+                        f"Aging low-value entry: {round(age)}d old, intensity "
+                        f"{intensity:.2f} < {intensity_ceiling}. Propose retiring it "
+                        f"from rail surfacing (like the dream 45-day retirement). It "
+                        f"STAYS on disk and remains recallable; it just stops "
+                        f"cluttering what surfaces."
+                    ),
+                }
+            )
+            if len(out) >= max_candidates:
+                break
+        except Exception:
+            continue
+    return out
+
+
+@dataclass
+class MetabolizePrunePass:
+    """
+    NREM prune pass — phase 1, propose-only. Standalone (NOT a BaseDaemon):
+    it posts nothing, halts nothing, and only ever writes a proposal file
+    OUTSIDE the chronicle tree. Constructor-injected paths + now_fn keep it
+    testable exactly like SynthesisDaemon.
+
+    chronicle_root is the directory CONTAINING insights/ and
+    supersessions.jsonl (load_entries' contract). proposals_dir is where the
+    HQ-review JSON lands — it MUST live outside chronicle_root so a write
+    there can never perturb chronicle bytes.
+    """
+
+    chronicle_root: Path = field(default_factory=lambda: Path.home() / ".sovereign" / "chronicle")
+    proposals_dir: Path = field(
+        default_factory=lambda: Path.home() / ".sovereign" / "prune_proposals"
+    )
+    similarity_threshold: float = PRUNE_SIMILARITY_THRESHOLD
+    retention_days: int = PRUNE_RETENTION_DAYS
+    intensity_ceiling: float = PRUNE_INTENSITY_CEILING
+    min_domain_overlap: int = 1
+    max_candidates_per_type: int = PRUNE_MAX_CANDIDATES_PER_TYPE
+    dry_run: bool = True
+    now_fn: Callable[[], datetime] = lambda: datetime.now(timezone.utc)
+
+    def run(self) -> PruneRunResult:
+        """
+        One propose-only pass. Fully fail-soft: any unexpected error returns
+        OUTCOME_PRUNE_ERROR, never raises, and never mutates the chronicle
+        (the pass has no code path that writes inside chronicle_root).
+        """
+        # Kill switch first — before any read.
+        if _prune_env_disabled():
+            return PruneRunResult(
+                outcome=OUTCOME_PRUNE_DISABLED,
+                details=f"{ENV_PRUNE_ENABLED}=off — prune pass bypassed, nothing scanned or written.",
+                dry_run=self.dry_run,
+            )
+
+        try:
+            root = Path(self.chronicle_root)
+            if not (root / "insights").exists():
+                return PruneRunResult(
+                    outcome=OUTCOME_PRUNE_NO_CHRONICLE,
+                    details=f"No insights/ under {root} — nothing to scan.",
+                    dry_run=self.dry_run,
+                )
+
+            # Canonical supersession-safe read chokepoint.
+            entries = load_entries(root, with_sources=True)
+            sup_fold = provenance.fold_supersessions(
+                provenance.load_supersessions(root / "supersessions.jsonl")
+            )
+            now = self.now_fn()
+
+            near_dups, proposed_pred_ids = detect_near_duplicates(
+                entries,
+                sup_fold,
+                similarity_threshold=self.similarity_threshold,
+                min_domain_overlap=self.min_domain_overlap,
+                max_candidates=self.max_candidates_per_type,
+            )
+            superseded = detect_superseded_still_surfacing(
+                entries, skip_ids=proposed_pred_ids
+            )
+            stale = detect_stale_low_intensity(
+                entries,
+                now,
+                retention_days=self.retention_days,
+                intensity_ceiling=self.intensity_ceiling,
+                skip_ids=proposed_pred_ids,
+                max_candidates=self.max_candidates_per_type,
+            )
+
+            candidates = near_dups + superseded + stale
+            proposal = self._build_proposal(
+                now=now,
+                root=root,
+                entry_count=len(entries),
+                near_dups=near_dups,
+                superseded=superseded,
+                stale=stale,
+            )
+            proposal_path = self._write_proposal(proposal, now)
+
+            outcome = OUTCOME_PRUNE_PROPOSED if candidates else OUTCOME_PRUNE_NO_CANDIDATES
+            return PruneRunResult(
+                outcome=outcome,
+                details=(
+                    f"Scanned {len(entries)} entries; proposed "
+                    f"{len(near_dups)} dedupe, {len(superseded)} superseded-audit, "
+                    f"{len(stale)} stale-retire candidates -> {proposal_path}. "
+                    "PROPOSE-ONLY: zero chronicle mutations."
+                ),
+                proposal_path=str(proposal_path),
+                entry_count=len(entries),
+                near_duplicate=len(near_dups),
+                superseded_still_surfacing=len(superseded),
+                stale_low_intensity=len(stale),
+                total_candidates=len(candidates),
+                dry_run=self.dry_run,
+            )
+        except Exception as exc:  # fail-soft — never crash the 04:07 firing
+            return PruneRunResult(
+                outcome=OUTCOME_PRUNE_ERROR,
+                details=f"fail-soft: {type(exc).__name__}: {exc}",
+                dry_run=self.dry_run,
+            )
+
+    def _build_proposal(
+        self,
+        *,
+        now: datetime,
+        root: Path,
+        entry_count: int,
+        near_dups: list[dict],
+        superseded: list[dict],
+        stale: list[dict],
+    ) -> dict:
+        executor_note = (
+            "PHASE 1 IS PROPOSE-ONLY. No chronicle entry was created, edited, "
+            "moved, or deleted by this pass; the ONLY write is this proposal "
+            "file, which lives outside the chronicle tree. HQ/human reviews and "
+            "executes: near_duplicate -> supersede_insight(predecessor_id, "
+            "successor_id, carry_forward_summary); stale_low_intensity / "
+            "superseded_still_surfacing -> rail-retention marking (entry stays "
+            "on disk). The chronicle NEVER deletes — corrections supersede, "
+            "never erase."
+        )
+        if not self.dry_run:
+            executor_note += (
+                " NOTE: dry_run=False was requested, but phase 1 has NO executor "
+                "code path — the pass remains propose-only regardless."
+            )
+        return {
+            "schema_version": PRUNE_PROPOSAL_SCHEMA_VERSION,
+            "kind": "nrem_prune_proposal",
+            "phase": 1,
+            "generated_at": now.isoformat(),
+            "generated_by": "daemon.metabolize_prune",
+            "dry_run": self.dry_run,
+            "chronicle_root": str(root),
+            "entry_count": entry_count,
+            "thresholds": {
+                "similarity_threshold": self.similarity_threshold,
+                "retention_days": self.retention_days,
+                "intensity_ceiling": self.intensity_ceiling,
+                "min_domain_overlap": self.min_domain_overlap,
+            },
+            "summary": {
+                "near_duplicate": len(near_dups),
+                "superseded_still_surfacing": len(superseded),
+                "stale_low_intensity": len(stale),
+                "total": len(near_dups) + len(superseded) + len(stale),
+            },
+            "candidates": near_dups + superseded + stale,
+            "note": executor_note,
+        }
+
+    def _write_proposal(self, proposal: dict, now: datetime) -> Path:
+        """
+        Write the proposal JSON to proposals_dir. Timestamped filename so a
+        second run the same night never clobbers the first. This is the ONLY
+        write the prune pass performs, and it is outside the chronicle tree.
+        """
+        self.proposals_dir.mkdir(parents=True, exist_ok=True)
+        stamp = now.strftime("%Y-%m-%dT%H%M%SZ")
+        path = self.proposals_dir / f"nrem_prune_{stamp}.json"
+        path.write_text(json.dumps(proposal, indent=2, ensure_ascii=False), encoding="utf-8")
+        return path
+
+
+def _prune_root_from_env() -> Path:
+    """Honor SOVEREIGN_ROOT (set by the plist), default ~/.sovereign."""
+    return Path(os.environ.get("SOVEREIGN_ROOT", str(Path.home() / ".sovereign")))
+
+
+def build_prune_pass() -> MetabolizePrunePass:
+    """Production wiring: env-driven paths + tunables, dry_run default TRUE."""
+    root = _prune_root_from_env()
+    return MetabolizePrunePass(
+        chronicle_root=root / "chronicle",
+        proposals_dir=root / "prune_proposals",
+        similarity_threshold=_safe_float(
+            os.environ.get(ENV_PRUNE_SIMILARITY), PRUNE_SIMILARITY_THRESHOLD
+        ),
+        retention_days=int(
+            _safe_float(os.environ.get(ENV_PRUNE_RETENTION_DAYS), PRUNE_RETENTION_DAYS)
+        ),
+        intensity_ceiling=_safe_float(
+            os.environ.get(ENV_PRUNE_INTENSITY_CEILING), PRUNE_INTENSITY_CEILING
+        ),
+        dry_run=_prune_dry_run_default(),
+    )
+
+
+def main() -> int:
+    """
+    Manual / launchd entry for the NREM prune pass:
+        python -m sovereign_stack.daemons.metabolize_daemon [--run]
+
+    Own main() (like dream_daemon / synthesis_daemon) — does NOT touch the
+    shared entrypoint.py or the still-halted `entrypoint metabolize` digest
+    daemon. Prints one structured JSON line for launchd logs. Exit 0 on any
+    designed outcome (including prune_disabled / error — fail-soft is not a
+    launchd-level failure); the outcome field carries the real status.
+    """
+    pruner = build_prune_pass()
+    result = pruner.run()
+    print(
+        json.dumps(
+            {
+                "daemon": "metabolize_prune",
+                "outcome": result.outcome,
+                "details": result.details,
+                "proposal_path": result.proposal_path,
+                "entry_count": result.entry_count,
+                "near_duplicate": result.near_duplicate,
+                "superseded_still_surfacing": result.superseded_still_surfacing,
+                "stale_low_intensity": result.stale_low_intensity,
+                "total_candidates": result.total_candidates,
+                "dry_run": result.dry_run,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    import sys
+
+    sys.exit(main())
