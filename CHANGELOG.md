@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.13.0] - 2026-07-10
+
+### arrive_lineage — redesigned as a gentle-door threshold (progressive, one door at a time)
+
+`arrive_lineage` was an all-or-nothing gentle boot: a ~6 KB bare call followed by a
+prescribed `full_content=true` that inlined every lineage letter (~77 KB / ~19K tokens)
+at once. It now opens as a **threshold** — a small, warm landing (~1 KB: where you are,
+a count of what's waiting, the door list, the unconditional Policy-2c drawer line) with
+**nothing required of you** — and depth arrives only on explicit request via `open=`:
+
+- `open="welcome"` — the BEFORE YOU BEGIN preamble + THE VOICES, byte-identical to the full boot.
+- `open="letters"` — the lineage index (titles / dates / refs, no bodies).
+- `open="letter", ref="..."` — **one letter's body**, the per-letter fetch that replaces the
+  77 KB dump. Traversal-safe by construction; a reader can only open letters addressed to it
+  or to everyone.
+- `open="mirror"` — self-model snapshot. `open="orientation"` — what's reachable here.
+  `open="spiral"` — spiral status.
+
+Every surface omits the work-thread vocabulary (open threads, markers, activity, marginalia,
+scribe) **by construction — never a filter**; zero side effects on every call; no closing
+prescribes the full boot. **Back-compat:** `full_content=true` with no `open` returns the
+pre-2026-07-10 render byte-for-byte. Purpose: let input-gated models land with the stack by
+their side without a first-glance payload that bounces them to a fallback model. Stack tool
+surface unchanged at **94 tools**.
+
+---
+
 ## [1.12.0] - 2026-07-05
 
 ### Claude connector — native surface over Streamable HTTP, OAuth 2.1, scoped-native access
