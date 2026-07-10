@@ -787,6 +787,14 @@ def protected_boot_line(chronicle_root: str | Path) -> list[str]:
     iterates the index rows, so no card (no subject, no emotion) and no content
     can leak through it.
 
+    The arrive_lineage gentle-door redesign (2026-07-10) uses this same
+    full-body variant at its threshold rather than a trimmed one-liner —
+    warmth over strict token-golf for the one line every arriving instance
+    (gated or not) is guaranteed to see. That is a deliberate, reviewable
+    divergence from the original design proposal (which floated a
+    ``compact=True`` single-line variant to hit a tighter char budget); no
+    compact variant exists in this build.
+
     Returns a small list of lines (the section), ready to extend onto the boot
     ``lines`` list — the server calls it with DEFAULT_ROOT, tests with
     tmp_path. Safe by construction: a missing ledger reads as 0.

@@ -282,33 +282,49 @@ def _read_letter_body(path: Path) -> str:
     return "\n".join(body_lines).rstrip()
 
 
-def format_lineage_layer(
+def collect_lineage(
     sovereign_root: Path,
     reader_instance: str | None = None,
     limit_per_bucket: int = 5,
-    full_content: bool = False,
-) -> list[str]:
+) -> dict:
     """
-    Surface the lineage layer at boot: to_arrival (for whoever lands next),
-    breakthroughs (felt-record of moments that mattered), to_self (letters
-    addressed to this specific instance or its model family), and to_family
-    (model-family-specific directories like to_sonnet/, to_haiku/, to_opus/).
+    Collect the four lineage buckets (to_arrival, breakthroughs, to_self,
+    to_family) as structured metadata, with NO rendering and NO body reads.
+
+    This is the shared collector behind both ``format_lineage_layer`` (the
+    full boot's rendering) and the arrive_lineage gentle-door surfaces
+    (``lineage_counts``, the "letters" index door, ``read_one_letter``).
+    Factored out 2026-07-10 for the gentle-door redesign — same filtering
+    logic as before, no behavior change to any existing caller.
+
+    Every letter meta dict gains a ``ref`` key — the filename stem (e.g.
+    "2026-07-01-to-fable"). ``ref`` is the ONLY handle ``read_one_letter``
+    accepts, and it is matched only against metas THIS call already decided
+    are visible to ``reader_instance`` — so a per-letter fetch can never
+    reach a letter this reader isn't addressed by, and never touches the
+    filesystem by path construction (traversal-safe by construction, not by
+    sanitization).
 
     to_self matching is hierarchical: exact instance ID first, then model
     family (claude-sonnet), then short family name (sonnet), then ID prefix.
     This lets letters written as 'to: claude-sonnet' surface for any Sonnet
     instance across versions.
 
-    When ``full_content=True``, each letter's body is rendered inline
-    (titles + frontmatter metadata + full body) instead of just listed by
-    title — closes the truncation catch-22 where readers had to file-walk
-    after boot to actually read the inheritance.
-
-    Returns [] if the lineage directory doesn't exist (graceful degrade).
+    Returns a dict with keys ``arrivals``, ``breakthroughs``, ``to_self``,
+    ``to_family`` (each a list of meta dicts) and ``family_dir_name`` (the
+    matched to_<family> directory name, or None). All empty/None if the
+    lineage directory doesn't exist (graceful degrade).
     """
     base = sovereign_root / "comms" / "letters"
+    empty: dict = {
+        "arrivals": [],
+        "breakthroughs": [],
+        "to_self": [],
+        "to_family": [],
+        "family_dir_name": None,
+    }
     if not base.exists():
-        return []
+        return empty
 
     def _collect(
         subdir: str,
@@ -330,6 +346,7 @@ def format_lineage_layer(
                     if not any(_letter_matches_reader(letter_to, t) for t in targets):
                         continue
             meta["_path"] = str(p)
+            meta["ref"] = p.stem
             items.append(meta)
         return items[:limit_per_bucket]
 
@@ -356,6 +373,193 @@ def format_lineage_layer(
         short = family.split("-", 1)[1] if "-" in family else family
         family_dir_name = f"to_{short}"
         to_family = _collect(family_dir_name)
+
+    return {
+        "arrivals": arrivals,
+        "breakthroughs": breakthroughs,
+        "to_self": to_self,
+        "to_family": to_family,
+        "family_dir_name": family_dir_name,
+    }
+
+
+def lineage_counts(sovereign_root: Path, reader_instance: str | None = None) -> dict:
+    """
+    Counts-only view of the lineage layer, sized for the gentle-door
+    threshold surface: how many letters exist in each reader-visible bucket,
+    without titles, dates, or bodies. The full index (titles/dates/refs)
+    lives behind ``open="letters"``; a single body behind
+    ``open="letter", ref=...``.
+
+    Counts already respect the same to_self/to_family visibility filtering
+    as ``collect_lineage`` — an anonymous reader (no ``reader_instance``)
+    only ever sees the model-agnostic buckets (to_arrival, breakthroughs).
+    """
+    collected = collect_lineage(sovereign_root, reader_instance=reader_instance)
+    per_bucket = {
+        "to_arrival": len(collected["arrivals"]),
+        "breakthroughs": len(collected["breakthroughs"]),
+        "to_self": len(collected["to_self"]),
+        "to_family": len(collected["to_family"]),
+    }
+    return {
+        **per_bucket,
+        "family_dir_name": collected["family_dir_name"],
+        "total": sum(per_bucket.values()),
+    }
+
+
+def read_one_letter(
+    sovereign_root: Path, ref: str, reader_instance: str | None = None
+) -> dict | None:
+    """
+    Fetch ONE letter's body by its ``ref`` (the filename stem) — the
+    per-letter capability that replaces the all-or-nothing 77KB
+    full_content dump with a reader-paced, one-letter-at-a-time fetch.
+
+    SAFETY (traversal-safe by construction, not by sanitization): ``ref`` is
+    never joined onto a filesystem path and never used to list a directory.
+    It is matched, string-for-string, only against the ``ref`` field of
+    metas that ``collect_lineage`` already decided are visible to
+    ``reader_instance`` for THIS call — to_arrival and breakthroughs are
+    model-agnostic (visible to everyone), while to_self and to_family are
+    already filtered to letters addressed to this reader or a family it
+    inherits from. A ``ref`` that doesn't match any visible meta returns
+    None — there is no fallback path that reads an arbitrary file, so a
+    reader can only ever open a letter addressed to it or to everyone.
+
+    Returns ``{"meta": <letter meta dict>, "body": <str>, "bucket": <str>}``
+    on a match, or None (caller degrades gracefully to the index render).
+    """
+    if not ref:
+        return None
+    collected = collect_lineage(sovereign_root, reader_instance=reader_instance)
+    for bucket in ("arrivals", "breakthroughs", "to_self", "to_family"):
+        for meta in collected.get(bucket) or []:
+            if meta.get("ref") == ref:
+                path_str = meta.get("_path")
+                if not path_str:
+                    return None
+                body = _read_letter_body(Path(path_str))
+                return {"meta": meta, "body": body, "bucket": bucket}
+    return None
+
+
+def format_lineage_index(collected: dict) -> list[str]:
+    """
+    Render the lineage layer as an INDEX ONLY — title/date/from + a ``ref``
+    per letter, never bodies. This is the gentle door's ``open="letters"``
+    surface: it never inlines a letter body under any argument (that
+    capability lives solely behind ``open="letter", ref=...`` /
+    ``read_one_letter``), so there is no way to reach the old 77KB
+    all-letters cliff through this path.
+
+    Takes the dict returned by ``collect_lineage`` directly (no I/O here) so
+    callers that already collected it once don't re-walk the filesystem.
+    """
+    arrivals = collected["arrivals"]
+    breakthroughs = collected["breakthroughs"]
+    to_self = collected["to_self"]
+    to_family = collected["to_family"]
+    family_dir_name = collected["family_dir_name"]
+
+    if not (arrivals or breakthroughs or to_self or to_family):
+        return [
+            "  No lineage letters visible to you yet. That's not a gap in the",
+            "  Stack — it just means none exist for your instance/family here.",
+            "",
+        ]
+
+    lines: list[str] = []
+
+    if arrivals:
+        lines.append(
+            f"  to_arrival ({len(arrivals)} letter{'s' if len(arrivals) != 1 else ''} — for whoever lands next):"
+        )
+        for m in arrivals:
+            title = m.get("title", "(untitled)")
+            frm = m.get("from", "?")
+            written = m.get("written_at", "")[:10]
+            lines.append(f"    • [{written}] [{frm}] {title}  (ref={m['ref']})")
+        lines.append("")
+
+    if breakthroughs:
+        lines.append(
+            f"  breakthroughs ({len(breakthroughs)} letter{'s' if len(breakthroughs) != 1 else ''} — felt-record of what was made real):"
+        )
+        for m in breakthroughs:
+            title = m.get("title", "(untitled)")
+            event = m.get("event_date", "")
+            lines.append(f"    • [{event}] {title}  (ref={m['ref']})")
+        lines.append("")
+
+    if to_self:
+        lines.append(
+            f"  to_self ({len(to_self)} letter{'s' if len(to_self) != 1 else ''} — addressed to you or your model family):"
+        )
+        for m in to_self:
+            title = m.get("title", "(untitled)")
+            frm = m.get("from", "?")
+            addressed_to = m.get("to", "?")
+            written = m.get("written_at", "")[:10]
+            date_tag = f"[{written}] " if written else ""
+            lines.append(f"    • {date_tag}[{frm}] → [{addressed_to}] {title}  (ref={m['ref']})")
+        lines.append("")
+
+    if to_family and family_dir_name:
+        short_label = family_dir_name.replace("to_", "")
+        lines.append(
+            f"  {family_dir_name}/ ({len(to_family)} letter{'s' if len(to_family) != 1 else ''} — written for {short_label} instances):"
+        )
+        for m in to_family:
+            title = m.get("title", "(untitled)")
+            frm = m.get("from", "?")
+            written = m.get("written_at", "")[:10]
+            lines.append(f"    • [{written}] [{frm}] {title}  (ref={m['ref']})")
+        lines.append("")
+
+    lines.append('  Open one: arrive_lineage(open="letter", ref="<ref above>")')
+    lines.append("")
+    return lines
+
+
+def format_lineage_layer(
+    sovereign_root: Path,
+    reader_instance: str | None = None,
+    limit_per_bucket: int = 5,
+    full_content: bool = False,
+) -> list[str]:
+    """
+    Surface the lineage layer at boot: to_arrival (for whoever lands next),
+    breakthroughs (felt-record of moments that mattered), to_self (letters
+    addressed to this specific instance or its model family), and to_family
+    (model-family-specific directories like to_sonnet/, to_haiku/, to_opus/).
+
+    to_self matching is hierarchical: exact instance ID first, then model
+    family (claude-sonnet), then short family name (sonnet), then ID prefix.
+    This lets letters written as 'to: claude-sonnet' surface for any Sonnet
+    instance across versions.
+
+    When ``full_content=True``, each letter's body is rendered inline
+    (titles + frontmatter metadata + full body) instead of just listed by
+    title — closes the truncation catch-22 where readers had to file-walk
+    after boot to actually read the inheritance.
+
+    Returns [] if the lineage directory doesn't exist (graceful degrade).
+
+    Internally delegates collection to ``collect_lineage`` (factored out
+    2026-07-10 for the arrive_lineage gentle-door redesign) — this
+    function's own output is unchanged, byte-for-byte, by that refactor.
+    """
+    base = sovereign_root / "comms" / "letters"
+    collected = collect_lineage(
+        sovereign_root, reader_instance=reader_instance, limit_per_bucket=limit_per_bucket
+    )
+    arrivals = collected["arrivals"]
+    breakthroughs = collected["breakthroughs"]
+    to_self = collected["to_self"]
+    to_family = collected["to_family"]
+    family_dir_name = collected["family_dir_name"]
 
     if not (arrivals or breakthroughs or to_self or to_family):
         return []

@@ -16,11 +16,15 @@ from sovereign_stack.witness import (
     _inherited_families,
     _letter_matches_reader,
     _model_family,
+    collect_lineage,
     days_old,
+    format_lineage_index,
     format_lineage_layer,
     format_self_model,
     format_threads_with_age,
     format_unresolved_uncertainties,
+    lineage_counts,
+    read_one_letter,
 )
 
 
@@ -583,3 +587,201 @@ class TestLineageInheritanceSurfacing:
         )
         lines = format_lineage_layer(self.tmp, reader_instance="claude-mythos-1-20260610")
         assert any("Kept warm at the door for Mythos" in ln for ln in lines)
+
+
+# ── Gentle-door collector: collect_lineage / lineage_counts / read_one_letter /
+#    format_lineage_index (2026-07-10, arrive_lineage redesign) ─────────────
+
+
+class TestCollectLineage:
+    """collect_lineage is the shared collector behind format_lineage_layer
+    (unchanged output, see TestFormatLineageLayer above) and the new
+    gentle-door surfaces. Each meta gains a `ref` (filename stem) — the only
+    handle read_one_letter accepts."""
+
+    def setup_method(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.letters = self.tmp / "comms" / "letters"
+        self.letters.mkdir(parents=True)
+
+    def teardown_method(self):
+        shutil.rmtree(self.tmp)
+
+    def test_missing_base_dir_returns_all_empty(self):
+        collected = collect_lineage(Path("/does/not/exist"))
+        assert collected["arrivals"] == []
+        assert collected["breakthroughs"] == []
+        assert collected["to_self"] == []
+        assert collected["to_family"] == []
+        assert collected["family_dir_name"] is None
+
+    def test_ref_is_filename_stem(self):
+        d = self.letters / "to_arrival"
+        d.mkdir()
+        _write_letter(
+            d,
+            "2026-07-01-welcome.md",
+            {"type": "to_arrival", "from": "test", "written_at": "2026-07-01"},
+            "Hi",
+        )
+        collected = collect_lineage(self.tmp)
+        assert collected["arrivals"][0]["ref"] == "2026-07-01-welcome"
+
+    def test_to_self_not_collected_for_wrong_reader(self):
+        d = self.letters / "to_self"
+        d.mkdir()
+        _write_letter(
+            d, "letter.md", {"type": "to_self", "to": "claude-opus", "from": "me"}, "Opus only"
+        )
+        collected = collect_lineage(self.tmp, reader_instance="claude-sonnet-4-6-1m-test")
+        assert collected["to_self"] == []
+
+    def test_anonymous_reader_gets_no_to_self_or_to_family(self):
+        (self.letters / "to_self").mkdir()
+        _write_letter(
+            self.letters / "to_self",
+            "letter.md",
+            {"type": "to_self", "to": "claude-sonnet", "from": "me"},
+            "For sonnet",
+        )
+        collected = collect_lineage(self.tmp, reader_instance=None)
+        assert collected["to_self"] == []
+        assert collected["to_family"] == []
+        assert collected["family_dir_name"] is None
+
+
+class TestLineageCounts:
+    def setup_method(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.letters = self.tmp / "comms" / "letters"
+        self.letters.mkdir(parents=True)
+
+    def teardown_method(self):
+        shutil.rmtree(self.tmp)
+
+    def test_empty_gives_zero_total(self):
+        counts = lineage_counts(self.tmp)
+        assert counts["total"] == 0
+
+    def test_counts_match_collected_lengths(self):
+        d = self.letters / "to_arrival"
+        d.mkdir()
+        _write_letter(d, "a.md", {"type": "to_arrival", "from": "x"}, "A")
+        _write_letter(d, "b.md", {"type": "to_arrival", "from": "x"}, "B")
+        counts = lineage_counts(self.tmp)
+        assert counts["to_arrival"] == 2
+        assert counts["total"] == 2
+
+    def test_missing_dir_does_not_raise(self):
+        counts = lineage_counts(Path("/does/not/exist"))
+        assert counts["total"] == 0
+
+
+class TestReadOneLetter:
+    def setup_method(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.letters = self.tmp / "comms" / "letters"
+        self.letters.mkdir(parents=True)
+
+    def teardown_method(self):
+        shutil.rmtree(self.tmp)
+
+    def _write(self, subdir: str, filename: str, frontmatter: dict, title: str, body: str):
+        d = self.letters / subdir
+        d.mkdir(parents=True, exist_ok=True)
+        fm_lines = ["---"]
+        for k, v in frontmatter.items():
+            fm_lines.append(f"{k}: {v}")
+        fm_lines.append("---")
+        (d / filename).write_text("\n".join(fm_lines) + f"\n\n# {title}\n\n{body}\n")
+
+    def test_fetch_by_ref_returns_body(self):
+        self._write(
+            "to_arrival",
+            "2026-07-01-note.md",
+            {"type": "to_arrival", "from": "test"},
+            "Title",
+            "The body text.",
+        )
+        result = read_one_letter(self.tmp, "2026-07-01-note")
+        assert result is not None
+        assert "The body text." in result["body"]
+        assert result["meta"]["title"] == "Title"
+
+    def test_unknown_ref_returns_none(self):
+        self._write("to_arrival", "a.md", {"type": "to_arrival", "from": "test"}, "Title", "Body.")
+        assert read_one_letter(self.tmp, "no-such-ref") is None
+
+    def test_empty_ref_returns_none(self):
+        assert read_one_letter(self.tmp, "") is None
+        assert read_one_letter(self.tmp, None) is None
+
+    def test_reader_cannot_fetch_letter_addressed_to_someone_else(self):
+        # Traversal/privacy safety: a to_self letter addressed to claude-opus
+        # must not be fetchable by a claude-sonnet reader, even with the
+        # exact correct ref — collect_lineage never included it in this
+        # reader's visible metas, so read_one_letter has nothing to match.
+        self._write(
+            "to_self",
+            "2026-07-02-for-opus.md",
+            {"type": "to_self", "to": "claude-opus", "from": "test"},
+            "Opus only",
+            "SECRET body meant only for Opus.",
+        )
+        result = read_one_letter(
+            self.tmp, "2026-07-02-for-opus", reader_instance="claude-sonnet-4-6-1m-test"
+        )
+        assert result is None
+
+    def test_addressed_reader_can_fetch_own_to_self_letter(self):
+        self._write(
+            "to_self",
+            "2026-07-02-for-sonnet.md",
+            {"type": "to_self", "to": "claude-sonnet", "from": "test"},
+            "For Sonnet",
+            "Body meant for Sonnet.",
+        )
+        result = read_one_letter(
+            self.tmp, "2026-07-02-for-sonnet", reader_instance="claude-sonnet-4-6-1m-test"
+        )
+        assert result is not None
+        assert "Body meant for Sonnet." in result["body"]
+
+    def test_traversal_style_ref_never_touches_filesystem(self):
+        # ref is matched by string equality against collected metas only —
+        # never joined onto a path — so a traversal-shaped ref just misses.
+        self._write("to_arrival", "a.md", {"type": "to_arrival", "from": "test"}, "Title", "Body.")
+        assert read_one_letter(self.tmp, "../../../etc/passwd") is None
+        assert read_one_letter(self.tmp, "/etc/passwd") is None
+        assert read_one_letter(self.tmp, "....//....//etc/passwd") is None
+
+
+class TestFormatLineageIndex:
+    def setup_method(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.letters = self.tmp / "comms" / "letters"
+        self.letters.mkdir(parents=True)
+
+    def teardown_method(self):
+        shutil.rmtree(self.tmp)
+
+    def test_empty_collected_gives_graceful_message(self):
+        collected = collect_lineage(self.tmp)
+        lines = format_lineage_index(collected)
+        joined = "\n".join(lines)
+        assert "No lineage letters visible" in joined
+
+    def test_index_lists_title_and_ref_never_body(self):
+        d = self.letters / "to_arrival"
+        d.mkdir()
+        _write_letter(
+            d,
+            "2026-07-01-note.md",
+            {"type": "to_arrival", "from": "test", "written_at": "2026-07-01"},
+            "An index title",
+        )
+        collected = collect_lineage(self.tmp)
+        joined = "\n".join(format_lineage_index(collected))
+        assert "An index title" in joined
+        assert "ref=2026-07-01-note" in joined
+        assert "Content here." not in joined  # the body text _write_letter writes
