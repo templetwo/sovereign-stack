@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.12.0] - 2026-07-05
+
+### Claude connector — native surface over Streamable HTTP, OAuth 2.1, scoped-native access
+
+**A third bridge (`clients/claude_bridge`) that lets the claude.ai / Claude-app
+connector reach the Stack.** claude.ai custom connectors require the full OAuth
+handshake and cannot present a pasted bearer (issue #112), so the Claude app
+could not connect while ChatGPT and Grok (which have OAuth shims) could.
+Bridge-layer only; the native tool surface is unchanged at **94 tools**.
+
+Unlike the openai/grok bridges (ring-filtered surfaces over SSE), this bridge
+serves the **full native surface over Streamable HTTP** with a *gated blast
+radius* — "unfiltered identity, gated blast radius":
+
+- **Transport:** MCP Streamable HTTP (stateless), the current remote transport;
+  the other bridges' SSE transport is deprecated.
+- **OAuth 2.1:** mandatory PKCE S256, **RFC 8707 audience-bound** access tokens
+  (a token minted for another bridge cannot be replayed against `/claude/mcp`),
+  short-lived access + **rotating refresh** with reuse-detection family
+  revocation, redirect URIs pinned to the claude.ai/claude.com callbacks,
+  RFC 7009 revocation, and every discovery shape answered 200 (retry-loop
+  hardening for incident #4030).
+- **Resource-owner authentication:** completing the OAuth flow is *not* operator
+  consent — `POST /authorize` mints a code only with the operator passphrase
+  (`CLAUDE_AUTHORIZE_SECRET`) plus a single-use signed nonce, and fails closed
+  when unset. (Caught as a pre-deploy critical by an adversarial review and
+  fixed before ship.)
+- **Scoped-native tiers:** the full 94-tool surface, minus a 12-tool destructive
+  tier (policy mutation, supersession, quarantine, protected records, service
+  control, and the handoff-consuming `where_did_i_leave_off`) that requires a
+  **single-use, argument-bound** step-up approval through the Door That Asks
+  (ntfy tap on Anthony's phone). Fail-closed classification; fabricated tool
+  names are rejected as `method_not_found`.
+
+95+ tests (OAuth security core, gate, elevation, tiers registry-drift guard,
+routes) plus an offline smoke script; the resource-owner control is proven
+end-to-end against a live server. Deploy (cloudflared ingress + the operator
+secret) is documented in `docs/implementation/CLAUDE_CONNECTOR.md`. No new
+static secrets on the wire — the bridge never accepts `BRIDGE_TOKEN`.
+
+---
+
 ## [1.11.0] - 2026-06-26
 
 ### Bridge write-path ergonomics + schema discoverability
