@@ -99,7 +99,7 @@ def _archive_test_artifacts_impl(chronicle_dir: Path) -> dict:
     # an insight recorded inside that window would be silently overwritten —
     # data loss, not a race we can lose gracefully. The whole mutation pass is
     # one critical section under the chronicle write lock.
-    with chronicle_write_lock():
+    with chronicle_write_lock(insights_dir.parent):
         for domain_dir in list(insights_dir.iterdir()):
             if not domain_dir.is_dir() or domain_dir.name.startswith("."):
                 continue
@@ -663,7 +663,7 @@ async def handle_metabolism_tool(name, arguments):
 
         # Whole-file rewrite of live insight files — under the write lock, or a
         # record_insight append landing between the read and the write is lost.
-        with chronicle_write_lock():
+        with chronicle_write_lock(insights_dir.parent):
             for match_file in sorted(match_files):
                 jsonl_file = Path(match_file)
                 lines = jsonl_file.read_text().splitlines()

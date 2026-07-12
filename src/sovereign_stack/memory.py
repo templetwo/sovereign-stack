@@ -791,7 +791,7 @@ class ExperientialMemory:
         # that lands inside that window is silently clobbered and the insight
         # is gone. The receipt hashing above stays OUTSIDE the lock — it is
         # pure, it can take seconds, and no other writer needs to wait on it.
-        with provenance.chronicle_write_lock():
+        with provenance.chronicle_write_lock(self.root):
             deduped = _dedup_hit(jsonl_path, content, domain, layer, timestamp)
             if deduped is not None:
                 return DedupedInsightPath(str(jsonl_path), deduped)
@@ -979,7 +979,7 @@ class ExperientialMemory:
         jsonl_path = self.threads_dir / f"{domain}.jsonl"
         # Thread files are rewritten whole by resolve_thread / resolve_thread_by_id;
         # an append that lands inside one of those rewrites would be clobbered.
-        with provenance.chronicle_write_lock(), open(jsonl_path, "a") as f:
+        with provenance.chronicle_write_lock(self.root), open(jsonl_path, "a") as f:
             for q in questions:
                 thread = {
                     "timestamp": timestamp.isoformat(),
@@ -1022,7 +1022,7 @@ class ExperientialMemory:
         jsonl_path = self.threads_dir / f"{domain}.jsonl"
         # Whole-file rewrite — read and write are one critical section, or a
         # concurrent record_open_thread append is overwritten by this rewrite.
-        with provenance.chronicle_write_lock():
+        with provenance.chronicle_write_lock(self.root):
             if jsonl_path.exists():
                 lines = []
                 with open(jsonl_path) as f:
@@ -1082,7 +1082,7 @@ class ExperientialMemory:
         now = datetime.now(timezone.utc).isoformat()
 
         # Whole-file rewrite — same critical section as resolve_thread.
-        with provenance.chronicle_write_lock():
+        with provenance.chronicle_write_lock(self.root):
             for jsonl_file in self.threads_dir.glob("*.jsonl"):
                 hit = False
                 lines = []

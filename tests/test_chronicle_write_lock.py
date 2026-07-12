@@ -278,9 +278,9 @@ class TestCancellationCannotReleaseTheLock:
                 await task
             # The worker thread is STILL inside the read-modify-write. The lock
             # it holds is a sync lock: the cancellation could not touch it.
-            acquired = provenance.chronicle_write_lock().acquire(blocking=False)
+            acquired = provenance._CHRONICLE_WRITE_LOCK.acquire(blocking=False)
             if acquired:  # pragma: no cover — only on a broken tree
-                provenance.chronicle_write_lock().release()
+                provenance._CHRONICLE_WRITE_LOCK.release()
             return acquired
 
         acquired = asyncio.run(drive())

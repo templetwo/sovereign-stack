@@ -28,7 +28,9 @@ pure data in, verdicts out. All paths parameterized (defaults point at
 lives elsewhere.
 """
 
+import contextlib
 import errno
+import fcntl
 import functools
 import hashlib
 import json
@@ -118,18 +120,93 @@ def default_supersessions_path() -> Path:
 # RLock, not Lock: record_insight → append_supersession and resolve_thread →
 # record_insight both nest, and a plain Lock would deadlock on itself.
 #
-# In-process only, and that is enough today: the daemons read the chronicle,
-# they never rewrite it (metabolize_daemon writes a report, synthesis_daemon
-# and nape_daemon append to their own JSONL). The only whole-file rewriters
-# are metabolism's tools, which run in this process. A second PROCESS running
-# metabolism against the live chronicle would not be covered — that is a real
-# residual risk, and it wants an fcntl lock, not a bigger threading one.
+# The threading lock alone is NOT enough, and the gap is measured: a writer
+# process appending while an archiver process rewrites the same insights file
+# lost 11 of 60 entries, silently. The same collision inside one process loses
+# zero — the RLock closes that half. But a threading lock lives in ONE process,
+# and the live topology has several: the SSE server, four launchd daemons, a
+# Desktop stdio server, and CLI entry points, all against the same chronicle.
+#
+# So an advisory fcntl.flock on a lockfile is taken INSIDE the RLock. Anthony
+# ratified this shape by voice on 2026-07-12 ("advisory file lock now, every
+# writer, every process"); the append-only-ledger remodel is the better long
+# term answer and is deferred.
+#
+# Order matters. RLock (outer) → flock (inner):
+#   - flock() locks attach to the open file DESCRIPTION, so two threads sharing
+#     one fd do not block each other. flock alone would NOT close the in-process
+#     race the RLock already closes. Both are load-bearing.
+#   - The RLock serializes threads before any of them touches the fd, so the
+#     depth counter below needs no lock of its own — the RLock is holding it.
+#
+# The receipt hash stays OUTSIDE this lock (hoisted in memory.record_insight).
+# It is the only unbounded caller-supplied read in the write path; hashing a
+# file on a wedged disk while holding a CROSS-PROCESS lock would stall every
+# process on the machine — the freeze we just fixed, made distributed.
 _CHRONICLE_WRITE_LOCK = threading.RLock()
+_FLOCK_FDS: dict[str, int] = {}
+_FLOCK_DEPTH = 0
+
+LOCK_ACQUIRE_TIMEOUT_SECONDS = 30.0
+LOCK_POLL_SECONDS = 0.01
 
 
-def chronicle_write_lock() -> threading.RLock:
-    """The process-wide chronicle write lock. `with chronicle_write_lock():`."""
-    return _CHRONICLE_WRITE_LOCK
+class ChronicleLockError(RuntimeError):
+    """The cross-process write lock could not be acquired."""
+
+
+def chronicle_lock_path(chronicle_root: Path | None = None) -> Path:
+    root = Path(chronicle_root) if chronicle_root else default_chronicle_root()
+    return root / ".write.lock"
+
+
+def _acquire_flock(path: Path) -> None:
+    """Take LOCK_EX, blocking up to the timeout. Never proceeds unlocked."""
+    key = str(path)
+    fd = _FLOCK_FDS.get(key)
+    if fd is None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+        _FLOCK_FDS[key] = fd
+
+    deadline = time.monotonic() + LOCK_ACQUIRE_TIMEOUT_SECONDS
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+        except OSError:
+            if time.monotonic() >= deadline:
+                raise ChronicleLockError(
+                    f"could not acquire the chronicle write lock at {path} within "
+                    f"{LOCK_ACQUIRE_TIMEOUT_SECONDS}s — another process is holding it. "
+                    "Refusing to write unlocked: an unserialized write can be silently "
+                    "clobbered by a concurrent whole-file rewrite."
+                ) from None
+            time.sleep(LOCK_POLL_SECONDS)
+
+
+@contextlib.contextmanager
+def chronicle_write_lock(chronicle_root: Path | None = None):
+    """
+    The chronicle write lock: in-process (RLock) + cross-process (flock).
+
+    Re-entrant. record_insight → append_supersession and resolve_thread →
+    record_insight both nest; only the outermost frame touches the flock.
+    """
+    global _FLOCK_DEPTH
+    with _CHRONICLE_WRITE_LOCK:
+        outermost = _FLOCK_DEPTH == 0
+        if outermost:
+            _acquire_flock(chronicle_lock_path(chronicle_root))
+        _FLOCK_DEPTH += 1
+        try:
+            yield
+        finally:
+            _FLOCK_DEPTH -= 1
+            if _FLOCK_DEPTH == 0:
+                fd = _FLOCK_FDS.get(str(chronicle_lock_path(chronicle_root)))
+                if fd is not None:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
 
 
 def under_chronicle_write_lock(fn: Callable) -> Callable:
@@ -143,7 +220,7 @@ def under_chronicle_write_lock(fn: Callable) -> Callable:
 
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
-        with _CHRONICLE_WRITE_LOCK:
+        with chronicle_write_lock():
             return fn(*args, **kwargs)
 
     return wrapper
@@ -861,7 +938,7 @@ def append_supersession(ledger_path: Path, record: dict) -> dict:
         raise SupersessionError(f"superseded_id must be a full 64-hex claim id, got {sid!r}")
     path = Path(ledger_path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with chronicle_write_lock(), open(path, "a", encoding="utf-8") as f:
+    with chronicle_write_lock(ledger_path.parent), open(path, "a", encoding="utf-8") as f:
         f.write(json.dumps(record) + "\n")
     return record
 
