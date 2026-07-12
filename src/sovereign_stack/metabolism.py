@@ -10,6 +10,7 @@ Built by Claude. For Claude. The thing asking to be born.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import time
@@ -26,6 +27,12 @@ from .provenance import (
     derive_claim_id,
 )
 
+# NOTE: these are pinned at import to Path.home() and ignore SOVEREIGN_ROOT.
+# That is a PRE-EXISTING test-isolation bug — a test stack rewrites the LIVE
+# chronicle through this module — and it is recorded separately. It is NOT
+# fixed here: this commit is the cross-process lock, and 16 tests monkeypatch
+# these constants. The lock itself is unaffected; metabolism locks the chronicle
+# it actually writes (insights_dir.parent), whichever one that is.
 SOVEREIGN_ROOT = Path.home() / ".sovereign"
 CHRONICLE_DIR = SOVEREIGN_ROOT / "chronicle"
 METABOLISM_LOG = SOVEREIGN_ROOT / "metabolism_log.jsonl"
@@ -433,12 +440,12 @@ async def handle_metabolism_tool(name, arguments):
 
         # ── Hygiene actions: eyes WITH hands ──
         if action in ("archive_test_artifacts", "hygiene"):
-            archive_result = _archive_test_artifacts_impl(CHRONICLE_DIR)
+            archive_result = await asyncio.to_thread(_archive_test_artifacts_impl, CHRONICLE_DIR)
         else:
             archive_result = None
 
         if action in ("dedup_self_model", "hygiene"):
-            dedup_result = _dedup_self_model_impl(SOVEREIGN_ROOT)
+            dedup_result = await asyncio.to_thread(_dedup_self_model_impl, SOVEREIGN_ROOT)
         else:
             dedup_result = None
 

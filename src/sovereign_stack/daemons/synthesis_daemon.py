@@ -82,6 +82,8 @@ from typing import Any
 
 from sovereign_stack.memory import load_entries
 
+from .. import provenance
+
 # ── Tunables ────────────────────────────────────────────────────────────────
 
 DEFAULT_MODEL = "claude-sonnet-4-6"  # 2026-06-20: migrated off Ollama to the
@@ -930,7 +932,13 @@ def write_reflections(
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     path = out_dir / f"{today}.jsonl"
     now_iso = datetime.now(timezone.utc).isoformat()
-    with path.open("a", encoding="utf-8") as fh:
+    # The other side of the reflections race: reflection_ack rewrites this whole
+    # file from the server process while this daemon appends to it. Same lock
+    # path as reflections.ack_reflection, or the two serialize against nothing.
+    with (
+        provenance.scoped_write_lock(provenance.reflections_lock_path(out_dir)),
+        path.open("a", encoding="utf-8") as fh,
+    ):
         for r in reflections:
             record = {
                 "id": f"reflection_{run_id}_{uuid.uuid4().hex[:8]}",

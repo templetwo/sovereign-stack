@@ -145,7 +145,11 @@ def default_supersessions_path() -> Path:
 # process on the machine — the freeze we just fixed, made distributed.
 _CHRONICLE_WRITE_LOCK = threading.RLock()
 _FLOCK_FDS: dict[str, int] = {}
-_FLOCK_DEPTH = 0
+# Per-path, not a single int. A global counter makes a nested lock on a
+# DIFFERENT root look like a re-entry, so the inner root is never flocked at
+# all — silently unprotected. One chronicle today, but the reflections tree is
+# a second lockfile as of this change, and they nest.
+_FLOCK_DEPTH: dict[str, int] = {}
 
 LOCK_ACQUIRE_TIMEOUT_SECONDS = 30.0
 LOCK_POLL_SECONDS = 0.01
@@ -157,6 +161,16 @@ class ChronicleLockError(RuntimeError):
 
 def chronicle_lock_path(chronicle_root: Path | None = None) -> Path:
     root = Path(chronicle_root) if chronicle_root else default_chronicle_root()
+    return root / ".write.lock"
+
+
+def reflections_lock_path(reflections_dir: Path | None = None) -> Path:
+    """The reflections tree is a SIBLING of chronicle/, not under it, and it has
+    its own cross-process race: ack_reflection rewrites the whole day-file that
+    synthesis_daemon (a separate launchd process) appends to. Both sides must
+    take THIS path — a lock on the chronicle root would serialize against
+    nothing."""
+    root = Path(reflections_dir) if reflections_dir else default_sovereign_root() / "reflections"
     return root / ".write.lock"
 
 
@@ -186,27 +200,45 @@ def _acquire_flock(path: Path) -> None:
 
 
 @contextlib.contextmanager
-def chronicle_write_lock(chronicle_root: Path | None = None):
+def scoped_write_lock(lock_path: Path):
     """
-    The chronicle write lock: in-process (RLock) + cross-process (flock).
+    Serialize writers on one tree: in-process (RLock) + cross-process (flock).
 
-    Re-entrant. record_insight → append_supersession and resolve_thread →
-    record_insight both nest; only the outermost frame touches the flock.
+    Re-entrant PER PATH. record_insight → append_supersession nests on the same
+    lockfile; a chronicle write nested inside a reflections write does not, and
+    each must hold its own flock.
+
+    NEVER CALL THIS FROM THE EVENT LOOP. Acquisition spin-waits up to
+    LOCK_ACQUIRE_TIMEOUT_SECONDS, so a foreign process holding the lock would
+    freeze every seat on the stack — the 2026-07-10 wedge, made worse because
+    another process could trigger it. Every async caller offloads via
+    asyncio.to_thread; that is load-bearing, not stylistic.
     """
-    global _FLOCK_DEPTH
+    key = str(lock_path)
     with _CHRONICLE_WRITE_LOCK:
-        outermost = _FLOCK_DEPTH == 0
-        if outermost:
-            _acquire_flock(chronicle_lock_path(chronicle_root))
-        _FLOCK_DEPTH += 1
+        depth = _FLOCK_DEPTH.get(key, 0)
+        if depth == 0:
+            _acquire_flock(lock_path)
+        _FLOCK_DEPTH[key] = depth + 1
         try:
             yield
         finally:
-            _FLOCK_DEPTH -= 1
-            if _FLOCK_DEPTH == 0:
-                fd = _FLOCK_FDS.get(str(chronicle_lock_path(chronicle_root)))
+            _FLOCK_DEPTH[key] -= 1
+            if _FLOCK_DEPTH[key] == 0:
+                del _FLOCK_DEPTH[key]
+                fd = _FLOCK_FDS.get(key)
                 if fd is not None:
                     fcntl.flock(fd, fcntl.LOCK_UN)
+
+
+def chronicle_write_lock(chronicle_root: Path | None = None):
+    """Serialize chronicle mutators. `with chronicle_write_lock(root):`"""
+    return scoped_write_lock(chronicle_lock_path(chronicle_root))
+
+
+def reflections_write_lock(reflections_dir: Path | None = None):
+    """Serialize reflections mutators. `with reflections_write_lock(dir):`"""
+    return scoped_write_lock(reflections_lock_path(reflections_dir))
 
 
 def under_chronicle_write_lock(fn: Callable) -> Callable:
@@ -220,7 +252,11 @@ def under_chronicle_write_lock(fn: Callable) -> Callable:
 
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
-        with chronicle_write_lock():
+        # Lock the chronicle the function is actually writing, not the default.
+        # Locking the default while writing a different root protects the wrong
+        # file — and made a test suite flock Anthony's live chronicle.
+        root = kwargs.get("chronicle_root")
+        with chronicle_write_lock(root):
             return fn(*args, **kwargs)
 
     return wrapper

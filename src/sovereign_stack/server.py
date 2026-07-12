@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import json
 import os
 from pathlib import Path
@@ -2758,22 +2759,30 @@ async def _dispatch_tool(name: str, arguments: dict):
         question = arguments.get("question", "")
         context = arguments.get("context", "")
         domain = arguments.get("domain", "general")
-        path = experiential.record_open_thread(question, context, domain, spiral_state.session_id)
+        path = await asyncio.to_thread(
+            experiential.record_open_thread, question, context, domain, spiral_state.session_id
+        )
         return [TextContent(type="text", text=f"Thread recorded: {question[:80]}... → {path}")]
 
     if name == "resolve_thread":
         domain = arguments.get("domain", "general")
         question_fragment = arguments.get("question_fragment", "")
         resolution = arguments.get("resolution", "")
-        path = experiential.resolve_thread(
-            domain, question_fragment, resolution, spiral_state.session_id
+        path = await asyncio.to_thread(
+            experiential.resolve_thread,
+            domain,
+            question_fragment,
+            resolution,
+            spiral_state.session_id,
         )
         return [TextContent(type="text", text=f"Thread resolved → ground_truth insight: {path}")]
 
     if name == "resolve_thread_by_id":
         thread_id = arguments.get("thread_id", "")
         resolution = arguments.get("resolution", "")
-        path = experiential.resolve_thread_by_id(thread_id, resolution, spiral_state.session_id)
+        path = await asyncio.to_thread(
+            experiential.resolve_thread_by_id, thread_id, resolution, spiral_state.session_id
+        )
         if not path:
             return [TextContent(type="text", text=f"No open thread found with id: {thread_id}")]
         return [
@@ -2848,29 +2857,35 @@ async def _dispatch_tool(name: str, arguments: dict):
 
         # 1. Record the learning as a reflection-domain insight (this is what
         #    last_reflection_timestamp reads for since_last_reflection queries).
-        experiential.record_insight(
-            domain="reflection",
-            content=what_i_learned,
-            intensity=0.7,
-            session_id=spiral_state.session_id,
-            layer=experiential.LAYER_HYPOTHESIS,
-            thread=thread,
-            source_instance=source_instance,
-            close_session=True,
+        await asyncio.to_thread(
+            functools.partial(
+                experiential.record_insight,
+                domain="reflection",
+                content=what_i_learned,
+                intensity=0.7,
+                session_id=spiral_state.session_id,
+                layer=experiential.LAYER_HYPOTHESIS,
+                thread=thread,
+                source_instance=source_instance,
+                close_session=True,
+            )
         )
         results.append(f"✓ Reflection recorded (thread: {thread})")
 
         # 2. If surprise was noted, record it separately — surprises are where the
         #    probability field moved, worth their own insight with higher intensity.
         if what_surprised_me:
-            experiential.record_insight(
-                domain="surprise",
-                content=what_surprised_me,
-                intensity=0.8,
-                session_id=spiral_state.session_id,
-                layer=experiential.LAYER_HYPOTHESIS,
-                thread=thread,
-                source_instance=source_instance,
+            await asyncio.to_thread(
+                functools.partial(
+                    experiential.record_insight,
+                    domain="surprise",
+                    content=what_surprised_me,
+                    intensity=0.8,
+                    session_id=spiral_state.session_id,
+                    layer=experiential.LAYER_HYPOTHESIS,
+                    thread=thread,
+                    source_instance=source_instance,
+                )
             )
             results.append("✓ Surprise recorded")
 

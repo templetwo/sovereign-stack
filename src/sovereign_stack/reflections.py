@@ -26,6 +26,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from . import provenance
+
 SOVEREIGN_ROOT = Path(os.path.expanduser("~/.sovereign"))
 REFLECTIONS_DIR = SOVEREIGN_ROOT / "reflections"
 
@@ -240,8 +242,19 @@ def ack_reflection(
     target.ack_timestamp = datetime.now(timezone.utc).isoformat()
     target.ack_by = by
 
-    # Rewrite the containing file with the updated line.
+    # Rewrite the containing file with the updated line. Under the reflections
+    # write lock: synthesis_daemon (com.templetwo.sovereign.synthesis, a
+    # SEPARATE launchd process, 04:17 daily) appends to this same day-file, and
+    # an append landing inside this read->write window is silently clobbered.
+    # tmp.replace() also swaps the inode out from under a daemon holding the
+    # old fd. Both sides take THIS lock path — the reflections tree is a sibling
+    # of chronicle/, so a chronicle lock would serialize against nothing.
     path = target._path
+    with provenance.scoped_write_lock(provenance.reflections_lock_path(path.parent)):
+        return _rewrite_acked(target, path)
+
+
+def _rewrite_acked(target, path):
     lines = path.read_text(encoding="utf-8").splitlines()
     new_lines: list[str] = []
     for idx, line in enumerate(lines):
