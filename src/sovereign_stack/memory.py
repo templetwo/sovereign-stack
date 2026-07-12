@@ -128,6 +128,33 @@ def _last_jsonl_entry(path: Path) -> dict | None:
         return None
 
 
+def _dedup_hit(
+    path: Path, content: str, domain: str, layer: str, timestamp: datetime
+) -> dict | None:
+    """
+    The surviving entry when this write is an immediate retry duplicate of the
+    file's last entry (identical content+domain+layer inside the dedup window),
+    else None. Read-only — record_insight runs it once as a fast bail and again
+    under the write lock, where the file cannot move underneath it.
+    """
+    last = _last_jsonl_entry(path)
+    if (
+        last is None
+        or last.get("content") != content
+        or last.get("domain") != domain
+        or last.get("layer") != layer
+    ):
+        return None
+    prev_ts = _parse_iso(last.get("timestamp"))
+    if prev_ts is None:
+        return None
+    try:
+        delta = abs((timestamp - prev_ts).total_seconds())
+    except TypeError:
+        return None  # naive legacy timestamp — not comparable
+    return last if delta <= _DEDUP_WINDOW_SECONDS else None
+
+
 class DedupedInsightPath(str):
     """
     record_insight return value when an append was skipped as a retry
@@ -701,6 +728,12 @@ class ExperientialMemory:
                 raise provenance.ReceiptError("verified_by must be a list of receipt dicts")
             for position, receipt in enumerate(verified_by, start=1):
                 provenance.validate_receipt_shape(receipt, position)
+                # Hazard classes are refused before the write touches anything:
+                # a fifo, a device or a dataless placeholder is not a file whose
+                # bytes we can hash, and opening one is how the stack froze on
+                # 2026-07-10. Size is not a hazard class — the wall clock bounds
+                # the read, and a big file that hashes fast still verifies.
+                provenance.preflight_file_receipt(receipt, position)
 
         # Emotional layer (v1.7.2) — light validation, fail fast. Descriptive
         # storage only; nothing here feeds surfacing or ranking.
@@ -736,22 +769,12 @@ class ExperientialMemory:
         # Idempotent writes: client retries land identical duplicates a few
         # hundred ms apart. If the last entry of this session file already
         # carries the same content+domain+layer within the dedup window, skip
-        # the append and report the surviving entry instead.
-        last = _last_jsonl_entry(jsonl_path)
-        if (
-            last is not None
-            and last.get("content") == content
-            and last.get("domain") == domain
-            and last.get("layer") == layer
-        ):
-            prev_ts = _parse_iso(last.get("timestamp"))
-            if prev_ts is not None:
-                try:
-                    delta = abs((timestamp - prev_ts).total_seconds())
-                except TypeError:
-                    delta = None  # naive legacy timestamp — not comparable
-                if delta is not None and delta <= _DEDUP_WINDOW_SECONDS:
-                    return DedupedInsightPath(str(jsonl_path), last)
+        # the append and report the surviving entry instead. Checked here so a
+        # retry never pays for receipt verification, and AGAIN under the write
+        # lock below, where the answer is authoritative.
+        deduped = _dedup_hit(jsonl_path, content, domain, layer, timestamp)
+        if deduped is not None:
+            return DedupedInsightPath(str(jsonl_path), deduped)
 
         # Receipts: verify refs and stamp write-time verdicts. A dangling /
         # ambiguous / malformed receipt rejects the whole call (ReceiptError
@@ -761,75 +784,93 @@ class ExperientialMemory:
         if verified_by:
             stamped_receipts = provenance.verify_receipts_at_write(verified_by, self.root)
 
-        # Supersedes: resolve each ref (unknown/ambiguous rejects the call).
-        resolved_predecessors: list[tuple[str, dict]] = []
-        if supersedes:
-            resolved_predecessors = provenance.resolve_supersedes(supersedes, self.root)
+        # Everything from here down reads the chronicle and then writes it —
+        # the dedup re-check, the supersedes resolution, the guard fold, the
+        # append, the ledger. Under the write lock, because metabolism rewrites
+        # these same files WHOLE (read_text -> mutate -> write_text): an append
+        # that lands inside that window is silently clobbered and the insight
+        # is gone. The receipt hashing above stays OUTSIDE the lock — it is
+        # pure, it can take seconds, and no other writer needs to wait on it.
+        with provenance.chronicle_write_lock():
+            deduped = _dedup_hit(jsonl_path, content, domain, layer, timestamp)
+            if deduped is not None:
+                return DedupedInsightPath(str(jsonl_path), deduped)
 
-        insight = {
-            "timestamp": timestamp.isoformat(),
-            "domain": domain,
-            "content": content,
-            "intensity": intensity,
-            "layer": layer,
-            "session_id": session_id,
-            **metadata,
-        }
-        if confidence is not None and layer == self.LAYER_HYPOTHESIS:
-            insight["confidence"] = confidence
-        if vantage:
-            insight["vantage"] = vantage
-        # Emotional layer (v1.7.2) — stored as first-class fields when present.
-        # Survives the MCP dispatch because these are named args (metadata is
-        # dropped by the server before it reaches here).
-        if observed_emotion is not None:
-            insight["observed_emotion"] = observed_emotion
-        if emotional_intensity is not None:
-            insight["emotional_intensity"] = emotional_intensity
-        if emotion_source is not None:
-            insight["emotion_source"] = emotion_source
-        if emotion_note is not None:
-            insight["emotion_note"] = emotion_note
-        if stamped_receipts:
-            insight["verified_by"] = stamped_receipts
-        if resolved_predecessors:
-            # Denormalized breadcrumb — the ledger remains canonical.
-            insight["supersedes"] = [claim_id for claim_id, _entry in resolved_predecessors]
-        if carry_forward_summary:
-            insight["carry_forward_summary"] = carry_forward_summary
+            # Supersedes: resolve each ref (unknown/ambiguous rejects the call).
+            resolved_predecessors: list[tuple[str, dict]] = []
+            if supersedes:
+                resolved_predecessors = provenance.resolve_supersedes(supersedes, self.root)
 
-        # Supersession guards run against the new entry's derived id BEFORE
-        # anything is written — a guard failure leaves chronicle and ledger
-        # both untouched.
-        successor_id = None
-        if resolved_predecessors:
-            successor_id = provenance.derive_claim_id(insight)
-            fold = provenance.fold_supersessions(
-                provenance.load_supersessions(self.supersessions_path)
-            )
-            for claim_id, _entry in resolved_predecessors:
-                provenance.check_supersession_guards(claim_id, successor_id, fold)
+            insight = {
+                "timestamp": timestamp.isoformat(),
+                "domain": domain,
+                "content": content,
+                "intensity": intensity,
+                "layer": layer,
+                "session_id": session_id,
+                **metadata,
+            }
+            if confidence is not None and layer == self.LAYER_HYPOTHESIS:
+                insight["confidence"] = confidence
+            if vantage:
+                insight["vantage"] = vantage
+            # Emotional layer (v1.7.2) — stored as first-class fields when present.
+            # Survives the MCP dispatch because these are named args (metadata is
+            # dropped by the server before it reaches here).
+            if observed_emotion is not None:
+                insight["observed_emotion"] = observed_emotion
+            if emotional_intensity is not None:
+                insight["emotional_intensity"] = emotional_intensity
+            if emotion_source is not None:
+                insight["emotion_source"] = emotion_source
+            if emotion_note is not None:
+                insight["emotion_note"] = emotion_note
+            if stamped_receipts:
+                insight["verified_by"] = stamped_receipts
+            if resolved_predecessors:
+                # Denormalized breadcrumb — the ledger remains canonical.
+                insight["supersedes"] = [claim_id for claim_id, _entry in resolved_predecessors]
+            if carry_forward_summary:
+                insight["carry_forward_summary"] = carry_forward_summary
 
-        # Append to domain's JSONL file
-        with open(jsonl_path, "a") as f:
-            f.write(json.dumps(insight) + "\n")
+            # Supersession guards run against the new entry's derived id BEFORE
+            # anything is written — a guard failure leaves chronicle and ledger
+            # both untouched.
+            successor_id = None
+            if resolved_predecessors:
+                successor_id = provenance.derive_claim_id(insight)
+                fold = provenance.fold_supersessions(
+                    provenance.load_supersessions(self.supersessions_path)
+                )
+                for claim_id, _entry in resolved_predecessors:
+                    provenance.check_supersession_guards(claim_id, successor_id, fold)
 
-        # One ledger record per predecessor, in the same call as the entry
-        # write (ledger is canonical; breadcrumb above is the denormalized
-        # copy — a test asserts the two stay rebuildable from each other).
-        for claim_id, predecessor in resolved_predecessors:
-            record = provenance.build_supersession_record(
-                action="supersede",
-                superseded_id=claim_id,
-                successor_id=successor_id,
-                carry_forward_summary=carry_forward_summary,
-                reason="",
-                by=str(metadata.get("source_instance") or ""),
-                vantage=vantage,
-                predecessor=predecessor,
-                timestamp=insight["timestamp"],
-            )
-            provenance.append_supersession(self.supersessions_path, record)
+            # Re-assert the domain dir under the lock. The mkdir above runs
+            # before the lock, and metabolism's archive pass — which holds the
+            # lock — can rmdir an emptied domain in that window, leaving the
+            # append to die on a missing parent.
+            domain_dir.mkdir(parents=True, exist_ok=True)
+
+            # Append to domain's JSONL file
+            with open(jsonl_path, "a") as f:
+                f.write(json.dumps(insight) + "\n")
+
+            # One ledger record per predecessor, in the same call as the entry
+            # write (ledger is canonical; breadcrumb above is the denormalized
+            # copy — a test asserts the two stay rebuildable from each other).
+            for claim_id, predecessor in resolved_predecessors:
+                record = provenance.build_supersession_record(
+                    action="supersede",
+                    superseded_id=claim_id,
+                    successor_id=successor_id,
+                    carry_forward_summary=carry_forward_summary,
+                    reason="",
+                    by=str(metadata.get("source_instance") or ""),
+                    vantage=vantage,
+                    predecessor=predecessor,
+                    timestamp=insight["timestamp"],
+                )
+                provenance.append_supersession(self.supersessions_path, record)
 
         # Absent both params this return is byte-identical to pre-v1.7.0.
         path_str = str(jsonl_path)
@@ -936,7 +977,9 @@ class ExperientialMemory:
         questions = _split_bundled_question(question)
 
         jsonl_path = self.threads_dir / f"{domain}.jsonl"
-        with open(jsonl_path, "a") as f:
+        # Thread files are rewritten whole by resolve_thread / resolve_thread_by_id;
+        # an append that lands inside one of those rewrites would be clobbered.
+        with provenance.chronicle_write_lock(), open(jsonl_path, "a") as f:
             for q in questions:
                 thread = {
                     "timestamp": timestamp.isoformat(),
@@ -977,36 +1020,39 @@ class ExperientialMemory:
         now = datetime.now(timezone.utc).isoformat()
 
         jsonl_path = self.threads_dir / f"{domain}.jsonl"
-        if jsonl_path.exists():
-            lines = []
-            with open(jsonl_path) as f:
-                for line in f:
-                    try:
-                        thread = json.loads(line)
-                        if (
-                            resolved_thread_id is None
-                            and question_fragment.lower() in thread.get("question", "").lower()
-                            and not thread.get("resolved")
-                        ):
-                            # Backfill thread_id for legacy threads that predate the id scheme.
-                            if not thread.get("thread_id"):
-                                legacy_ts = _parse_iso(thread.get("timestamp")) or datetime.now(
-                                    timezone.utc
-                                )
-                                thread["thread_id"] = _generate_thread_id(
-                                    thread.get("question", ""), legacy_ts
-                                )
-                            resolved_thread_id = thread["thread_id"]
-                            resolved_timestamp = thread.get("timestamp")
-                            thread["resolved"] = True
-                            thread["resolved_by"] = session_id
-                            thread["resolved_at"] = now
-                            thread["resolution"] = resolution
-                        lines.append(json.dumps(thread))
-                    except json.JSONDecodeError:
-                        lines.append(line.strip())
-            with open(jsonl_path, "w") as f:
-                f.write("\n".join(lines) + "\n")
+        # Whole-file rewrite — read and write are one critical section, or a
+        # concurrent record_open_thread append is overwritten by this rewrite.
+        with provenance.chronicle_write_lock():
+            if jsonl_path.exists():
+                lines = []
+                with open(jsonl_path) as f:
+                    for line in f:
+                        try:
+                            thread = json.loads(line)
+                            if (
+                                resolved_thread_id is None
+                                and question_fragment.lower() in thread.get("question", "").lower()
+                                and not thread.get("resolved")
+                            ):
+                                # Backfill thread_id for legacy threads that predate the id scheme.
+                                if not thread.get("thread_id"):
+                                    legacy_ts = _parse_iso(thread.get("timestamp")) or datetime.now(
+                                        timezone.utc
+                                    )
+                                    thread["thread_id"] = _generate_thread_id(
+                                        thread.get("question", ""), legacy_ts
+                                    )
+                                resolved_thread_id = thread["thread_id"]
+                                resolved_timestamp = thread.get("timestamp")
+                                thread["resolved"] = True
+                                thread["resolved_by"] = session_id
+                                thread["resolved_at"] = now
+                                thread["resolution"] = resolution
+                            lines.append(json.dumps(thread))
+                        except json.JSONDecodeError:
+                            lines.append(line.strip())
+                with open(jsonl_path, "w") as f:
+                    f.write("\n".join(lines) + "\n")
 
         # Record the resolution as ground truth with back-reference.
         return self.record_insight(
@@ -1035,29 +1081,31 @@ class ExperientialMemory:
         resolved_timestamp: str | None = None
         now = datetime.now(timezone.utc).isoformat()
 
-        for jsonl_file in self.threads_dir.glob("*.jsonl"):
-            hit = False
-            lines = []
-            with open(jsonl_file) as f:
-                for line in f:
-                    try:
-                        thread = json.loads(line)
-                        if thread.get("thread_id") == thread_id and not thread.get("resolved"):
-                            hit = True
-                            resolved_domain = thread.get("domain", jsonl_file.stem)
-                            resolved_question = thread.get("question", "")
-                            resolved_timestamp = thread.get("timestamp")
-                            thread["resolved"] = True
-                            thread["resolved_by"] = session_id
-                            thread["resolved_at"] = now
-                            thread["resolution"] = resolution
-                        lines.append(json.dumps(thread))
-                    except json.JSONDecodeError:
-                        lines.append(line.strip())
-            if hit:
-                with open(jsonl_file, "w") as f:
-                    f.write("\n".join(lines) + "\n")
-                break
+        # Whole-file rewrite — same critical section as resolve_thread.
+        with provenance.chronicle_write_lock():
+            for jsonl_file in self.threads_dir.glob("*.jsonl"):
+                hit = False
+                lines = []
+                with open(jsonl_file) as f:
+                    for line in f:
+                        try:
+                            thread = json.loads(line)
+                            if thread.get("thread_id") == thread_id and not thread.get("resolved"):
+                                hit = True
+                                resolved_domain = thread.get("domain", jsonl_file.stem)
+                                resolved_question = thread.get("question", "")
+                                resolved_timestamp = thread.get("timestamp")
+                                thread["resolved"] = True
+                                thread["resolved_by"] = session_id
+                                thread["resolved_at"] = now
+                                thread["resolution"] = resolution
+                            lines.append(json.dumps(thread))
+                        except json.JSONDecodeError:
+                            lines.append(line.strip())
+                if hit:
+                    with open(jsonl_file, "w") as f:
+                        f.write("\n".join(lines) + "\n")
+                    break
 
         if not resolved_domain:
             return ""
@@ -1847,15 +1895,18 @@ class ExperientialMemory:
         else:
             record = matches[-1]
 
-        blob_path = Path(record.get("path", ""))
-        if not blob_path.exists():
+        content, verdict = provenance.read_blob_bounded(Path(record.get("path", "")))
+        if content is None:
             return {
-                "integrity": "missing",
-                "detail": "index record exists but the bytes are gone from disk",
+                "integrity": verdict,
+                "detail": (
+                    "index record exists but the bytes are gone from disk"
+                    if verdict == "missing"
+                    else "index record exists but the bytes could not be read within the wall clock"
+                ),
                 **record,
             }
 
-        content = blob_path.read_text(encoding="utf-8")
         recomputed = hashlib.sha256(content.encode("utf-8")).hexdigest()
         integrity = "verified" if recomputed == record.get("sha256") else "mismatch"
         return {

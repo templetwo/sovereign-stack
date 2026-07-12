@@ -53,7 +53,7 @@ PROTECTED_ACTIONS = ("protect", "unprotect")
 
 # Verdict vocabulary for a stakes load, identical to the archive layer's
 # recall_exchange / verify_archive_ref vocabulary.
-STAKES_VERDICTS = ("verified", "mismatch", "missing", "ambiguous", "unknown")
+STAKES_VERDICTS = ("verified", "mismatch", "missing", "unreadable", "ambiguous", "unknown")
 
 # The two-word index (Policy 2a): each protected record carries a one-word
 # SUBJECT and a one-word EMOTION (e.g. father / loss). A "word" is a single
@@ -205,11 +205,15 @@ def load_stakes(stakes_archive_id: str, chronicle_root: str | Path) -> tuple[str
       - ("...the stakes prose...", "verified")  when bytes present + intact
       - (None, "mismatch")  bytes present but hash changed (tamper)
       - (None, "missing")   index record exists, bytes gone from disk
+      - (None, "unreadable") bytes could not be read inside the wall clock
       - (None, "ambiguous") prefix matches multiple distinct archives
       - (None, "unknown")   no archive record / empty pointer
 
     Only "verified" is safe to couple; every other verdict is a
-    fail-closed condition at the chokepoint.
+    fail-closed condition at the chokepoint. The read is bounded
+    (provenance.read_blob_bounded): a wedged or dataless blob must not be
+    able to hang the event loop, and "unreadable" is fail-closed like every
+    other non-verified verdict — the gate is unchanged in strength.
     """
     ref = (stakes_archive_id or "").strip()
     if not ref:
@@ -226,13 +230,9 @@ def load_stakes(stakes_archive_id: str, chronicle_root: str | Path) -> tuple[str
     else:
         record = matches[-1]
 
-    blob_path = Path(record.get("path", ""))
-    if not blob_path.exists():
-        return None, "missing"
-    try:
-        content = blob_path.read_text(encoding="utf-8")
-    except OSError:
-        return None, "missing"
+    content, verdict = provenance.read_blob_bounded(Path(record.get("path", "")))
+    if content is None:
+        return None, verdict
     recomputed = hashlib.sha256(content.encode("utf-8")).hexdigest()
     if recomputed != record.get("sha256"):
         return None, "mismatch"

@@ -19,7 +19,12 @@ from pathlib import Path
 from mcp.types import TextContent, Tool
 
 from .memory import load_entries
-from .provenance import append_supersession, build_supersession_record, derive_claim_id
+from .provenance import (
+    append_supersession,
+    build_supersession_record,
+    chronicle_write_lock,
+    derive_claim_id,
+)
 
 SOVEREIGN_ROOT = Path.home() / ".sovereign"
 CHRONICLE_DIR = SOVEREIGN_ROOT / "chronicle"
@@ -89,54 +94,60 @@ def _archive_test_artifacts_impl(chronicle_dir: Path) -> dict:
     domains_removed = 0
     now_iso = datetime.now(timezone.utc).isoformat()
 
-    for domain_dir in list(insights_dir.iterdir()):
-        if not domain_dir.is_dir() or domain_dir.name.startswith("."):
-            continue
-        for jsonl_file in list(domain_dir.glob("*.jsonl")):
-            if str(jsonl_file) not in flagged_files:
+    # The rewrite below is read_text -> mutate -> write_text on a live insight
+    # file. record_insight appends to those same files from a worker thread, so
+    # an insight recorded inside that window would be silently overwritten —
+    # data loss, not a race we can lose gracefully. The whole mutation pass is
+    # one critical section under the chronicle write lock.
+    with chronicle_write_lock():
+        for domain_dir in list(insights_dir.iterdir()):
+            if not domain_dir.is_dir() or domain_dir.name.startswith("."):
                 continue
-            kept_lines: list[str] = []
-            archived_entries: list[dict] = []
-            for line in jsonl_file.read_text().splitlines():
-                if not line.strip():
+            for jsonl_file in list(domain_dir.glob("*.jsonl")):
+                if str(jsonl_file) not in flagged_files:
                     continue
-                try:
-                    entry = json.loads(line)
-                except json.JSONDecodeError:
-                    kept_lines.append(line)
+                kept_lines: list[str] = []
+                archived_entries: list[dict] = []
+                for line in jsonl_file.read_text().splitlines():
+                    if not line.strip():
+                        continue
+                    try:
+                        entry = json.loads(line)
+                    except json.JSONDecodeError:
+                        kept_lines.append(line)
+                        continue
+                    if _is_test_artifact(entry.get("content", "")):
+                        archived_entries.append(
+                            {
+                                **entry,
+                                "_archived_at": now_iso,
+                                "_archived_reason": "test_artifact_pattern",
+                                "_original_file": str(jsonl_file),
+                            }
+                        )
+                    else:
+                        kept_lines.append(line)
+
+                if not archived_entries:
                     continue
-                if _is_test_artifact(entry.get("content", "")):
-                    archived_entries.append(
-                        {
-                            **entry,
-                            "_archived_at": now_iso,
-                            "_archived_reason": "test_artifact_pattern",
-                            "_original_file": str(jsonl_file),
-                        }
-                    )
+
+                archive_file = archive_dir / f"{domain_dir.name}__{jsonl_file.name}"
+                with open(archive_file, "a") as af:
+                    for e in archived_entries:
+                        af.write(json.dumps(e) + "\n")
+
+                if kept_lines:
+                    jsonl_file.write_text("\n".join(kept_lines) + "\n")
                 else:
-                    kept_lines.append(line)
+                    jsonl_file.unlink()
 
-            if not archived_entries:
-                continue
+                archived_total += len(archived_entries)
+                files_modified += 1
 
-            archive_file = archive_dir / f"{domain_dir.name}__{jsonl_file.name}"
-            with open(archive_file, "a") as af:
-                for e in archived_entries:
-                    af.write(json.dumps(e) + "\n")
-
-            if kept_lines:
-                jsonl_file.write_text("\n".join(kept_lines) + "\n")
-            else:
-                jsonl_file.unlink()
-
-            archived_total += len(archived_entries)
-            files_modified += 1
-
-        # If a domain directory is now empty, remove it too.
-        if domain_dir.exists() and not any(domain_dir.iterdir()):
-            domain_dir.rmdir()
-            domains_removed += 1
+            # If a domain directory is now empty, remove it too.
+            if domain_dir.exists() and not any(domain_dir.iterdir()):
+                domain_dir.rmdir()
+                domains_removed += 1
 
     return {
         "archived": archived_total,
@@ -650,37 +661,40 @@ async def handle_metabolism_tool(name, arguments):
                 if "_superseded_by" in candidate:
                     already_superseded += 1
 
-        for match_file in sorted(match_files):
-            jsonl_file = Path(match_file)
-            lines = jsonl_file.read_text().splitlines()
-            updated = []
-            file_changed = False
-            for line in lines:
-                if not line.strip():
-                    continue
-                try:
-                    entry = json.loads(line)
-                    if (
-                        entry.get("layer") == "hypothesis"
-                        and fragment.lower() in entry.get("content", "").lower()
-                    ):
-                        # Claim ids derive from (timestamp, domain, content)
-                        # only — the retirement annotations below are
-                        # outside the preimage, so the id never shifts.
-                        retired_entries.append((derive_claim_id(entry), dict(entry)))
-                        entry["layer"] = "retired"
-                        entry["retired_reason"] = reason
-                        entry["retired_by"] = replaced_by
-                        entry["retired_at"] = datetime.now(timezone.utc).isoformat()
-                        retired = True
-                        file_changed = True
-                    updated.append(json.dumps(entry))
-                except json.JSONDecodeError:
-                    updated.append(line)
-            # Only rewrite files that actually changed — untouched files
-            # keep their bytes (and mtimes) exactly as they were.
-            if file_changed:
-                jsonl_file.write_text("\n".join(updated) + "\n")
+        # Whole-file rewrite of live insight files — under the write lock, or a
+        # record_insight append landing between the read and the write is lost.
+        with chronicle_write_lock():
+            for match_file in sorted(match_files):
+                jsonl_file = Path(match_file)
+                lines = jsonl_file.read_text().splitlines()
+                updated = []
+                file_changed = False
+                for line in lines:
+                    if not line.strip():
+                        continue
+                    try:
+                        entry = json.loads(line)
+                        if (
+                            entry.get("layer") == "hypothesis"
+                            and fragment.lower() in entry.get("content", "").lower()
+                        ):
+                            # Claim ids derive from (timestamp, domain, content)
+                            # only — the retirement annotations below are
+                            # outside the preimage, so the id never shifts.
+                            retired_entries.append((derive_claim_id(entry), dict(entry)))
+                            entry["layer"] = "retired"
+                            entry["retired_reason"] = reason
+                            entry["retired_by"] = replaced_by
+                            entry["retired_at"] = datetime.now(timezone.utc).isoformat()
+                            retired = True
+                            file_changed = True
+                        updated.append(json.dumps(entry))
+                    except json.JSONDecodeError:
+                        updated.append(line)
+                # Only rewrite files that actually changed — untouched files
+                # keep their bytes (and mtimes) exactly as they were.
+                if file_changed:
+                    jsonl_file.write_text("\n".join(updated) + "\n")
 
         if retired:
             # Reconcile the two liveness systems: the supersession read path

@@ -2529,6 +2529,20 @@ def _before_you_begin_lines() -> list[str]:
     ]
 
 
+# Chronicle work used to run inline on the event loop, which serialized it for
+# free. It now runs in a worker thread (a receipt re-hash must never block the
+# loop again — 2026-07-10), which means two tool calls can genuinely overlap for
+# the first time. That serialization is held where it belongs — in the SYNC
+# layer, inside the chronicle mutators themselves (provenance.chronicle_write_
+# lock, taken by record_insight, the thread mutators, metabolism's whole-file
+# rewrites, and the ledger appends). It is deliberately NOT held here: an
+# asyncio.Lock releases on CancelledError (a client disconnect would drop it
+# while the worker thread is still mid read-modify-write), and every inline
+# caller — close_session, resolve_thread, a daemon — bypasses the dispatcher
+# entirely. A second lock in the wrong layer is a liability, not defense in
+# depth.
+
+
 async def _dispatch_tool(name: str, arguments: dict):
     """Inner dispatcher — contains the original handle_tool body.
 
@@ -2632,7 +2646,12 @@ async def _dispatch_tool(name: str, arguments: dict):
         confidence = arguments.get("confidence")
         vantage = arguments.get("vantage")
         try:
-            path = experiential.record_insight(
+            # Off the event loop: record_insight re-hashes file receipts, and a
+            # caller-supplied path can block for as long as the filesystem wants
+            # to. Inline, that froze every seat on the stack (2026-07-10) —
+            # sse_server mounts this same Server on one worker, one loop.
+            path = await asyncio.to_thread(
+                experiential.record_insight,
                 domain,
                 content,
                 intensity,
@@ -2673,7 +2692,9 @@ async def _dispatch_tool(name: str, arguments: dict):
         return [TextContent(type="text", text=json.dumps(record, indent=2, default=str))]
 
     if name == "recall_exchange":
-        result = experiential.recall_exchange(arguments.get("archive_id", ""))
+        result = await asyncio.to_thread(
+            experiential.recall_exchange, arguments.get("archive_id", "")
+        )
         return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
 
     if name == "list_exchanges":
@@ -3757,13 +3778,20 @@ Phase: {spiral_state.current_phase.value}
             TextContent(type="text", text=handle_policy_tool(name, arguments, PolicyRegistry()))
         ]
 
-    # Provenance forensics (v1.7.0 — inspect_claim returns raw JSON text; sync)
+    # Provenance forensics (v1.7.0 — inspect_claim returns raw JSON text).
+    # Off-loop: inspect_claim re-checks receipts live, which re-hashes files.
+    # supersede_insight takes the chronicle write lock in the sync layer.
     if name in [t.name for t in PROVENANCE_TOOLS]:
-        return [TextContent(type="text", text=handle_provenance_tool(name, arguments, None, None))]
+        text = await asyncio.to_thread(handle_provenance_tool, name, arguments, None, None)
+        return [TextContent(type="text", text=text)]
 
-    # Seasons (v1.7.0 — thread families + read-only season review; sync)
+    # Seasons (v1.7.0 — thread families + read-only season review).
+    # Off-loop: season_review re-verifies EVERY receipted entry in the
+    # chronicle — the receipt re-hash, multiplied. link_threads takes the
+    # chronicle write lock in the sync layer.
     if name in [t.name for t in SEASON_TOOLS]:
-        return [TextContent(type="text", text=handle_season_tool(name, arguments))]
+        text = await asyncio.to_thread(handle_season_tool, name, arguments)
+        return [TextContent(type="text", text=text)]
 
     # Nape daemon — runtime critique layer
     if name == "nape_observe":
@@ -4113,7 +4141,8 @@ Phase: {spiral_state.current_phase.value}
             ]
         chronicle_root = Path(DEFAULT_ROOT) / "chronicle"
         try:
-            opened = _protected.open_record(claim_id, chronicle_root)
+            # Off-loop: opening a record re-hashes the coupled stakes blob.
+            opened = await asyncio.to_thread(_protected.open_record, claim_id, chronicle_root)
         except (_protected.ProtectedError, _provenance.ProvenanceError) as exc:
             return [TextContent(type="text", text=f"open_protected_record error: {exc}")]
         return [TextContent(type="text", text=json.dumps(opened, indent=2, default=str))]
