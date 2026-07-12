@@ -845,6 +845,12 @@ class ExperientialMemory:
                 for claim_id, _entry in resolved_predecessors:
                     provenance.check_supersession_guards(claim_id, successor_id, fold)
 
+            # Re-assert the domain dir under the lock. The mkdir above runs
+            # before the lock, and metabolism's archive pass — which holds the
+            # lock — can rmdir an emptied domain in that window, leaving the
+            # append to die on a missing parent.
+            domain_dir.mkdir(parents=True, exist_ok=True)
+
             # Append to domain's JSONL file
             with open(jsonl_path, "a") as f:
                 f.write(json.dumps(insight) + "\n")

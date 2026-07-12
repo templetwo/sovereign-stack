@@ -446,3 +446,50 @@ class TestChronicleRootIsolation:
             provenance.default_supersessions_path()
             == Path.home() / ".sovereign" / "chronicle" / "supersessions.jsonl"
         )
+
+
+class TestDomainDirCannotVanishUnderAParkedWriter:
+    """record_insight mkdirs the domain dir BEFORE taking the lock. Metabolism's
+    archive pass rmdirs an emptied domain WHILE holding it. A writer already past
+    the mkdir and parked on the lock comes back to a vanished parent."""
+
+    def test_append_survives_the_domain_dir_being_removed_while_parked(self, tmp_path):
+        chronicle = _chronicle(tmp_path)
+        mem = ExperientialMemory(root=str(chronicle))
+        domain_dir = chronicle / "insights" / "doomed"
+        domain_dir.mkdir(parents=True)
+
+        holder_has_lock = threading.Event()
+        rmdir_done = threading.Event()
+        failure: list[BaseException] = []
+
+        def rmdir_holder():
+            with provenance.chronicle_write_lock():
+                holder_has_lock.set()
+                # give the writer time to clear the pre-lock mkdir and park on
+                # the lock, which is the only window where this can bite
+                time.sleep(0.4)
+                for child in domain_dir.iterdir():
+                    child.unlink()
+                domain_dir.rmdir()
+                rmdir_done.set()
+
+        def writer():
+            holder_has_lock.wait(timeout=5)
+            try:
+                mem.record_insight(domain="doomed", content="must survive", layer="hypothesis")
+            except BaseException as exc:  # noqa: BLE001 - the regression is any raise
+                failure.append(exc)
+
+        holder = threading.Thread(target=rmdir_holder)
+        w = threading.Thread(target=writer)
+        holder.start()
+        w.start()
+        holder.join(timeout=10)
+        w.join(timeout=10)
+
+        assert rmdir_done.is_set(), "the race never set up — holder did not rmdir"
+        assert not failure, f"the append died on a vanished domain dir: {failure[0]!r}"
+        landed = list((chronicle / "insights" / "doomed").glob("*.jsonl"))
+        assert landed, "insight was lost — no file under the recreated domain dir"
+        assert any("must survive" in f.read_text() for f in landed)
