@@ -29,6 +29,7 @@ lives elsewhere.
 """
 
 import errno
+import functools
 import hashlib
 import json
 import os
@@ -74,14 +75,78 @@ _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 LEGACY_MARKER_RE = re.compile(r"CORRECTED|DEFINITIVE|supersedes")
 
 
+def default_sovereign_root() -> Path:
+    """The live sovereign root. Computed on call, never at import."""
+    return Path(os.environ.get("SOVEREIGN_ROOT") or (Path.home() / ".sovereign"))
+
+
 def default_chronicle_root() -> Path:
-    """The live chronicle root. Computed on call, never at import."""
-    return Path.home() / ".sovereign" / "chronicle"
+    """
+    The live chronicle root. Computed on call, never at import.
+
+    Honors SOVEREIGN_CHRONICLE, then SOVEREIGN_ROOT, then ~/.sovereign —
+    the same precedence server.py resolves its roots by. Unset, this is
+    ~/.sovereign/chronicle exactly as before; set, a test (or a second
+    stack) never touches Anthony's lived records.
+    """
+    override = os.environ.get("SOVEREIGN_CHRONICLE")
+    if override:
+        return Path(override)
+    return default_sovereign_root() / "chronicle"
 
 
 def default_supersessions_path() -> Path:
     """The live supersession ledger path. Computed on call, never at import."""
     return default_chronicle_root() / "supersessions.jsonl"
+
+
+# ── The chronicle write lock ─────────────────────────────────────────────────
+#
+# Serialization has to live in the SYNC layer, held by the code that actually
+# touches the bytes. An asyncio.Lock in the dispatcher cannot do this job: it
+# unwinds on CancelledError (a client disconnect would release it mid-write),
+# and every inline caller — close_session, resolve_thread, a daemon, a CLI —
+# bypasses it entirely.
+#
+# What it protects: chronicle mutators do read-modify-write. record_insight
+# reads for dedup then appends; metabolism reads a whole JSONL, mutates, and
+# REWRITES it. Once record_insight runs in a worker thread, an append landing
+# inside a rewrite's read→write window is silently clobbered — the insight is
+# gone. Every mutator takes this lock across its full read-modify-write span,
+# so no dispatch path can slip between another's read and its write.
+#
+# RLock, not Lock: record_insight → append_supersession and resolve_thread →
+# record_insight both nest, and a plain Lock would deadlock on itself.
+#
+# In-process only, and that is enough today: the daemons read the chronicle,
+# they never rewrite it (metabolize_daemon writes a report, synthesis_daemon
+# and nape_daemon append to their own JSONL). The only whole-file rewriters
+# are metabolism's tools, which run in this process. A second PROCESS running
+# metabolism against the live chronicle would not be covered — that is a real
+# residual risk, and it wants an fcntl lock, not a bigger threading one.
+_CHRONICLE_WRITE_LOCK = threading.RLock()
+
+
+def chronicle_write_lock() -> threading.RLock:
+    """The process-wide chronicle write lock. `with chronicle_write_lock():`."""
+    return _CHRONICLE_WRITE_LOCK
+
+
+def under_chronicle_write_lock(fn: Callable) -> Callable:
+    """
+    Run a whole mutator under the chronicle write lock.
+
+    For the guard-then-append shapes (supersede_insight, link_threads) whose
+    critical section is the entire function: they resolve a fold, check it,
+    then append against it. Held here, no dispatch path can bypass it.
+    """
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        with _CHRONICLE_WRITE_LOCK:
+            return fn(*args, **kwargs)
+
+    return wrapper
 
 
 # ── Exceptions ───────────────────────────────────────────────────────────────
@@ -272,12 +337,14 @@ def resolve_claim(
 
 STAT_TIMEOUT_SECONDS = 1.0
 READ_TIMEOUT_SECONDS = 5.0
-# 256 MiB. sha256 itself runs at ~3 GB/s here, so the cap is set by I/O, not by
-# the hash: even a 100 MB/s network volume finishes 256 MiB inside
-# READ_TIMEOUT_SECONDS. Anything bigger is not a receipt for a claim, it is a
-# dataset — archive it and cite the archive (kind="archive").
-MAX_RECEIPT_BYTES = 256 * 1024 * 1024
 _READ_CHUNK_BYTES = 1024 * 1024
+# There is deliberately no size cap. The wall clock ALREADY bounds the read —
+# a size limit adds no hang protection, it only turns a legitimate receipt into
+# a hard write refusal. The entropy program ships raw NDJSON as its primary
+# record (house law #7); a 300 MB run file hashes in ~0.1s here, well inside
+# READ_TIMEOUT_SECONDS, and must stamp "verified" like any other file. A file
+# too slow to hash in the budget degrades to "attested" with a reason — bound
+# by TIME, never by size, and never by rejecting the write.
 
 # macOS sets this on a file-provider (iCloud) placeholder whose bytes are not
 # on this machine. Opening one triggers a materialization download that can
@@ -355,11 +422,6 @@ def classify_file_target(path: Path) -> str | None:
     # platform extras — neither is a dataless flag, both must not blow up here.
     if (getattr(st, "st_flags", 0) or 0) & _SF_DATALESS:
         return "dangling — dataless placeholder; the bytes are not on this machine"
-    if st.st_size > MAX_RECEIPT_BYTES:
-        return (
-            f"too large — {st.st_size} bytes exceeds the {MAX_RECEIPT_BYTES}-byte "
-            "receipt cap; archive it and cite the archive"
-        )
     return None
 
 
@@ -382,17 +444,11 @@ def hash_file_bounded(path: Path) -> str:
     def _hash() -> str:
         digest = hashlib.sha256()
         deadline = time.monotonic() + READ_TIMEOUT_SECONDS
-        total = 0
         with open(path, "rb") as handle:
             while True:
                 chunk = handle.read(_READ_CHUNK_BYTES)
                 if not chunk:
                     break
-                total += len(chunk)
-                if total > MAX_RECEIPT_BYTES:
-                    raise BoundedIOError(
-                        f"grew past the {MAX_RECEIPT_BYTES}-byte receipt cap while hashing"
-                    )
                 digest.update(chunk)
                 if time.monotonic() > deadline:
                     raise BoundedIOError(f"read did not complete within {READ_TIMEOUT_SECONDS:g}s")
@@ -437,8 +493,9 @@ def preflight_file_receipt(receipt: dict, position: int | None = None) -> None:
     Reject hazard-class file receipts BEFORE the write does any work.
 
     Runs beside validate_receipt_shape in record_insight, so a receipt
-    pointing at a fifo, a device, a directory, a dataless placeholder or an
-    over-cap blob never reaches the dedup check, the ledger, or the hash.
+    pointing at a fifo, a device, a directory or a dataless placeholder never
+    reaches the dedup check, the ledger, or the hash. Size is NOT a hazard —
+    a big file that hashes fast is a legitimate receipt.
 
     A stat that never answers is NOT rejected here — a wedged mount is not
     the caller's error, and verify_receipt_at_write degrades it honestly to
@@ -559,9 +616,9 @@ def verify_receipt_at_write(
         bytes -> REJECTED (a receipt pointing at nothing is unrecordable);
         resolvable -> stamped "verified" | "mismatch".
       - file: requires sha256; missing file / hazard class (fifo, device,
-        directory, dataless placeholder, over the byte cap) -> REJECTED;
-        present -> re-hashed under a wall clock (chunked) ->
-        "verified" | "mismatch".
+        directory, dataless placeholder) -> REJECTED; present -> re-hashed
+        under a wall clock (chunked) -> "verified" | "mismatch". Size is not
+        a hazard: a 300 MB run file that hashes inside the budget verifies.
       - claim: resolved against insights/ + quarantine; dangling or
         ambiguous -> REJECTED; resolvable -> stamped "cites", NEVER
         "verified" (a citation is not a verification).
@@ -804,7 +861,7 @@ def append_supersession(ledger_path: Path, record: dict) -> dict:
         raise SupersessionError(f"superseded_id must be a full 64-hex claim id, got {sid!r}")
     path = Path(ledger_path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "a", encoding="utf-8") as f:
+    with chronicle_write_lock(), open(path, "a", encoding="utf-8") as f:
         f.write(json.dumps(record) + "\n")
     return record
 

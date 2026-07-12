@@ -63,6 +63,7 @@ from .provenance import (
     iter_chronicle_entries,
     load_supersessions,
     token_overlap,
+    under_chronicle_write_lock,
     verify_archive_ref,
 )
 from .witness import days_old
@@ -444,6 +445,7 @@ def _all_threads(memory: ExperientialMemory) -> dict[str, dict]:
     return threads
 
 
+@under_chronicle_write_lock
 def link_threads(
     thread_ids: list[str],
     label: str,

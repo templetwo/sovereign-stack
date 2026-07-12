@@ -23,6 +23,7 @@ to fail.
 
 import asyncio
 import errno
+import hashlib
 import os
 import stat as stat_module
 import threading
@@ -167,14 +168,35 @@ class TestReceiptFreeze:
             )
         assert time.monotonic() - started < 1.0, "the refusal opened the fifo"
 
-    def test_oversize_file_is_refused_with_the_cap_named(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(provenance, "MAX_RECEIPT_BYTES", 16)
-        big = tmp_path / "big.bin"
-        big.write_bytes(b"x" * 64)
-        with pytest.raises(provenance.ReceiptError, match="too large"):
-            provenance.preflight_file_receipt(
-                {"kind": "file", "ref": str(big), "sha256": "c" * 64}, 1
-            )
+    def test_a_300mb_file_that_hashes_fast_still_verifies(self, tmp_path):
+        """
+        The entropy program ships raw NDJSON as its primary record (house law
+        #7). A 300 MB run file hashes in a fraction of the read budget — it must
+        stamp "verified", not be refused. The wall clock already bounds the read;
+        a size cap adds no hang protection, it only breaks a real workflow.
+        """
+        big = tmp_path / "run.ndjson"
+        chunk = b"x" * (1024 * 1024)
+        digest = hashlib.sha256()
+        with open(big, "wb") as f:
+            for _ in range(300):
+                f.write(chunk)
+                digest.update(chunk)
+        assert big.stat().st_size == 300 * 1024 * 1024
+
+        receipt = {"kind": "file", "ref": str(big), "sha256": digest.hexdigest()}
+        provenance.preflight_file_receipt(receipt, 1)  # must not raise
+
+        started = time.monotonic()
+        stamped = provenance.verify_receipt_at_write(receipt, tmp_path / "chronicle", 1)
+        elapsed = time.monotonic() - started
+
+        assert stamped["checked_at_write"] == "verified", (
+            "a big file that hashes inside the budget earned its verification; "
+            "rejecting it would have broken the entropy program's raw NDJSON"
+        )
+        assert "unverified_reason" not in stamped
+        assert elapsed < provenance.READ_TIMEOUT_SECONDS
 
     def test_dataless_placeholder_is_refused_without_opening_it(self, tmp_path, monkeypatch):
         """The real 2026-07-10 shape: SF_DATALESS set, bytes not on this machine."""

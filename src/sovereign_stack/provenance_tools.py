@@ -83,7 +83,14 @@ def _check_receipt_now(receipt: dict, chronicle_root: Path) -> str:
 
     if kind == "archive":
         verdict = prov.verify_archive_ref(ref, chronicle_root)
-        return verdict if verdict in ("verified", "mismatch", "missing") else "missing"
+        # "unreadable" survives: collapsing it to "missing" would tell a
+        # forensic reader the archived bytes are GONE when they are intact on a
+        # slow mount — a false loss signal, in the tool whose job is this
+        # question. unknown/ambiguous stay "missing" (the artifact cannot be
+        # found and re-verified, which is what "missing" has always meant here).
+        if verdict in ("verified", "mismatch", "missing", "unreadable"):
+            return verdict
+        return "missing"
     if kind == "file":
         path = Path(ref).expanduser()
         try:
@@ -116,8 +123,14 @@ def _check_receipt_now(receipt: dict, chronicle_root: Path) -> str:
 def _receipt_views(entry: dict, chronicle_root: Path, verify_receipts: bool) -> list[dict]:
     """
     Project the entry's verified_by list to the spec's receipt shape
-    {kind, ref, checked_at_write, checked_now?}. The full stored
-    receipts (sha256, note) remain visible inside `entry`.
+    {kind, ref, checked_at_write, unverified_reason?, checked_now?}. The full
+    stored receipts (sha256, note) remain visible inside `entry`.
+
+    unverified_reason rides along whenever the write-time check degraded (a
+    file that could not be hashed inside the wall clock stamps "attested" WITH
+    a reason). Without it, inspect_claim cannot tell "we tried to hash this and
+    gave up" from "a url receipt nobody ever re-checks" — both would read as a
+    bare "attested", and distinguishing them is this tool's entire job.
     """
     views: list[dict] = []
     for receipt in entry.get("verified_by") or []:
@@ -128,6 +141,8 @@ def _receipt_views(entry: dict, chronicle_root: Path, verify_receipts: bool) -> 
             "ref": receipt.get("ref"),
             "checked_at_write": receipt.get("checked_at_write"),
         }
+        if receipt.get("unverified_reason"):
+            view["unverified_reason"] = receipt["unverified_reason"]
         if verify_receipts:
             view["checked_now"] = _check_receipt_now(receipt, chronicle_root)
         views.append(view)
@@ -290,6 +305,7 @@ def _resolve_with_verified_integrity(ref: str, chronicle_root: Path, role: str) 
     return entry, full_id
 
 
+@prov.under_chronicle_write_lock
 def supersede_insight(
     predecessor_id: str,
     successor_id: str | None = None,

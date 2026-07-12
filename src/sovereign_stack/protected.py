@@ -53,7 +53,7 @@ PROTECTED_ACTIONS = ("protect", "unprotect")
 
 # Verdict vocabulary for a stakes load, identical to the archive layer's
 # recall_exchange / verify_archive_ref vocabulary.
-STAKES_VERDICTS = ("verified", "mismatch", "missing", "ambiguous", "unknown")
+STAKES_VERDICTS = ("verified", "mismatch", "missing", "unreadable", "ambiguous", "unknown")
 
 # The two-word index (Policy 2a): each protected record carries a one-word
 # SUBJECT and a one-word EMOTION (e.g. father / loss). A "word" is a single

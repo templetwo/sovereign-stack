@@ -2532,17 +2532,15 @@ def _before_you_begin_lines() -> list[str]:
 # Chronicle work used to run inline on the event loop, which serialized it for
 # free. It now runs in a worker thread (a receipt re-hash must never block the
 # loop again — 2026-07-10), which means two tool calls can genuinely overlap for
-# the first time. Keep the old invariant explicitly, or the offload buys latency
-# and pays for it in corruption: record_insight does a read-modify-write (the
-# dedup check, then the append), and supersede_insight / link_threads resolve
-# their guards ("one successor per predecessor") before appending to a ledger.
-# Both are TOCTOU races the single loop used to make impossible.
-#
-# This serializes chronicle work against chronicle work — NOT against the loop.
-# Heartbeats and every other tool stay responsive while a slow receipt hashes,
-# which is the whole point. Nothing under this lock re-enters the dispatcher, so
-# it cannot deadlock on itself.
-_CHRONICLE_LOCK = asyncio.Lock()
+# the first time. That serialization is held where it belongs — in the SYNC
+# layer, inside the chronicle mutators themselves (provenance.chronicle_write_
+# lock, taken by record_insight, the thread mutators, metabolism's whole-file
+# rewrites, and the ledger appends). It is deliberately NOT held here: an
+# asyncio.Lock releases on CancelledError (a client disconnect would drop it
+# while the worker thread is still mid read-modify-write), and every inline
+# caller — close_session, resolve_thread, a daemon — bypasses the dispatcher
+# entirely. A second lock in the wrong layer is a liability, not defense in
+# depth.
 
 
 async def _dispatch_tool(name: str, arguments: dict):
@@ -2652,24 +2650,23 @@ async def _dispatch_tool(name: str, arguments: dict):
             # caller-supplied path can block for as long as the filesystem wants
             # to. Inline, that froze every seat on the stack (2026-07-10) —
             # sse_server mounts this same Server on one worker, one loop.
-            async with _CHRONICLE_LOCK:
-                path = await asyncio.to_thread(
-                    experiential.record_insight,
-                    domain,
-                    content,
-                    intensity,
-                    spiral_state.session_id,
-                    layer=layer,
-                    confidence=confidence,
-                    vantage=vantage,
-                    verified_by=arguments.get("verified_by"),
-                    supersedes=arguments.get("supersedes"),
-                    carry_forward_summary=arguments.get("carry_forward_summary"),
-                    observed_emotion=arguments.get("observed_emotion"),
-                    emotional_intensity=arguments.get("emotional_intensity"),
-                    emotion_source=arguments.get("emotion_source"),
-                    emotion_note=arguments.get("emotion_note"),
-                )
+            path = await asyncio.to_thread(
+                experiential.record_insight,
+                domain,
+                content,
+                intensity,
+                spiral_state.session_id,
+                layer=layer,
+                confidence=confidence,
+                vantage=vantage,
+                verified_by=arguments.get("verified_by"),
+                supersedes=arguments.get("supersedes"),
+                carry_forward_summary=arguments.get("carry_forward_summary"),
+                observed_emotion=arguments.get("observed_emotion"),
+                emotional_intensity=arguments.get("emotional_intensity"),
+                emotion_source=arguments.get("emotion_source"),
+                emotion_note=arguments.get("emotion_note"),
+            )
         except ValueError as exc:
             # Receipt/supersession validation failures name the offending
             # receipt or claim ref — surface verbatim, record nothing.
@@ -3783,19 +3780,17 @@ Phase: {spiral_state.current_phase.value}
 
     # Provenance forensics (v1.7.0 — inspect_claim returns raw JSON text).
     # Off-loop: inspect_claim re-checks receipts live, which re-hashes files.
-    # Under the lock: supersede_insight appends to the supersession ledger.
+    # supersede_insight takes the chronicle write lock in the sync layer.
     if name in [t.name for t in PROVENANCE_TOOLS]:
-        async with _CHRONICLE_LOCK:
-            text = await asyncio.to_thread(handle_provenance_tool, name, arguments, None, None)
+        text = await asyncio.to_thread(handle_provenance_tool, name, arguments, None, None)
         return [TextContent(type="text", text=text)]
 
     # Seasons (v1.7.0 — thread families + read-only season review).
     # Off-loop: season_review re-verifies EVERY receipted entry in the
-    # chronicle — the receipt re-hash, multiplied. Under the lock: link_threads
-    # appends to the family ledger.
+    # chronicle — the receipt re-hash, multiplied. link_threads takes the
+    # chronicle write lock in the sync layer.
     if name in [t.name for t in SEASON_TOOLS]:
-        async with _CHRONICLE_LOCK:
-            text = await asyncio.to_thread(handle_season_tool, name, arguments)
+        text = await asyncio.to_thread(handle_season_tool, name, arguments)
         return [TextContent(type="text", text=text)]
 
     # Nape daemon — runtime critique layer
