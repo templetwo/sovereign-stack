@@ -22,9 +22,21 @@ Design:
 Public API:
   - ENDPOINTS: list[Endpoint]
   - get_endpoint(name) -> Endpoint
-  - check_status(endpoint, *, now=None) -> EndpointStatus
-  - check_all() -> list[EndpointStatus]
+  - check_status(endpoint, *, now=None, service_fold=None) -> EndpointStatus
+  - check_all(*, service_fold=None) -> list[EndpointStatus]
+  - check_all_reconciled(*, service_fold=None) -> list[EndpointStatus]
+  - aggregate(statuses) -> dict
+  - aggregate_reconciled(statuses) -> dict
   - start(endpoint), stop(endpoint), restart(endpoint) -> ActionResult
+
+Reason-receipts on disabled services (2026-07-12): "disabled" used to be
+purely inferred from launchctl (never stored — who, when, why, and what
+would re-enable it were unqueryable). service_ledger.py now carries that
+as an append-only, stored state; check_status/check_all_reconciled fold
+it against the launchctl-inferred read. The distinction that matters: a
+service that is stored-enabled (or has no ledger record — the default)
+and reads inferred-down is an INCIDENT. A service that is stored-disabled
+and reads inferred-down is EXPECTED. Both used to look identical.
 """
 
 from __future__ import annotations
@@ -37,6 +49,8 @@ import urllib.error
 import urllib.request
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+
+from . import service_ledger
 
 # ── Status constants ────────────────────────────────────────────────────────
 
@@ -51,6 +65,16 @@ STATUS_DISABLED = "disabled"  # plist marked disabled — informational
 # Endpoint kinds
 KIND_ALWAYS_ON = "always_on"
 KIND_PERIODIC = "periodic"
+KIND_UNREGISTERED = "unregistered"  # ledger knows it; ENDPOINTS does not
+
+# Reconciliation verdicts — stored (service_ledger) vs inferred (launchctl/
+# HTTP) status, crossed. This is the whole value of the ledger: without it,
+# "stored-disabled, inferred-down" and "stored-enabled, inferred-down" are
+# indistinguishable, and the second one is the incident.
+RECONCILE_OK = "ok"  # enabled (or no record) + inferred running
+RECONCILE_INCIDENT = "incident"  # enabled (or no record) + inferred down
+RECONCILE_EXPECTED_DISABLED = "expected_disabled"  # disabled + inferred down
+RECONCILE_UNEXPECTED_RUNNING = "unexpected_running"  # disabled + inferred running
 
 
 # ── Endpoint registry ───────────────────────────────────────────────────────
@@ -153,6 +177,8 @@ class EndpointStatus:
     http_error: str | None = None
     log_age_seconds: float | None = None
     notes: list[str] = field(default_factory=list)
+    stored_state: str | None = None  # "disabled" | "enabled" | None (no ledger record)
+    reconciliation: str | None = None  # one of RECONCILE_* | None (not computed / ambiguous)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -249,6 +275,47 @@ def parse_launchctl_print(text: str) -> dict:
     return {"state": state, "pid": pid, "last_exit_code": last_exit}
 
 
+# ── Stored-vs-inferred reconciliation ───────────────────────────────────────
+
+
+def reconcile_service(
+    status: EndpointStatus, service_fold: dict[str, dict] | None
+) -> tuple[str | None, str | None]:
+    """
+    Cross stored ledger state (service_ledger.fold_service_state) against
+    the inferred status this module just derived from launchctl/HTTP.
+    Returns (stored_state, reconciliation).
+
+    (None, None) when there's nothing to reconcile against — no fold was
+    passed, or the endpoint carries no launchctl label (the ledger keys on
+    label). reconciliation is also None when the inferred signal is itself
+    too ambiguous to reconcile (STALE periodic jobs, UNKNOWN launchctl
+    parses) — forcing an ambiguous read into ok/incident would be false
+    confidence, not a fix. A service absent from the fold entirely defaults
+    to stored_state=None, treated the same as "enabled": the ledger only
+    ever records departures from the default-on assumption.
+    """
+    if service_fold is None or status.label is None:
+        return None, None
+    record = service_fold.get(status.label)
+    stored_state = record.get("state") if record else None
+    if status.status in (STATUS_STALE, STATUS_UNKNOWN):
+        return stored_state, None
+    inferred_down = status.status == STATUS_DOWN
+    inferred_running = status.status in (STATUS_OK, STATUS_DEGRADED)
+    if stored_state == "disabled":
+        if inferred_down:
+            return stored_state, RECONCILE_EXPECTED_DISABLED
+        if inferred_running:
+            return stored_state, RECONCILE_UNEXPECTED_RUNNING
+        return stored_state, None
+    if inferred_down:
+        return stored_state, RECONCILE_INCIDENT
+    if inferred_running:
+        return stored_state, RECONCILE_OK
+    return stored_state, None
+
+
 # ── Per-endpoint status check ───────────────────────────────────────────────
 
 
@@ -263,6 +330,7 @@ def check_status(
     endpoint: Endpoint,
     *,
     now: float | None = None,
+    service_fold: dict[str, dict] | None = None,
 ) -> EndpointStatus:
     """
     Return the current status of one endpoint.
@@ -278,6 +346,10 @@ def check_status(
          service downgrades to STATUS_DEGRADED. Success on an ALWAYS_ON
          service is authoritative: the service is UP even when launchctl
          can't enumerate it (launchctl detail stays in the report).
+      5. If service_fold is given, reconcile the inferred status above
+         against the stored ledger state (reconcile_service) — sets
+         stored_state and reconciliation. Omit service_fold to leave both
+         None, which is exactly today's behavior for existing callers.
     """
     now = now if now is not None else time.time()
     status = EndpointStatus(
@@ -376,12 +448,86 @@ def check_status(
             status.notes.append(f"health probe OK overrides launchctl-derived {status.status!r}")
             status.status = STATUS_OK
 
+    status.stored_state, status.reconciliation = reconcile_service(status, service_fold)
     return status
 
 
-def check_all(*, now: float | None = None) -> list[EndpointStatus]:
+def check_all(
+    *, now: float | None = None, service_fold: dict[str, dict] | None = None
+) -> list[EndpointStatus]:
     """Check every endpoint in the registry. Order matches ENDPOINTS."""
-    return [check_status(e, now=now) for e in ENDPOINTS]
+    return [check_status(e, now=now, service_fold=service_fold) for e in ENDPOINTS]
+
+
+def check_unregistered_service(
+    label: str, *, service_fold: dict[str, dict] | None = None
+) -> EndpointStatus:
+    """
+    Build a status for a service that has a ledger record but no
+    registered Endpoint — e.g. the dream daemon, invisible to ENDPOINTS by
+    design until HQ enables it. launchctl-only: there's no Endpoint to
+    supply a health_url, cadence, or log_path, so this is a thinner read
+    than check_status gives a registered endpoint — enough to reconcile
+    against the ledger, not a full health probe.
+
+    When the ledger record carries plist_path, also surfaces whether the
+    program that plist would invoke actually imports (see
+    service_ledger.check_service_module) — the "not merely paused, truly
+    unrunnable" class of problem a stored-disabled state alone can't show.
+    """
+    status = EndpointStatus(name=label, label=label, kind=KIND_UNREGISTERED, status=STATUS_UNKNOWN)
+    text = _launchctl_print_text(label)
+    if text is None:
+        status.status = STATUS_DOWN
+        status.notes.append("launchctl: service not loaded")
+    else:
+        parsed = parse_launchctl_print(text)
+        status.launchctl_state = parsed["state"]
+        status.pid = parsed["pid"]
+        status.last_exit_code = parsed["last_exit_code"]
+        status.status = STATUS_OK if parsed["state"] == "running" else STATUS_DOWN
+
+    status.stored_state, status.reconciliation = reconcile_service(status, service_fold)
+
+    record = (service_fold or {}).get(label)
+    if record:
+        module_check = service_ledger.check_service_module(record)
+        if module_check and module_check.get("importable") is False:
+            status.notes.append(
+                f"unrunnable: plist invokes {module_check.get('module')!r} which "
+                f"does not import ({module_check.get('error')})"
+            )
+
+    return status
+
+
+def check_all_reconciled(
+    *, now: float | None = None, service_fold: dict[str, dict] | None = None
+) -> list[EndpointStatus]:
+    """
+    check_all() plus ledger-only services: labels the ledger knows about
+    that ENDPOINTS does not. Union, not replacement — a service can be
+    legitimately disabled and still invisible to the registry (that
+    invisibility is exactly the gap the ledger closes); registered
+    endpoints keep the full launchctl+HTTP decision tree, ledger-only
+    labels get the launchctl-only reconciliation view.
+
+    service_fold defaults to the live ledger (service_ledger.default_services_path)
+    when omitted — the "give me the reconciled real world" entry point,
+    mirroring how check_all() hits real launchctl/HTTP by default. Tests
+    should pass an explicit service_fold to stay hermetic.
+    """
+    if service_fold is None:
+        service_fold = service_ledger.fold_service_state(
+            service_ledger.load_service_records(service_ledger.default_services_path())
+        )
+    statuses = check_all(now=now, service_fold=service_fold)
+    if service_fold:
+        registered_labels = {e.label for e in ENDPOINTS if e.label}
+        for label in service_fold:
+            if label not in registered_labels:
+                statuses.append(check_unregistered_service(label, service_fold=service_fold))
+    return statuses
 
 
 # ── Action helpers ──────────────────────────────────────────────────────────
@@ -494,6 +640,52 @@ def aggregate(statuses: list[EndpointStatus]) -> dict:
         overall = STATUS_DOWN
     elif counts.get(STATUS_DEGRADED) or counts.get(STATUS_STALE) or counts.get(STATUS_UNKNOWN):
         overall = STATUS_DEGRADED
+
+    return {
+        "overall": overall,
+        "counts": counts,
+        "endpoints": [s.to_dict() for s in statuses],
+        "timestamp": time.time(),
+    }
+
+
+def aggregate_reconciled(statuses: list[EndpointStatus]) -> dict:
+    """
+    Like aggregate(), but reconciliation-aware. A service that reads
+    inferred-down BECAUSE it is stored-disabled (RECONCILE_EXPECTED_DISABLED)
+    does not count against overall health — someone turned it off on
+    purpose and said why; it buckets under "expected_disabled" instead of
+    "down". A down service with no such record — RECONCILE_INCIDENT, or
+    reconciliation never computed (no service_fold, ambiguous inferred
+    status) — counts exactly as it does in aggregate(). A service the
+    ledger says is disabled but that is answering anyway
+    (RECONCILE_UNEXPECTED_RUNNING) is itself flagged: the ledger is stale,
+    or someone re-enabled it without recording why — never silently OK.
+
+    aggregate() itself is untouched by this function's existence: existing
+    callers (the CLI, monitor.py) that never pass a service_fold see
+    identical behavior to before this ledger existed.
+    """
+    counts: dict[str, int] = {}
+    for s in statuses:
+        bucket = (
+            "expected_disabled" if s.reconciliation == RECONCILE_EXPECTED_DISABLED else s.status
+        )
+        counts[bucket] = counts.get(bucket, 0) + 1
+
+    down = any(
+        s.status == STATUS_DOWN and s.reconciliation != RECONCILE_EXPECTED_DISABLED
+        for s in statuses
+    )
+    degraded = any(
+        s.reconciliation == RECONCILE_UNEXPECTED_RUNNING
+        or (
+            s.reconciliation != RECONCILE_EXPECTED_DISABLED
+            and s.status in (STATUS_DEGRADED, STATUS_STALE, STATUS_UNKNOWN)
+        )
+        for s in statuses
+    )
+    overall = STATUS_DOWN if down else (STATUS_DEGRADED if degraded else STATUS_OK)
 
     return {
         "overall": overall,
