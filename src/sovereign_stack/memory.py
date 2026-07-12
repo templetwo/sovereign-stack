@@ -701,6 +701,11 @@ class ExperientialMemory:
                 raise provenance.ReceiptError("verified_by must be a list of receipt dicts")
             for position, receipt in enumerate(verified_by, start=1):
                 provenance.validate_receipt_shape(receipt, position)
+                # Hazard classes are refused before the write touches anything:
+                # a fifo, a device, a dataless placeholder or an over-cap blob
+                # is not a file whose bytes we can hash, and opening one is how
+                # the stack froze on 2026-07-10.
+                provenance.preflight_file_receipt(receipt, position)
 
         # Emotional layer (v1.7.2) — light validation, fail fast. Descriptive
         # storage only; nothing here feeds surfacing or ranking.
@@ -1847,15 +1852,18 @@ class ExperientialMemory:
         else:
             record = matches[-1]
 
-        blob_path = Path(record.get("path", ""))
-        if not blob_path.exists():
+        content, verdict = provenance.read_blob_bounded(Path(record.get("path", "")))
+        if content is None:
             return {
-                "integrity": "missing",
-                "detail": "index record exists but the bytes are gone from disk",
+                "integrity": verdict,
+                "detail": (
+                    "index record exists but the bytes are gone from disk"
+                    if verdict == "missing"
+                    else "index record exists but the bytes could not be read within the wall clock"
+                ),
                 **record,
             }
 
-        content = blob_path.read_text(encoding="utf-8")
         recomputed = hashlib.sha256(content.encode("utf-8")).hexdigest()
         integrity = "verified" if recomputed == record.get("sha256") else "mismatch"
         return {

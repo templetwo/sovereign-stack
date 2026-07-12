@@ -35,7 +35,6 @@ Integration notes (server.py owner):
   both tools is "provenance" in TOOL_CATEGORIES.
 """
 
-import hashlib
 import json
 import re
 from pathlib import Path
@@ -87,13 +86,19 @@ def _check_receipt_now(receipt: dict, chronicle_root: Path) -> str:
         return verdict if verdict in ("verified", "mismatch", "missing") else "missing"
     if kind == "file":
         path = Path(ref).expanduser()
-        if not path.is_file():
-            return "missing"
+        try:
+            hazard = prov.classify_file_target(path)
+        except prov.BoundedIOError:
+            return "unreadable"
+        if hazard is not None:
+            return "missing" if "does not exist" in hazard else "unreadable"
         sha256 = receipt.get("sha256")
         if not isinstance(sha256, str) or not sha256:
             return "mismatch"
         try:
-            recomputed = hashlib.sha256(path.read_bytes()).hexdigest()
+            recomputed = prov.hash_file_bounded(path)
+        except prov.BoundedIOError:
+            return "unreadable"
         except OSError:
             return "missing"
         return "verified" if recomputed == sha256 else "mismatch"

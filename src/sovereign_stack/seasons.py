@@ -53,16 +53,43 @@ from .policies import PolicyRegistry
 from .protected import load_protected_fold
 from .provenance import (
     LIVED_VANTAGES,
+    BoundedIOError,
+    classify_file_target,
     derive_claim_id,
     display_id,
     fold_supersessions,
     has_legacy_marker,
+    hash_file_bounded,
     iter_chronicle_entries,
     load_supersessions,
     token_overlap,
     verify_archive_ref,
 )
 from .witness import days_old
+
+
+def _reverify_file_receipt(path: Path, expected_sha256: str | None) -> str:
+    """
+    Re-hash one stored file receipt under provenance's wall clock.
+
+    season_review walks every receipted entry, so an unbounded read here is
+    the 2026-07-10 freeze multiplied by the size of the chronicle. A path
+    that cannot be read in budget re-verifies as "unreadable", which the
+    caller reports as a hygiene failure — honest, and never a verification.
+    """
+    try:
+        hazard = classify_file_target(path)
+    except BoundedIOError:
+        return "unreadable"
+    if hazard is not None:
+        return "missing" if "does not exist" in hazard else "unreadable"
+    try:
+        return "verified" if hash_file_bounded(path) == expected_sha256 else "mismatch"
+    except BoundedIOError:
+        return "unreadable"
+    except OSError:
+        return "missing"
+
 
 # ── Constants ──
 
@@ -832,15 +859,7 @@ def season_review(
             if kind == "archive":
                 verdict = verify_archive_ref(ref, root)
             elif kind == "file":
-                path = Path(ref).expanduser()
-                if not path.is_file():
-                    verdict = "missing"
-                else:
-                    try:
-                        recomputed = hashlib.sha256(path.read_bytes()).hexdigest()
-                        verdict = "verified" if recomputed == receipt.get("sha256") else "mismatch"
-                    except OSError:
-                        verdict = "missing"
+                verdict = _reverify_file_receipt(Path(ref).expanduser(), receipt.get("sha256"))
             elif kind == "claim":
                 hits = {cid for cid in ids_present if cid.startswith(ref)}
                 verdict = "cites" if len(hits) == 1 else ("ambiguous" if hits else "dangling")
