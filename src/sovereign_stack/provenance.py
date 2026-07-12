@@ -28,10 +28,15 @@ pure data in, verdicts out. All paths parameterized (defaults point at
 lives elsewhere.
 """
 
+import errno
 import hashlib
 import json
+import os
 import re
-from collections.abc import Iterator
+import stat
+import threading
+import time
+from collections.abc import Callable, Iterator
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -254,6 +259,207 @@ def resolve_claim(
     return entry, jsonl_file, location
 
 
+# ── Bounded filesystem reads (the 2026-07-10 freeze) ─────────────────────────
+#
+# verify_receipt_at_write used to re-hash a caller-supplied path with an
+# unbounded, synchronous read_bytes(). The path was an iCloud dataless stub:
+# stat() reported an ordinary regular file, the read blocked forever on
+# materialization, and because record_insight is called synchronously from the
+# async dispatch on a single-worker event loop, the whole stack wedged behind
+# it — heartbeats included. Every hash of bytes that a caller or an index
+# points us at now goes through here: classified by stat before anything is
+# opened, read in chunks, and bounded by a wall clock at both layers.
+
+STAT_TIMEOUT_SECONDS = 1.0
+READ_TIMEOUT_SECONDS = 5.0
+# 256 MiB. sha256 itself runs at ~3 GB/s here, so the cap is set by I/O, not by
+# the hash: even a 100 MB/s network volume finishes 256 MiB inside
+# READ_TIMEOUT_SECONDS. Anything bigger is not a receipt for a claim, it is a
+# dataset — archive it and cite the archive (kind="archive").
+MAX_RECEIPT_BYTES = 256 * 1024 * 1024
+_READ_CHUNK_BYTES = 1024 * 1024
+
+# macOS sets this on a file-provider (iCloud) placeholder whose bytes are not
+# on this machine. Opening one triggers a materialization download that can
+# block indefinitely. stat() is honest about the flag, so refuse before opening.
+_SF_DATALESS = 0x40000000
+_ICLOUD_STUB_SUFFIX = ".icloud"
+
+
+class BoundedIOError(Exception):
+    """A bounded filesystem probe or read did not complete inside its budget."""
+
+
+def _run_bounded(fn: Callable[[], object], timeout: float) -> object:
+    """
+    Run a blocking filesystem call in a daemon thread; abandon it if it
+    outlives `timeout`.
+
+    A wedged open()/read() cannot be cancelled from Python. The thread is a
+    daemon so an abandoned one never holds up interpreter exit, and it frees
+    itself if the kernel ever answers. What matters is that the CALLER returns.
+
+    Raises:
+        BoundedIOError: the call outlived its budget.
+        Exception: whatever fn raised, re-raised in the caller's thread.
+    """
+    box: dict = {}
+
+    def _runner() -> None:
+        try:
+            box["value"] = fn()
+        except BaseException as exc:  # noqa: BLE001 — re-raised in the caller's thread
+            box["error"] = exc
+
+    worker = threading.Thread(target=_runner, daemon=True)
+    worker.start()
+    worker.join(timeout)
+    if worker.is_alive():
+        raise BoundedIOError(f"did not complete within {timeout:g}s")
+    if "error" in box:
+        raise box["error"]
+    return box["value"]
+
+
+def classify_file_target(path: Path) -> str | None:
+    """
+    Stat-only hazard classification for a path we are about to hash.
+
+    Returns None when the path is a plain, local, in-budget regular file;
+    otherwise a short reason naming the hazard class. Nothing is opened —
+    stat answers for FIFOs, devices, directories, symlink loops and dataless
+    placeholders without triggering the block that opening them would cause.
+
+    Raises:
+        BoundedIOError: the stat itself never answered (wedged mount).
+    """
+    if path.name.endswith(_ICLOUD_STUB_SUFFIX):
+        return "dangling — iCloud placeholder stub, not the file itself"
+
+    def _probe() -> tuple[os.stat_result | None, str | None]:
+        try:
+            return os.stat(path), None
+        except FileNotFoundError:
+            return None, "dangling — file does not exist"
+        except OSError as exc:
+            if exc.errno == errno.ELOOP:
+                return None, "dangling — symlink loop"
+            return None, f"dangling — file is unstattable ({exc.strerror or exc})"
+
+    st, reason = _run_bounded(_probe, STAT_TIMEOUT_SECONDS)  # type: ignore[misc]
+    if reason is not None:
+        return reason
+    if not stat.S_ISREG(st.st_mode):
+        return "dangling — not a regular file (directory, fifo, socket or device)"
+    # st_flags is absent on Linux and None on a stat_result built without the
+    # platform extras — neither is a dataless flag, both must not blow up here.
+    if (getattr(st, "st_flags", 0) or 0) & _SF_DATALESS:
+        return "dangling — dataless placeholder; the bytes are not on this machine"
+    if st.st_size > MAX_RECEIPT_BYTES:
+        return (
+            f"too large — {st.st_size} bytes exceeds the {MAX_RECEIPT_BYTES}-byte "
+            "receipt cap; archive it and cite the archive"
+        )
+    return None
+
+
+def hash_file_bounded(path: Path) -> str:
+    """
+    sha256 a regular file in chunks under a wall clock.
+
+    Two layers, because they catch different failures: the inner deadline
+    aborts a slow-but-progressing read cooperatively (the thread exits); the
+    outer bound catches a read that never progresses at all — an open() that
+    blocks on materialization returns nothing to check a deadline against.
+
+    Assumes classify_file_target has already cleared the path.
+
+    Raises:
+        BoundedIOError: the hash did not complete inside the budget.
+        OSError: the file could not be opened or read.
+    """
+
+    def _hash() -> str:
+        digest = hashlib.sha256()
+        deadline = time.monotonic() + READ_TIMEOUT_SECONDS
+        total = 0
+        with open(path, "rb") as handle:
+            while True:
+                chunk = handle.read(_READ_CHUNK_BYTES)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > MAX_RECEIPT_BYTES:
+                    raise BoundedIOError(
+                        f"grew past the {MAX_RECEIPT_BYTES}-byte receipt cap while hashing"
+                    )
+                digest.update(chunk)
+                if time.monotonic() > deadline:
+                    raise BoundedIOError(f"read did not complete within {READ_TIMEOUT_SECONDS:g}s")
+        return digest.hexdigest()
+
+    return _run_bounded(_hash, READ_TIMEOUT_SECONDS + 0.5)  # type: ignore[return-value]
+
+
+def read_blob_bounded(path: Path) -> tuple[str | None, str | None]:
+    """
+    Read an archive-indexed blob as utf-8 under the same bounds.
+
+    (content, None) when the bytes came back; (None, verdict) when they did
+    not, where verdict is "missing" (the blob is gone or unopenable) or
+    "unreadable" (a hazard class, or the read never finished — a dataless or
+    wedged ~/.sovereign blocks the loop exactly like a caller's bad path did).
+
+    The archive layer's paths come from its own index rather than from a
+    caller, which makes them trustworthy but not fast: same disks, same
+    hazard, same bound. Never raises, never blocks past the budget.
+    """
+    try:
+        hazard = classify_file_target(path)
+    except BoundedIOError:
+        return None, "unreadable"
+    if hazard is not None:
+        return None, "missing" if "does not exist" in hazard else "unreadable"
+
+    def _read() -> str:
+        return path.read_text(encoding="utf-8")
+
+    try:
+        return _run_bounded(_read, READ_TIMEOUT_SECONDS), None  # type: ignore[return-value]
+    except BoundedIOError:
+        return None, "unreadable"
+    except OSError:
+        return None, "missing"
+
+
+def preflight_file_receipt(receipt: dict, position: int | None = None) -> None:
+    """
+    Reject hazard-class file receipts BEFORE the write does any work.
+
+    Runs beside validate_receipt_shape in record_insight, so a receipt
+    pointing at a fifo, a device, a directory, a dataless placeholder or an
+    over-cap blob never reaches the dedup check, the ledger, or the hash.
+
+    A stat that never answers is NOT rejected here — a wedged mount is not
+    the caller's error, and verify_receipt_at_write degrades it honestly to
+    "attested". Only definitive hazards raise.
+
+    Raises:
+        ReceiptError: naming the offending receipt.
+    """
+    if not isinstance(receipt, dict) or receipt.get("kind") != "file":
+        return
+    ref = receipt.get("ref")
+    if not isinstance(ref, str) or not ref.strip():
+        return
+    try:
+        hazard = classify_file_target(Path(ref.strip()).expanduser())
+    except BoundedIOError:
+        return
+    if hazard is not None:
+        raise ReceiptError(f"{_receipt_name(receipt, position)}: {hazard}")
+
+
 # ── Receipt grammar ──────────────────────────────────────────────────────────
 
 
@@ -318,8 +524,10 @@ def verify_archive_ref(ref: str, chronicle_root: Path) -> str:
     read the bytes at the recorded path, recompute sha256 over the
     utf-8 text, compare to the indexed hash.
 
-    Returns one of "verified" | "mismatch" | "missing" | "ambiguous" |
-    "unknown" — same vocabulary as recall_exchange.
+    Returns one of "verified" | "mismatch" | "missing" | "unreadable" |
+    "ambiguous" | "unknown" — same vocabulary as recall_exchange.
+    "unreadable" means the bytes could not be read inside the wall clock
+    (see read_blob_bounded): never treat it as a verification.
     """
     records = _read_archive_index(chronicle_root)
     matches = [r for r in records if r.get("archive_id", "").startswith(ref)]
@@ -333,13 +541,9 @@ def verify_archive_ref(ref: str, chronicle_root: Path) -> str:
     else:
         record = matches[-1]
 
-    blob_path = Path(record.get("path", ""))
-    if not blob_path.exists():
-        return "missing"
-    try:
-        content = blob_path.read_text(encoding="utf-8")
-    except OSError:
-        return "missing"
+    content, verdict = read_blob_bounded(Path(record.get("path", "")))
+    if content is None:
+        return verdict
     recomputed = hashlib.sha256(content.encode("utf-8")).hexdigest()
     return "verified" if recomputed == record.get("sha256") else "mismatch"
 
@@ -354,15 +558,27 @@ def verify_receipt_at_write(
       - archive: re-hash via the archive index. unknown/ambiguous/missing
         bytes -> REJECTED (a receipt pointing at nothing is unrecordable);
         resolvable -> stamped "verified" | "mismatch".
-      - file: requires sha256; missing file -> REJECTED; present ->
-        re-hashed (raw bytes) -> "verified" | "mismatch".
+      - file: requires sha256; missing file / hazard class (fifo, device,
+        directory, dataless placeholder, over the byte cap) -> REJECTED;
+        present -> re-hashed under a wall clock (chunked) ->
+        "verified" | "mismatch".
       - claim: resolved against insights/ + quarantine; dangling or
         ambiguous -> REJECTED; resolvable -> stamped "cites", NEVER
         "verified" (a citation is not a verification).
       - cmd / url / human: stamped "attested" (no live check at write).
 
-    Returns a COPY of the receipt with "checked_at_write" added; the
-    input dict is never mutated.
+    Degradation (the 2026-07-10 freeze): when the bytes exist but cannot be
+    read inside the wall clock — a wedged mount, a stat that never answers —
+    the receipt is stamped "attested" with an "unverified_reason", NOT
+    "verified", and the write proceeds. Three ways to get this wrong, all
+    worse: hanging (froze the stack), rejecting the whole write (a slow disk
+    is not the author's error), and stamping "verified" without hashing
+    (would corrupt provenance itself — the one thing this module exists to
+    prevent). "attested" already means "nobody re-checked this", which is
+    exactly what is true.
+
+    Returns a COPY of the receipt with "checked_at_write" added (and
+    "unverified_reason" when degraded); the input dict is never mutated.
 
     Raises:
         ReceiptError: naming the offending receipt.
@@ -371,6 +587,8 @@ def verify_receipt_at_write(
     name = _receipt_name(receipt, position)
     kind = receipt["kind"]
     ref = receipt["ref"].strip()
+
+    unverified_reason: str | None = None
 
     if kind == "archive":
         verdict = verify_archive_ref(ref, chronicle_root)
@@ -382,16 +600,30 @@ def verify_receipt_at_write(
             raise ReceiptError(
                 f"{name}: dangling — index record exists but the bytes are gone from disk"
             )
-        stamp = verdict  # "verified" | "mismatch"
+        if verdict == "unreadable":
+            stamp = "attested"
+            unverified_reason = "archive bytes could not be read within the wall clock"
+        else:
+            stamp = verdict  # "verified" | "mismatch"
     elif kind == "file":
         path = Path(ref).expanduser()
-        if not path.is_file():
-            raise ReceiptError(f"{name}: dangling — file does not exist")
         try:
-            recomputed = hashlib.sha256(path.read_bytes()).hexdigest()
-        except OSError as exc:
-            raise ReceiptError(f"{name}: dangling — file is unreadable ({exc})") from exc
-        stamp = "verified" if recomputed == receipt["sha256"] else "mismatch"
+            hazard = classify_file_target(path)
+        except BoundedIOError as exc:
+            stamp = "attested"
+            unverified_reason = f"file could not be stat'd ({exc})"
+        else:
+            if hazard is not None:
+                raise ReceiptError(f"{name}: {hazard}")
+            try:
+                recomputed = hash_file_bounded(path)
+            except BoundedIOError as exc:
+                stamp = "attested"
+                unverified_reason = f"file could not be hashed ({exc})"
+            except OSError as exc:
+                raise ReceiptError(f"{name}: dangling — file is unreadable ({exc})") from exc
+            else:
+                stamp = "verified" if recomputed == receipt["sha256"] else "mismatch"
     elif kind == "claim":
         try:
             resolve_claim(ref, chronicle_root)
@@ -407,6 +639,8 @@ def verify_receipt_at_write(
 
     stamped = dict(receipt)
     stamped["checked_at_write"] = stamp
+    if unverified_reason is not None:
+        stamped["unverified_reason"] = unverified_reason
     return stamped
 
 
