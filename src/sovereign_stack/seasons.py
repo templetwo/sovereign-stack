@@ -48,6 +48,7 @@ from pathlib import Path
 
 from mcp.types import Tool
 
+from . import provenance
 from .memory import ExperientialMemory
 from .policies import PolicyRegistry
 from .protected import load_protected_fold
@@ -63,7 +64,6 @@ from .provenance import (
     iter_chronicle_entries,
     load_supersessions,
     token_overlap,
-    under_chronicle_write_lock,
     verify_archive_ref,
 )
 from .witness import days_old
@@ -445,7 +445,6 @@ def _all_threads(memory: ExperientialMemory) -> dict[str, dict]:
     return threads
 
 
-@under_chronicle_write_lock
 def link_threads(
     thread_ids: list[str],
     label: str,
@@ -562,7 +561,11 @@ def link_threads(
             by=by,
         )
 
-    append_family_record(families_path, record)
+    # Lock the tree this actually writes. The decorator used to guess the root
+    # from kwargs, and link_threads has no chronicle_root — so it flocked the
+    # LIVE chronicle while mutating a families file somewhere else entirely.
+    with provenance.scoped_write_lock(provenance.chronicle_lock_path(Path(families_path).parent)):
+        append_family_record(families_path, record)
 
     after = family_state(fold_families(load_families(families_path))).get(family_id, {})
     return {

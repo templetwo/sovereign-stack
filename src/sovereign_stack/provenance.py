@@ -144,6 +144,24 @@ def default_supersessions_path() -> Path:
 # file on a wedged disk while holding a CROSS-PROCESS lock would stall every
 # process on the machine — the freeze we just fixed, made distributed.
 _CHRONICLE_WRITE_LOCK = threading.RLock()
+
+# Per-path RLocks, not one global. A single RLock held across the flock's
+# spin-wait means a foreign process holding the REFLECTIONS lock stalls every
+# CHRONICLE writer, even though the chronicle lock is free — measured at 2.81s.
+# Now that reflections is a second lockfile, the trees must make independent
+# progress. _RLOCKS_GUARD only protects the dict, never a spin-wait.
+_RLOCKS: dict[str, threading.RLock] = {}
+_RLOCKS_GUARD = threading.Lock()
+
+
+def _rlock_for(key: str) -> threading.RLock:
+    if key == str(chronicle_lock_path()):
+        # the default chronicle keeps the named lock, which tests probe directly
+        return _CHRONICLE_WRITE_LOCK
+    with _RLOCKS_GUARD:
+        return _RLOCKS.setdefault(key, threading.RLock())
+
+
 _FLOCK_FDS: dict[str, int] = {}
 # Per-path, not a single int. A global counter makes a nested lock on a
 # DIFFERENT root look like a re-entry, so the inner root is never flocked at
@@ -215,7 +233,7 @@ def scoped_write_lock(lock_path: Path):
     asyncio.to_thread; that is load-bearing, not stylistic.
     """
     key = str(lock_path)
-    with _CHRONICLE_WRITE_LOCK:
+    with _rlock_for(key):
         depth = _FLOCK_DEPTH.get(key, 0)
         if depth == 0:
             _acquire_flock(lock_path)

@@ -278,12 +278,18 @@ class TestCancellationCannotReleaseTheLock:
                 await task
             # The worker thread is STILL inside the read-modify-write. The lock
             # it holds is a sync lock: the cancellation could not touch it.
-            acquired = provenance._CHRONICLE_WRITE_LOCK.acquire(blocking=False)
+            acquired = provenance._rlock_for(str(provenance.chronicle_lock_path(chronicle))).acquire(
+                blocking=False
+            )
             if acquired:  # pragma: no cover — only on a broken tree
-                provenance._CHRONICLE_WRITE_LOCK.release()
+                provenance._rlock_for(str(provenance.chronicle_lock_path(chronicle))).release()
             return acquired
 
         acquired = asyncio.run(drive())
+        # The worker thread outlives the cancelled awaiter — that IS the finding.
+        # But it still holds the lock, so it must be drained before the next test
+        # runs, or it leaks lock state across the suite.
+        time.sleep(1.2)
         assert not acquired, (
             "the write lock was released while a write was in flight — a cancelled "
             "awaiter must not be able to open the critical section to a second writer"

@@ -633,103 +633,12 @@ async def handle_metabolism_tool(name, arguments):
         return [TextContent(type="text", text=result)]
 
     if name == "retire_hypothesis":
-        domain = arguments.get("domain", "")
-        fragment = arguments.get("content_fragment", "")
-        reason = arguments.get("reason", "")
-        replaced_by = arguments.get("replaced_by", "")
-
-        # Find and retire the hypothesis
-        insights_dir = CHRONICLE_DIR / "insights"
-        retired = False
-        retired_entries: list[tuple[str, dict]] = []  # (claim_id, pre-mutation snapshot)
-        if not insights_dir.exists():
-            # Fresh chronicle — nothing to retire, nothing to crash on.
-            return [
-                TextContent(type="text", text=f"No matching hypothesis found for '{fragment[:60]}'")
-            ]
-
-        # v1.7.x reader convergence: the scan SELECTS through the shared
-        # annotated chokepoint (_load_all_insights -> memory.load_entries),
-        # so already-superseded matches are visible instead of silently
-        # treated as live. Selection is unchanged — superseded matches are
-        # still retired (never drop), the state is just surfaced below. The
-        # mutation loop then re-reads raw lines for ONLY the matched files,
-        # so corrupt lines and untouched files keep their exact bytes.
-        already_superseded = 0
-        match_files: set[str] = set()
-        for candidate in _load_all_insights():
-            if domain and domain not in candidate.get("_domain_dir", ""):
-                continue
-            if (
-                candidate.get("layer") == "hypothesis"
-                and fragment.lower() in candidate.get("content", "").lower()
-            ):
-                match_files.add(candidate["_file"])
-                if "_superseded_by" in candidate:
-                    already_superseded += 1
-
-        # Whole-file rewrite of live insight files — under the write lock, or a
-        # record_insight append landing between the read and the write is lost.
-        with chronicle_write_lock(insights_dir.parent):
-            for match_file in sorted(match_files):
-                jsonl_file = Path(match_file)
-                lines = jsonl_file.read_text().splitlines()
-                updated = []
-                file_changed = False
-                for line in lines:
-                    if not line.strip():
-                        continue
-                    try:
-                        entry = json.loads(line)
-                        if (
-                            entry.get("layer") == "hypothesis"
-                            and fragment.lower() in entry.get("content", "").lower()
-                        ):
-                            # Claim ids derive from (timestamp, domain, content)
-                            # only — the retirement annotations below are
-                            # outside the preimage, so the id never shifts.
-                            retired_entries.append((derive_claim_id(entry), dict(entry)))
-                            entry["layer"] = "retired"
-                            entry["retired_reason"] = reason
-                            entry["retired_by"] = replaced_by
-                            entry["retired_at"] = datetime.now(timezone.utc).isoformat()
-                            retired = True
-                            file_changed = True
-                        updated.append(json.dumps(entry))
-                    except json.JSONDecodeError:
-                        updated.append(line)
-                # Only rewrite files that actually changed — untouched files
-                # keep their bytes (and mtimes) exactly as they were.
-                if file_changed:
-                    jsonl_file.write_text("\n".join(updated) + "\n")
-
-        if retired:
-            # Reconcile the two liveness systems: the supersession read path
-            # must see retirements. One ledger record per retired entry —
-            # action "retire", successor_id null, reason = what replaced it
-            # (the entry's retired_by pointer). Spec v1.7.0 section 2.
-            ledger_path = CHRONICLE_DIR / "supersessions.jsonl"
-            for claim_id, snapshot in retired_entries:
-                record = build_supersession_record(
-                    action="retire",
-                    superseded_id=claim_id,
-                    successor_id=None,
-                    reason=replaced_by,
-                    predecessor=snapshot,
-                )
-                append_supersession(ledger_path, record)
-            text = f"📦 Hypothesis retired: '{fragment[:60]}...'\n  Reason: {reason}\n  Replaced by: {replaced_by}"
-            if already_superseded:
-                # Data-gated visibility: the scan saw ledger state — say so.
-                noun = "entry was" if already_superseded == 1 else "entries were"
-                text += (
-                    f"\n  Note: {already_superseded} matched {noun} already "
-                    "superseded in the ledger (retired anyway; latest action wins)"
-                )
-            return [TextContent(type="text", text=text)]
-        return [
-            TextContent(type="text", text=f"No matching hypothesis found for '{fragment[:60]}'")
-        ]
+        # The whole scan-rewrite-ledger span holds the cross-process write lock,
+        # whose acquisition spin-waits up to 30s. Inline on the loop, a foreign
+        # process holding that lock froze every seat on the stack (an adversarial
+        # review measured 3.75s of dead loop). Offloaded, like the other two.
+        text = await asyncio.to_thread(_retire_hypothesis_impl, arguments)
+        return [TextContent(type="text", text=text)]
 
     if name == "self_model":
         action = arguments.get("action", "read")
@@ -914,3 +823,101 @@ async def handle_metabolism_tool(name, arguments):
         return [TextContent(type="text", text=result)]
 
     return [TextContent(type="text", text=f"Unknown metabolism tool: {name}")]
+
+
+def _retire_hypothesis_impl(arguments) -> str:
+    """Sync. Runs in a worker thread — NEVER on the event loop, because it takes
+    the cross-process chronicle lock and that acquisition blocks."""
+    domain = arguments.get("domain", "")
+    fragment = arguments.get("content_fragment", "")
+    reason = arguments.get("reason", "")
+    replaced_by = arguments.get("replaced_by", "")
+
+    # Find and retire the hypothesis
+    insights_dir = CHRONICLE_DIR / "insights"
+    retired = False
+    retired_entries: list[tuple[str, dict]] = []  # (claim_id, pre-mutation snapshot)
+    if not insights_dir.exists():
+        # Fresh chronicle — nothing to retire, nothing to crash on.
+        return f"No matching hypothesis found for '{fragment[:60]}'"
+
+    # v1.7.x reader convergence: the scan SELECTS through the shared
+    # annotated chokepoint (_load_all_insights -> memory.load_entries),
+    # so already-superseded matches are visible instead of silently
+    # treated as live. Selection is unchanged — superseded matches are
+    # still retired (never drop), the state is just surfaced below. The
+    # mutation loop then re-reads raw lines for ONLY the matched files,
+    # so corrupt lines and untouched files keep their exact bytes.
+    already_superseded = 0
+    match_files: set[str] = set()
+    for candidate in _load_all_insights():
+        if domain and domain not in candidate.get("_domain_dir", ""):
+            continue
+        if (
+            candidate.get("layer") == "hypothesis"
+            and fragment.lower() in candidate.get("content", "").lower()
+        ):
+            match_files.add(candidate["_file"])
+            if "_superseded_by" in candidate:
+                already_superseded += 1
+
+    # Whole-file rewrite of live insight files — under the write lock, or a
+    # record_insight append landing between the read and the write is lost.
+    with chronicle_write_lock(insights_dir.parent):
+        for match_file in sorted(match_files):
+            jsonl_file = Path(match_file)
+            lines = jsonl_file.read_text().splitlines()
+            updated = []
+            file_changed = False
+            for line in lines:
+                if not line.strip():
+                    continue
+                try:
+                    entry = json.loads(line)
+                    if (
+                        entry.get("layer") == "hypothesis"
+                        and fragment.lower() in entry.get("content", "").lower()
+                    ):
+                        # Claim ids derive from (timestamp, domain, content)
+                        # only — the retirement annotations below are
+                        # outside the preimage, so the id never shifts.
+                        retired_entries.append((derive_claim_id(entry), dict(entry)))
+                        entry["layer"] = "retired"
+                        entry["retired_reason"] = reason
+                        entry["retired_by"] = replaced_by
+                        entry["retired_at"] = datetime.now(timezone.utc).isoformat()
+                        retired = True
+                        file_changed = True
+                    updated.append(json.dumps(entry))
+                except json.JSONDecodeError:
+                    updated.append(line)
+            # Only rewrite files that actually changed — untouched files
+            # keep their bytes (and mtimes) exactly as they were.
+            if file_changed:
+                jsonl_file.write_text("\n".join(updated) + "\n")
+
+    if retired:
+        # Reconcile the two liveness systems: the supersession read path
+        # must see retirements. One ledger record per retired entry —
+        # action "retire", successor_id null, reason = what replaced it
+        # (the entry's retired_by pointer). Spec v1.7.0 section 2.
+        ledger_path = CHRONICLE_DIR / "supersessions.jsonl"
+        for claim_id, snapshot in retired_entries:
+            record = build_supersession_record(
+                action="retire",
+                superseded_id=claim_id,
+                successor_id=None,
+                reason=replaced_by,
+                predecessor=snapshot,
+            )
+            append_supersession(ledger_path, record)
+        text = f"📦 Hypothesis retired: '{fragment[:60]}...'\n  Reason: {reason}\n  Replaced by: {replaced_by}"
+        if already_superseded:
+            # Data-gated visibility: the scan saw ledger state — say so.
+            noun = "entry was" if already_superseded == 1 else "entries were"
+            text += (
+                f"\n  Note: {already_superseded} matched {noun} already "
+                "superseded in the ledger (retired anyway; latest action wins)"
+            )
+        return text
+    return f"No matching hypothesis found for '{fragment[:60]}'"

@@ -4111,11 +4111,17 @@ Phase: {spiral_state.current_phase.value}
                 )
             ]
         try:
-            updated = _ack_reflection(
-                reflection_id=rid,
-                action=action,
-                note=arguments.get("note"),
-                by=arguments.get("by"),
+            # Offloaded: ack_reflection takes the cross-process reflections lock,
+            # and that acquisition spin-waits. Inline on the loop, a foreign
+            # process holding it froze every seat (measured 3.75s of dead loop).
+            updated = await asyncio.to_thread(
+                functools.partial(
+                    _ack_reflection,
+                    reflection_id=rid,
+                    action=action,
+                    note=arguments.get("note"),
+                    by=arguments.get("by"),
+                )
             )
         except ValueError as exc:
             return [TextContent(type="text", text=f"reflection_ack error: {exc}")]
