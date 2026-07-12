@@ -138,6 +138,12 @@ def recall_arc(
                         "content": t.get("question", "") + "\n\nContext: " + t.get("context", ""),
                         "intensity": 0.8,
                         "layer": "open_thread",
+                        # get_open_threads only ever returns OPEN threads and
+                        # annotates status itself. An older server omits it — and
+                        # everything it returned was unresolved, i.e. active. This
+                        # module runs standalone, so it cannot import the canonical
+                        # helper from .memory.
+                        "status": t.get("status", "active"),
                         "_source": "open_thread",
                     }
 

@@ -48,7 +48,7 @@ from pathlib import Path
 
 from mcp.types import Tool
 
-from .memory import ExperientialMemory
+from .memory import ExperientialMemory, thread_is_open, thread_status
 from .policies import PolicyRegistry
 from .protected import load_protected_fold
 from .provenance import (
@@ -603,7 +603,8 @@ def _load_threads_readonly(chronicle_root: Path) -> list[dict]:
     threads: list[dict] = []
     for jsonl_file in sorted((chronicle_root / "open_threads").glob("*.jsonl")):
         for record in _iter_jsonl(jsonl_file):
-            if not record.get("resolved", False):
+            if thread_is_open(record):
+                record["status"] = thread_status(record)
                 threads.append(record)
     threads.sort(key=lambda t: t.get("timestamp", ""), reverse=True)
     return threads

@@ -690,6 +690,21 @@ async def list_tools():
                             "description": "Partial match for the original question",
                         },
                         "resolution": {"type": "string", "description": "What was discovered"},
+                        "status": {
+                            "type": "string",
+                            "enum": ["answered", "superseded", "merged"],
+                            "default": "answered",
+                            "description": (
+                                "How the thread closed. 'superseded' = the question stopped "
+                                "applying; 'merged' = it folded into another thread (pass "
+                                "merged_into). Recording a merge as an 'answered' with prose is "
+                                "what this replaces."
+                            ),
+                        },
+                        "merged_into": {
+                            "type": "string",
+                            "description": "thread_id this thread folded into (status='merged').",
+                        },
                     },
                     "required": ["domain", "question_fragment", "resolution"],
                 },
@@ -705,6 +720,20 @@ async def list_tools():
                             "description": "The stable thread id (from get_open_threads output)",
                         },
                         "resolution": {"type": "string", "description": "What was discovered"},
+                        "status": {
+                            "type": "string",
+                            "enum": ["answered", "superseded", "merged"],
+                            "default": "answered",
+                            "description": (
+                                "How the thread closed. 'superseded' = the question stopped "
+                                "applying; 'merged' = it folded into another thread (pass "
+                                "merged_into)."
+                            ),
+                        },
+                        "merged_into": {
+                            "type": "string",
+                            "description": "thread_id this thread folded into (status='merged').",
+                        },
                     },
                     "required": ["thread_id", "resolution"],
                 },
@@ -750,6 +779,16 @@ async def list_tools():
                                 "instead of a plain list. Use this to detect silent cap: if "
                                 "total > len(threads) then more exist beyond this page. "
                                 "Default false preserves the original list return."
+                            ),
+                        },
+                        "status": {
+                            "type": "string",
+                            "enum": ["active", "held"],
+                            "description": (
+                                "Narrow to one lifecycle status. Omit to get BOTH — every "
+                                "returned thread carries its `status`, so a held (deliberately "
+                                "parked) thread is visible but distinguishable from one that is "
+                                "actively waiting. Held threads are excluded from triage_threads."
                             ),
                         },
                     },
@@ -2768,20 +2807,39 @@ async def _dispatch_tool(name: str, arguments: dict):
         domain = arguments.get("domain", "general")
         question_fragment = arguments.get("question_fragment", "")
         resolution = arguments.get("resolution", "")
-        path = experiential.resolve_thread(
-            domain, question_fragment, resolution, spiral_state.session_id
-        )
+        try:
+            path = experiential.resolve_thread(
+                domain,
+                question_fragment,
+                resolution,
+                spiral_state.session_id,
+                status=arguments.get("status", "answered"),
+                merged_into=arguments.get("merged_into"),
+            )
+        except ValueError as e:
+            return [TextContent(type="text", text=f"Thread not resolved: {e}")]
         return [TextContent(type="text", text=f"Thread resolved → ground_truth insight: {path}")]
 
     if name == "resolve_thread_by_id":
         thread_id = arguments.get("thread_id", "")
         resolution = arguments.get("resolution", "")
-        path = experiential.resolve_thread_by_id(thread_id, resolution, spiral_state.session_id)
+        status = arguments.get("status", "answered")
+        try:
+            path = experiential.resolve_thread_by_id(
+                thread_id,
+                resolution,
+                spiral_state.session_id,
+                status=status,
+                merged_into=arguments.get("merged_into"),
+            )
+        except ValueError as e:
+            return [TextContent(type="text", text=f"Thread not resolved: {e}")]
         if not path:
             return [TextContent(type="text", text=f"No open thread found with id: {thread_id}")]
         return [
             TextContent(
-                type="text", text=f"Thread {thread_id} resolved → ground_truth insight: {path}"
+                type="text",
+                text=f"Thread {thread_id} {status} → ground_truth insight: {path}",
             )
         ]
 
@@ -2798,6 +2856,7 @@ async def _dispatch_tool(name: str, arguments: dict):
             domain_contains=arguments.get("domain_contains"),
             offset=arguments.get("offset", 0),
             with_total=with_total,
+            status=arguments.get("status"),
         )
         # When with_total=True, result is a dict {threads, total, has_more, offset}.
         # When with_total=False (default), result is a plain list (backward-compat).
@@ -3288,9 +3347,12 @@ async def _dispatch_tool(name: str, arguments: dict):
 
         lines.append("━━━ LIVE ━━━")
         if threads:
-            lines.append(f"  Open threads ({len(threads_all)}) — top:")
+            _held_count = sum(1 for t in threads_all if t.get("status") == "held")
+            _held_note = f", {_held_count} held" if _held_count else ""
+            lines.append(f"  Open threads ({len(threads_all)}{_held_note}) — top:")
             for t in threads[:4]:
-                lines.append(f"    • {_clip(t.get('question', ''), 100)}")
+                _tag = " [HELD]" if t.get("status") == "held" else ""
+                lines.append(f"    •{_tag} {_clip(t.get('question', ''), 100)}")
         else:
             lines.append("  Open threads: none")
         if pending:

@@ -42,7 +42,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from sovereign_stack.memory import ExperientialMemory
+from sovereign_stack.memory import ExperientialMemory, thread_status
 
 from .redactor import redact, redact_structure
 
@@ -230,6 +230,7 @@ def tool_chronicle_get_threads(
                 "timestamp": (t.get("timestamp") or "")[:19],
                 "domain": t.get("domain"),
                 "question": t.get("question"),
+                "status": thread_status(t),
                 "resolved": bool(t.get("resolved")),
             }
         )

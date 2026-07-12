@@ -40,6 +40,7 @@ from pathlib import Path
 from typing import Any
 
 from . import connectivity, protected
+from .memory import thread_status
 
 # ── Defaults / paths ────────────────────────────────────────────────────────
 
@@ -523,6 +524,7 @@ def collect_latest_entries(sovereign_root: Path) -> dict[str, dict | None]:
             "timestamp": thread.get("timestamp"),
             "domain": thread.get("domain"),
             "thread_id": thread.get("thread_id"),
+            "status": thread_status(thread),
             "preview": _preview_text(thread.get("question", "")),
         }
     else:

@@ -23,6 +23,7 @@ from pathlib import Path
 
 from ..comms import get_acknowledgments
 from ..governance import runtime_compass_check
+from ..memory import THREAD_STATUS_ACTIVE, thread_status
 from .metabolize_daemon import MetabolizeDaemon
 from .uncertainty_resurfacer import UncertaintyResurfacer
 
@@ -180,7 +181,8 @@ def _detect_fn_real() -> dict:
 
     stale_threads: list[dict] = []
     for thread in threads:
-        if thread.get("resolved"):
+        # Only ACTIVE threads can go stale — held ones are parked on purpose.
+        if thread_status(thread) != THREAD_STATUS_ACTIVE:
             continue
         ts = thread.get("timestamp", "")
         try:

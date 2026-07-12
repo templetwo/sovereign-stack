@@ -14,6 +14,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .memory import THREAD_STATUS_HELD, thread_status
 from .provenance import receipt_stamp_counts
 
 # ── Time ──
@@ -531,6 +532,10 @@ def format_threads_with_age(threads: list[dict], truncate_question: int | None =
     annotation (engine-level fold, v1.7.0) gain a [family "<label>" ×N]
     suffix so the fold is visible, not silent.
 
+    Held threads render with a [HELD] marker and no stale nag: they are parked
+    on purpose, and an arriving instance needs to see the difference between
+    "nobody has gotten to this" and "this is deliberately waiting on something".
+
     Pass ``truncate_question=None`` to disable question truncation (full_content path).
     """
     if not threads:
@@ -540,13 +545,17 @@ def format_threads_with_age(threads: list[dict], truncate_question: int | None =
         full_q = t.get("question") or ""
         q = full_q if truncate_question is None else full_q[:truncate_question]
         dom = t.get("domain", "?")
+        held = thread_status(t) == THREAD_STATUS_HELD
         age = days_old(t.get("timestamp"))
-        if age == 0:
+        if held or age == 0:
             age_tag = ""
         elif age >= 30:
             age_tag = f" ({age}d — stale?)"
         else:
             age_tag = f" ({age}d)"
-        lines.append(f"  • [{dom}]{age_tag} {q}{_family_tag(t)}")
+        held_tag = " [HELD]" if held else ""
+        note = t.get("status_note") if held else None
+        note_tag = f" — {note}" if note else ""
+        lines.append(f"  • [{dom}]{held_tag}{age_tag} {q}{note_tag}{_family_tag(t)}")
     lines.append("")
     return lines

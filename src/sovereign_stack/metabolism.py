@@ -18,7 +18,7 @@ from pathlib import Path
 
 from mcp.types import TextContent, Tool
 
-from .memory import load_entries
+from .memory import THREAD_STATUS_ACTIVE, load_entries, thread_status
 from .provenance import append_supersession, build_supersession_record, derive_claim_id
 
 SOVEREIGN_ROOT = Path.home() / ".sovereign"
@@ -519,10 +519,11 @@ async def handle_metabolism_tool(name, arguments):
                             row["ground_truth_superseded"] = True
                         digest["contradictions"].append(row)
 
-        # Detect stale threads
+        # Detect stale threads. Only ACTIVE threads can go stale — a held thread
+        # is parked on purpose, and nagging about it is noise.
         if detect_stale:
             for thread in threads:
-                if thread.get("resolved"):
+                if thread_status(thread) != THREAD_STATUS_ACTIVE:
                     continue
                 ts = thread.get("timestamp", "")
                 try:

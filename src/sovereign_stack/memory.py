@@ -91,6 +91,113 @@ def _parse_iso(ts: str | None) -> datetime | None:
         return None
 
 
+# =============================================================================
+# THREAD LIFECYCLE (v1.12.1)
+#
+# Threads carried a bare `resolved` boolean, so a deliberately parked thread was
+# indistinguishable from an actively-waiting one, and a merge could only be
+# faked by resolving with prose. `status` is now the source of truth.
+#
+# `resolved` remains as a MAINTAINED MIRROR of status (closed -> True), never
+# assigned by hand: every reader that predates the enum keeps reading these
+# records correctly, and a held thread reads as still-open to all of them.
+# =============================================================================
+THREAD_STATUS_ACTIVE = "active"
+THREAD_STATUS_HELD = "held"
+THREAD_STATUS_ANSWERED = "answered"
+THREAD_STATUS_SUPERSEDED = "superseded"
+THREAD_STATUS_MERGED = "merged"
+
+THREAD_STATUSES = (
+    THREAD_STATUS_ACTIVE,
+    THREAD_STATUS_HELD,
+    THREAD_STATUS_ANSWERED,
+    THREAD_STATUS_SUPERSEDED,
+    THREAD_STATUS_MERGED,
+)
+OPEN_THREAD_STATUSES = frozenset({THREAD_STATUS_ACTIVE, THREAD_STATUS_HELD})
+CLOSED_THREAD_STATUSES = frozenset(
+    {THREAD_STATUS_ANSWERED, THREAD_STATUS_SUPERSEDED, THREAD_STATUS_MERGED}
+)
+
+
+def thread_status(thread: dict) -> str:
+    """
+    The lifecycle status of a thread record, derived for records that predate
+    the enum.
+
+    Back-compat is the whole point: the 128 domain files on disk carry only
+    `resolved`. False -> active, True -> answered. An unrecognized status value
+    falls back to the same derivation, so a corrupt field can never make a
+    closed thread read as open.
+    """
+    status = thread.get("status")
+    if status in THREAD_STATUSES:
+        return status
+    return THREAD_STATUS_ANSWERED if thread.get("resolved") else THREAD_STATUS_ACTIVE
+
+
+def thread_is_open(thread: dict) -> bool:
+    """A thread still awaiting an answer — active OR deliberately held."""
+    return thread_status(thread) in OPEN_THREAD_STATUSES
+
+
+def apply_thread_status(thread: dict, status: str) -> dict:
+    """
+    The ONE place `status` and its `resolved` mirror are written together.
+
+    Assigning `resolved` anywhere else reintroduces the drift this replaces.
+    """
+    if status not in THREAD_STATUSES:
+        raise ValueError(f"unknown thread status {status!r} (valid: {', '.join(THREAD_STATUSES)})")
+    thread["status"] = status
+    thread["resolved"] = status in CLOSED_THREAD_STATUSES
+    return thread
+
+
+def _rewrite_jsonl_atomic(path: Path, records: list[Any]) -> None:
+    """
+    Replace a JSONL file in one atomic step.
+
+    Thread files are rewritten WHOLE on every status change. The previous
+    open(path, "w") truncated the file before rewriting it, so a crash mid-write
+    destroyed an entire domain's threads. Temp file + os.replace means the only
+    mutation point is the rename: either the old file or the new one, never a
+    torn one. The temp name ends in ".tmp", so the "*.jsonl" globs that
+    enumerate threads never pick it up.
+    """
+    tmp = path.with_name(path.name + ".tmp")
+    lines = [r if isinstance(r, str) else json.dumps(r) for r in records]
+    try:
+        with open(tmp, "w") as f:
+            f.write("\n".join(lines) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def _resolving_claim_receipt(insight_path: str) -> dict | None:
+    """
+    A {kind: "claim", ref: <64-hex>} receipt pointing at the insight that
+    resolved a thread — so a closed thread names its answer instead of merely
+    asserting one.
+
+    The id must be derived from the PERSISTED entry: derive_claim_id hashes
+    timestamp+domain+content, and record_insight stamps the timestamp itself, so
+    an id derived from a pre-write dict would be a dangling pointer. When the
+    append was deduped, record_insight returns a DedupedInsightPath carrying the
+    surviving entry — that entry, not the file's last line, is the answer.
+    """
+    existing = getattr(insight_path, "existing_entry", None)
+    entry = existing if isinstance(existing, dict) else _last_jsonl_entry(Path(insight_path))
+    if not entry:
+        return None
+    return {"kind": "claim", "ref": provenance.derive_claim_id(entry)}
+
+
 # Idempotent-write window: client retries land identical duplicates a few
 # hundred ms apart. 120s comfortably covers retry storms without swallowing
 # a deliberate later re-recording of the same observation.
@@ -951,70 +1058,108 @@ class ExperientialMemory:
                     "domain": domain,
                     "session_id": session_id,
                     "layer": self.LAYER_OPEN_THREAD,
-                    "resolved": False,
                 }
+                apply_thread_status(thread, THREAD_STATUS_ACTIVE)
                 f.write(json.dumps(thread) + "\n")
 
         return str(jsonl_path)
 
+    @staticmethod
+    def _apply_resolution(
+        thread: dict,
+        status: str,
+        resolution: str,
+        session_id: str | None,
+        now: str,
+        receipt: dict | None,
+        merged_into: str | None = None,
+    ) -> dict:
+        """
+        The single mutation both resolve paths run — they used to carry mirrored
+        copies of this block, which is exactly how two write paths drift.
+        """
+        apply_thread_status(thread, status)
+        thread["resolved_by"] = session_id
+        thread["resolved_at"] = now
+        thread["resolution"] = resolution
+        if receipt is not None:
+            thread["resolution_ref"] = receipt
+        if merged_into:
+            thread["merged_into"] = merged_into
+        return thread
+
     def resolve_thread(
-        self, domain: str, question_fragment: str, resolution: str, session_id: str = None
+        self,
+        domain: str,
+        question_fragment: str,
+        resolution: str,
+        session_id: str = None,
+        status: str = THREAD_STATUS_ANSWERED,
+        merged_into: str = None,
     ) -> str:
         """
         Resolve an open thread with a finding.
 
-        Matches the FIRST unresolved thread whose question contains the fragment.
-        The resolution becomes a ground_truth insight that back-references the
-        thread by thread_id, so handoff surfacing can verify a thread has been
-        answered even across sessions.
+        Matches the FIRST open thread whose question contains the fragment (held
+        threads included — a parked thread can still be answered). The resolution
+        becomes a ground_truth insight that back-references the thread by
+        thread_id, and the thread gains a `resolution_ref` claim receipt pointing
+        back at that insight, so a closed thread names its answer.
 
         Args:
             domain: Domain of the thread
             question_fragment: Partial match for the original question
             resolution: What was discovered
             session_id: Current session identifier
+            status: Closing status — answered (default), superseded, or merged
+            merged_into: thread_id this thread folded into (status="merged")
 
         Returns:
             Path to the new ground_truth insight
         """
+        if status not in CLOSED_THREAD_STATUSES:
+            raise ValueError(
+                f"resolve_thread status must be one of {sorted(CLOSED_THREAD_STATUSES)}, got {status!r}"
+            )
+
         resolved_thread_id: str | None = None
         resolved_timestamp: str | None = None
+        target: int | None = None
+        records: list[Any] = []
         now = datetime.now(timezone.utc).isoformat()
 
         jsonl_path = self.threads_dir / f"{domain}.jsonl"
         if jsonl_path.exists():
-            lines = []
             with open(jsonl_path) as f:
                 for line in f:
                     try:
                         thread = json.loads(line)
-                        if (
-                            resolved_thread_id is None
-                            and question_fragment.lower() in thread.get("question", "").lower()
-                            and not thread.get("resolved")
-                        ):
-                            # Backfill thread_id for legacy threads that predate the id scheme.
-                            if not thread.get("thread_id"):
-                                legacy_ts = _parse_iso(thread.get("timestamp")) or datetime.now(
-                                    timezone.utc
-                                )
-                                thread["thread_id"] = _generate_thread_id(
-                                    thread.get("question", ""), legacy_ts
-                                )
-                            resolved_thread_id = thread["thread_id"]
-                            resolved_timestamp = thread.get("timestamp")
-                            thread["resolved"] = True
-                            thread["resolved_by"] = session_id
-                            thread["resolved_at"] = now
-                            thread["resolution"] = resolution
-                        lines.append(json.dumps(thread))
                     except json.JSONDecodeError:
-                        lines.append(line.strip())
-            with open(jsonl_path, "w") as f:
-                f.write("\n".join(lines) + "\n")
+                        records.append(line.strip())
+                        continue
+                    if (
+                        target is None
+                        and question_fragment.lower() in thread.get("question", "").lower()
+                        and thread_is_open(thread)
+                    ):
+                        # Backfill thread_id for legacy threads that predate the id scheme.
+                        if not thread.get("thread_id"):
+                            legacy_ts = _parse_iso(thread.get("timestamp")) or datetime.now(
+                                timezone.utc
+                            )
+                            thread["thread_id"] = _generate_thread_id(
+                                thread.get("question", ""), legacy_ts
+                            )
+                        resolved_thread_id = thread["thread_id"]
+                        resolved_timestamp = thread.get("timestamp")
+                        target = len(records)
+                    records.append(thread)
 
-        # Record the resolution as ground truth with back-reference.
-        return self.record_insight(
+        # The insight lands BEFORE the thread is marked closed: the thread must
+        # never claim a resolution it cannot point at. Crashing between the two
+        # leaves an orphan insight (harmless) rather than a thread asserting an
+        # answer that was never written.
+        insight_path = self.record_insight(
             domain=domain,
             content=resolution,
             intensity=0.8,
@@ -1025,49 +1170,83 @@ class ExperientialMemory:
             resolved_thread_timestamp=resolved_timestamp,
         )
 
-    def resolve_thread_by_id(self, thread_id: str, resolution: str, session_id: str = None) -> str:
+        if target is not None:
+            self._apply_resolution(
+                records[target],
+                status,
+                resolution,
+                session_id,
+                now,
+                _resolving_claim_receipt(insight_path),
+                merged_into,
+            )
+            _rewrite_jsonl_atomic(jsonl_path, records)
+
+        return insight_path
+
+    def resolve_thread_by_id(
+        self,
+        thread_id: str,
+        resolution: str,
+        session_id: str = None,
+        status: str = THREAD_STATUS_ANSWERED,
+        merged_into: str = None,
+    ) -> str:
         """
         Resolve an open thread by its stable thread_id.
 
         Preferred over resolve_thread(domain, fragment) when the thread_id is
-        known — avoids ambiguity when multiple threads share keywords.
+        known — avoids ambiguity when multiple threads share keywords. Shares the
+        mutation with resolve_thread via _apply_resolution, so the two write paths
+        cannot drift.
 
         Returns:
             Path to the new ground_truth insight (or empty string if not found).
         """
+        if status not in CLOSED_THREAD_STATUSES:
+            raise ValueError(
+                f"resolve_thread_by_id status must be one of {sorted(CLOSED_THREAD_STATUSES)}, "
+                f"got {status!r}"
+            )
+
         resolved_domain: str | None = None
         resolved_question: str | None = None
         resolved_timestamp: str | None = None
+        hit_file: Path | None = None
+        target: int | None = None
+        records: list[Any] = []
         now = datetime.now(timezone.utc).isoformat()
 
         for jsonl_file in self.threads_dir.glob("*.jsonl"):
-            hit = False
-            lines = []
+            records = []
+            target = None
             with open(jsonl_file) as f:
                 for line in f:
                     try:
                         thread = json.loads(line)
-                        if thread.get("thread_id") == thread_id and not thread.get("resolved"):
-                            hit = True
-                            resolved_domain = thread.get("domain", jsonl_file.stem)
-                            resolved_question = thread.get("question", "")
-                            resolved_timestamp = thread.get("timestamp")
-                            thread["resolved"] = True
-                            thread["resolved_by"] = session_id
-                            thread["resolved_at"] = now
-                            thread["resolution"] = resolution
-                        lines.append(json.dumps(thread))
                     except json.JSONDecodeError:
-                        lines.append(line.strip())
-            if hit:
-                with open(jsonl_file, "w") as f:
-                    f.write("\n".join(lines) + "\n")
+                        records.append(line.strip())
+                        continue
+                    if (
+                        target is None
+                        and thread.get("thread_id") == thread_id
+                        and thread_is_open(thread)
+                    ):
+                        target = len(records)
+                        resolved_domain = thread.get("domain", jsonl_file.stem)
+                        resolved_question = thread.get("question", "")
+                        resolved_timestamp = thread.get("timestamp")
+                    records.append(thread)
+            if target is not None:
+                hit_file = jsonl_file
                 break
 
-        if not resolved_domain:
+        if not resolved_domain or hit_file is None or target is None:
             return ""
 
-        return self.record_insight(
+        # Insight first — see resolve_thread: a closed thread must be able to
+        # point at the answer that closed it.
+        insight_path = self.record_insight(
             domain=resolved_domain,
             content=resolution,
             intensity=0.8,
@@ -1078,6 +1257,87 @@ class ExperientialMemory:
             resolved_thread_timestamp=resolved_timestamp,
         )
 
+        self._apply_resolution(
+            records[target],
+            status,
+            resolution,
+            session_id,
+            now,
+            _resolving_claim_receipt(insight_path),
+            merged_into,
+        )
+        _rewrite_jsonl_atomic(hit_file, records)
+
+        return insight_path
+
+    def set_thread_status(
+        self,
+        thread_id: str,
+        status: str,
+        note: str = "",
+        session_id: str = None,
+        merged_into: str = None,
+    ) -> dict:
+        """
+        Park a thread (held), un-park it (active), or close it out-of-band.
+
+        This is what makes `held` reachable at all: a lifecycle nobody can drive
+        is decoration. Holding does NOT resolve — a held thread keeps
+        resolved=False and stays visible to every legacy reader, it just stops
+        reading as actionable.
+
+        Closing statuses (answered/superseded/merged) are accepted here for
+        bookkeeping-only closes that carry no new finding; when there IS a
+        finding, use resolve_thread_by_id so the resolving insight is recorded
+        and pointed at.
+
+        Returns:
+            {thread_id, status, previous_status, path} — or {} if not found.
+        """
+        if status not in THREAD_STATUSES:
+            raise ValueError(
+                f"unknown thread status {status!r} (valid: {', '.join(THREAD_STATUSES)})"
+            )
+
+        now = datetime.now(timezone.utc).isoformat()
+
+        for jsonl_file in self.threads_dir.glob("*.jsonl"):
+            records: list[Any] = []
+            target: int | None = None
+            previous: str | None = None
+            with open(jsonl_file) as f:
+                for line in f:
+                    try:
+                        thread = json.loads(line)
+                    except json.JSONDecodeError:
+                        records.append(line.strip())
+                        continue
+                    if target is None and thread.get("thread_id") == thread_id:
+                        target = len(records)
+                        previous = thread_status(thread)
+                    records.append(thread)
+            if target is None:
+                continue
+
+            thread = records[target]
+            apply_thread_status(thread, status)
+            thread["status_changed_at"] = now
+            thread["status_changed_by"] = session_id
+            if note:
+                thread["status_note"] = note
+            if merged_into:
+                thread["merged_into"] = merged_into
+            _rewrite_jsonl_atomic(jsonl_file, records)
+
+            return {
+                "thread_id": thread_id,
+                "status": status,
+                "previous_status": previous,
+                "path": str(jsonl_file),
+            }
+
+        return {}
+
     def get_open_threads(
         self,
         domain: str = None,
@@ -1086,6 +1346,7 @@ class ExperientialMemory:
         domain_contains: str = None,
         offset: int = 0,
         with_total: bool = False,
+        status: str = None,
     ) -> list[dict]:
         """
         Get unresolved open threads - questions waiting for answers.
@@ -1116,6 +1377,11 @@ class ExperientialMemory:
             with_total: When True, return a dict with keys "threads", "total",
                     "has_more", and "offset" instead of a plain list. Default False
                     preserves the original list return for all existing callers.
+            status: Narrow to one lifecycle status ("active" or "held"). None
+                    (default) returns BOTH — a held thread stays visible, it is
+                    just no longer indistinguishable: every returned thread is
+                    annotated with its `status`. Closed statuses return nothing
+                    here by construction; this surface is the open map.
 
         Returns:
             When with_total=False (default): list of unresolved thread dicts,
@@ -1150,7 +1416,13 @@ class ExperientialMemory:
                 for line in f:
                     try:
                         thread = json.loads(line)
-                        if not thread.get("resolved", False):
+                        if thread_is_open(thread):
+                            # Annotate the derived status so pre-enum records
+                            # (which carry only `resolved`) read the same as new
+                            # ones to every caller downstream.
+                            thread["status"] = thread_status(thread)
+                            if status and thread["status"] != status:
+                                continue
                             # Backfill thread_id for legacy threads so callers
                             # can always reference them by stable id.
                             if not thread.get("thread_id"):
@@ -1279,6 +1551,7 @@ class ExperientialMemory:
         self,
         current_domain_tags: list[str] | None = None,
         limit: int = 15,
+        include_held: bool = False,
     ) -> list[dict]:
         """
         Return open threads ranked by urgency using a composite triage score.
@@ -1292,10 +1565,16 @@ class ExperientialMemory:
         Threads older than 30 days with zero touches gain a
         recommendation: "archive_or_escalate" field. No auto-archiving occurs.
 
+        Held threads are EXCLUDED by default: triage ranks what to act on, and a
+        deliberately parked thread would otherwise accrue age_pressure forever
+        and crowd the actionable list with things nobody is waiting on. They
+        remain visible in get_open_threads, labelled.
+
         Args:
             current_domain_tags: Caller's active domains for relevance scoring.
                                   None means no tag_match contribution.
             limit: Maximum threads to return.
+            include_held: Score held threads too (default False).
 
         Returns:
             List of thread dicts with triage_score and triage_reason, highest score first.
@@ -1306,6 +1585,8 @@ class ExperientialMemory:
         # happens after scoring (family row = MAX member score), per the
         # v1.7.0 seasons semantics.
         all_threads = self.get_open_threads(limit=9999, coalesce_families=False)
+        if not include_held:
+            all_threads = [t for t in all_threads if thread_status(t) != THREAD_STATUS_HELD]
 
         # Build touch counts per thread from the full touches log.
         # "Recent" is within the last 7 days.
