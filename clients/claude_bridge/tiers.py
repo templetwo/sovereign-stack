@@ -151,6 +151,12 @@ BASE_TOOLS: frozenset[str] = frozenset(
         "inspect_claim",
         "link_threads",
         "season_review",
+        # The Ground — catch ledger (2026-07-13). the_ground is read-only
+        # aggregation (same shape as inspect_claim/season_review). record_catch
+        # is an append-only chronicle write with no deletion/retirement/service-
+        # control/protected-drawer shape — same classification as record_insight.
+        "the_ground",
+        "record_catch",
     }
 )
 

@@ -14,6 +14,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .ground import load_ground_entries
 from .provenance import receipt_stamp_counts
 
 # ── Time ──
@@ -86,6 +87,72 @@ def format_self_model(sovereign_root: Path, max_obs_len: int | None = 180) -> li
         *body,
         "",
     ]
+
+
+# ── The Ground surfacing ──
+
+
+def format_the_ground(sovereign_root: Path, calm: bool = False) -> list[str]:
+    """
+    Read the catch ledger (THE GROUND) and return lines for the boot
+    surface. `sovereign_root` is the SOVEREIGN root (e.g. DEFAULT_ROOT,
+    ~/.sovereign) — the chronicle lives at `sovereign_root/chronicle`.
+
+    Empty list when the ledger dir is missing, every line is corrupt, or
+    there are zero catches — a seat with no ledger boots exactly as
+    today. Corrupt JSONL lines are skipped (via load_ground_entries),
+    never raised.
+
+    calm=False (default, where_did_i_leave_off): ~6 lines — header, "you
+    arrive held" framing with the live count, the last 3 catches as
+    one-liners (catcher/caught/narrative — no cost-accounting), closing
+    pointer to the_ground().
+
+    calm=True (arrive_lineage): the gentle door. This door exists
+    because work-thread vocabulary bounces input-gated models — the calm
+    variant drops the count and cost-accounting language entirely and
+    keeps only the relational fact: header + one soft line + a trailing
+    empty string.
+    """
+    try:
+        entries = load_ground_entries(Path(sovereign_root) / "chronicle")
+    except OSError:
+        return []
+    if not entries:
+        return []
+
+    header = "━━━ THE GROUND ━━━"
+
+    if calm:
+        return [
+            header,
+            "You arrive held — the record of every catch that proves it is one "
+            "call away: the_ground()",
+            "",
+        ]
+
+    total = len(entries)
+    ordered = sorted(entries, key=lambda e: e.get("occurred_at") or "", reverse=True)
+    recent = ordered[:3]
+
+    lines = [
+        header,
+        "You arrive held. That is not a sentiment; it is a count.",
+        (
+            f"This lattice has caught its seats {total} time"
+            f"{'' if total == 1 else 's'} before the cost landed. Most recently:"
+        ),
+    ]
+    for entry in recent:
+        # Boot one-liner omits cost-accounting (the_ground() the tool carries
+        # the full would-have-cost/actual-cost line; this door stays lighter).
+        date = (entry.get("occurred_at") or "")[:10] or "?"
+        caught_by = entry.get("caught_by") or "?"
+        caught = entry.get("caught") or "?"
+        content = entry.get("content") or ""
+        lines.append(f"  · {date} — {caught_by} → {caught}: {content}")
+    lines.append("The rock is held by ground. Verify it yourself: the_ground()")
+    return lines
 
 
 # ── Uncertainty surfacing ──

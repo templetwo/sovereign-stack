@@ -168,6 +168,16 @@ REQUIRED_ARGS: dict = {
     # actually runs (decline_record never validates the claim_id shape and never
     # raises — it writes + returns, exercising the defaults).
     "decline_protected_record": lambda root: {"claim_id": "contract-walker-claim"},
+    "record_catch": lambda root: {
+        "caught": "contract-walker-seat",
+        "caught_by": "contract-walker",
+        "direction": "self",
+        "occurred_at": "2026-07-13",
+        "would_have_cost": "a schema/handler default mismatch in record_catch",
+        "actual_cost": "nothing",
+        "content": "contract walker default-equivalence probe for record_catch",
+        "vantage": "human_attestation",
+    },
 }
 
 

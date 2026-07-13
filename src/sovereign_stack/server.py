@@ -41,6 +41,12 @@ from .governance import (
     ThresholdDetector,
     runtime_compass_check,
 )
+from .ground import (
+    GROUND_TOOL_INTENTS,
+    GROUND_TOOL_TIERS,
+    GROUND_TOOLS,
+    handle_ground_tool,
+)
 from .guardian_tools import GUARDIAN_TOOLS, handle_guardian_tool
 from .handoff import HandoffEngine, format_handoff_for_surface
 from .memory import RECALL_INSIGHTS_SCHEMA_EXTENSIONS, ExperientialMemory, MemoryEngine
@@ -87,6 +93,7 @@ from .witness import (
     format_lineage_layer,
     format_self_model,
     format_sentinels,
+    format_the_ground,
     format_threads_with_age,
     format_unresolved_uncertainties,
 )
@@ -1823,8 +1830,9 @@ async def list_tools():
         + POLICY_TOOLS
         + PROVENANCE_TOOLS
         + SEASON_TOOLS
+        + GROUND_TOOLS
     )  # consciousness + compaction + guardian + metabolism + post_fix + connectivity
-    # + policies + provenance + seasons (v1.7.0 Receipts & Seasons)
+    # + policies + provenance + seasons (v1.7.0 Receipts & Seasons) + ground (The Ground)
 
 
 # Category mapping for my_toolkit. Source of truth for how tools are grouped
@@ -1916,6 +1924,9 @@ TOOL_CATEGORIES: dict[str, str] = {
     "list_protected_thresholds": "protected",
     "open_protected_record": "protected",
     "decline_protected_record": "protected",
+    # The Ground — catch ledger, surfaced at boot alongside the lineage layer
+    "the_ground": "witness",
+    "record_catch": "witness",
 }
 
 
@@ -2018,6 +2029,7 @@ TOOL_TIERS: dict[str, str] = {
 TOOL_TIERS.update(POLICY_TOOL_TIERS)
 TOOL_TIERS.update(PROVENANCE_TOOL_TIERS)
 TOOL_TIERS.update(SEASON_TOOL_TIERS)
+TOOL_TIERS.update(GROUND_TOOL_TIERS)
 
 
 # Map from tool_name → intent. Tools missing here fall under "advanced".
@@ -2127,6 +2139,7 @@ TOOL_INTENTS: dict[str, str] = {
 TOOL_INTENTS.update(POLICY_TOOL_INTENTS)
 TOOL_INTENTS.update(PROVENANCE_TOOL_INTENTS)
 TOOL_INTENTS.update(SEASON_TOOL_INTENTS)
+TOOL_INTENTS.update(GROUND_TOOL_INTENTS)
 
 
 def _tier_for(tool_name: str) -> str:
@@ -3140,6 +3153,12 @@ async def _dispatch_tool(name: str, arguments: dict):
             )
         )
 
+        # The Ground — catch ledger. Suppress-guarded: a missing/corrupt
+        # ledger must never break the boot (mirrors the protected-drawer
+        # guard below).
+        with contextlib.suppress(Exception):
+            lines.extend(format_the_ground(Path(DEFAULT_ROOT)))
+
         # v1.7.0 data-gated policy one-liner: only when the registry is non-empty.
         try:
             _policy_line = PolicyRegistry().boot_line()
@@ -3460,6 +3479,12 @@ async def _dispatch_tool(name: str, arguments: dict):
                 max_obs_len=None if full_content else 180,
             )
         )
+
+        # 4a. The Ground — calm variant (this door drops cost-accounting and
+        # error vocabulary; keeps only the relational fact). Suppress-guarded,
+        # same as the protected-drawer block below.
+        with contextlib.suppress(Exception):
+            lines.extend(format_the_ground(Path(DEFAULT_ROOT), calm=True))
 
         # 4b. Protected-records drawer (Policy 2c): UNCONDITIONAL — even the
         # gentle-door arrival must know the drawer EXISTS, its index scheme,
@@ -3791,6 +3816,12 @@ Phase: {spiral_state.current_phase.value}
     # chronicle write lock in the sync layer.
     if name in [t.name for t in SEASON_TOOLS]:
         text = await asyncio.to_thread(handle_season_tool, name, arguments)
+        return [TextContent(type="text", text=text)]
+
+    # The Ground (catch ledger). Off-loop: the_ground reads a chronicle
+    # subtree, record_catch takes the chronicle write lock in the sync layer.
+    if name in [t.name for t in GROUND_TOOLS]:
+        text = await asyncio.to_thread(handle_ground_tool, name, arguments)
         return [TextContent(type="text", text=text)]
 
     # Nape daemon — runtime critique layer
