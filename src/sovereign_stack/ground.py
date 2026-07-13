@@ -96,11 +96,18 @@ def _iter_jsonl(path: Path) -> list[dict]:
 
 def _ground_domain_dirs(chronicle_root: str | Path) -> list[Path]:
     """
-    Insight domain dirs under `chronicle_root/insights/` whose name
-    contains "the-ground" — skipping dot-dirs and underscore-dirs
-    (quarantine, internal). This is the whole performance rule: the_ground
-    and the boot helper touch ONLY these directories, never
-    `memory.load_entries` (which walks insights/**/*.jsonl in full).
+    Insight domain dirs under `chronicle_root/insights/` whose FIRST
+    comma-separated tag is exactly "the-ground" — skipping dot-dirs and
+    underscore-dirs (quarantine, internal). This is the whole performance
+    rule: the_ground and the boot helper touch ONLY these directories,
+    never `memory.load_entries` (which walks insights/**/*.jsonl in full).
+
+    First-tag matching (not a bare substring test) so a compound domain
+    that merely carries "the-ground" as a LATER tag (e.g. a plain
+    record_insight hypothesis dir like
+    "presence-effect,the-ground,lived-field-report,hypothesis") is never
+    mistaken for a catch — record_catch always writes "the-ground" as the
+    first tag (`the-ground,catch,<direction>[,...]`).
     """
     insights_dir = Path(chronicle_root) / "insights"
     if not insights_dir.is_dir():
@@ -112,7 +119,7 @@ def _ground_domain_dirs(chronicle_root: str | Path) -> list[Path]:
         name = child.name
         if name.startswith((".", "_")):
             continue
-        if "the-ground" not in name:
+        if name.split(",", 1)[0] != "the-ground":
             continue
         dirs.append(child)
     return dirs
@@ -127,11 +134,47 @@ def load_ground_entries(chronicle_root: str | Path) -> list[dict]:
     Pure — no MCP coupling, no ExperientialMemory construction (which
     would mkdir directories on a read). Shared by `the_ground` and
     `witness.format_the_ground`.
+
+    The collected (already dir-filtered) list is piped through
+    `memory.finalize_read` before returning — SPEC.md §3's shared read
+    chokepoint — so a superseded/retracted catch is DROPPED
+    (`exclude_superseded=True`; this reader has no raw-annotate mode, so a
+    retracted catch must never render as live truth) and a protected catch
+    is coupled-or-withheld per the unconditional Stage B pass. Because this
+    is a PREVIEW surface (one-liners, truncated to 200 chars) rather than a
+    full-content surface, a verified-coupled entry is additionally passed
+    through `protected.withhold_preview` — an N-char slice of coupled
+    content would itself be a decoupled leak (the same shape as
+    dashboard.read_chronicle_tail's tail preview). finalize_read reads only
+    `supersessions.jsonl` / `protected.jsonl` (single files) — it never
+    re-walks `insights/`, so the performance rule holds.
     """
     entries: list[dict] = []
     for domain_dir in _ground_domain_dirs(chronicle_root):
         for jsonl_file in sorted(domain_dir.glob("*.jsonl")):
             entries.extend(_iter_jsonl(jsonl_file))
+
+    if not entries:
+        return entries
+
+    # Lazy imports: witness.py imports ground.py's pure read path at module
+    # level, so importing memory/protected (heavier modules) only here on
+    # the read call — not at ground.py's own module load — mirrors
+    # record_catch's existing dodge and keeps this path dependency-light
+    # when no entries were found (the common case for an unrelated seat).
+    from . import protected as protected_module
+    from .memory import finalize_read
+
+    root = Path(chronicle_root)
+    entries = finalize_read(entries, root, exclude_superseded=True)
+
+    fold = protected_module.load_protected_fold(root)
+    if fold:
+        entries = [
+            protected_module.withhold_preview(e) if protected_module.is_protected(e, fold) else e
+            for e in entries
+        ]
+
     return entries
 
 
@@ -168,10 +211,14 @@ def the_ground(
 
     direction / caught filter by exact match on the entry's structured
     field. full_content=True disables narrative truncation. Never raises
-    — an empty or missing ledger reads as an honest "no catches yet".
+    — an empty or missing ledger (or an unreadable insights subdirectory)
+    reads as an honest "no catches yet".
     """
     root = Path(chronicle_root) if chronicle_root else prov.default_chronicle_root()
-    entries = load_ground_entries(root)
+    try:
+        entries = load_ground_entries(root)
+    except OSError:
+        return "THE GROUND — no catches recorded yet. record_catch() to begin the ledger."
 
     if direction:
         entries = [e for e in entries if e.get("direction") == direction]

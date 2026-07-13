@@ -14,7 +14,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .ground import load_ground_entries
+from .ground import _truncate, load_ground_entries
 from .provenance import receipt_stamp_counts
 
 # ── Time ──
@@ -146,10 +146,13 @@ def format_the_ground(sovereign_root: Path, calm: bool = False) -> list[str]:
     for entry in recent:
         # Boot one-liner omits cost-accounting (the_ground() the tool carries
         # the full would-have-cost/actual-cost line; this door stays lighter).
+        # Content is truncated the same way ground.py's own _catch_one_liner
+        # truncates (_CONTENT_TRUNCATE_LEN) — a long narrative must not be
+        # dumped in full into the boot payload uncapped.
         date = (entry.get("occurred_at") or "")[:10] or "?"
         caught_by = entry.get("caught_by") or "?"
         caught = entry.get("caught") or "?"
-        content = entry.get("content") or ""
+        content = _truncate(entry.get("content") or "", full_content=False)
         lines.append(f"  · {date} — {caught_by} → {caught}: {content}")
     lines.append("The rock is held by ground. Verify it yourself: the_ground()")
     return lines

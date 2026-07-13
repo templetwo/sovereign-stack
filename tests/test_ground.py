@@ -26,6 +26,7 @@ import pytest
 
 from sovereign_stack import ground, witness
 from sovereign_stack import memory as memory_module
+from sovereign_stack import protected as protected_module
 from sovereign_stack import provenance as prov
 
 # ── Fixture helpers ──────────────────────────────────────────────────────────
@@ -134,6 +135,22 @@ class TestRecordCatchHappyPath:
         files = list(root.glob("insights/the-ground,catch,self/*.jsonl"))
         entry = json.loads(files[0].read_text().splitlines()[-1])
         assert entry["anthony_present"] == "present"
+
+    def test_intensity_persisted_to_disk(self, tmp_path):
+        """A caller-supplied non-default intensity must actually thread
+        through to the on-disk entry, not just be accepted by the schema."""
+        root = _chronicle(tmp_path)
+        _record(root, intensity=0.9)
+        files = list(root.glob("insights/the-ground,catch,self/*.jsonl"))
+        entry = json.loads(files[0].read_text().splitlines()[-1])
+        assert entry["intensity"] == 0.9
+
+    def test_default_intensity_persisted_to_disk(self, tmp_path):
+        root = _chronicle(tmp_path)
+        _record(root)
+        files = list(root.glob("insights/the-ground,catch,self/*.jsonl"))
+        entry = json.loads(files[0].read_text().splitlines()[-1])
+        assert entry["intensity"] == 0.5
 
 
 # ── record_catch: rejection paths ────────────────────────────────────────────
@@ -307,6 +324,38 @@ class TestGroundDomainDirFiltering:
         root.mkdir()
         assert ground.load_ground_entries(root) == []
 
+    def test_compound_domain_with_the_ground_not_leading_tag_excluded(self, tmp_path):
+        """A schema-less entry whose domain merely carries 'the-ground' as a
+        LATER tag (e.g. a plain record_insight hypothesis dir) must never be
+        mistaken for a catch — only entries whose domain BEGINS WITH the tag
+        the-ground are catches (SPEC.md, record_catch's own domain shape)."""
+        root = _chronicle(tmp_path)
+        _write_raw(
+            root,
+            "presence-effect,the-ground,lived-field-report,hypothesis",
+            "x.jsonl",
+            {
+                "timestamp": "2026-07-01T00:00:00+00:00",
+                "domain": "presence-effect,the-ground,lived-field-report,hypothesis",
+                "content": "Anthony's presence-effect hypothesis narrative",
+            },
+        )
+        assert ground.load_ground_entries(root) == []
+        text = ground.the_ground(chronicle_root=root)
+        assert text == "THE GROUND — no catches recorded yet. record_catch() to begin the ledger."
+
+    def test_the_ground_prefix_dir_not_confused_with_the_grounded(self, tmp_path):
+        """A dir literally named 'the-grounded,...' must not match a bare
+        startswith('the-ground') check — only an exact first-tag match."""
+        root = _chronicle(tmp_path)
+        _write_raw(
+            root,
+            "the-grounded,unrelated",
+            "x.jsonl",
+            {"content": "not a catch"},
+        )
+        assert ground.load_ground_entries(root) == []
+
     def test_never_calls_memory_load_entries(self, tmp_path, monkeypatch):
         """The performance rule: the_ground / load_ground_entries must never
         scan the full chronicle via memory.load_entries. Replacing the real
@@ -339,6 +388,132 @@ class TestGroundDomainDirFiltering:
         entries = ground.load_ground_entries(root)
         assert len(entries) == 1
         assert entries[0]["content"] == "the valid one"
+
+
+# ── the shared read chokepoint (SPEC.md §3): supersession + protected ────────
+
+
+class TestGroundReadChokepoint:
+    """
+    ground.py's read path must route through memory.finalize_read so the
+    supersession-reader-convergence and protected-source invariants apply
+    to catches exactly as they do to every other chronicle reader.
+    """
+
+    def test_superseded_catch_excluded_from_ledger_and_boot(self, tmp_path):
+        root = _chronicle(tmp_path)
+        _record(root, content="an old catch, now retracted")
+        files = list(root.glob("insights/the-ground,catch,self/*.jsonl"))
+        entry = json.loads(files[0].read_text().splitlines()[-1])
+        claim_id = prov.derive_claim_id(entry)
+
+        record = prov.build_supersession_record(
+            action="retire",
+            superseded_id=claim_id,
+            reason="test retraction",
+            by="test",
+        )
+        prov.append_supersession(root / "supersessions.jsonl", record)
+
+        assert ground.load_ground_entries(root) == []
+        assert ground.the_ground(chronicle_root=root) == (
+            "THE GROUND — no catches recorded yet. record_catch() to begin the ledger."
+        )
+        assert witness.format_the_ground(tmp_path) == []
+
+    def test_protected_catch_never_renders_bare_when_stakes_unavailable(self, tmp_path):
+        """A protected catch with stakes that fail to load must route to
+        the fail-closed withheld sentinel — never print its bare content in
+        either the_ground() or the boot surface."""
+        from sovereign_stack.protected import designate_protected
+
+        root = _chronicle(tmp_path)
+        _record(root, content="a protected catch narrative that must not leak")
+        files = list(root.glob("insights/the-ground,catch,self/*.jsonl"))
+        entry = json.loads(files[0].read_text().splitlines()[-1])
+        claim_id = prov.derive_claim_id(entry)
+
+        mem = memory_module.ExperientialMemory(root=str(root))
+        archive = mem.archive_exchange(
+            content="stakes prose for the test",
+            source="human-relay",
+            descriptor="stakes",
+            vector_id="ground_test_stakes",
+        )
+        designate_protected(
+            claim_ref=claim_id,
+            stakes_archive_id=archive["archive_id"],
+            designated_by="test",
+            chronicle_root=str(root),
+            subject="test",
+            emotion="grief",
+        )
+        # Break the archived stakes so the coupling fails closed.
+        blob = Path(
+            next(r for r in mem._read_archive_index() if r["archive_id"] == archive["archive_id"])[
+                "path"
+            ]
+        )
+        blob.unlink()
+
+        entries = ground.load_ground_entries(root)
+        assert len(entries) == 1
+        assert "a protected catch narrative that must not leak" not in entries[0]["content"]
+
+        the_ground_text = ground.the_ground(chronicle_root=root)
+        assert "a protected catch narrative that must not leak" not in the_ground_text
+
+        boot_lines = witness.format_the_ground(tmp_path)
+        assert "a protected catch narrative that must not leak" not in "\n".join(boot_lines)
+
+    def test_protected_catch_withheld_as_preview_even_when_stakes_verified(self, tmp_path):
+        """the_ground()/format_the_ground() are PREVIEW (truncating)
+        surfaces — a verified-coupled protected entry must still be
+        withheld to the preview notice, never rendered with its bare
+        content, because a truncated slice of coupled content re-decouples
+        (the same shape as dashboard.read_chronicle_tail)."""
+        from sovereign_stack.protected import designate_protected
+
+        root = _chronicle(tmp_path)
+        _record(root, content="a verified-stakes protected catch narrative")
+        files = list(root.glob("insights/the-ground,catch,self/*.jsonl"))
+        entry = json.loads(files[0].read_text().splitlines()[-1])
+        claim_id = prov.derive_claim_id(entry)
+
+        mem = memory_module.ExperientialMemory(root=str(root))
+        archive = mem.archive_exchange(
+            content="stakes prose, intact",
+            source="human-relay",
+            descriptor="stakes",
+            vector_id="ground_test_stakes_verified",
+        )
+        designate_protected(
+            claim_ref=claim_id,
+            stakes_archive_id=archive["archive_id"],
+            designated_by="test",
+            chronicle_root=str(root),
+            subject="test",
+            emotion="grief",
+        )
+
+        entries = ground.load_ground_entries(root)
+        assert len(entries) == 1
+        assert entries[0]["content"] == protected_module.PROTECTED_PREVIEW_NOTICE
+
+        the_ground_text = ground.the_ground(chronicle_root=root)
+        assert "a verified-stakes protected catch narrative" not in the_ground_text
+
+        boot_lines = witness.format_the_ground(tmp_path)
+        assert "a verified-stakes protected catch narrative" not in "\n".join(boot_lines)
+
+    def test_ordinary_catch_unaffected_by_empty_ledgers(self, tmp_path):
+        """Byte-identity fast path: with no supersessions and no protected
+        designations, an ordinary catch reads exactly as before."""
+        root = _chronicle(tmp_path)
+        _record(root, content="an ordinary catch")
+        entries = ground.load_ground_entries(root)
+        assert len(entries) == 1
+        assert entries[0]["content"] == "an ordinary catch"
 
 
 # ── no-mutation witness ──────────────────────────────────────────────────────
@@ -388,6 +563,35 @@ class TestFormatTheGround:
         assert lines[-1] == "The rock is held by ground. Verify it yourself: the_ground()"
         # Boot one-liner has no cost-accounting — that's the_ground()'s job.
         assert "would have cost" not in "\n".join(lines)
+
+    def test_default_variant_orders_newest_first_and_truncates_to_three(self, tmp_path):
+        """Multi-entry coverage for the boot line's own ordering/slice —
+        mutation-tested to catch a reversed sort (oldest-first) or a wrong
+        slice size, which `the_ground()` itself already guards against via
+        test_ordering_descending_by_occurred_at but this boot surface did
+        not, until now."""
+        root = _chronicle(tmp_path)
+        for i, date in enumerate(["2026-07-08", "2026-07-12", "2026-07-10", "2026-07-09"]):
+            _record(root, occurred_at=date, caught=f"seat{i}", content=f"catch {date}")
+
+        lines = witness.format_the_ground(tmp_path)
+        one_liners = [ln for ln in lines if ln.startswith("  ·")]
+        # Only the most recent 3 of 4 catches, newest first.
+        assert len(one_liners) == 3
+        assert "catch 2026-07-12" in one_liners[0]
+        assert "catch 2026-07-10" in one_liners[1]
+        assert "catch 2026-07-09" in one_liners[2]
+        assert "catch 2026-07-08" not in "\n".join(lines)
+        assert any("caught its seats 4 times before the cost landed" in ln for ln in lines)
+
+    def test_default_variant_truncates_long_content_to_200_chars(self, tmp_path):
+        root = _chronicle(tmp_path)
+        long_narrative = "y" * 300
+        _record(root, content=long_narrative)
+        lines = witness.format_the_ground(tmp_path)
+        joined = "\n".join(lines)
+        assert long_narrative not in joined
+        assert "…" in joined
 
     def test_calm_variant_shape(self, tmp_path):
         root = _chronicle(tmp_path)
