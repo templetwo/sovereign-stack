@@ -24,6 +24,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 
 def _dispatch(name: str, arguments: dict) -> str:
     """Run an MCP tool dispatch and return the assembled text result."""
@@ -109,14 +111,14 @@ class TestRecallReflectionsHandler:
         data = json.loads(text)
         assert {r["id"] for r in data["reflections"]} == {"g1"}
 
-    def test_invalid_ack_status_returns_error_text(self, tmp_path: Path):
+    def test_invalid_ack_status_raises_error(self, tmp_path: Path):
         d = tmp_path / "reflections"
         d.mkdir()
+        # Raised, not returned, since the P1 continuation (mesh-20260719):
+        # a rejection returned as text is wrapped by the SDK as a success.
         with patch("sovereign_stack.reflections.REFLECTIONS_DIR", d):
-            text = _dispatch("recall_reflections", {"ack_status": "not-a-status"})
-        # The handler catches ValueError and surfaces a readable message,
-        # not a stack trace.
-        assert "recall_reflections error" in text
+            with pytest.raises(ValueError, match="recall_reflections error"):
+                _dispatch("recall_reflections", {"ack_status": "not-a-status"})
 
 
 # ── reflection_ack ──────────────────────────────────────────────────────────
@@ -164,39 +166,40 @@ class TestReflectionAckHandler:
         assert data["count"] == 1
         assert data["reflections"][0]["id"] == "r2"
 
-    def test_missing_id_returns_error(self, tmp_path: Path):
+    def test_missing_id_raises_error(self, tmp_path: Path):
         d = tmp_path / "reflections"
         d.mkdir()
+        # The KeyError is normalized to a raised ValueError with the same
+        # readable message (P1 continuation).
         with patch("sovereign_stack.reflections.REFLECTIONS_DIR", d):
-            text = _dispatch(
-                "reflection_ack",
-                {"reflection_id": "nonexistent", "action": "confirm"},
-            )
-        # Handler catches KeyError and returns a readable error string.
-        assert "reflection_ack error" in text
+            with pytest.raises(ValueError, match="reflection_ack error"):
+                _dispatch(
+                    "reflection_ack",
+                    {"reflection_id": "nonexistent", "action": "confirm"},
+                )
 
     def test_empty_args_rejected(self, tmp_path: Path):
         d = tmp_path / "reflections"
         d.mkdir()
+        # Empty required args raise an explicit error (P1 continuation).
         with patch("sovereign_stack.reflections.REFLECTIONS_DIR", d):
-            text = _dispatch(
-                "reflection_ack",
-                {"reflection_id": "", "action": ""},
-            )
-        # Empty required args produce an explicit error message.
-        assert "non-empty" in text
+            with pytest.raises(ValueError, match="non-empty"):
+                _dispatch(
+                    "reflection_ack",
+                    {"reflection_id": "", "action": ""},
+                )
 
     def test_invalid_action_rejected(self, tmp_path: Path):
         d = tmp_path / "reflections"
         d.mkdir()
         _seed_reflection(d, rid="r3")
+        # 'promote' is not in ACK_ACTIONS — ValueError raised (P1 continuation).
         with patch("sovereign_stack.reflections.REFLECTIONS_DIR", d):
-            text = _dispatch(
-                "reflection_ack",
-                {"reflection_id": "r3", "action": "promote"},
-            )
-        # 'promote' is not in ACK_ACTIONS — ValueError surfaced.
-        assert "reflection_ack error" in text
+            with pytest.raises(ValueError, match="reflection_ack error"):
+                _dispatch(
+                    "reflection_ack",
+                    {"reflection_id": "r3", "action": "promote"},
+                )
 
 
 # ── synthesize_now ──────────────────────────────────────────────────────────
