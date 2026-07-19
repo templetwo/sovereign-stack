@@ -2646,14 +2646,13 @@ async def _dispatch_tool(name: str, arguments: dict):
         domain = arguments.get("domain")
         content = arguments.get("content")
         # The schema marks both required — don't invent defaults for callers
-        # that omit them; reject so nothing lands in the chronicle.
+        # that omit them; reject so nothing lands in the chronicle. Raised,
+        # not returned: the SDK turns a raise into isError=True with this
+        # exact text, while returned text is wrapped as a SUCCESS and every
+        # envelope above reports ok:true on a write that recorded nothing
+        # (mesh-20260719, P1).
         if not domain or not content:
-            return [
-                TextContent(
-                    type="text",
-                    text="record_insight requires non-empty 'domain' and 'content'",
-                )
-            ]
+            raise ValueError("record_insight requires non-empty 'domain' and 'content'")
         intensity = arguments.get("intensity", 0.5)
         layer = arguments.get("layer", "hypothesis")
         confidence = arguments.get("confidence")
@@ -2681,9 +2680,14 @@ async def _dispatch_tool(name: str, arguments: dict):
                 emotion_note=arguments.get("emotion_note"),
             )
         except ValueError as exc:
-            # Receipt/supersession validation failures name the offending
-            # receipt or claim ref — surface verbatim, record nothing.
-            return [TextContent(type="text", text=f"record_insight rejected: {exc}")]
+            # Receipt/supersession/domain validation failures name the
+            # offending receipt, claim ref, or label — surface verbatim,
+            # record nothing. Re-raised rather than returned: a rejection
+            # must be an error on the wire (isError=True), not ok-shaped
+            # text. Returning it here is how a malformed receipt came back
+            # {"ok": true} through the REST bridge while nothing was written
+            # (mesh-20260719, P1 — the fail-open write path).
+            raise ValueError(f"record_insight rejected: {exc}") from exc
         via = f" (via {vantage})" if vantage else ""
         return [
             TextContent(
