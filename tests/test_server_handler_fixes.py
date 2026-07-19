@@ -34,6 +34,8 @@ import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 
+import pytest
+
 from sovereign_stack.memory import ExperientialMemory
 
 # ---------------------------------------------------------------------------
@@ -106,35 +108,38 @@ class TestRecordInsightRequiredArguments:
     """The handler must mirror the schema's required: ['domain', 'content']."""
 
     def test_missing_content_returns_validation_error_and_writes_nothing(self):
-        """Omitting 'content' must return a tool error, not record an entry."""
+        """Omitting 'content' must be a tool ERROR, not record an entry.
+
+        Since P1 (mesh-20260719) the rejection RAISES rather than returning
+        ok-shaped text: the SDK converts the raise into isError=True with the
+        same message, so no envelope above can report the miss as a success.
+        """
         from sovereign_stack.server import _dispatch_tool
 
         with _isolated_server("record-insight-missing-content") as (_srv, tmp_root):
-            result = asyncio.run(_dispatch_tool("record_insight", {"domain": "regression"}))
+            with pytest.raises(
+                ValueError, match="record_insight requires non-empty 'domain' and 'content'"
+            ):
+                asyncio.run(_dispatch_tool("record_insight", {"domain": "regression"}))
 
-            text = result[0].text
-            assert "record_insight requires non-empty 'domain' and 'content'" in text, (
-                f"Expected validation error for missing content; got: {text[:200]}"
-            )
-            assert "Insight recorded" not in text
             written = _insight_files(tmp_root)
             assert not written, (
                 f"record_insight wrote to the chronicle despite missing content: {written}"
             )
 
     def test_missing_domain_returns_validation_error_and_writes_nothing(self):
-        """Omitting 'domain' must return a tool error, not default to 'general'."""
+        """Omitting 'domain' must be a tool ERROR, not default to 'general'.
+
+        Raise-not-return for the same P1 reason as the missing-content case.
+        """
         from sovereign_stack.server import _dispatch_tool
 
         with _isolated_server("record-insight-missing-domain") as (_srv, tmp_root):
-            result = asyncio.run(
-                _dispatch_tool("record_insight", {"content": "an orphaned insight"})
-            )
+            with pytest.raises(
+                ValueError, match="record_insight requires non-empty 'domain' and 'content'"
+            ):
+                asyncio.run(_dispatch_tool("record_insight", {"content": "an orphaned insight"}))
 
-            text = result[0].text
-            assert "record_insight requires non-empty 'domain' and 'content'" in text, (
-                f"Expected validation error for missing domain; got: {text[:200]}"
-            )
             written = _insight_files(tmp_root)
             assert not written, (
                 f"record_insight invented a default domain and wrote anyway: {written}"

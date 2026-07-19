@@ -111,6 +111,27 @@ def _normalize_domain(domain: str) -> str:
     return ",".join(part.strip() for part in domain.split(","))
 
 
+def _validate_domain_label(domain: str) -> None:
+    """
+    A domain is a label, not a path. Reject separators and traversal tokens
+    outright instead of escaping them: an escaped domain would land the entry
+    in a directory no exact-match recall ever queries, which is the quiet form
+    of the same loss this gate exists to prevent (mesh-20260719, P1 — a
+    slash-carrying domain raised FileNotFoundError at mkdir and the failure
+    was reported upstream as ok:true; a slash domain whose parent directory
+    happened to exist would have nested SILENTLY instead).
+    """
+    if not domain:
+        raise ValueError("domain must be a non-empty label")
+    if "/" in domain or "\\" in domain or "\x00" in domain:
+        raise ValueError(
+            f"invalid domain {domain!r}: a domain is a label, not a path "
+            "(path separators are not allowed; use commas for compound tags)"
+        )
+    if domain in (".", ".."):
+        raise ValueError(f"invalid domain {domain!r}: a domain is a label, not a path")
+
+
 def _last_jsonl_entry(path: Path) -> dict | None:
     """Return the last parseable JSON entry of a JSONL file, or None."""
     if not path.exists():
@@ -761,6 +782,10 @@ class ExperientialMemory:
         # they used to disagree ("a, b" stored under "a,b"), which broke
         # domain-filtered recall.
         domain = _normalize_domain(domain)
+        # Fail closed before any filesystem call — a bad label must be a loud
+        # ValueError (the rejection path every envelope above knows how to
+        # report), never a FileNotFoundError from mkdir or a silent nesting.
+        _validate_domain_label(domain)
 
         domain_dir = self.insights_dir / domain
         domain_dir.mkdir(exist_ok=True)
