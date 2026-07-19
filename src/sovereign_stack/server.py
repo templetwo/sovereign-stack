@@ -2623,12 +2623,12 @@ async def _dispatch_tool(name: str, arguments: dict):
         stakes = arguments.get("stakes", "medium")
         with_simulation = bool(arguments.get("with_simulation", False))
 
+        # Raised, not returned — same P1 rule as record_insight (mesh-20260719
+        # continuation): a rejection returned as text is wrapped by the SDK as
+        # a SUCCESS (isError=False) and every envelope above reports ok:true.
+        # Raising lets the SDK mark it isError=True with the same verbatim text.
         if not action:
-            return [
-                TextContent(
-                    type="text", text="compass_check requires a non-empty 'action' argument"
-                )
-            ]
+            raise ValueError("compass_check requires a non-empty 'action' argument")
 
         try:
             result = runtime_compass_check(
@@ -2638,7 +2638,7 @@ async def _dispatch_tool(name: str, arguments: dict):
                 with_simulation=with_simulation,
             )
         except ValueError as exc:
-            return [TextContent(type="text", text=f"compass_check error: {exc}")]
+            raise ValueError(f"compass_check error: {exc}") from exc
 
         return [TextContent(type="text", text=json.dumps(result, indent=2))]
 
@@ -2840,7 +2840,12 @@ async def _dispatch_tool(name: str, arguments: dict):
                 thread=thread,
             )
         except ValueError as e:
-            return [TextContent(type="text", text=f"Handoff rejected: {e}")]
+            # Raised, not returned — P1 continuation, and THIS branch is where
+            # the damage concentrated: a handoff note over HANDOFF_MAX_BYTES
+            # raises here, and returning the rejection as ok-shaped text is how
+            # 28 of 122 handoffs (23%) died silently while reporting success
+            # (mesh-20260719, lane 3/3 forensics).
+            raise ValueError(f"Handoff rejected: {e}") from e
         return [
             TextContent(
                 type="text",
@@ -3860,12 +3865,13 @@ Phase: {spiral_state.current_phase.value}
     if name == "nape_ack":
         honk_id_arg = arguments.get("honk_id", "").strip()
         note_arg = arguments.get("note", "")
+        # Raised, not returned — P1 continuation (see compass_check).
         if not honk_id_arg:
-            return [TextContent(type="text", text="nape_ack requires honk_id")]
+            raise ValueError("nape_ack requires honk_id")
         try:
             record = nape_daemon.ack(honk_id=honk_id_arg, note=note_arg)
         except ValueError as exc:
-            return [TextContent(type="text", text=f"nape_ack failed: {exc}")]
+            raise ValueError(f"nape_ack failed: {exc}") from exc
         return [
             TextContent(
                 type="text",
@@ -4111,7 +4117,8 @@ Phase: {spiral_state.current_phase.value}
                 model=arguments.get("model"),
             )
         except ValueError as exc:
-            return [TextContent(type="text", text=f"recall_reflections error: {exc}")]
+            # Raised, not returned — P1 continuation (see compass_check).
+            raise ValueError(f"recall_reflections error: {exc}") from exc
         payload = {
             "count": len(recs),
             "reflections": [r.to_dict() for r in recs],
@@ -4123,13 +4130,11 @@ Phase: {spiral_state.current_phase.value}
 
         rid = (arguments.get("reflection_id") or "").strip()
         action = (arguments.get("action") or "").strip()
+        # Raised, not returned — P1 continuation (see compass_check). The
+        # KeyError is normalized to ValueError so the wire text stays the
+        # readable message, not a quoted key.
         if not rid or not action:
-            return [
-                TextContent(
-                    type="text",
-                    text="reflection_ack requires non-empty 'reflection_id' and 'action'",
-                )
-            ]
+            raise ValueError("reflection_ack requires non-empty 'reflection_id' and 'action'")
         try:
             updated = _ack_reflection(
                 reflection_id=rid,
@@ -4138,9 +4143,9 @@ Phase: {spiral_state.current_phase.value}
                 by=arguments.get("by"),
             )
         except ValueError as exc:
-            return [TextContent(type="text", text=f"reflection_ack error: {exc}")]
+            raise ValueError(f"reflection_ack error: {exc}") from exc
         except KeyError as exc:
-            return [TextContent(type="text", text=f"reflection_ack error: {exc}")]
+            raise ValueError(f"reflection_ack error: {exc}") from exc
         return [
             TextContent(
                 type="text",
