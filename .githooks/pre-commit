@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Repo-owned pre-commit hook (not the pre-commit framework).
+# Install with: make hooks
+#
+# Deliberately narrow: lint + format check only, nothing else. No pytest,
+# no coverage, no other tooling — CI is the authority on the rest.
+
+set -euo pipefail
+
+cd "$(git rev-parse --show-toplevel)"
+
+if [ -x "./venv/bin/ruff" ]; then
+  RUFF="./venv/bin/ruff"
+else
+  RUFF="ruff"
+fi
+
+"$RUFF" check src/sovereign_stack/ tests/
+"$RUFF" format --check src/sovereign_stack/ tests/
