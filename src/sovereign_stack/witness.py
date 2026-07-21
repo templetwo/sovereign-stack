@@ -47,24 +47,29 @@ def days_old(iso_timestamp: str | None) -> int:
 _SELF_MODEL_CATEGORY_ORDER = ("strength", "tendency", "blind_spot", "drift")
 
 
-def format_self_model(sovereign_root: Path, max_obs_len: int | None = 180) -> list[str]:
-    """
-    Read ~/.sovereign/self_model.json and return lines for the boot surface.
+def collect_self_model(sovereign_root: Path) -> dict | None:
+    """Read ~/.sovereign/self_model.json and return the raw parsed dict.
 
-    Surfaces the LATEST observation per category. Strength first (affirm
-    capability), then tendency, blind_spot, drift (shadow last). Empty list
-    if the file is missing, corrupt, or has no observations — the caller
-    should just skip the section in that case.
-
-    Pass ``max_obs_len=None`` to disable truncation (full_content path —
-    the parallel-witness fix from 2026-04-26).
+    Returns None if the file is missing or corrupt — the collect half of the
+    Phase 4 collect/render split. No caps, no formatting: pure gather.
     """
     path = Path(sovereign_root) / "self_model.json"
     if not path.exists():
-        return []
+        return None
     try:
-        model = json.loads(path.read_text())
+        return json.loads(path.read_text())
     except (json.JSONDecodeError, OSError):
+        return None
+
+
+def render_self_model(model: dict | None, *, max_obs_len: int | None = 180) -> list[str]:
+    """Render the self-model boot section from an already-parsed model dict.
+
+    Surfaces the LATEST observation per category. Strength first (affirm
+    capability), then tendency, blind_spot, drift (shadow last). Empty list
+    if the model is None/empty or has no observations.
+    """
+    if not model:
         return []
     body: list[str] = []
     for cat in _SELF_MODEL_CATEGORY_ORDER:
@@ -87,6 +92,21 @@ def format_self_model(sovereign_root: Path, max_obs_len: int | None = 180) -> li
         *body,
         "",
     ]
+
+
+def format_self_model(sovereign_root: Path, max_obs_len: int | None = 180) -> list[str]:
+    """
+    Read ~/.sovereign/self_model.json and return lines for the boot surface.
+
+    Back-compat wrapper over collect_self_model + render_self_model (Phase 4):
+    byte-identical to the pre-split behavior. Empty list if the file is
+    missing, corrupt, or has no observations — the caller should just skip the
+    section in that case.
+
+    Pass ``max_obs_len=None`` to disable truncation (full_content path —
+    the parallel-witness fix from 2026-04-26).
+    """
+    return render_self_model(collect_self_model(sovereign_root), max_obs_len=max_obs_len)
 
 
 # ── The Ground surfacing ──
@@ -113,11 +133,23 @@ def format_the_ground(sovereign_root: Path, calm: bool = False) -> list[str]:
     variant drops the count and cost-accounting language entirely and
     keeps only the relational fact: header + one soft line + a trailing
     empty string.
+
+    Back-compat wrapper over load_ground_entries + render_the_ground
+    (Phase 4 collect/render split) — byte-identical to the pre-split path.
     """
     try:
         entries = load_ground_entries(Path(sovereign_root) / "chronicle")
     except OSError:
         return []
+    return render_the_ground(entries, calm=calm)
+
+
+def render_the_ground(entries: list[dict], *, calm: bool = False) -> list[str]:
+    """Render THE GROUND boot section from already-loaded catch entries.
+
+    Empty list when there are zero catches — a seat with no ledger boots
+    exactly as today. See format_the_ground for the calm/non-calm contract.
+    """
     if not entries:
         return []
 
@@ -161,21 +193,13 @@ def format_the_ground(sovereign_root: Path, calm: bool = False) -> list[str]:
 # ── Uncertainty surfacing ──
 
 
-def format_unresolved_uncertainties(
-    sovereign_root: Path, limit: int = 5, max_text_len: int | None = 160
-) -> list[str]:
-    """
-    Read ~/.sovereign/consciousness/uncertainty_log.json and return lines
-    for unresolved markers.
+def collect_uncertainties(sovereign_root: Path) -> list[dict]:
+    """Read the uncertainty log and return the raw list of UNRESOLVED markers.
 
-    An uncertainty is unresolved if:
-      - resolved is missing or false, AND
-      - resolution is not set
-
-    Returns the most recent `limit` unresolved markers. Empty list if the
-    file is missing, corrupt, or has no unresolved markers.
-
-    Pass ``max_text_len=None`` to disable text truncation (full_content path).
+    An uncertainty is unresolved if `resolved` is missing/false AND
+    `resolution` is not set. Empty list if the file is missing, corrupt, or has
+    no unresolved markers. The collect half of the Phase 4 split — no sort,
+    no limit, no truncation.
     """
     path = Path(sovereign_root) / "consciousness" / "uncertainty_log.json"
     if not path.exists():
@@ -185,7 +209,17 @@ def format_unresolved_uncertainties(
     except (json.JSONDecodeError, OSError):
         return []
     markers = data.get("markers") or []
-    unresolved = [m for m in markers if not m.get("resolved") and not m.get("resolution")]
+    return [m for m in markers if not m.get("resolved") and not m.get("resolution")]
+
+
+def render_uncertainties(
+    unresolved: list[dict], *, limit: int = 5, max_text_len: int | None = 160
+) -> list[str]:
+    """Render the UNRESOLVED UNCERTAINTIES boot section from collected markers.
+
+    Returns the most recent `limit` unresolved markers. Empty list if none.
+    Pass ``max_text_len=None`` to disable text truncation (full_content path).
+    """
     if not unresolved:
         return []
     # Most recent first — markers are typically appended, so reverse.
@@ -210,6 +244,21 @@ def format_unresolved_uncertainties(
         lines.append(f"  • {shown}{age_tag}")
     lines.append("")
     return lines
+
+
+def format_unresolved_uncertainties(
+    sovereign_root: Path, limit: int = 5, max_text_len: int | None = 160
+) -> list[str]:
+    """
+    Read ~/.sovereign/consciousness/uncertainty_log.json and return lines
+    for unresolved markers.
+
+    Back-compat wrapper over collect_uncertainties + render_uncertainties
+    (Phase 4) — byte-identical to the pre-split behavior.
+    """
+    return render_uncertainties(
+        collect_uncertainties(sovereign_root), limit=limit, max_text_len=max_text_len
+    )
 
 
 # ── Lineage layer (to_arrival, breakthroughs, to_self, to_family) ──
@@ -375,10 +424,32 @@ def format_lineage_layer(
     after boot to actually read the inheritance.
 
     Returns [] if the lineage directory doesn't exist (graceful degrade).
+
+    Back-compat wrapper over collect_lineage + render_lineage (Phase 4) —
+    byte-identical to the pre-split behavior.
+    """
+    return render_lineage(
+        collect_lineage(sovereign_root, reader_instance, limit_per_bucket),
+        full_content=full_content,
+    )
+
+
+def collect_lineage(
+    sovereign_root: Path,
+    reader_instance: str | None = None,
+    limit_per_bucket: int = 5,
+) -> dict | None:
+    """Gather the lineage buckets (to_arrival / breakthroughs / to_self /
+    to_family) for a reader. The collect half of the Phase 4 split — file
+    reads + reader-matching, no rendering, no caps beyond limit_per_bucket.
+
+    Returns None when the lineage directory doesn't exist (graceful degrade,
+    mapped to [] by the renderer). Otherwise a dict carrying every bucket plus
+    the base path (needed for the render footer).
     """
     base = sovereign_root / "comms" / "letters"
     if not base.exists():
-        return []
+        return None
 
     def _collect(
         subdir: str,
@@ -426,6 +497,31 @@ def format_lineage_layer(
         short = family.split("-", 1)[1] if "-" in family else family
         family_dir_name = f"to_{short}"
         to_family = _collect(family_dir_name)
+
+    return {
+        "base": base,
+        "arrivals": arrivals,
+        "breakthroughs": breakthroughs,
+        "to_self": to_self,
+        "to_family": to_family,
+        "family_dir_name": family_dir_name,
+    }
+
+
+def render_lineage(data: dict | None, *, full_content: bool = False) -> list[str]:
+    """Render the COMMS — LINEAGE boot section from collected lineage buckets.
+
+    Empty list when data is None (no lineage dir) or every bucket is empty —
+    byte-identical to the pre-split format_lineage_layer.
+    """
+    if data is None:
+        return []
+    base = data["base"]
+    arrivals = data["arrivals"]
+    breakthroughs = data["breakthroughs"]
+    to_self = data["to_self"]
+    to_family = data["to_family"]
+    family_dir_name = data["family_dir_name"]
 
     if not (arrivals or breakthroughs or to_self or to_family):
         return []

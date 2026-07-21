@@ -790,15 +790,32 @@ def protected_boot_line(chronicle_root: str | Path) -> list[str]:
     Returns a small list of lines (the section), ready to extend onto the boot
     ``lines`` list — the server calls it with DEFAULT_ROOT, tests with
     tmp_path. Safe by construction: a missing ledger reads as 0.
+
+    Back-compat wrapper over collect_protected_drawer + render_protected_boot_line
+    (Phase 4 collect/render split) — byte-identical to the pre-split behavior.
+    """
+    return render_protected_boot_line(collect_protected_drawer(chronicle_root))
+
+
+def collect_protected_drawer(chronicle_root: str | Path) -> int:
+    """Return the count of designated protected records (0 on any error).
+
+    Never iterates the index rows — count only, so no card (subject/emotion)
+    or content can leak. Safe by construction: a missing ledger reads as 0.
     """
     try:
-        fold = load_protected_fold(chronicle_root)
-        count = len(fold)
+        return len(load_protected_fold(chronicle_root))
     except Exception:
         # Never let the drawer announcement break the boot; default to a
         # known-safe "exists, count unavailable" shape rather than raising.
-        count = 0
+        return 0
 
+
+def render_protected_boot_line(count: int) -> list[str]:
+    """Render the PROTECTED RECORDS drawer boot line from a record count.
+
+    Announces existence + scheme + how to open — never a card or content.
+    """
     if count == 0:
         body = (
             "  No records are designated protected yet — the drawer is empty. "
