@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.13.0] - 2026-07-21
+
+### Retrieval honesty — Phase 1 (the read-path fail-open, closed)
+
+The read-side sibling of the v1.12.x write-path fix. `recall_insights` no longer
+hands a caller a confident partial answer: it returns everything its query
+matches, states its own coverage, and refuses to dress a typo as a domain.
+
+- **Subset-containment domain matching.** A domain query matches every directory
+  whose comma-split label set contains all the query's labels (`lineage` reaches
+  `lineage,letters`; `a,b` reaches `a,b,c`). The old exact-directory match hid
+  every compound sibling behind a bare directory — **1,303 entries across 37
+  domains were invisible to exact recall** (`lineage` returned 5 of 321).
+  Recovered without moving a stored byte. Bare membership matching was rejected
+  in review: it would have zeroed 932 of 1,006 compound-domain queries.
+- **D1 — explicit empty on no match** (owner-ruled). A domain matching no
+  directory returns an explicit empty (`scope.mode "domain-empty"`,
+  `partial_reasons ["domain_no_match"]`), never the old fall-through to a
+  full-corpus scan that handed a typo'd caller the whole chronicle dressed as
+  their domain. The "intentional quirk" test is openly rewritten to the new intent.
+- **Short query terms filter** instead of silently dropping (the `<3`-char floor
+  is removed) — `query="P1"` now narrows instead of degrading to an unfiltered scan.
+- **Relevance before recency truncation** in the reflexive surface, so an
+  old-but-relevant entry is no longer starved by the 200-row cap.
+
+### ⚠ BREAKING — the read TOOL response is now an envelope
+
+`recall_insights` over the MCP/REST **tool** surface returns the Schema v1 read
+envelope `{items, returned, total_matched, scope, truncated, partial_reasons,
+continuation}` instead of a bare list. **External consumers that parse the result
+as a list MUST read `result.items`.** In-process library callers are unaffected —
+`ExperientialMemory.recall_insights` keeps the bare-list default
+(`envelope=False`); only the tool passes `envelope=True`.
+
+Stack tool surface unchanged at **96 tools**; the change is response-shape only.
+Built and verified through the trifecta mesh (build / independent audit / anchor
+re-verification). Full suite: 1880 passed.
+
+---
+
 ## [1.12.0] - 2026-07-05
 
 ### Claude connector — native surface over Streamable HTTP, OAuth 2.1, scoped-native access
