@@ -216,9 +216,14 @@ class ReflexiveSurface:
         )
 
         # ── Bucket 4: related insights ──
+        # order="relevance": select by match strength BEFORE the 200-cap.
+        # The default newest-first sort meant the cap was applied by recency
+        # and the scorer never saw an old-but-relevant entry (Phase 1,
+        # mesh-20260719 — recency truncation starved the scorer).
         raw_insights = self._memory.recall_insights(
             query=" ".join(caller_tags) if caller_tags else None,
             limit=200,
+            order="relevance",
         )
         scored_insights = self._score_and_sort(
             raw_insights,

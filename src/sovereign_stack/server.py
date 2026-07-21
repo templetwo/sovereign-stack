@@ -639,9 +639,12 @@ async def list_tools():
                     "properties": {
                         "query": {
                             "type": "string",
-                            "description": "Text search across content and domain. Returns entries containing any query term (length >= 3).",
+                            "description": "Text search across content and domain. Returns entries containing any query term — every non-empty term filters, including short ones like 'P1' or 'v4'.",
                         },
-                        "domain": {"type": "string"},
+                        "domain": {
+                            "type": "string",
+                            "description": "Domain label(s), subset-containment matched: every directory whose comma-split label set contains ALL these labels is searched ('lineage' reaches 'lineage' and 'lineage,letters'; 'a,b' reaches 'a,b,c'). No match returns an explicit empty (scope.mode 'domain-empty'), never a full-corpus fallback.",
+                        },
                         "limit": {"type": "integer", "default": 10},
                         "start_date": {
                             "type": "string",
@@ -2744,7 +2747,7 @@ async def _dispatch_tool(name: str, arguments: dict):
         start_date = arguments.get("start_date")
         end_date = arguments.get("end_date")
         since_last_reflection = arguments.get("since_last_reflection", False)
-        insights = experiential.recall_insights(
+        result = experiential.recall_insights(
             query=query,
             domain=domain,
             limit=limit,
@@ -2755,8 +2758,14 @@ async def _dispatch_tool(name: str, arguments: dict):
             exclude_superseded=arguments.get("exclude_superseded", False),
             domain_contains=arguments.get("domain_contains"),
             order=arguments.get("order", "newest"),
+            offset=arguments.get("offset", 0),
+            # The tool response is always the full read envelope (Phase 1,
+            # mesh-20260719): the payload states its own coverage — returned
+            # vs total_matched, which scope ran, truncation — instead of a
+            # bare array that implies completeness.
+            envelope=True,
         )
-        return [TextContent(type="text", text=json.dumps(insights, indent=2))]
+        return [TextContent(type="text", text=json.dumps(result, indent=2))]
 
     if name == "check_mistakes":
         context = arguments.get("context", "")
