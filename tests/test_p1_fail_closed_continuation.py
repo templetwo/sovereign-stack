@@ -56,32 +56,36 @@ class TestHandoffFailsClosed:
 
 class TestCompassCheckFailsClosed:
     def test_missing_action_raises(self):
-        with _isolated_server("p1c-compass") as (srv, _tmp_root):
-            with pytest.raises(ValueError, match="non-empty 'action'"):
-                _run(srv._dispatch_tool("compass_check", {}))
+        with (
+            _isolated_server("p1c-compass") as (srv, _tmp_root),
+            pytest.raises(ValueError, match="non-empty 'action'"),
+        ):
+            _run(srv._dispatch_tool("compass_check", {}))
 
     def test_engine_valueerror_raises_with_named_tool(self):
         """The catch branch itself: a ValueError from the compass engine must
         surface as a raised, tool-named error, not ok-shaped text."""
-        with _isolated_server("p1c-compass-engine") as (srv, _tmp_root):
-            with patch.object(
-                srv, "runtime_compass_check", side_effect=ValueError("boom")
-            ):
-                with pytest.raises(ValueError, match="compass_check error: boom"):
-                    _run(srv._dispatch_tool("compass_check", {"action": "probe"}))
+        with (
+            _isolated_server("p1c-compass-engine") as (srv, _tmp_root),
+            patch.object(srv, "runtime_compass_check", side_effect=ValueError("boom")),
+            pytest.raises(ValueError, match="compass_check error: boom"),
+        ):
+            _run(srv._dispatch_tool("compass_check", {"action": "probe"}))
 
 
 class TestNapeAckFailsClosed:
     def test_unknown_honk_id_raises(self):
-        with _isolated_server("p1c-nape") as (srv, _tmp_root):
-            with pytest.raises(ValueError, match="nape_ack failed"):
-                _run(
-                    srv._dispatch_tool(
-                        "nape_ack", {"honk_id": "honk_does_not_exist", "note": "probe"}
-                    )
-                )
+        with (
+            _isolated_server("p1c-nape") as (srv, _tmp_root),
+            pytest.raises(ValueError, match="nape_ack failed"),
+        ):
+            _run(
+                srv._dispatch_tool("nape_ack", {"honk_id": "honk_does_not_exist", "note": "probe"})
+            )
 
     def test_missing_honk_id_raises(self):
-        with _isolated_server("p1c-nape-missing") as (srv, _tmp_root):
-            with pytest.raises(ValueError, match="nape_ack requires honk_id"):
-                _run(srv._dispatch_tool("nape_ack", {"note": "probe"}))
+        with (
+            _isolated_server("p1c-nape-missing") as (srv, _tmp_root),
+            pytest.raises(ValueError, match="nape_ack requires honk_id"),
+        ):
+            _run(srv._dispatch_tool("nape_ack", {"note": "probe"}))

@@ -86,8 +86,10 @@ def _assert_schema_v1(env: dict, limit: int):
     complete = (
         not env["truncated"]
         and env["scope"]["mode"] != "domain-empty"
-        and not any(r.startswith(("corrupt_line_skipped", "query_term_ignored"))
-                    for r in env["partial_reasons"])
+        and not any(
+            r.startswith(("corrupt_line_skipped", "query_term_ignored"))
+            for r in env["partial_reasons"]
+        )
     )
     assert (env["partial_reasons"] == []) == complete  # inv 5
     scope = env["scope"]

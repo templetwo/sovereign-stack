@@ -59,7 +59,7 @@ class TestDomainLabelGate:
         with pytest.raises(ValueError):
             mem.record_insight("..", "traversal probe", 0.5)
         # Nothing may have escaped the insights tree.
-        stray = [p for p in (tmp_path / "chronicle").glob("*.jsonl")]
+        stray = list((tmp_path / "chronicle").glob("*.jsonl"))
         assert stray == []
 
     def test_plain_and_compound_domains_still_write(self, tmp_path):
@@ -83,41 +83,45 @@ class TestDispatchFailsClosed:
         (isError=False) and every envelope above reports ok:true on a write
         that recorded nothing. FIXED: the rejection raises; the SDK converts
         it to isError=True with the same verbatim text."""
-        with _isolated_server("p1-fail-closed") as (srv, _tmp_root):
-            with pytest.raises(ValueError, match="record_insight rejected"):
-                _run(
-                    srv._dispatch_tool(
-                        "record_insight",
-                        {
-                            "domain": "p1-test",
-                            "content": "receipt probe",
-                            "verified_by": [
-                                {"kind": "file", "ref": "/nonexistent", "sha256": "nope"}
-                            ],
-                        },
-                    )
+        with (
+            _isolated_server("p1-fail-closed") as (srv, _tmp_root),
+            pytest.raises(ValueError, match="record_insight rejected"),
+        ):
+            _run(
+                srv._dispatch_tool(
+                    "record_insight",
+                    {
+                        "domain": "p1-test",
+                        "content": "receipt probe",
+                        "verified_by": [{"kind": "file", "ref": "/nonexistent", "sha256": "nope"}],
+                    },
                 )
+            )
 
     def test_missing_domain_raises_instead_of_ok_text(self):
         """UNFIXED: returns the requirement message as ok-shaped text.
         FIXED: raises, so no envelope can call it a success."""
-        with _isolated_server("p1-fail-closed") as (srv, _tmp_root):
-            with pytest.raises(ValueError, match="non-empty 'domain' and 'content'"):
-                _run(srv._dispatch_tool("record_insight", {"content": "no domain"}))
+        with (
+            _isolated_server("p1-fail-closed") as (srv, _tmp_root),
+            pytest.raises(ValueError, match="non-empty 'domain' and 'content'"),
+        ):
+            _run(srv._dispatch_tool("record_insight", {"content": "no domain"}))
 
     def test_slash_domain_through_dispatch_is_a_named_rejection(self):
         """UNFIXED: FileNotFoundError sails through dispatch (only ValueError
         is caught) and the SDK stringifies it into '[Errno 2] ...' — the exact
         text of the 2026-07-19 loss. FIXED: the label gate turns it into a
         ValueError before any filesystem call, and dispatch names the tool."""
-        with _isolated_server("p1-fail-closed") as (srv, _tmp_root):
-            with pytest.raises(ValueError, match="label, not a path"):
-                _run(
-                    srv._dispatch_tool(
-                        "record_insight",
-                        {"domain": "a,b,feat/c", "content": "dispatch slash probe"},
-                    )
+        with (
+            _isolated_server("p1-fail-closed") as (srv, _tmp_root),
+            pytest.raises(ValueError, match="label, not a path"),
+        ):
+            _run(
+                srv._dispatch_tool(
+                    "record_insight",
+                    {"domain": "a,b,feat/c", "content": "dispatch slash probe"},
                 )
+            )
 
     def test_good_write_still_succeeds_through_dispatch(self):
         """Regression guard, passes on both sides."""

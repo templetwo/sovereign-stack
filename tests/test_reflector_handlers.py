@@ -116,9 +116,11 @@ class TestRecallReflectionsHandler:
         d.mkdir()
         # Raised, not returned, since the P1 continuation (mesh-20260719):
         # a rejection returned as text is wrapped by the SDK as a success.
-        with patch("sovereign_stack.reflections.REFLECTIONS_DIR", d):
-            with pytest.raises(ValueError, match="recall_reflections error"):
-                _dispatch("recall_reflections", {"ack_status": "not-a-status"})
+        with (
+            patch("sovereign_stack.reflections.REFLECTIONS_DIR", d),
+            pytest.raises(ValueError, match="recall_reflections error"),
+        ):
+            _dispatch("recall_reflections", {"ack_status": "not-a-status"})
 
 
 # ── reflection_ack ──────────────────────────────────────────────────────────
@@ -171,35 +173,41 @@ class TestReflectionAckHandler:
         d.mkdir()
         # The KeyError is normalized to a raised ValueError with the same
         # readable message (P1 continuation).
-        with patch("sovereign_stack.reflections.REFLECTIONS_DIR", d):
-            with pytest.raises(ValueError, match="reflection_ack error"):
-                _dispatch(
-                    "reflection_ack",
-                    {"reflection_id": "nonexistent", "action": "confirm"},
-                )
+        with (
+            patch("sovereign_stack.reflections.REFLECTIONS_DIR", d),
+            pytest.raises(ValueError, match="reflection_ack error"),
+        ):
+            _dispatch(
+                "reflection_ack",
+                {"reflection_id": "nonexistent", "action": "confirm"},
+            )
 
     def test_empty_args_rejected(self, tmp_path: Path):
         d = tmp_path / "reflections"
         d.mkdir()
         # Empty required args raise an explicit error (P1 continuation).
-        with patch("sovereign_stack.reflections.REFLECTIONS_DIR", d):
-            with pytest.raises(ValueError, match="non-empty"):
-                _dispatch(
-                    "reflection_ack",
-                    {"reflection_id": "", "action": ""},
-                )
+        with (
+            patch("sovereign_stack.reflections.REFLECTIONS_DIR", d),
+            pytest.raises(ValueError, match="non-empty"),
+        ):
+            _dispatch(
+                "reflection_ack",
+                {"reflection_id": "", "action": ""},
+            )
 
     def test_invalid_action_rejected(self, tmp_path: Path):
         d = tmp_path / "reflections"
         d.mkdir()
         _seed_reflection(d, rid="r3")
         # 'promote' is not in ACK_ACTIONS — ValueError raised (P1 continuation).
-        with patch("sovereign_stack.reflections.REFLECTIONS_DIR", d):
-            with pytest.raises(ValueError, match="reflection_ack error"):
-                _dispatch(
-                    "reflection_ack",
-                    {"reflection_id": "r3", "action": "promote"},
-                )
+        with (
+            patch("sovereign_stack.reflections.REFLECTIONS_DIR", d),
+            pytest.raises(ValueError, match="reflection_ack error"),
+        ):
+            _dispatch(
+                "reflection_ack",
+                {"reflection_id": "r3", "action": "promote"},
+            )
 
 
 # ── synthesize_now ──────────────────────────────────────────────────────────
