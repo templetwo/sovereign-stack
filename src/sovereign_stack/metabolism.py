@@ -883,7 +883,16 @@ async def handle_metabolism_tool(name, arguments):
             if score > 0:
                 scored.append((score, ins))
 
-        scored.sort(reverse=True, key=lambda x: x[0])
+        # Total-order sort: score desc, then timestamp desc, then content — a
+        # deterministic tiebreak so the result is identical on every platform.
+        # Sorting by score alone left ties in filesystem-iteration order
+        # (_load_all_insights reads the dirs), which differs macOS vs Linux and
+        # made omitting `limit` diverge from passing its default (contract
+        # walker red on Linux CI, 2026-07-21).
+        scored.sort(
+            key=lambda x: (x[0], x[1].get("timestamp", ""), x[1].get("content", "")),
+            reverse=True,
+        )
         top = scored[:limit]
 
         if not top:
