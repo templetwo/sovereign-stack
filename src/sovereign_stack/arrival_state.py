@@ -161,7 +161,14 @@ def _parse_ts(ts: str | None) -> datetime | None:
     if not ts:
         return None
     try:
-        dt = datetime.fromisoformat(ts)
+        s = ts.strip()
+        # Python 3.10's fromisoformat cannot parse a trailing 'Z' (support was
+        # added in 3.11); normalize to an explicit +00:00 offset so parsing is
+        # uniform across the 3.10/3.11/3.12 CI matrix. _iso_z emits 'Z', so
+        # round-tripping our own watermark strings depends on this.
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        dt = datetime.fromisoformat(s)
     except (ValueError, TypeError):
         return None
     if dt.tzinfo is None:
