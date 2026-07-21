@@ -198,6 +198,13 @@ class TestReceiptFreeze:
         assert "unverified_reason" not in stamped
         assert elapsed < provenance.READ_TIMEOUT_SECONDS
 
+    @pytest.mark.skipif(
+        not hasattr(os.stat(__file__), "st_flags"),
+        reason="SF_DATALESS detection relies on st_flags, a macOS/BSD stat field absent on "
+        "Linux; the test injects it via os.stat_result(fields, {'st_flags': ...}), which "
+        "only takes effect where the platform recognizes st_flags (macOS). On Linux the key "
+        "is dropped, classify_file_target returns None, and 'dataless' in None raises.",
+    )
     def test_dataless_placeholder_is_refused_without_opening_it(self, tmp_path, monkeypatch):
         """The real 2026-07-10 shape: SF_DATALESS set, bytes not on this machine."""
         stub = tmp_path / "in-icloud.pdf"
