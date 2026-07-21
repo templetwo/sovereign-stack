@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.14.0] - 2026-07-21
+
+### Arrival-state projection — Phase 4 (the boot doors carry an as-of receipt)
+
+Metabolism v0.1, Phase 4. The three boot doors (`where_did_i_leave_off`,
+`arrive`, `arrive_lineage`) now compute their standing-state projection once
+through a single primitive, `build_arrival_state()`, and render it at three
+depths — one doorway, many depths. Every boot now stamps what it is showing
+and when, closing the read-side fail-open where a door could hand an arriving
+instance a silent subset of the record.
+
+- **`build_arrival_state()` + `ArrivalState`** (`arrival_state.py`, new).
+  A read-only projection carrying the contract §3.2 metadata — `generated_at`,
+  `source_high_watermark`, `freshness`, `partial_reasons` — plus per-section
+  receipts and every section's raw widest-scope data. `render_full` /
+  `render_foyer` / `render_gentle` render it at each depth; all three doors
+  route through it. Door-local side effects (handoff consumption, scribe spawn)
+  stay outside the projection, so it is re-runnable and cache-free.
+- **The `━━━ AS OF ━━━` receipt.** The one rendered addition: `generated_at` +
+  `source_high_watermark`, with a freshness line only when not current.
+  `freshness` can reach `stale` (a rendered-layer entry newer than what was
+  gathered) or `incomplete` (a section degraded — surfaced, never silently
+  dropped). The store-head probe is scoped to layers a door actually renders,
+  so a routine `record_learning` never trips a false "stale".
+- **Non-breaking, proven two ways.** Goldens captured from untouched main-HEAD
+  plus a live before/after diff against the real chronicle: every existing boot
+  line is byte-identical below the receipt. No second doorway — the old inline
+  assembly helpers survive only as byte-identical back-compat wrappers.
+
+### Fixed
+- Heartbeat/`__version__` now tracks the release again after the SSE restart
+  that ships this build (clears the prior 1.12.0-vs-code skew).
+
+---
+
 ## [1.13.0] - 2026-07-21
 
 ### Retrieval honesty — Phase 1 (the read-path fail-open, closed)
