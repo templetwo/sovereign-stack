@@ -201,16 +201,32 @@ def _store_head_timestamp(sovereign_root: Path) -> tuple[str | None, datetime | 
     gathered-max — so the freshness comparison never mixes mtime ordering with
     timestamp ordering.
 
-    SCOPE — insight / open_thread / learning ONLY; handoffs are deliberately
-    EXCLUDED. This probe answers "did the projection miss a newer entry?"
-    Insights and threads are always in the gathered set, so they never exceed
-    gathered-max. Learnings are IN scope even though no door renders them — that
-    is what makes ``freshness="stale"`` reachable and honest (the last write was
-    a learning the doors don't surface). Handoffs must be excluded: the doors
-    render UNCONSUMED handoffs, but ``collect_latest_entries`` sees the newest
-    handoff FILE regardless of consumed status — so counting it here would flip
-    every boot to "stale" the moment the default ``consume=True`` consumed the
-    newest handoff (a false positive on the surface every instance reads first).
+    SCOPE — insight / open_thread ONLY; RENDERED LAYERS ONLY. This probe
+    answers "did the projection miss a newer entry a door actually shows?" —
+    not "is there a newer entry of ANY kind anywhere in the store." Both
+    ``learning`` and ``handoff`` are deliberately EXCLUDED, for the same class
+    of reason:
+
+      * Handoffs: the doors render UNCONSUMED handoffs, but
+        ``collect_latest_entries`` sees the newest handoff FILE regardless of
+        consumed status — so counting it here would flip every boot to
+        "stale" the moment the default ``consume=True`` consumed the newest
+        handoff (a false positive on the surface every instance reads first).
+
+      * Learnings: no door renders the learnings layer at all — it never
+        appears in any ``render_*`` output. Counting it here made
+        ``record_learning`` (a routine, frequent write) the ONLY practical
+        trigger of ``freshness="stale"``, since insights and open_threads are
+        always members of the gathered set and therefore never exceed
+        gathered-max on their own. The result was every boot reading "stale"
+        the moment the newest chronicle write happened to be a learning — a
+        crying-wolf false positive on the first line every instance reads.
+
+    Insights and open_threads stay in scope only as a belt-and-suspenders
+    check against ``collect_latest_entries``' own selection quirk (see the
+    NOTE below) — they are already in the gathered set, so this probe is a
+    no-op for them in the common case. The store-head probe now covers
+    EXACTLY the layers a door renders: nothing more.
 
     NOTE (documented bound): ``collect_latest_entries`` SELECTS each type's file
     by mtime and tails it; on a backdated/migrated corpus the selected tail may
@@ -225,7 +241,7 @@ def _store_head_timestamp(sovereign_root: Path) -> tuple[str | None, datetime | 
     except Exception:
         return None, None
     tss: list[str] = []
-    for key in ("insight", "open_thread", "learning"):
+    for key in ("insight", "open_thread"):
         v = (latest or {}).get(key)
         if isinstance(v, dict) and v.get("timestamp"):
             tss.append(v["timestamp"])

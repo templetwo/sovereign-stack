@@ -144,13 +144,62 @@ class TestProjectionInvariants:
                         f"entry {rec.get('timestamp')} postdates watermark {state.source_high_watermark}"
                     )
 
-    def test_freshness_not_current_when_newer_entry_exists(self, tmp_path: Path):
-        # A learning newer than everything the doors render must knock freshness
-        # off "current" (the doors do not surface learnings — honest, not broken)
-        # and the watermark must still cover it.
+    def test_freshness_not_current_on_true_rendered_layer_lag(self, tmp_path: Path):
+        # freshness="stale" must remain REACHABLE (law #2 — a gate must be
+        # demonstrably able to fail in selftest) — but on a TRUE lag: a
+        # rendered-layer entry (insight/open_thread) newer than everything the
+        # doors gathered. A routine record_learning is NOT a rendered layer and
+        # must never trigger this (see test_record_learning_alone_does_not_
+        # flip_freshness_to_stale below — the false-positive regression this
+        # fix closes). Simulate the true-lag case synthetically by mocking the
+        # store-head probe, since injecting a real insight/open_thread newer
+        # than the gathered max would just get pulled INTO the gathered set by
+        # the doors themselves (they render insights/threads at wide limits).
         root = tmp_path / ".sovereign"
         fx.build_fixture(root)
-        newer = "2026-07-20T23:59:00+00:00"
+        newer = "2030-01-01T00:00:00+00:00"
+        with mock.patch(
+            "sovereign_stack.arrival_state._store_head_timestamp",
+            return_value=(newer, datetime(2030, 1, 1, tzinfo=timezone.utc)),
+        ):
+            state = _build(root, "full")
+        assert state.freshness != "current"
+        assert state.freshness == "stale"
+        from sovereign_stack.arrival_state import _parse_ts
+
+        assert _parse_ts(state.source_high_watermark) >= _parse_ts(newer)
+
+    def test_stale_line_is_never_bare(self, tmp_path: Path):
+        # A bare "Freshness: stale" reads as broken on the surface every instance
+        # reads first — the render must carry a reason clause. Proven on the
+        # same synthetic true-lag as above, not by riding a routine learning.
+        root = tmp_path / ".sovereign"
+        fx.build_fixture(root)
+        with mock.patch(
+            "sovereign_stack.arrival_state._store_head_timestamp",
+            return_value=(
+                "2030-01-01T00:00:00+00:00",
+                datetime(2030, 1, 1, tzinfo=timezone.utc),
+            ),
+        ):
+            state = _build(root, "full")
+        from sovereign_stack.arrival_state import render_full
+
+        text = render_full(state)
+        assert "Freshness: stale — " in text
+        assert "Freshness: stale\n" not in text
+
+    def test_record_learning_alone_does_not_flip_freshness_to_stale(self, tmp_path: Path):
+        # REGRESSION (the bug this fix closes): a `learning` newer than every
+        # gathered insight/open_thread/handoff must NOT flip freshness to
+        # "stale". No door renders the learnings layer, so it is excluded from
+        # the store-head probe's scope — counting it made record_learning (a
+        # routine, frequent write) the only practical trigger of "stale",
+        # crying wolf on the first line every instance reads. Cover both doors
+        # that show chronicle recency (full + foyer).
+        root = tmp_path / ".sovereign"
+        fx.build_fixture(root)
+        newer = "2030-01-01T00:00:00+00:00"
         learn_dir = root / "chronicle" / "learnings" / "general"
         learn_dir.mkdir(parents=True, exist_ok=True)
         (learn_dir / "s.jsonl").write_text(
@@ -164,36 +213,13 @@ class TestProjectionInvariants:
             )
             + "\n"
         )
-        state = _build(root, "full")
-        assert state.freshness != "current"
-        assert state.freshness == "stale"
-        from sovereign_stack.arrival_state import _parse_ts
-
-        assert _parse_ts(state.source_high_watermark) >= _parse_ts(newer)
-
-    def test_stale_line_is_never_bare(self, tmp_path: Path):
-        # A bare "Freshness: stale" reads as broken on the surface every instance
-        # reads first — the render must carry a reason clause.
-        root = tmp_path / ".sovereign"
-        fx.build_fixture(root)
-        learn_dir = root / "chronicle" / "learnings" / "general"
-        learn_dir.mkdir(parents=True, exist_ok=True)
-        (learn_dir / "s.jsonl").write_text(
-            json.dumps(
-                {
-                    "timestamp": "2026-07-20T23:59:00+00:00",
-                    "applies_to": "general",
-                    "what_learned": "newer than all rendered entries",
-                }
+        for profile in ("full", "foyer"):
+            state = _build(root, profile)
+            assert state.freshness == "current", (
+                f"{profile} boot went stale on a bare record_learning write — "
+                "the false positive is back"
             )
-            + "\n"
-        )
-        state = _build(root, "full")
-        from sovereign_stack.arrival_state import render_full
-
-        text = render_full(state)
-        assert "Freshness: stale — " in text
-        assert "Freshness: stale\n" not in text
+            assert not state.partial_reasons
 
     def test_consuming_newest_handoff_does_not_flip_to_stale(self, tmp_path: Path):
         # The fixture's newest entry is the handoff. The default consume=True
