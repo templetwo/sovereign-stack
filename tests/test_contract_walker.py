@@ -75,6 +75,7 @@ SKIP: dict[str, str] = {
     "guardian_baseline": "gathers live ports/processes/network via subprocess",
     "connectivity_status": "urllib probes against live service endpoints",
     "stack_write_check": "live write-path probe across running services",
+    "context_retrieve": "recency-weighted relevance scores drift between the two probe calls and reorder near-tied entries (float-normalization can't stabilize order); the default-of-5 equivalence is pinned deterministically under fixed data by test_context_retrieve_determinism.py::test_omitting_limit_matches_schema_default_of_five",
 }
 
 
