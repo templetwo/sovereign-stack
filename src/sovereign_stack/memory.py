@@ -268,6 +268,15 @@ RECALL_INSIGHTS_SCHEMA_EXTENSIONS = {
             "partial match. Falls back to 'newest' when no query is given."
         ),
     },
+    "offset": {
+        "type": "integer",
+        "default": 0,
+        "description": (
+            "Number of matched insights to skip before `limit` applies (pagination). "
+            "The response envelope reports total_matched and, when truncated, a "
+            "continuation {offset, limit} for the next page."
+        ),
+    },
 }
 
 
@@ -1513,14 +1522,25 @@ class ExperientialMemory:
         exclude_superseded: bool = False,
         domain_contains: str = None,
         order: str = "newest",
-    ) -> list[dict]:
+        offset: int = 0,
+        envelope: bool = False,
+    ) -> list[dict] | dict:
         """
         Recall insights, optionally filtered by domain, intensity, and time window.
 
         Args:
-            domain: Filter to specific domain directory (exact name match; None = all).
-                    Use domain_contains for substring/tag matching across compound dirs.
-            limit: Maximum number of insights to return.
+            domain: Filter by domain label(s), SUBSET-CONTAINMENT matched
+                    (Phase 1, mesh-20260719): every directory whose comma-split
+                    label set contains ALL the query's labels is searched, so
+                    domain="lineage" reaches both the bare "lineage" dir and
+                    "lineage,letters,..." compounds, and domain="a,b" reaches
+                    "a,b,c". A domain matching NO directory returns an explicit
+                    empty result (D1, ruled by Anthony 2026-07-20) — never the
+                    whole corpus. None = all domains.
+            limit: Maximum number of insights to return (after `offset`).
+            offset: Number of matched insights to skip before `limit` applies
+                    (pagination; combine with envelope=True to see
+                    total_matched / continuation).
             min_intensity: Minimum intensity threshold.
             layer_filter: Chronicle layer filter ("ground_truth", "hypothesis", "open_thread").
             start_date: ISO8601 lower bound (inclusive). Partial dates like "2026-04-10" accepted.
@@ -1547,6 +1567,11 @@ class ExperientialMemory:
                     query terms matched in content) descending, with NO recency boost,
                     so an old entry with many term matches ranks above a fresh entry with
                     fewer matches. Falls back to "newest" when no query is given.
+            envelope: If True, return the full read envelope
+                    {items, returned, total_matched, scope, truncated,
+                    partial_reasons, continuation} instead of a bare list —
+                    the read-side sibling of the P1 write fix: the response
+                    states its own coverage instead of implying completeness.
 
         Returns:
             List of insight dicts sorted per `order`. Data-gated annotation: when
@@ -1563,35 +1588,63 @@ class ExperientialMemory:
                 start_date = last
 
         insights = []
+        partial_reasons: list[str] = []
+        corrupt_lines = 0
+
+        all_dirs = [
+            d for d in self.insights_dir.iterdir() if d.is_dir() and not d.name.startswith(".")
+        ]
+        domains_total = len(all_dirs)
 
         if domain:
             # Same normalizer as record_insight, so spaced and unspaced
             # queries ("a, b" vs "a,b") reach the same domain directory.
             domain = _normalize_domain(domain)
-            domain_path = self.insights_dir / domain
-            # If specified domain doesn't exist, search all domains
-            if not domain_path.exists():
-                search_dirs = [
-                    d
-                    for d in self.insights_dir.iterdir()
-                    if d.is_dir() and not d.name.startswith(".")
-                ]
-            else:
-                search_dirs = [domain_path]
+            # SUBSET-CONTAINMENT matching (Phase 1, mesh-20260719): search
+            # every directory whose comma-split label set contains all the
+            # query's labels. Bare membership (`dom in split`) is not enough —
+            # it zeroes compound queries like "a,b" against "a,b,c" — and the
+            # old exact-dir match hid every compound sibling behind a bare
+            # dir (1,303 rows invisible across 37 domains, measured
+            # 2026-07-20).
+            query_labels = set(domain.split(","))
+            search_dirs = [d for d in all_dirs if query_labels <= set(d.name.split(","))]
         else:
-            search_dirs = [
-                d for d in self.insights_dir.iterdir() if d.is_dir() and not d.name.startswith(".")
-            ]
+            search_dirs = all_dirs
 
         # Apply domain_contains substring filter (case-insensitive) on top.
         if domain_contains:
             needle = domain_contains.lower()
             search_dirs = [d for d in search_dirs if needle in d.name.lower()]
 
-        # Pre-compute query terms once (len>=3) for use inside the loop.
+        # Schema v1 scope.mode (closed 3-value enum). Interpretation note,
+        # flagged for the anchor: the schema keys "domain given" to the enum;
+        # domain_contains is also a domain-scoping argument, so EITHER makes
+        # this a domain filter — otherwise a contains-filtered read would
+        # have to claim mode "all" while searching fewer dirs than exist,
+        # violating invariant 7.
+        # D1, ruled by Anthony 2026-07-20: a domain filter matching NOTHING
+        # returns mode "domain-empty" — an explicit, self-describing empty.
+        # The old fall-through to a global scan handed a typo'd caller the
+        # whole corpus dressed as their domain (the read-side fail-open).
+        domain_scoped = bool(domain) or bool(domain_contains)
+        if not domain_scoped:
+            scope_mode = "all"
+        elif search_dirs:
+            scope_mode = "domain"
+        else:
+            scope_mode = "domain-empty"
+        domain_query = ",".join(sorted(query_labels)) if domain else None
+
+        # Pre-compute query terms once for use inside the loop. Every
+        # non-empty term filters — the old >=3-char floor silently DROPPED
+        # short terms ("P1", "v4"), and a query whose terms all dropped
+        # degraded to an unfiltered scan while the caller believed it
+        # filtered (R3, live-reproduced 2026-07-20). Substring scan at this
+        # corpus size is free; honesty is not optional.
         query_terms: list[str] = []
         if query:
-            query_terms = [t.lower() for t in query.split() if len(t) >= 3]
+            query_terms = [t.lower() for t in query.split() if t]
 
         for domain_dir in search_dirs:
             for jsonl_file in domain_dir.glob("*.jsonl"):
@@ -1627,6 +1680,9 @@ class ExperientialMemory:
                                     )
                             insights.append(insight)
                         except json.JSONDecodeError:
+                            # Counted, not silent: a corrupt row must show up
+                            # in partial_reasons, not vanish from the read.
+                            corrupt_lines += 1
                             continue
 
         # Sort by the requested order.
@@ -1651,13 +1707,50 @@ class ExperientialMemory:
         # load_entries fold supersession identically, in ONE place.
         insights = finalize_read(insights, self.root, exclude_superseded=exclude_superseded)
 
-        insights = insights[:limit]
+        # Capture total AFTER finalize_read, BEFORE slicing — the same rule
+        # get_open_threads already follows for with_total. The function knows
+        # how much matched; throwing that away before the caller can see it
+        # is the silent 5-of-321 (R1).
+        total_matched = len(insights)
+        insights = insights[offset : offset + limit]
         # Strip internal annotation keys before returning.
         for insight in insights:
             insight.pop("_match_count", None)
         if with_ids:
             insights = provenance.annotate_claim_ids(insights)
-        return insights
+
+        if not envelope:
+            return insights
+
+        # Schema v1 (canonical, fable (2/3) 2026-07-20): 8 required top-level
+        # fields, closed partial_reasons vocabulary, 8 invariants — each
+        # reason is a tagged string from the closed set, built so invariant 5
+        # (empty IFF complete AND exact AND lossless) holds by construction.
+        returned = len(insights)
+        truncated = total_matched > offset + returned
+        if truncated:
+            partial_reasons.append(f"truncated:{total_matched}")
+        if scope_mode == "domain-empty":
+            partial_reasons.append("domain_no_match")
+        if corrupt_lines:
+            partial_reasons.append(f"corrupt_line_skipped:{corrupt_lines}")
+        # "query_term_ignored" never fires here: every non-empty term is
+        # applied (the <3-char silent drop is deleted, not renamed).
+        return {
+            "items": insights,
+            "returned": returned,
+            "total_matched": total_matched,
+            "offset": offset,
+            "scope": {
+                "mode": scope_mode,
+                "domain_query": domain_query,
+                "domains_searched": len(search_dirs),
+                "domains_total": domains_total,
+            },
+            "truncated": truncated,
+            "partial_reasons": partial_reasons,
+            "continuation": {"offset": offset + returned, "limit": limit} if truncated else None,
+        }
 
     def last_reflection_timestamp(self) -> str | None:
         """

@@ -232,21 +232,23 @@ class TestRecallGoldenNoLedger:
         result = mem.recall_insights(domain="alpha")
         assert result == [recs["alpha_hyp"], recs["alpha_gt"]]
 
-    def test_domain_nonexistent_falls_back_to_full_search(self, fixture_chronicle):
-        """The intentional quirk: a missing domain searches ALL non-dot dirs."""
+    def test_domain_nonexistent_returns_explicit_empty(self, fixture_chronicle):
+        """D1, ruled by Anthony 2026-07-20 — REWRITES the old 'intentional
+        quirk' (a missing domain used to fall back to searching ALL non-dot
+        dirs). That fallback handed a typo'd caller the whole corpus dressed
+        as one domain, with no signal — the read-side fail-open. The new
+        intent, asserted openly: a domain matching no directory returns an
+        explicit empty, and the envelope names it (mode 'domain-empty',
+        partial_reasons ['domain_no_match'])."""
         mem = _memory(fixture_chronicle)
-        recs = fixture_chronicle["recs"]
         result = mem.recall_insights(domain="does-not-exist")
-        expected = [
-            recs["post_reflection"],
-            recs["reflection"],
-            recs["boundary"],
-            recs["compound"],
-            recs["beta_low"],
-            recs["alpha_hyp"],
-            recs["alpha_gt"],
-        ]
-        assert result == expected
+        assert result == []
+        env = mem.recall_insights(domain="does-not-exist", envelope=True)
+        assert env["items"] == []
+        assert env["total_matched"] == 0
+        assert env["scope"]["mode"] == "domain-empty"
+        assert env["scope"]["domains_searched"] == 0
+        assert "domain_no_match" in env["partial_reasons"]
 
     def test_domain_contains(self, fixture_chronicle):
         mem = _memory(fixture_chronicle)
