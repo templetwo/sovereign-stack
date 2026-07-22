@@ -14,9 +14,12 @@ Classification is FAIL-CLOSED three ways:
     classifies it into BASE_TOOLS. New capability never silently lands in
     the remote seat's base tier.
 
-Both sets were frozen from the live 94-tool registry (v1.11.0, 2026-07-04).
-When the native registry grows, the new tool trips the unknown→step-up path
-on first remote use, which is the signal to classify it here.
+Both sets are maintained to the live native registry (97 tools, v1.14.0) — the
+table was first frozen from the 94-tool registry (v1.11.0, 2026-07-04) and has
+since been kept current as tools were added (record_catch / the_ground, then the
+call-first heartbeat boot tool). The classification is current; only prose lags.
+When the native registry grows, the new tool trips the unknown→step-up path on
+first remote use, which is the signal to classify it here.
 
 Spec-category mapping (ratified 2026-07-04 build spec, item 6):
   policy mutation      → set_policy
@@ -157,6 +160,11 @@ BASE_TOOLS: frozenset[str] = frozenset(
         # control/protected-drawer shape — same classification as record_insight.
         "the_ground",
         "record_catch",
+        # Heartbeat — the call-first boot tool. Read-only liveness + grounding +
+        # routing, no side effects, no credentials. It is the SAFE first call on
+        # the connector and MUST stay callable untapped, so it is base tier
+        # (never destructive).
+        "heartbeat",
     }
 )
 
@@ -165,6 +173,25 @@ assert not (DESTRUCTIVE_TOOLS & BASE_TOOLS), "tier sets overlap"
 
 TIER_BASE = "base"
 TIER_STEP_UP = "step_up"
+
+# Per-tool human-readable WHY a step-up tap is required, folded into the refusal
+# 'detail' so a remote seat (and the human it relays to) understands the tap is
+# protecting something specific, not bureaucratic friction. Absent tools fall
+# back to the generic Door messaging in the refusal.
+STEP_UP_REASONS: dict[str, str] = {
+    "where_did_i_leave_off": (
+        "This door CONSUMES the unconsumed handoffs addressed to whoever boots "
+        "next at HQ, so it needs Anthony's tap — a remote seat must not silently "
+        "eat handoffs meant for the next boot. For an ordinary arrival use "
+        "arrive_lineage (the calm door) or arrive (the foyer), which read without "
+        "consuming."
+    ),
+}
+
+
+def step_up_reason(tool_name: str) -> str | None:
+    """The human-readable reason this tool taps, if one is registered."""
+    return STEP_UP_REASONS.get(tool_name)
 
 
 def classify(tool_name: str) -> str:

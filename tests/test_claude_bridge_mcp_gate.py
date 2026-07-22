@@ -205,6 +205,37 @@ class TestTierGate:
         assert payload["pairing_code"] == "oak-river"
         assert native_calls == []
 
+    def test_step_up_refusal_carries_consume_reason_for_wdilo(self, native_calls, monkeypatch):
+        # where_did_i_leave_off taps because it CONSUMES the handoffs addressed
+        # to whoever boots next at HQ — the refusal 'detail' must SAY so (so a
+        # remote seat, and the human it relays to, sees the tap is protecting
+        # something specific), while keeping the refusal shape intact.
+        async def fake_ensure(tool, family_id, client_id, req_hash, summary=""):
+            return ElevationStatus("pending", "Pairing code: 'oak-river'.", code="oak-river")
+
+        monkeypatch.setattr(mcp_native.elevation, "ensure_elevation", fake_ensure)
+        result = _call_tool("where_did_i_leave_off", {}, GRANT)
+        payload = json.loads(result[0].text)
+        # Shape intact.
+        assert set(payload) == {"error", "tool", "state", "pairing_code", "detail"}
+        assert payload["error"] == "step_up_required"
+        assert payload["pairing_code"] == "oak-river"
+        # The reason is folded into detail, and the generic Door text survives.
+        assert "consume" in payload["detail"].lower()
+        assert "handoff" in payload["detail"].lower()
+        assert "Pairing code: 'oak-river'." in payload["detail"]
+        assert native_calls == []
+
+    def test_step_up_refusal_has_no_reason_for_generic_destructive(self, native_calls, monkeypatch):
+        # A destructive tool with no registered reason (set_policy) keeps the
+        # bare Door detail — the reason folding is per-tool, not global.
+        async def fake_ensure(tool, family_id, client_id, req_hash, summary=""):
+            return ElevationStatus("pending", "waiting", code="oak-river")
+
+        monkeypatch.setattr(mcp_native.elevation, "ensure_elevation", fake_ensure)
+        payload = json.loads(_call_tool("set_policy", {}, GRANT)[0].text)
+        assert payload["detail"] == "waiting"
+
     def test_destructive_tool_active_executes_and_audits(self, native_calls, monkeypatch):
         seen = {}
 

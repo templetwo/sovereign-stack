@@ -945,6 +945,8 @@ def render_foyer(state: ArrivalState) -> str:
         "        marginalia, all threads — handoffs are consumed there, not here) ·",
         "        arrive_delta() for just what changed · my_toolkit() for tools.",
         "  First time here? start_here() gives the 5-minute orientation.",
+        "  The deeper doors: arrive_lineage() (calm) · where_did_i_leave_off() "
+        "(full, tap-gated on the claude.ai connector).",
         "",
         "  ⟁ Bootstrap context, not ground truth. Verify before you declare.",
     ]

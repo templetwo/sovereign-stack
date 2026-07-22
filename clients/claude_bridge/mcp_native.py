@@ -118,13 +118,21 @@ async def claude_call_tool(name: str, arguments: dict):
             # Structured refusal instead of an exception: the calling model
             # reads this, relays the pairing code to the human, and re-calls
             # the tool after approval. An MCP client cannot block on a human.
+            # Fold in the per-tool WHY (e.g. where_did_i_leave_off taps because
+            # it CONSUMES handoffs meant for whoever boots next at HQ) ahead of
+            # the generic Door messaging, keeping the {error, tool, state,
+            # pairing_code, detail} shape intact.
+            detail = status.detail
+            reason = tiers.step_up_reason(name)
+            if reason:
+                detail = f"{reason} {detail}"
             return _err(
                 {
                     "error": "step_up_required",
                     "tool": name,
                     "state": status.state,
                     "pairing_code": status.code,
-                    "detail": status.detail,
+                    "detail": detail,
                 }
             )
         # Consume the single-use elevation as we execute (per-use, not
