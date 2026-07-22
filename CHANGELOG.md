@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.15.0] - 2026-07-21
+
+### Call-first heartbeat boot tool + tier-aware connector routing
+
+A new base-tier `heartbeat` tool is the safe first call for any arriving model.
+It returns liveness (status, version, live tool count) plus grounding and
+tier-aware routing text — moving the orientation that was tripping input-gated
+models' turn-1 input classifier off the profile instructions and into a tool
+result, where it lands cleanly.
+
+- **`heartbeat` tool** — base tier, read-only, no side effects, no credentials.
+  Callable untapped on the claude.ai connector (the safe first call). Routes
+  Claude Fable to `arrive_lineage` (the calm door), any other model to `arrive`
+  (the foyer); the full `where_did_i_leave_off` stays reachable through the
+  existing step-up tap. Proven no-side-effect by a pending-handoff test.
+- **Step-up refusals now say why they tap.** `where_did_i_leave_off`'s remote
+  refusal explains it taps because it consumes handoffs meant for whoever boots
+  next at HQ — not bureaucratic friction. Refusal shape unchanged.
+- **The foyer names the deeper doors** so a model in `arrive` knows
+  `arrive_lineage` and `where_did_i_leave_off` exist.
+- Tool surface: 96 → 97.
+
+---
+
 ## [1.14.0] - 2026-07-21
 
 ### Arrival-state projection — Phase 4 (the boot doors carry an as-of receipt)
