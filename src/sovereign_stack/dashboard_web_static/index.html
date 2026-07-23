@@ -1,67 +1,96 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="Cache-Control" content="no-store">
-<title>Sovereign Stack — Dashboard</title>
+<meta name="color-scheme" content="dark light">
+<title>Sovereign Stack — Operations Console</title>
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-<header class="topbar">
-  <div class="brand">
-    <span class="brand-mark" aria-hidden="true">†⟡†</span>
-    <h1>Sovereign Stack</h1>
+<div class="app">
+
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">†⟡†</span>
+      <div class="brand-text">
+        <h1>Sovereign Stack</h1>
+        <p class="brand-sub">Operations Console</p>
+      </div>
+    </div>
+
+    <div class="heartbeat">
+      <div class="hb-status" id="hb-status" role="status" aria-live="polite">
+        <span class="hb-dot" id="overall-dot"></span>
+        <span class="hb-status-text" id="overall-text">connecting…</span>
+      </div>
+      <div class="hb-stats">
+        <div class="stat">
+          <span class="stat-label">Services</span>
+          <span class="stat-value is-muted" id="stat-services">—</span>
+        </div>
+        <div class="stat">
+          <span class="stat-label">Version</span>
+          <span class="stat-value is-muted" id="stat-version">—</span>
+        </div>
+        <div class="stat">
+          <span class="stat-label">Tools</span>
+          <span class="stat-value is-muted" id="stat-tools">—</span>
+        </div>
+        <div class="stat">
+          <span class="stat-label">Updated</span>
+          <span class="stat-value is-muted" id="stat-updated">—</span>
+        </div>
+      </div>
+      <button class="theme-toggle" id="theme-toggle" type="button"
+              aria-label="Toggle light and dark theme" title="Toggle theme">◐</button>
+    </div>
+  </header>
+
+  <div class="alert-region" id="alert-region" role="alert" hidden>
+    <span class="alert-icon" aria-hidden="true">⚠</span>
+    <span class="alert-body" id="alert-body"></span>
   </div>
-  <div class="status-line" id="status-line">
-    <span class="dot dot-unknown" id="overall-dot"></span>
-    <span class="status-text" id="overall-text">connecting…</span>
-    <span class="muted" id="updated-at"></span>
-  </div>
-</header>
 
-<main class="grid">
-  <section class="card card-services">
-    <header class="card-head">
-      <h2>Services</h2>
-      <div class="counts" id="counts"></div>
-    </header>
-    <ul class="services" id="services"></ul>
-  </section>
+  <main class="grid">
+    <section class="card card-services" aria-labelledby="h-services">
+      <header class="card-head">
+        <h2 id="h-services">Services</h2>
+        <div class="counts" id="counts"></div>
+      </header>
+      <ul class="services" id="services">
+        <li class="placeholder">Checking endpoints…</li>
+      </ul>
+    </section>
 
-  <section class="card card-indicators">
-    <header class="card-head">
-      <h2>Indicators</h2>
-    </header>
-    <ul class="indicators" id="indicators">
-      <li class="muted">No indicators.</li>
-    </ul>
-  </section>
+    <section class="card card-latest" aria-labelledby="h-latest">
+      <header class="card-head">
+        <h2 id="h-latest">Recent chronicle writes</h2>
+        <span class="head-note">most recent of each type</span>
+      </header>
+      <div class="latest" id="latest">
+        <div class="placeholder">Reading chronicle…</div>
+      </div>
+    </section>
 
-  <section class="card card-feed">
-    <header class="card-head">
-      <h2>Activity</h2>
-      <span class="muted small" id="feed-meta">live</span>
-    </header>
-    <ol class="feed" id="feed">
-      <li class="muted">Watching…</li>
-    </ol>
-  </section>
+    <section class="card card-feed" aria-labelledby="h-feed">
+      <header class="card-head">
+        <h2 id="h-feed">Activity stream</h2>
+        <div class="filters" id="filters"></div>
+      </header>
+      <ol class="feed" id="feed">
+        <li class="placeholder">Connecting to activity watcher…</li>
+      </ol>
+    </section>
+  </main>
 
-  <section class="card card-latest">
-    <header class="card-head">
-      <h2>Latest entries</h2>
-      <span class="muted small">most recent of each type</span>
-    </header>
-    <div class="latest" id="latest"></div>
-  </section>
-</main>
+  <footer class="footer">
+    <span class="foot-item" id="poll-status">initializing…</span>
+    <span class="foot-item foot-right">polling <code>/snapshot.json</code> · vanilla DOM · offline-safe</span>
+  </footer>
 
-<footer class="footer muted small">
-  <span>Polling /snapshot.json every 3s · vanilla DOM · no framework</span>
-  <span id="poll-status">·</span>
-</footer>
-
+</div>
 <script src="/static/app.js"></script>
 </body>
 </html>
