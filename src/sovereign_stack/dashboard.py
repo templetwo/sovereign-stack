@@ -32,6 +32,7 @@ import asyncio
 import contextlib
 import json
 import os
+import re
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -40,6 +41,7 @@ from pathlib import Path
 from typing import Any
 
 from . import connectivity, protected
+from .scribe.redactor import redact as _scribe_redact
 
 # ── Defaults / paths ────────────────────────────────────────────────────────
 
@@ -67,6 +69,226 @@ def _halts_dir() -> Path:
 
 def _decisions_dir() -> Path:
     return _sovereign_root() / "decisions"
+
+
+# ── Service telemetry (v4 ops-console, BUILD_SPEC.md §1b/§4) ───────────────
+#
+# Per-service log tail + uptime helpers backing the `service_telemetry`
+# snapshot key that dashboard_web.build_snapshot() assembles. Two hard
+# requirements throughout this section: never full-read a log file (some
+# run 7MB+), and never let a raw line reach a caller before the credential
+# redaction pass below.
+
+
+def service_log_map() -> dict[str, Path]:
+    """
+    Per-service stdout/log path for the 5 connectivity endpoints, keyed by
+    the same `name`s as connectivity.ENDPOINTS. Computed fresh against the
+    live `_sovereign_root()` on every call (not a module-level constant)
+    so SOVEREIGN_ROOT overrides in tests are honored.
+    """
+    root = _sovereign_root()
+    return {
+        "sse": root / "sse.log",
+        "bridge": root / "bridge-api.log",
+        "tunnel": root / "tunnel.log",
+        "dispatcher": root / "dispatcher.log",
+        "listener": root / "comms_listener.log",
+    }
+
+
+# ── Credential redaction for log lines ──────────────────────────────────────
+#
+# Baseline: the scribe's pattern-based redactor (scribe/redactor.py) —
+# Bearer tokens, sk-ant-/sk-/pk-/api- key shapes, private-key blocks,
+# UPPERCASE_ENV=credential assignments, long hex tokens, sensitive paths.
+# Layered on top: shapes specific to THIS server's own logs that the
+# scribe redactor doesn't cover —
+#   * a lowercase `?token=` query parameter. Native /sse accepts the
+#     bearer this way (sse_server.py); a raw uvicorn access-log line can
+#     carry a live token that the scribe's uppercase-only env_credential
+#     pattern does not match.
+#   * a bare `Authorization:` header value regardless of scheme (the
+#     scribe pattern only fires on the literal word "Bearer").
+#   * a bare, unlabeled `Bearer <token>` of ANY length. The scribe's own
+#     bearer_token pattern requires >=20 chars (`{20,}`) and a narrow
+#     charset (`[A-Za-z0-9_\-\.]`), so it fail-opens on two real shapes:
+#     a short token (`Bearer sk-test123`, no "Authorization:" label) and
+#     a base64-shaped token containing `+`, `/`, or `=` — the scribe
+#     pattern stops at the first such char, masking only a PREFIX of the
+#     token and leaving the rest exposed. This pattern is length-agnostic
+#     and case-insensitive, and its charset covers base64/JWT-safe chars
+#     so the entire token is masked, never a partial match.
+#   * a length-agnostic sk-/pk-/api-/xai- API-key shape. The scribe's own
+#     sk-ant-/sk-/pk-/api- patterns require >=20 chars (and it lacks xai-
+#     entirely), so short/test/rotated keys fail-open. This closes the
+#     whole prefix class regardless of length. Charset is base64url
+#     ([A-Za-z0-9_-], no +/=), matching real sk/pk/api/xai key encoding,
+#     so a single post-scribe pass has no partial-tail leak.
+_RE_TOKEN_PARAM = re.compile(r"(?i)\btoken=[^\s&\"'<>]+")
+_RE_AUTH_HEADER = re.compile(
+    r'(?i)authorization["\']?\s*[:=]\s*["\']?[^\s,"\'}]+(?:\s+[^\s,"\'}]+)?'
+)
+_RE_BARE_BEARER = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9\-_.+/=]+")
+_RE_KEY_PREFIX = re.compile(r"(?i)\b(?:sk|pk|api|xai)-[A-Za-z0-9_\-]+")
+
+
+def redact_log_line(line: str) -> str:
+    """
+    Mandatory credential-redaction pass for one log line, applied BEFORE
+    the line can enter a snapshot or a TAIL response (BUILD_SPEC.md §1b,
+    §2c). See module-level comment above for the pattern set.
+    """
+    if not line:
+        return line
+    # _RE_BARE_BEARER MUST run first, on the raw line, before _scribe_redact.
+    # Scribe's own bearer_token pattern (>=20 chars, narrower charset) fires
+    # on any token that clears its 20-char floor and stops at the first
+    # char outside [A-Za-z0-9_-.] (e.g. a base64 `+`/`/`/`=`), replacing
+    # only the truncated PREFIX and leaving the tail (e.g. "+b/c=") in the
+    # text — a partial match this function must never report as safe. By
+    # then, the tail sits right after "<redacted-token>" where this
+    # broader-charset pattern can no longer see the original "Bearer " to
+    # anchor on. Running first on the untouched line lets the full-width
+    # charset claim the ENTIRE token before scribe's narrower one ever
+    # gets a chance to truncate it.
+    text = _RE_BARE_BEARER.sub("Bearer <redacted-token>", line)
+    text = _scribe_redact(text).text
+    text = _RE_AUTH_HEADER.sub("authorization: <redacted>", text)
+    text = _RE_TOKEN_PARAM.sub("token=<redacted>", text)
+    return _RE_KEY_PREFIX.sub("<redacted-key>", text)
+
+
+# ── Seek-tail (never full-read) ─────────────────────────────────────────────
+
+
+def seek_tail_lines(
+    path: Path,
+    *,
+    want_lines: int,
+    initial_chunk: int = 8192,
+    max_chunk: int = 2_000_000,
+) -> tuple[list[str], bool]:
+    """
+    Return the last `want_lines` non-empty lines of `path` without reading
+    the whole file, plus a `truncated` flag (True whenever content before
+    the returned window still exists on disk — the common case for any
+    log bigger than the window).
+
+    Starts with an `initial_chunk`-byte read from EOF (seek(-initial_chunk,
+    SEEK_END) equivalent); if that doesn't contain enough newlines and more
+    of the file remains, grows the window (x4) up to `max_chunk` — a safety
+    ceiling well below the 7MB+ size some of these logs reach, so a caller
+    asking for the full 500-line TAIL clamp still gets a real seek-tail,
+    never a full read.
+
+    Missing file, 0-byte file, or any OSError -> ([], False).
+    """
+    try:
+        if not path.exists() or not path.is_file():
+            return [], False
+        size = path.stat().st_size
+    except OSError:
+        return [], False
+    if size == 0:
+        return [], False
+
+    chunk = initial_chunk
+    seek_from = 0
+    data = b""
+    try:
+        with path.open("rb") as f:
+            while True:
+                seek_from = max(0, size - chunk)
+                f.seek(seek_from)
+                data = f.read()
+                if data.count(b"\n") >= want_lines or seek_from == 0 or chunk >= max_chunk:
+                    break
+                chunk = min(chunk * 4, max_chunk)
+    except OSError:
+        return [], False
+
+    text = data.decode("utf-8", errors="replace")
+    all_lines = [ln for ln in text.splitlines() if ln.strip()]
+    tail = all_lines[-want_lines:] if want_lines > 0 else []
+    truncated = seek_from > 0 or len(all_lines) > want_lines
+    return tail, truncated
+
+
+def recent_log_lines(path: Path, *, n: int = 3) -> list[str]:
+    """
+    Seek-tail the last `n` non-empty, credential-redacted lines of a
+    service log for the `service_telemetry` snapshot field. 0-byte or
+    missing file -> []. Never full-reads.
+    """
+    lines, _truncated = seek_tail_lines(path, want_lines=n)
+    return [redact_log_line(ln) for ln in lines]
+
+
+# ── Process uptime ───────────────────────────────────────────────────────────
+
+
+def _parse_ps_etime(raw: str) -> float | None:
+    """
+    Parse `ps -o etime=` output — format `[[dd-]hh:]mm:ss` — into elapsed
+    seconds. `etime` (not `etimes`) is deliberate: BSD/macOS `ps` has no
+    `etimes` keyword at all (verified live on this machine — `ps: etimes:
+    keyword not found`, exit 1, which would have made this helper silently
+    return None for every service, always, on Darwin). `etime` in this
+    bracketed form is what both BSD ps (macOS) and GNU ps (Linux) actually
+    support, so parsing it here is also more portable than the
+    integer-seconds `etimes` the spec named.
+    """
+    raw = raw.strip()
+    if not raw:
+        return None
+    days = 0
+    if "-" in raw:
+        day_part, rest = raw.split("-", 1)
+        try:
+            days = int(day_part)
+        except ValueError:
+            return None
+    else:
+        rest = raw
+    parts = rest.split(":")
+    try:
+        nums = [int(p) for p in parts]
+    except ValueError:
+        return None
+    if len(nums) == 2:
+        hh, mm, ss = 0, nums[0], nums[1]
+    elif len(nums) == 3:
+        hh, mm, ss = nums
+    else:
+        return None
+    return float(days * 86400 + hh * 3600 + mm * 60 + ss)
+
+
+def current_uptime_seconds(pid: int | None) -> float | None:
+    """
+    Elapsed process uptime in seconds via `ps -o etime= -p <pid>`. None
+    when there is no live pid (e.g. a periodic service between ticks, or
+    an always-on service that's down) or when `ps` can't find it (already
+    exited between the launchctl read and this call).
+    """
+    if not pid:
+        return None
+    import subprocess
+
+    try:
+        proc = subprocess.run(
+            ["ps", "-o", "etime=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            timeout=3.0,
+            check=False,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return None
+    if proc.returncode != 0:
+        return None
+    return _parse_ps_etime(proc.stdout)
 
 
 # ── Activity feed ───────────────────────────────────────────────────────────
@@ -607,6 +829,12 @@ def collect_latest_entries(sovereign_root: Path) -> dict[str, dict | None]:
     if honks:
         h = honks[0]
         out["honk"] = {
+            # Additive (BUILD_SPEC.md scope-C shape unchanged otherwise):
+            # the id NapeDaemon.ack() targets (see nape_daemon.py `ack`),
+            # so the frontend can actually address this honk in a real
+            # POST /actions/ack instead of falling back to a fail-open
+            # session-global local hide.
+            "honk_id": h.get("honk_id"),
             "timestamp": h.get("timestamp"),
             "level": h.get("level"),
             "pattern": h.get("pattern"),
@@ -635,6 +863,7 @@ def collect_state(
     *,
     sovereign_root: Path | None = None,
     connectivity_check: Any | None = None,
+    restart_counts: dict[str, int | None] | None = None,
 ) -> DashboardState:
     """
     Build a one-shot snapshot of the stack state. Pure-data — no
@@ -646,10 +875,18 @@ def collect_state(
         bridge_stats: Pre-fetched bridge stats; if None, defaults are used.
         sovereign_root: Override for the data root (tests use this).
         connectivity_check: Override for connectivity check (tests inject).
+        restart_counts: Out-param dict forwarded to connectivity.check_all()
+            when `connectivity_check` is None — see check_status's docstring.
+            Ignored (left as the caller passed it, unfilled) when a custom
+            connectivity_check override is supplied, since that override
+            doesn't know about the out-param protocol.
     """
     root = sovereign_root or _sovereign_root()
 
-    statuses = connectivity.check_all() if connectivity_check is None else connectivity_check()
+    if connectivity_check is None:
+        statuses = connectivity.check_all(restart_counts=restart_counts)
+    else:
+        statuses = connectivity_check()
 
     summary = connectivity.aggregate(statuses)
 

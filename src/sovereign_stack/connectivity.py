@@ -215,12 +215,19 @@ def _launchctl_print_text(label: str) -> str | None:
 _RE_STATE = re.compile(r"^\s*state\s*=\s*(\S+)", re.MULTILINE)
 _RE_PID = re.compile(r"^\s*pid\s*=\s*(\d+)", re.MULTILINE)
 _RE_LAST_EXIT = re.compile(r"^\s*last exit code\s*=\s*(-?\d+)", re.MULTILINE)
+# `runs = N` — launchd's count of times this label has been spawned since
+# its last bootstrap (bootout/bootstrap resets it to 1). Source for
+# service_telemetry.restart_count (BUILD_SPEC.md §1b/§4). NEVER surface the
+# raw `launchctl print` block itself — its `environment = {…}` section
+# carries BRIDGE_TOKEN / GROK_BRIDGE_TOKEN / CLAUDE_AUTHORIZE_SECRET in
+# cleartext; only this parsed integer may leave this module.
+_RE_RUNS = re.compile(r"^\s*runs\s*=\s*(\d+)", re.MULTILINE)
 
 
 def parse_launchctl_print(text: str) -> dict:
     """
     Parse the relevant fields from `launchctl print` output. Returns a
-    dict with keys: state, pid, last_exit_code (each Optional).
+    dict with keys: state, pid, last_exit_code, runs (each Optional).
 
     Parsing is line-anchored regex against the documented field names —
     forgiving of extra fields, robust to ordering changes.
@@ -246,7 +253,15 @@ def parse_launchctl_print(text: str) -> dict:
         except ValueError:
             last_exit = None
 
-    return {"state": state, "pid": pid, "last_exit_code": last_exit}
+    runs = None
+    m = _RE_RUNS.search(text)
+    if m:
+        try:
+            runs = int(m.group(1))
+        except ValueError:
+            runs = None
+
+    return {"state": state, "pid": pid, "last_exit_code": last_exit, "runs": runs}
 
 
 # ── Per-endpoint status check ───────────────────────────────────────────────
@@ -263,6 +278,7 @@ def check_status(
     endpoint: Endpoint,
     *,
     now: float | None = None,
+    restart_counts: dict[str, int | None] | None = None,
 ) -> EndpointStatus:
     """
     Return the current status of one endpoint.
@@ -278,6 +294,17 @@ def check_status(
          service downgrades to STATUS_DEGRADED. Success on an ALWAYS_ON
          service is authoritative: the service is UP even when launchctl
          can't enumerate it (launchctl detail stays in the report).
+
+    `restart_counts`, if passed, is an out-param dict the caller supplies
+    to collect the parsed `runs` count per endpoint name — deliberately
+    NOT a field on EndpointStatus. EndpointStatus.to_dict() is a plain
+    asdict() consumed by five other callers (server.py, monitor.py,
+    connectivity_cli.py, connectivity_tools.py, dashboard.py); adding a
+    field there changes their output shape too and risks a v1.7.0
+    byte-identity regression. This side-channel reuses the SAME
+    `launchctl print` subprocess call check_status already makes — no
+    new subprocess — and keeps the dataclass untouched. See
+    BUILD_SPEC.md §1b.
     """
     now = now if now is not None else time.time()
     status = EndpointStatus(
@@ -286,6 +313,8 @@ def check_status(
         kind=endpoint.kind,
         status=STATUS_UNKNOWN,
     )
+    if restart_counts is not None:
+        restart_counts.setdefault(endpoint.name, None)
 
     # ── launchctl probe ──
     launchctl_text = None
@@ -300,6 +329,11 @@ def check_status(
         status.launchctl_state = parsed["state"]
         status.pid = parsed["pid"]
         status.last_exit_code = parsed["last_exit_code"]
+        if restart_counts is not None:
+            # Extract ONLY the parsed integer — launchctl_text (which may
+            # hold cleartext tokens in its `environment` block) never
+            # leaves this function.
+            restart_counts[endpoint.name] = parsed["runs"]
 
     # Decide by kind.
     if endpoint.kind == KIND_ALWAYS_ON:
@@ -379,9 +413,40 @@ def check_status(
     return status
 
 
-def check_all(*, now: float | None = None) -> list[EndpointStatus]:
-    """Check every endpoint in the registry. Order matches ENDPOINTS."""
-    return [check_status(e, now=now) for e in ENDPOINTS]
+def check_all(
+    *,
+    now: float | None = None,
+    restart_counts: dict[str, int | None] | None = None,
+) -> list[EndpointStatus]:
+    """Check every endpoint in the registry. Order matches ENDPOINTS.
+    `restart_counts` forwards to check_status — see its docstring."""
+    return [check_status(e, now=now, restart_counts=restart_counts) for e in ENDPOINTS]
+
+
+def probe_latency_ms(endpoint: Endpoint, *, timeout: float = 2.0) -> float | None:
+    """
+    Time the HTTP health-probe for `endpoint`, in milliseconds. Wraps the
+    same `_http_probe` primitive `check_status` uses in `time.perf_counter`.
+
+    Returns None when the endpoint has no `health_url` — tunnel, dispatcher,
+    and listener have no HTTP surface, so there is honestly nothing to time
+    (BUILD_SPEC.md §1b). Timed regardless of probe success/failure — a slow
+    failure is still informative latency, and p95 should reflect it.
+
+    Deliberately standalone rather than folded into check_status: check_status
+    also shells `launchctl print` per endpoint (5 subprocesses), which is fine
+    at snapshot-build cadence but too heavy to run every ~2s just to sample
+    latency for the 2 endpoints that have a health_url. This function reuses
+    the same `_http_probe` call check_status makes — same latency semantics —
+    without the launchctl cost. Intended caller: the dashboard-web watcher's
+    ~2s loop, decoupling the p95 series from client poll rate (see
+    dashboard_web._watcher_loop).
+    """
+    if not endpoint.health_url:
+        return None
+    start = time.perf_counter()
+    _http_probe(endpoint.health_url, timeout=timeout)
+    return (time.perf_counter() - start) * 1000.0
 
 
 # ── Action helpers ──────────────────────────────────────────────────────────
