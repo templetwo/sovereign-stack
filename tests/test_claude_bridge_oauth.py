@@ -1,10 +1,20 @@
 """
 Claude-bridge OAuth 2.1 tests — the security core of the connector.
 
-Covers the four hardening deltas over the openai template, each of which is a
-ratified spec item: mandatory PKCE S256 (both ends), RFC 8707 audience binding
-(authorize, token, and resource-gate enforcement), refresh rotation with
-reuse-detection family revocation, and pinned redirect URIs.
+Covers the four hardening deltas over the openai template that are UNCHANGED
+by the 2026-07 phone-tap swap (mandatory PKCE S256, RFC 8707 audience
+binding, refresh rotation with reuse-detection family revocation, pinned
+redirect URIs), plus the swap itself: the operator passphrase
+(`CLAUDE_AUTHORIZE_SECRET`) and the GET->POST consent nonce are RETIRED. The
+resource-owner control is now an ntfy phone-tap delegated to the bridge over
+loopback — `GET /authorize` asks the bridge to create a pending approval and
+push Anthony's phone; `POST /authorize` mints a code only when (a) the
+submitted params bind (sha256, constant-time) to what the GET created and
+(b) the bridge's atomic approved->consumed confirm returns
+`{approved: true}`. The bridge itself is never real here — every test in
+this file mocks `claude_bridge.oauth._bridge_approval_{request,status,
+confirm}` (the handler-level seam) or, for the low-level network-path
+tests, `httpx.AsyncClient` via `httpx.MockTransport` (no real network).
 
 House style per tests/test_sse_gate.py: raw ASGI scopes, asyncio.run with
 captured send lists, module-constant monkeypatching, no network, no TestClient.
@@ -14,6 +24,7 @@ import asyncio
 import base64
 import hashlib
 import json
+import re
 import secrets
 
 # clients/ is placed on sys.path by sovereign_stack.sse_server at import; do it
@@ -23,6 +34,7 @@ import urllib.parse
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import httpx
 import pytest
 
 _CLIENTS = Path(__file__).parent.parent / "clients"
@@ -34,14 +46,17 @@ from claude_bridge import oauth  # noqa: E402
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 
-def _scope(method="GET", path="/claude/oauth/authorize", query="", headers=None):
-    return {
+def _scope(method="GET", path="/claude/oauth/authorize", query="", headers=None, client=None):
+    scope = {
         "type": "http",
         "method": method,
         "path": path,
         "query_string": query.encode(),
         "headers": headers or [],
     }
+    if client is not None:
+        scope["client"] = client
+    return scope
 
 
 def _run(handler, scope, body=b""):
@@ -85,29 +100,48 @@ def _pkce_pair():
 
 
 CALLBACK = "https://claude.ai/api/mcp/auth_callback"
-
-
-APPROVAL_SECRET = "operator-passphrase-under-test"
+CALLBACK_COM = "https://claude.com/api/mcp/auth_callback"
 
 
 @pytest.fixture
 def oauth_env(tmp_path, monkeypatch):
-    """Hermetic storage + a registered client + configured approval secret.
-    Returns the client_id."""
+    """Hermetic storage + a registered client + a phone-tap bridge stub that
+    approves by default (so the token/refresh/revoke suites, which only need
+    a code minted and don't exercise the gate itself, keep working exactly
+    as before). Gate-specific tests override the stubs per-case. Returns the
+    client_id."""
     codes = tmp_path / "codes"
     tokens = tmp_path / "tokens"
     refresh = tmp_path / "refresh"
-    for d in (codes, tokens, refresh):
+    approvals = tmp_path / "approvals"
+    for d in (codes, tokens, refresh, approvals):
         d.mkdir()
     monkeypatch.setattr(oauth, "_CODES_DIR", codes)
     monkeypatch.setattr(oauth, "_TOKENS_DIR", tokens)
     monkeypatch.setattr(oauth, "_REFRESH_DIR", refresh)
+    monkeypatch.setattr(oauth, "_APPROVALS_DIR", approvals)
     monkeypatch.setattr(oauth, "_CLIENTS_FILE", tmp_path / "oauth_clients.json")
-    # Resource-owner auth: configure the operator secret + nonce key, and clear
-    # the process-global consumed-nonce set so tests don't leak into each other.
-    monkeypatch.setattr(oauth, "CLAUDE_AUTHORIZE_SECRET", APPROVAL_SECRET)
-    monkeypatch.setattr(oauth, "_NONCE_SIGNING_KEY", APPROVAL_SECRET)
-    oauth._used_nonces.clear()
+    monkeypatch.setattr(oauth, "_BRIDGE_TOKEN", "test-bridge-token")
+
+    async def _approve_request(
+        *, summary, client_id, redirect_uri, audience, code, requester_ip=""
+    ):
+        return {
+            "approval_id": "aid-" + secrets.token_urlsafe(12),
+            "code": code,
+            "notification_sent": True,
+        }
+
+    async def _approve_confirm(aid):
+        return {"approved": True}
+
+    async def _approve_status(aid):
+        return {"status": "approved"}
+
+    monkeypatch.setattr(oauth, "_bridge_approval_request", _approve_request)
+    monkeypatch.setattr(oauth, "_bridge_approval_confirm", _approve_confirm)
+    monkeypatch.setattr(oauth, "_bridge_approval_status", _approve_status)
+
     client_id = "claude-test-client"
     oauth._save_clients(
         {
@@ -123,29 +157,68 @@ def oauth_env(tmp_path, monkeypatch):
     return client_id
 
 
-def _approve_form(
-    client_id, challenge, resource="", scope_str="", secret=APPROVAL_SECRET, nonce=None
-):
+def _get_authorize(client_id, challenge="", method="S256", resource="", scope_str="", state=""):
+    params = {
+        "response_type": "code",
+        "client_id": client_id,
+        "redirect_uri": CALLBACK,
+    }
+    if challenge:
+        params["code_challenge"] = challenge
+        params["code_challenge_method"] = method
+    if resource:
+        params["resource"] = resource
+    if scope_str:
+        params["scope"] = scope_str
+    if state:
+        params["state"] = state
+    return _run(oauth.handle_authorize, _scope(query=urllib.parse.urlencode(params)))
+
+
+_AID_RE = re.compile(rb'name="approval_id" value="([^"]*)"')
+
+
+def _extract_aid(html: bytes) -> str:
+    m = _AID_RE.search(html)
+    assert m, html
+    return m.group(1).decode()
+
+
+def _complete_form(aid, client_id, challenge, resource="", scope_str="", state="st4te"):
     form = {
         "action": "approve",
+        "approval_id": aid,
         "client_id": client_id,
         "redirect_uri": CALLBACK,
         "code_challenge": challenge,
         "code_challenge_method": "S256",
-        "state": "st4te",
+        "state": state,
         "scope": scope_str,
-        "approval_secret": secret,
-        "nonce": nonce if nonce is not None else oauth._mint_nonce(),
     }
     if resource:
         form["resource"] = resource
     return form
 
 
-def _authorize_code(client_id: str, challenge: str, resource: str = "", scope_str: str = "") -> str:
-    """Run the approve POST (with a valid operator secret + fresh nonce) and
-    return the minted code from the redirect."""
-    form = _approve_form(client_id, challenge, resource=resource, scope_str=scope_str)
+def _create_approval(client_id, challenge, resource="", scope_str="", state="st4te") -> str:
+    """Run the GET (phone-tap request, mocked-approved by the fixture's
+    default stub) and return the minted approval_id."""
+    sent = _get_authorize(client_id, challenge, resource=resource, scope_str=scope_str, state=state)
+    assert _status(sent) == 200, _body(sent)
+    return _extract_aid(_body(sent))
+
+
+def _authorize_code(
+    client_id: str, challenge: str, resource: str = "", scope_str: str = "", state: str = "st4te"
+) -> str:
+    """Run the full GET (creates + bridge-approves the approval) then POST
+    (bridge-confirms) and return the minted code from the redirect."""
+    aid = _create_approval(
+        client_id, challenge, resource=resource, scope_str=scope_str, state=state
+    )
+    form = _complete_form(
+        aid, client_id, challenge, resource=resource, scope_str=scope_str, state=state
+    )
     sent = _run(oauth.handle_authorize, _scope(method="POST"), body=_form(form))
     assert _status(sent) == 302, _body(sent)
     location = _headers(sent)[b"location"].decode()
@@ -292,51 +365,133 @@ class TestDCR:
 
 
 class TestAuthorizeGet:
-    def _get(self, client_id, challenge="", method="S256", resource=""):
-        params = {
-            "response_type": "code",
-            "client_id": client_id,
-            "redirect_uri": CALLBACK,
-        }
-        if challenge:
-            params["code_challenge"] = challenge
-            params["code_challenge_method"] = method
-        if resource:
-            params["resource"] = resource
-        return _run(oauth.handle_authorize, _scope(query=urllib.parse.urlencode(params)))
-
     def test_missing_challenge_refused(self, oauth_env):
-        sent = self._get(oauth_env)
+        sent = _get_authorize(oauth_env)
         assert _status(sent) == 400
         assert b"code_challenge required" in _body(sent)
 
     def test_plain_method_refused(self, oauth_env):
         _, challenge = _pkce_pair()
-        sent = self._get(oauth_env, challenge=challenge, method="plain")
+        sent = _get_authorize(oauth_env, challenge=challenge, method="plain")
         assert _status(sent) == 400
         assert b"S256" in _body(sent)
 
-    def test_s256_renders_consent(self, oauth_env):
+    def test_s256_renders_waiting_page(self, oauth_env):
         _, challenge = _pkce_pair()
-        sent = self._get(oauth_env, challenge=challenge)
+        sent = _get_authorize(oauth_env, challenge=challenge)
         assert _status(sent) == 200
-        assert b"Approve Claude connector access" in _body(sent)
+        assert b"Check your phone" in _body(sent)
 
     def test_foreign_resource_refused(self, oauth_env):
         _, challenge = _pkce_pair()
-        sent = self._get(oauth_env, challenge=challenge, resource="https://evil.example/mcp")
+        sent = _get_authorize(oauth_env, challenge=challenge, resource="https://evil.example/mcp")
         assert _status(sent) == 400
         assert b"invalid_target" in _body(sent)
 
     def test_canonical_resource_accepted(self, oauth_env):
         _, challenge = _pkce_pair()
-        sent = self._get(oauth_env, challenge=challenge, resource=oauth.CANONICAL_RESOURCE)
+        sent = _get_authorize(oauth_env, challenge=challenge, resource=oauth.CANONICAL_RESOURCE)
         assert _status(sent) == 200
 
     def test_unknown_client_refused(self, oauth_env):
         _, challenge = _pkce_pair()
-        sent = self._get("claude-nobody", challenge=challenge)
+        sent = _get_authorize("claude-nobody", challenge=challenge)
         assert _status(sent) == 400
+
+    def test_invalid_params_never_reach_the_bridge(self, oauth_env, monkeypatch):
+        # Params are validated BEFORE the bridge is ever contacted — an
+        # invalid request must not cost Anthony a phone push.
+        called = []
+
+        async def _spy(**kwargs):
+            called.append(kwargs)
+            return {"approval_id": "x", "code": "a-b"}
+
+        monkeypatch.setattr(oauth, "_bridge_approval_request", _spy)
+        sent = _get_authorize(oauth_env)  # no challenge -> invalid, 400
+        assert _status(sent) == 400
+        assert called == []
+
+    def _authorize_scope(self, client_id, challenge, headers=None, client=None):
+        params = {
+            "response_type": "code",
+            "client_id": client_id,
+            "redirect_uri": CALLBACK,
+            "code_challenge": challenge,
+            "code_challenge_method": "S256",
+        }
+        return _scope(query=urllib.parse.urlencode(params), headers=headers, client=client)
+
+    def test_requester_ip_forwarded_from_cf_connecting_ip_header(self, oauth_env, monkeypatch):
+        # FIX 3: the bridge's per-IP DoS caps are useless if every caller
+        # collapses to the SSE's loopback address. The header (set by
+        # Cloudflare on tunneled traffic) must win even when the ASGI
+        # scope's own client is the tunnel's loopback hop.
+        seen = {}
+
+        async def _spy(*, requester_ip, **kwargs):
+            seen["requester_ip"] = requester_ip
+            return {"approval_id": "aid-cf", "code": "a-b", "notification_sent": True}
+
+        monkeypatch.setattr(oauth, "_bridge_approval_request", _spy)
+        _, challenge = _pkce_pair()
+        scope = self._authorize_scope(
+            oauth_env,
+            challenge,
+            headers=[(b"cf-connecting-ip", b"203.0.113.7")],
+            client=("127.0.0.1", 54321),
+        )
+        sent = _run(oauth.handle_authorize, scope)
+        assert _status(sent) == 200
+        assert seen["requester_ip"] == "203.0.113.7"
+
+    def test_requester_ip_falls_back_to_asgi_client_without_header(self, oauth_env, monkeypatch):
+        seen = {}
+
+        async def _spy(*, requester_ip, **kwargs):
+            seen["requester_ip"] = requester_ip
+            return {"approval_id": "aid-direct", "code": "a-b", "notification_sent": True}
+
+        monkeypatch.setattr(oauth, "_bridge_approval_request", _spy)
+        _, challenge = _pkce_pair()
+        scope = self._authorize_scope(oauth_env, challenge, client=("198.51.100.9", 443))
+        sent = _run(oauth.handle_authorize, scope)
+        assert _status(sent) == 200
+        assert seen["requester_ip"] == "198.51.100.9"
+
+    def test_requester_ip_empty_when_neither_present(self, oauth_env, monkeypatch):
+        seen = {}
+
+        async def _spy(*, requester_ip, **kwargs):
+            seen["requester_ip"] = requester_ip
+            return {"approval_id": "aid-none", "code": "a-b", "notification_sent": True}
+
+        monkeypatch.setattr(oauth, "_bridge_approval_request", _spy)
+        _, challenge = _pkce_pair()
+        scope = self._authorize_scope(oauth_env, challenge)
+        sent = _run(oauth.handle_authorize, scope)
+        assert _status(sent) == 200
+        assert seen["requester_ip"] == ""
+
+
+class TestRealClientIp:
+    """Unit coverage for `_real_client_ip` (FIX 3) independent of the
+    authorize handler."""
+
+    def test_prefers_cf_connecting_ip_header_over_asgi_client(self):
+        scope = _scope(headers=[(b"cf-connecting-ip", b"203.0.113.7")], client=("127.0.0.1", 1))
+        assert oauth._real_client_ip(scope) == "203.0.113.7"
+
+    def test_falls_back_to_asgi_client_host_without_header(self):
+        scope = _scope(client=("198.51.100.9", 443))
+        assert oauth._real_client_ip(scope) == "198.51.100.9"
+
+    def test_empty_string_when_neither_present(self):
+        assert oauth._real_client_ip(_scope()) == ""
+
+    def test_blank_cf_header_falls_back_to_asgi_client(self):
+        scope = _scope(headers=[(b"cf-connecting-ip", b"")], client=("198.51.100.9", 443))
+        assert oauth._real_client_ip(scope) == "198.51.100.9"
 
 
 class TestAuthorizePost:
@@ -353,15 +508,22 @@ class TestAuthorizePost:
         data = oauth._load_code(code)
         assert data["audience"] == oauth._normalize_resource(oauth.CANONICAL_RESOURCE)
 
-    def test_post_revalidates_pkce(self, oauth_env):
-        # Valid operator secret + nonce, but a missing challenge → PKCE re-check
-        # (400) after the approval gate passes.
-        form = _approve_form(oauth_env, challenge="")
+    def test_post_revalidates_challenge_method_even_after_binding_match(self, oauth_env):
+        # code_challenge_method is NOT part of the binding hash (only the
+        # challenge VALUE is, per build-spec §4) — a tampered method must
+        # still be caught by the POST's defense-in-depth re-validation even
+        # though the binding matches.
+        _, challenge = _pkce_pair()
+        aid = _create_approval(oauth_env, challenge)
+        form = _complete_form(aid, oauth_env, challenge)
+        form["code_challenge_method"] = "plain"
         sent = _run(oauth.handle_authorize, _scope(method="POST"), body=_form(form))
         assert _status(sent) == 400
+        assert b"S256" in _body(sent)
 
     def test_deny_redirects_access_denied(self, oauth_env):
-        # Deny short-circuits before the approval gate — no secret needed to say no.
+        # Deny short-circuits before the approval gate entirely — no aid,
+        # no bridge call, needed to say no.
         form = {"action": "deny", "client_id": oauth_env, "redirect_uri": CALLBACK, "state": "s"}
         sent = _run(oauth.handle_authorize, _scope(method="POST"), body=_form(form))
         assert _status(sent) == 302
@@ -372,79 +534,462 @@ class TestAuthorizePost:
         sent = _run(oauth.handle_authorize, _scope(method="POST"), body=_form(form))
         assert _status(sent) == 400
 
+    def test_deny_never_calls_the_bridge(self, oauth_env, monkeypatch):
+        called = []
 
-class TestResourceOwnerAuth:
-    """The load-bearing control: an anonymous approve POST must never mint a
-    code. Requires the operator secret AND a single-use signed nonce."""
+        async def _spy(aid):
+            called.append(aid)
+            return {"approved": True}
+
+        monkeypatch.setattr(oauth, "_bridge_approval_confirm", _spy)
+        form = {"action": "deny", "client_id": oauth_env, "redirect_uri": CALLBACK, "state": "s"}
+        sent = _run(oauth.handle_authorize, _scope(method="POST"), body=_form(form))
+        assert _status(sent) == 302
+        assert called == []
+
+
+# ── Phone-tap approval: the load-bearing control (2026-07 swap) ───────────────
+
+
+class TestPhoneTapApproval:
+    """No passphrase, no nonce: the ntfy tap, delegated to the bridge over
+    loopback, is the whole gate. approval_id (a bridge-minted capability) +
+    the SSE-side binding check + the bridge's atomic confirm are what stand
+    in the old design's place. Every case here runs against the mocked
+    bridge (no network) — see TestBridgeApprovalCalls for the real network
+    code path."""
 
     _, _CHAL = _pkce_pair()
 
-    def test_get_renders_secret_field(self, oauth_env):
-        params = {
-            "response_type": "code",
-            "client_id": oauth_env,
-            "redirect_uri": CALLBACK,
-            "code_challenge": self._CHAL,
-            "code_challenge_method": "S256",
-        }
-        sent = _run(oauth.handle_authorize, _scope(query=urllib.parse.urlencode(params)))
+    def test_passphrase_and_nonce_symbols_fully_removed(self):
+        for name in (
+            "CLAUDE_AUTHORIZE_SECRET",
+            "_approval_secret_ok",
+            "_mint_nonce",
+            "_nonce_valid",
+            "_consume_nonce",
+            "_used_nonces",
+            "NONCE_TTL_SECONDS",
+            "_NONCE_SIGNING_KEY",
+            "CLAUDE_AUTHORIZE_NONCE_KEY",
+            "approval_enabled",
+        ):
+            assert not hasattr(oauth, name), f"{name} should have been removed"
+
+    def test_get_creates_pending_approval_and_renders_waiting_page(self, oauth_env):
+        sent = _get_authorize(oauth_env, challenge=self._CHAL)
         assert _status(sent) == 200
         body = _body(sent)
-        assert b'name="approval_secret"' in body
-        assert b'name="nonce"' in body
+        assert b"Check your phone" in body
+        assert b'name="approval_id"' in body
+        # no trace of the retired passphrase/nonce UI
+        assert b"approval_secret" not in body
+        assert b'name="nonce"' not in body
+        # the persisted approvals record actually exists, keyed by the aid
+        # the (mocked) bridge minted
+        aid = _extract_aid(body)
+        assert oauth._load_approval(aid) is not None
 
-    def test_missing_secret_refused(self, oauth_env):
-        form = _approve_form(oauth_env, self._CHAL, secret="")
-        sent = _run(oauth.handle_authorize, _scope(method="POST"), body=_form(form))
-        assert _status(sent) == 403
+    def test_get_fails_closed_when_bridge_unreachable(self, oauth_env, monkeypatch):
+        async def _unreachable(**kwargs):
+            return None  # what a connection error / non-2xx collapses to
 
-    def test_wrong_secret_refused(self, oauth_env):
-        form = _approve_form(oauth_env, self._CHAL, secret="not-the-passphrase")
-        sent = _run(oauth.handle_authorize, _scope(method="POST"), body=_form(form))
-        assert _status(sent) == 403
-
-    def test_missing_nonce_refused(self, oauth_env):
-        form = _approve_form(oauth_env, self._CHAL, nonce="")
-        sent = _run(oauth.handle_authorize, _scope(method="POST"), body=_form(form))
-        assert _status(sent) == 403
-
-    def test_forged_nonce_refused(self, oauth_env):
-        form = _approve_form(oauth_env, self._CHAL, nonce="deadbeef.9999999999.forged")
-        sent = _run(oauth.handle_authorize, _scope(method="POST"), body=_form(form))
-        assert _status(sent) == 403
-
-    def test_nonce_is_single_use(self, oauth_env):
-        nonce = oauth._mint_nonce()
-        f1 = _approve_form(oauth_env, self._CHAL, nonce=nonce)
-        assert _status(_run(oauth.handle_authorize, _scope(method="POST"), body=_form(f1))) == 302
-        # Replaying the same nonce (even with the right secret) is refused.
-        f2 = _approve_form(oauth_env, self._CHAL, nonce=nonce)
-        assert _status(_run(oauth.handle_authorize, _scope(method="POST"), body=_form(f2))) == 403
-
-    def test_expired_nonce_refused(self, oauth_env, monkeypatch):
-        monkeypatch.setattr(oauth, "NONCE_TTL_SECONDS", -1)  # already expired at mint
-        form = _approve_form(oauth_env, self._CHAL, nonce=oauth._mint_nonce())
-        sent = _run(oauth.handle_authorize, _scope(method="POST"), body=_form(form))
-        assert _status(sent) == 403
-
-    def test_fail_closed_when_secret_unset_get(self, oauth_env, monkeypatch):
-        monkeypatch.setattr(oauth, "CLAUDE_AUTHORIZE_SECRET", "")
-        params = {
-            "response_type": "code",
-            "client_id": oauth_env,
-            "redirect_uri": CALLBACK,
-            "code_challenge": self._CHAL,
-            "code_challenge_method": "S256",
-        }
-        sent = _run(oauth.handle_authorize, _scope(query=urllib.parse.urlencode(params)))
+        monkeypatch.setattr(oauth, "_bridge_approval_request", _unreachable)
+        sent = _get_authorize(oauth_env, challenge=self._CHAL)
         assert _status(sent) == 503
+        assert not list(oauth._APPROVALS_DIR.glob("*.json"))
 
-    def test_fail_closed_when_secret_unset_post(self, oauth_env, monkeypatch):
-        # A valid-looking approve cannot mint a code if no operator secret exists.
-        form = _approve_form(oauth_env, self._CHAL)
-        monkeypatch.setattr(oauth, "CLAUDE_AUTHORIZE_SECRET", "")
-        sent = _run(oauth.handle_authorize, _scope(method="POST"), body=_form(form))
+    def test_get_fails_closed_when_bridge_response_missing_approval_id(
+        self, oauth_env, monkeypatch
+    ):
+        async def _malformed(**kwargs):
+            return {"code": "a-b"}  # 2xx-shaped but no approval_id
+
+        monkeypatch.setattr(oauth, "_bridge_approval_request", _malformed)
+        sent = _get_authorize(oauth_env, challenge=self._CHAL)
         assert _status(sent) == 503
+        assert not list(oauth._APPROVALS_DIR.glob("*.json"))
+
+    def test_post_missing_approval_id_refused(self, oauth_env):
+        form = _complete_form("", oauth_env, self._CHAL)
+        sent = _run(oauth.handle_authorize, _scope(method="POST"), body=_form(form))
+        assert _status(sent) == 403
+
+    def test_post_unknown_approval_id_refused(self, oauth_env):
+        form = _complete_form("never-issued-aid", oauth_env, self._CHAL)
+        sent = _run(oauth.handle_authorize, _scope(method="POST"), body=_form(form))
+        assert _status(sent) == 403
+
+    def test_post_binding_mismatch_wrong_client_refused(self, oauth_env):
+        aid = _create_approval(oauth_env, self._CHAL)
+        form = _complete_form(aid, "claude-someone-else", self._CHAL)
+        sent = _run(oauth.handle_authorize, _scope(method="POST"), body=_form(form))
+        assert _status(sent) == 403
+        assert b"does not match" in _body(sent)
+
+    def test_post_binding_mismatch_wrong_challenge_refused(self, oauth_env):
+        aid = _create_approval(oauth_env, self._CHAL)
+        _, other_challenge = _pkce_pair()
+        form = _complete_form(aid, oauth_env, other_challenge)
+        sent = _run(oauth.handle_authorize, _scope(method="POST"), body=_form(form))
+        assert _status(sent) == 403
+
+    def test_post_binding_mismatch_wrong_redirect_refused(self, oauth_env):
+        # Both callbacks are independently pinned targets — the binding, not
+        # merely pinning, is what catches the swap.
+        aid = _create_approval(oauth_env, self._CHAL)
+        form = _complete_form(aid, oauth_env, self._CHAL)
+        form["redirect_uri"] = CALLBACK_COM
+        sent = _run(oauth.handle_authorize, _scope(method="POST"), body=_form(form))
+        assert _status(sent) == 403
+
+    def test_post_requires_bridge_approved_true(self, oauth_env, monkeypatch):
+        aid = _create_approval(oauth_env, self._CHAL)
+
+        async def _denied(_aid):
+            return {"approved": False, "reason": "denied"}
+
+        monkeypatch.setattr(oauth, "_bridge_approval_confirm", _denied)
+        form = _complete_form(aid, oauth_env, self._CHAL)
+        sent = _run(oauth.handle_authorize, _scope(method="POST"), body=_form(form))
+        assert _status(sent) == 403
+        assert not list(oauth._CODES_DIR.glob("*.json"))
+        # NOT consumed locally on a refused confirm (deleted only on the
+        # success path) — a legitimate retry (e.g. Anthony taps a moment
+        # later, or the browser resubmits) can still find the record.
+        assert oauth._load_approval(aid) is not None
+
+    def test_post_fails_closed_when_confirm_bridge_unreachable(self, oauth_env, monkeypatch):
+        aid = _create_approval(oauth_env, self._CHAL)
+
+        async def _unreachable(_aid):
+            return None
+
+        monkeypatch.setattr(oauth, "_bridge_approval_confirm", _unreachable)
+        form = _complete_form(aid, oauth_env, self._CHAL)
+        sent = _run(oauth.handle_authorize, _scope(method="POST"), body=_form(form))
+        assert _status(sent) == 403
+        assert not list(oauth._CODES_DIR.glob("*.json"))
+
+    def test_post_fails_closed_when_confirm_returns_unexpected_shape(self, oauth_env, monkeypatch):
+        aid = _create_approval(oauth_env, self._CHAL)
+
+        async def _weird(_aid):
+            return {"approved": "yes"}  # truthy string, not the bool True
+
+        monkeypatch.setattr(oauth, "_bridge_approval_confirm", _weird)
+        form = _complete_form(aid, oauth_env, self._CHAL)
+        sent = _run(oauth.handle_authorize, _scope(method="POST"), body=_form(form))
+        assert _status(sent) == 403
+        assert not list(oauth._CODES_DIR.glob("*.json"))
+
+    def test_post_succeeds_only_after_approved_true_and_consumes_locally(self, oauth_env):
+        aid = _create_approval(oauth_env, self._CHAL)
+        form = _complete_form(aid, oauth_env, self._CHAL)
+        sent = _run(oauth.handle_authorize, _scope(method="POST"), body=_form(form))
+        assert _status(sent) == 302
+        location = _headers(sent)[b"location"].decode()
+        assert "code=" in location
+        # single-use: the local approval record is gone after a successful mint
+        assert oauth._load_approval(aid) is None
+
+    def test_replaying_a_consumed_approval_id_refused(self, oauth_env):
+        aid = _create_approval(oauth_env, self._CHAL)
+        form = _complete_form(aid, oauth_env, self._CHAL)
+        assert _status(_run(oauth.handle_authorize, _scope(method="POST"), body=_form(form))) == 302
+        # replay the identical POST with the now-consumed approval_id
+        sent = _run(oauth.handle_authorize, _scope(method="POST"), body=_form(form))
+        assert _status(sent) == 403
+
+    def test_approval_id_charset_is_not_assumed(self, oauth_env, monkeypatch):
+        # The build-spec never pins the bridge's approval_id charset. The
+        # local record is keyed on sha256(aid), not the raw string, so a
+        # bridge that mints standard base64 (+ / =), a namespaced id
+        # (":"), or anything else still round-trips correctly — a tap that
+        # approved must never come back "unknown approval_id".
+        odd_aid = "ns:req+7/9=="
+
+        async def _request_odd_aid(**kwargs):
+            return {"approval_id": odd_aid, "code": kwargs["code"], "notification_sent": True}
+
+        monkeypatch.setattr(oauth, "_bridge_approval_request", _request_odd_aid)
+        sent = _get_authorize(oauth_env, challenge=self._CHAL)
+        assert _status(sent) == 200
+        assert _extract_aid(_body(sent)) == odd_aid
+        assert oauth._load_approval(odd_aid) is not None
+
+        form = _complete_form(odd_aid, oauth_env, self._CHAL)
+        sent = _run(oauth.handle_authorize, _scope(method="POST"), body=_form(form))
+        assert _status(sent) == 302, _body(sent)
+        assert oauth._load_approval(odd_aid) is None  # consumed
+
+
+class TestAuthorizeStatusEndpoint:
+    """GET /claude/oauth/authorize/status — the waiting page's poll target.
+    Read-only proxy to the bridge; never mints, never flips state."""
+
+    def _poll(self, aid):
+        return _run(
+            oauth.handle_claude_oauth_authorize_status,
+            _scope(method="GET", path="/claude/oauth/authorize/status", query=f"approval_id={aid}"),
+        )
+
+    def test_proxies_bridge_status(self, oauth_env):
+        _, challenge = _pkce_pair()
+        aid = _create_approval(oauth_env, challenge)
+        sent = self._poll(aid)
+        assert _status(sent) == 200
+        assert _json(sent)["status"] == "approved"  # fixture's default stub
+
+    def test_fails_closed_on_bridge_error(self, oauth_env, monkeypatch):
+        async def _unreachable(_aid):
+            return None
+
+        monkeypatch.setattr(oauth, "_bridge_approval_status", _unreachable)
+        sent = self._poll("aid-x")
+        assert _status(sent) == 503
+        assert _json(sent)["status"] == "unavailable"
+
+    def test_requires_approval_id(self, oauth_env):
+        sent = _run(
+            oauth.handle_claude_oauth_authorize_status,
+            _scope(method="GET", path="/claude/oauth/authorize/status", query=""),
+        )
+        assert _status(sent) == 400
+
+    def test_rejects_non_get(self, oauth_env):
+        sent = _run(
+            oauth.handle_claude_oauth_authorize_status,
+            _scope(method="POST", path="/claude/oauth/authorize/status", query="approval_id=aid-x"),
+        )
+        assert _status(sent) == 405
+
+    def test_never_mints_or_flips_on_pending(self, oauth_env, monkeypatch):
+        async def _pending(_aid):
+            return {"status": "pending", "notification_sent": False}
+
+        monkeypatch.setattr(oauth, "_bridge_approval_status", _pending)
+        sent = self._poll("aid-x")
+        assert _status(sent) == 200
+        body = _json(sent)
+        assert body["status"] == "pending"
+        assert body["notification_sent"] is False
+        assert not list(oauth._CODES_DIR.glob("*.json"))
+
+    def test_unexpected_statuses_normalize_to_pending(self, oauth_env, monkeypatch):
+        # FIX 1: the connector status endpoint is master-gated and its only
+        # poller is the trusted SSE — arrival's anti-abuse poll-discipline
+        # (which can emit `slow_down`) does not apply here, but even if a
+        # `slow_down` or any other unrecognized status reaches this proxy it
+        # must NEVER read as a decision and abort a live wait.
+        for weird in ("slow_down", "consumed", "some_future_status"):
+
+            async def _weird(_aid, weird=weird):
+                return {"status": weird}
+
+            monkeypatch.setattr(oauth, "_bridge_approval_status", _weird)
+            sent = self._poll("aid-x")
+            assert _status(sent) == 200, weird
+            assert _json(sent)["status"] == "pending", weird
+
+    def test_terminal_statuses_pass_through_unchanged(self, oauth_env, monkeypatch):
+        for terminal in ("approved", "denied", "expired"):
+
+            async def _terminal(_aid, terminal=terminal):
+                return {"status": terminal}
+
+            monkeypatch.setattr(oauth, "_bridge_approval_status", _terminal)
+            sent = self._poll("aid-x")
+            assert _json(sent)["status"] == terminal, terminal
+
+    def test_poll_interval_seconds_passed_through_when_present(self, oauth_env, monkeypatch):
+        async def _with_interval(_aid):
+            return {"status": "pending", "poll_interval_seconds": 8}
+
+        monkeypatch.setattr(oauth, "_bridge_approval_status", _with_interval)
+        sent = self._poll("aid-x")
+        assert _json(sent)["poll_interval_seconds"] == 8
+
+    def test_poll_interval_seconds_absent_when_bridge_omits_it(self, oauth_env):
+        # fixture's default stub ({"status": "approved"}) carries no
+        # poll_interval_seconds — the proxy must not invent one.
+        sent = self._poll("aid-x")
+        assert "poll_interval_seconds" not in _json(sent)
+
+
+class TestWaitingPageJS:
+    """Regression coverage for FIX 1's JS-side status branching: only
+    'approved' submits, only 'denied'/'expired' redirect to the deny URL,
+    and everything else (pending, unavailable, or an unrecognized value
+    that somehow reached the browser un-normalized) keeps polling."""
+
+    def test_only_approved_submits_only_denied_expired_redirects(self, oauth_env):
+        _, challenge = _pkce_pair()
+        sent = _get_authorize(oauth_env, challenge=challenge)
+        html = _body(sent).decode()
+
+        assert "status === 'approved'" in html
+        assert "status === 'denied' || status === 'expired'" in html
+        assert "document.getElementById('complete').submit();" in html
+        assert "window.location.href = denyUrl;" in html
+
+        # No other status is ever compared against explicitly — pending,
+        # unavailable, slow_down, consumed, or anything unrecognized all
+        # fall through to the bare `else` (keep polling), by construction,
+        # not by an enumerated clause.
+        for other in ("pending", "unavailable", "slow_down", "consumed"):
+            assert f"status === '{other}'" not in html
+
+
+class TestComputeBinding:
+    def test_deterministic(self):
+        a = oauth._compute_binding("c", "r", "aud", "chal")
+        b = oauth._compute_binding("c", "r", "aud", "chal")
+        assert a == b
+
+    def test_sensitive_to_client_id(self):
+        base = oauth._compute_binding("c", "r", "aud", "chal")
+        assert oauth._compute_binding("x", "r", "aud", "chal") != base
+
+    def test_sensitive_to_redirect_uri(self):
+        base = oauth._compute_binding("c", "r", "aud", "chal")
+        assert oauth._compute_binding("c", "x", "aud", "chal") != base
+
+    def test_sensitive_to_audience(self):
+        base = oauth._compute_binding("c", "r", "aud", "chal")
+        assert oauth._compute_binding("c", "r", "x", "chal") != base
+
+    def test_sensitive_to_code_challenge(self):
+        base = oauth._compute_binding("c", "r", "aud", "chal")
+        assert oauth._compute_binding("c", "r", "aud", "x") != base
+
+
+class TestBridgeApprovalCalls:
+    """Low-level network-path coverage for the SSE->bridge phone-tap calls —
+    exercises the REAL httpx code path via httpx.MockTransport (no real
+    network), verifying fail-closed on connection error / non-2xx / bad
+    JSON, and the outbound request shape (URL, Authorization header,
+    body)."""
+
+    def _patched(self, monkeypatch, handler):
+        # oauth.httpx IS the httpx module object (not a copy) — capture the
+        # real AsyncClient BEFORE patching, else the factory recurses into
+        # itself the moment it's substituted for the name it's calling.
+        real_async_client = httpx.AsyncClient
+        transport = httpx.MockTransport(handler)
+
+        def _factory(*args, **kwargs):
+            return real_async_client(transport=transport)
+
+        monkeypatch.setattr(oauth.httpx, "AsyncClient", _factory)
+        return transport
+
+    def test_request_success_returns_body_and_sends_bearer_token(self, monkeypatch):
+        monkeypatch.setattr(oauth, "_BRIDGE_TOKEN", "tok123")
+        seen = {}
+
+        def handler(request):
+            seen["auth"] = request.headers.get("authorization")
+            seen["url"] = str(request.url)
+            seen["body"] = json.loads(request.content)
+            return httpx.Response(200, json={"approval_id": "aid-1", "code": "amber-cove"})
+
+        self._patched(monkeypatch, handler)
+        result = asyncio.run(
+            oauth._bridge_approval_request(
+                summary="s", client_id="c", redirect_uri=CALLBACK, audience="aud", code="amber-cove"
+            )
+        )
+        assert result == {"approval_id": "aid-1", "code": "amber-cove"}
+        assert seen["auth"] == "Bearer tok123"
+        assert seen["url"].endswith("/api/approval/request")
+        assert seen["body"]["client_id"] == "c"
+        assert seen["body"]["code"] == "amber-cove"
+        # requester_ip defaults to "" (not omitted) when the caller doesn't
+        # pass one — the bridge's per-IP caps always see the key present.
+        assert seen["body"]["requester_ip"] == ""
+
+    def test_request_forwards_requester_ip_in_body(self, monkeypatch):
+        monkeypatch.setattr(oauth, "_BRIDGE_TOKEN", "tok123")
+        seen = {}
+
+        def handler(request):
+            seen["body"] = json.loads(request.content)
+            return httpx.Response(200, json={"approval_id": "aid-1", "code": "amber-cove"})
+
+        self._patched(monkeypatch, handler)
+        asyncio.run(
+            oauth._bridge_approval_request(
+                summary="s",
+                client_id="c",
+                redirect_uri=CALLBACK,
+                audience="aud",
+                code="amber-cove",
+                requester_ip="203.0.113.7",
+            )
+        )
+        assert seen["body"]["requester_ip"] == "203.0.113.7"
+
+    def test_request_connection_error_returns_none(self, monkeypatch):
+        monkeypatch.setattr(oauth, "_BRIDGE_TOKEN", "tok123")
+
+        def handler(request):
+            raise httpx.ConnectError("boom", request=request)
+
+        self._patched(monkeypatch, handler)
+        result = asyncio.run(
+            oauth._bridge_approval_request(
+                summary="s", client_id="c", redirect_uri=CALLBACK, audience="aud", code="x-y"
+            )
+        )
+        assert result is None
+
+    def test_status_non_2xx_returns_none(self, monkeypatch):
+        monkeypatch.setattr(oauth, "_BRIDGE_TOKEN", "tok123")
+        self._patched(monkeypatch, lambda request: httpx.Response(500, json={"error": "boom"}))
+        assert asyncio.run(oauth._bridge_approval_status("aid-1")) is None
+
+    def test_confirm_bad_json_body_returns_none(self, monkeypatch):
+        monkeypatch.setattr(oauth, "_BRIDGE_TOKEN", "tok123")
+        self._patched(monkeypatch, lambda request: httpx.Response(200, content=b"not json"))
+        assert asyncio.run(oauth._bridge_approval_confirm("aid-1")) is None
+
+    def test_status_uses_path_param(self, monkeypatch):
+        monkeypatch.setattr(oauth, "_BRIDGE_TOKEN", "tok123")
+        seen = {}
+
+        def handler(request):
+            seen["url"] = str(request.url)
+            return httpx.Response(200, json={"status": "pending"})
+
+        self._patched(monkeypatch, handler)
+        asyncio.run(oauth._bridge_approval_status("aid-42"))
+        assert seen["url"].endswith("/api/approval/status/aid-42")
+
+    def test_confirm_sends_approval_id_body(self, monkeypatch):
+        monkeypatch.setattr(oauth, "_BRIDGE_TOKEN", "tok123")
+        seen = {}
+
+        def handler(request):
+            seen["url"] = str(request.url)
+            seen["body"] = json.loads(request.content)
+            return httpx.Response(200, json={"approved": True})
+
+        self._patched(monkeypatch, handler)
+        result = asyncio.run(oauth._bridge_approval_confirm("aid-7"))
+        assert result == {"approved": True}
+        assert seen["url"].endswith("/api/approval/confirm")
+        assert seen["body"] == {"approval_id": "aid-7"}
+
+    def test_no_bridge_token_never_touches_the_network(self, monkeypatch):
+        monkeypatch.setattr(oauth, "_BRIDGE_TOKEN", "")
+
+        def handler(request):
+            raise AssertionError("must not reach the network without BRIDGE_TOKEN")
+
+        self._patched(monkeypatch, handler)
+        assert asyncio.run(oauth._bridge_approval_confirm("aid-1")) is None
+        assert asyncio.run(oauth._bridge_approval_status("aid-1")) is None
 
 
 # ── Token endpoint: authorization_code grant ──────────────────────────────────

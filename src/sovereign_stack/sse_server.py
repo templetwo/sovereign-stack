@@ -118,6 +118,9 @@ try:
         handle_authorize as handle_claude_oauth_authorize,
     )
     from claude_bridge.oauth import (
+        handle_claude_oauth_authorize_status,
+    )
+    from claude_bridge.oauth import (
         handle_protected_resource_metadata as handle_claude_oauth_pr_meta,
     )
     from claude_bridge.oauth import (
@@ -139,6 +142,7 @@ except Exception as _claude_e:
     handle_claude_mcp = None
     claude_session_manager = None
     handle_claude_oauth_authorize = None
+    handle_claude_oauth_authorize_status = None
     handle_claude_oauth_token = None
     handle_claude_oauth_register = None
     handle_claude_oauth_revoke = None
@@ -532,8 +536,17 @@ class SovereignAsgiMiddleware:
             # bearer) is enforced inside handle_claude_mcp before the session
             # manager ever sees the request.
             await handle_claude_mcp(scope, receive, send)
+        elif (
+            _CLAUDE_BRIDGE_ENABLED and path == "/claude/oauth/authorize/status" and method == "GET"
+        ):
+            # Poll target for the phone-tap waiting page; proxies to the
+            # bridge's read-only approval-status oracle. Must be routed
+            # before the /claude/oauth/authorize branch below, else the
+            # more general path never matches this more specific one.
+            await handle_claude_oauth_authorize_status(scope, receive, send)
         elif _CLAUDE_BRIDGE_ENABLED and path == "/claude/oauth/authorize":
-            # GET shows consent page; POST receives consent submission
+            # GET renders the phone-tap waiting page; POST receives the
+            # completion submit once the waiting page's poll sees "approved".
             await handle_claude_oauth_authorize(scope, receive, send)
         elif _CLAUDE_BRIDGE_ENABLED and path == "/claude/oauth/token" and method == "POST":
             await handle_claude_oauth_token(scope, receive, send)

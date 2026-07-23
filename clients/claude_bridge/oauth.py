@@ -29,10 +29,20 @@ Deltas over the openai template — each one is a spec item, not styling:
      anything else; /authorize re-refuses (defense in depth).
   5. Revocation endpoint (RFC 7009): one call revokes the token's whole
      family. Always 200 — no token-probing oracle.
+  6. Phone-tap resource-owner authentication (2026-07 swap; supersedes the
+     original operator-passphrase + consent-nonce design). GET /authorize no
+     longer renders a consent form — it delegates a fresh approval request to
+     the sovereign-bridge (port 8100, loopback, master BRIDGE_TOKEN) and
+     renders a "check your phone" waiting page that polls for Anthony's ntfy
+     tap. POST /authorize mints a code only when the submitted params bind
+     (sha256, constant-time) to the approval the GET created AND the
+     bridge's atomic approved→consumed confirm returns {approved: true}.
+     No passphrase, no admin-approve fallback — the tap is the only gate.
 
 Endpoints (wired in sse_server.py):
-  GET  /claude/oauth/authorize                          — consent page
+  GET  /claude/oauth/authorize                          — phone-tap waiting page
   POST /claude/oauth/authorize                          — issue code, redirect
+  GET  /claude/oauth/authorize/status                    — poll target for the waiting page
   POST /claude/oauth/token                              — code + refresh grants
   POST /claude/oauth/register                           — RFC 7591 DCR
   POST /claude/oauth/revoke                             — RFC 7009 revocation
@@ -44,10 +54,12 @@ Endpoints (wired in sse_server.py):
    them with 200s is the #4030 retry-loop hardening.)
 
 Storage (0700 dirs, 0600 files):
-  ~/.sovereign/claude_bridge/oauth/codes/<code>.json     — pending auth codes
-  ~/.sovereign/claude_bridge/oauth/tokens/<token>.json   — access tokens
-  ~/.sovereign/claude_bridge/oauth/refresh/<token>.json  — refresh tokens
-  ~/.sovereign/claude_bridge/oauth_clients.json          — registered clients
+  ~/.sovereign/claude_bridge/oauth/codes/<code>.json      — pending auth codes
+  ~/.sovereign/claude_bridge/oauth/tokens/<token>.json    — access tokens
+  ~/.sovereign/claude_bridge/oauth/refresh/<token>.json   — refresh tokens
+  ~/.sovereign/claude_bridge/oauth/approvals/<aid>.json   — pending phone-tap
+                                                             approval bindings
+  ~/.sovereign/claude_bridge/oauth_clients.json           — registered clients
 """
 
 from __future__ import annotations
@@ -59,74 +71,191 @@ import json
 import logging
 import os
 import secrets
-import time
 import urllib.parse
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import httpx
 from bridge_core import register_token_validator
 
 logger = logging.getLogger(__name__)
 
 
-# ── Approval-secret + single-use consent nonce ────────────────────────────────
+# ── Phone-tap approval delegation (bridge, port 8100) ──────────────────────────
+#
+# The passphrase + consent nonce this section used to hold are RETIRED
+# (2026-07 phone-tap swap; HQ ruling: nonce fully retired, no replacement key).
+# The ntfy tap on Anthony's phone is now the load-bearing "is this really
+# Anthony" control, delegated to the bridge over loopback exactly as the
+# destructive-tier step-up already does (see elevation.py). The connector
+# never holds NTFY_TOPIC or ARRIVAL_DECIDE_SECRET — it only ever speaks
+# request/status/confirm, authenticated outbound with the BRIDGE_TOKEN it
+# already carries for other loopback calls.
+
+_DOOR_BASE_URL = os.environ.get("CLAUDE_DOOR_BASE_URL", "http://127.0.0.1:8100")
+_BRIDGE_TOKEN = os.environ.get("BRIDGE_TOKEN", "")
+_BRIDGE_CALL_TIMEOUT_SECONDS = 10.0
+
+# A modest, unambiguous word bank for the human-matching code shown on both
+# the waiting page and Anthony's phone push. This is NOT a security boundary
+# (the approval_id capability + SSE-side binding check are) — it exists only
+# so Anthony can tell which pending push corresponds to which open browser
+# tab when two authorize attempts race (spec §7 threat 4).
+_CODE_WORDS = [
+    "amber",
+    "ash",
+    "birch",
+    "cedar",
+    "coral",
+    "cove",
+    "delta",
+    "ember",
+    "fern",
+    "flint",
+    "garnet",
+    "harbor",
+    "hazel",
+    "indigo",
+    "ivory",
+    "jasper",
+    "kestrel",
+    "lagoon",
+    "maple",
+    "nectar",
+    "onyx",
+    "opal",
+    "pearl",
+    "quartz",
+    "raven",
+    "sable",
+    "slate",
+    "teal",
+    "umber",
+    "violet",
+    "willow",
+    "aspen",
+    "basalt",
+    "cinder",
+    "dune",
+    "ebony",
+    "feather",
+    "granite",
+    "heron",
+    "island",
+    "juniper",
+    "lark",
+    "meadow",
+    "nimbus",
+    "otter",
+    "plume",
+    "ridge",
+    "sparrow",
+    "thistle",
+]
 
 
-def approval_enabled() -> bool:
-    """True iff an operator secret is configured. When False, /authorize
-    fail-closes (mints nothing) — never anonymous-approves."""
-    return bool(CLAUDE_AUTHORIZE_SECRET)
+def _mint_tap_code() -> str:
+    """A fresh two-word code, regenerated per authorize GET — never reused."""
+    return f"{secrets.choice(_CODE_WORDS)}-{secrets.choice(_CODE_WORDS)}"
 
 
-def _approval_secret_ok(presented: str) -> bool:
-    if not CLAUDE_AUTHORIZE_SECRET:
-        return False
-    return hmac.compare_digest(presented or "", CLAUDE_AUTHORIZE_SECRET)
+def _compute_binding(
+    client_id: str, redirect_uri: str, bound_audience: str, code_challenge: str
+) -> str:
+    """The canonical connector-authorize binding (HQ req #3 / build-spec §4):
+    sha256 over the four fields that must match between the GET that created
+    the approval and the POST that redeems it. Both call sites use this SAME
+    derivation so absent-resource normalization agrees."""
+    binding_src = (
+        "connector-authorize\nv1\n"
+        + client_id
+        + "\n"
+        + redirect_uri
+        + "\n"
+        + bound_audience
+        + "\n"
+        + code_challenge
+    )
+    return hashlib.sha256(binding_src.encode()).hexdigest()
 
 
-def _mint_nonce() -> str:
-    """A single-use, self-verifying consent nonce: <random>.<exp>.<hmac>. No
-    server-side store needed — the HMAC is the integrity, the exp is the TTL,
-    and single-use is enforced by consuming the exact nonce string on POST."""
-    rnd = secrets.token_urlsafe(16)
-    exp = str(int(time.time()) + NONCE_TTL_SECONDS)
-    mac = hmac.new(_NONCE_SIGNING_KEY.encode(), f"{rnd}.{exp}".encode(), hashlib.sha256).hexdigest()
-    return f"{rnd}.{exp}.{mac}"
+async def _bridge_call(method: str, path: str, json_body: dict | None = None) -> dict | None:
+    """POST/GET a loopback call to the bridge's /api/approval/* surface,
+    authenticated with the master BRIDGE_TOKEN (HQ ruling: master-gated,
+    zero new secrets — the SSE plist already carries it).
 
-
-def _nonce_valid(nonce: str) -> bool:
-    if not _NONCE_SIGNING_KEY or not nonce:
-        return False
-    parts = nonce.split(".")
-    if len(parts) != 3:
-        return False
-    rnd, exp, mac = parts
-    expected = hmac.new(
-        _NONCE_SIGNING_KEY.encode(), f"{rnd}.{exp}".encode(), hashlib.sha256
-    ).hexdigest()
-    if not hmac.compare_digest(expected, mac):
-        return False
+    Returns the parsed JSON body on any 2xx response; None on ANY failure —
+    connection error, timeout, non-2xx status, or an unparseable body. Every
+    caller MUST treat None as "mint/advance nothing" (fail-closed). Never
+    logs BRIDGE_TOKEN.
+    """
+    if not _BRIDGE_TOKEN:
+        logger.warning("OAuth: BRIDGE_TOKEN not set — cannot reach the phone-tap approval gate")
+        return None
+    headers = {"Authorization": f"Bearer {_BRIDGE_TOKEN}"}
     try:
-        return time.time() < int(exp)
+        async with httpx.AsyncClient(timeout=_BRIDGE_CALL_TIMEOUT_SECONDS) as client:
+            resp = await client.request(
+                method, f"{_DOOR_BASE_URL}{path}", json=json_body, headers=headers
+            )
+    except httpx.HTTPError as exc:
+        logger.warning("OAuth: approval-bridge call %s %s failed: %s", method, path, exc)
+        return None
+    if resp.status_code // 100 != 2:
+        logger.warning(
+            "OAuth: approval-bridge call %s %s returned HTTP %s", method, path, resp.status_code
+        )
+        return None
+    try:
+        return resp.json()
     except ValueError:
-        return False
+        logger.warning("OAuth: approval-bridge call %s %s returned a non-JSON body", method, path)
+        return None
 
 
-# Consumed nonces (single-use). Bounded in-memory set; process-local is fine
-# because the SSE server is a load-bearing single worker (see sse_server.py).
-_used_nonces: set[str] = set()
+async def _bridge_approval_request(
+    *,
+    summary: str,
+    client_id: str,
+    redirect_uri: str,
+    audience: str,
+    code: str,
+    requester_ip: str = "",
+) -> dict | None:
+    """POST /api/approval/request — create the pending approval + push ntfy.
+    Returns {approval_id, code, ...} on success, None on any failure.
+
+    `requester_ip` (FIX 3) is the REAL browser client IP for the /authorize
+    request that triggered this call (see `_real_client_ip`) — forwarded so
+    the bridge's per-IP create-rate cap and per-IP pending cap key on the
+    actual caller instead of collapsing to the SSE's loopback address (every
+    caller would otherwise share one bucket, including Anthony's own
+    attempts). The bridge trusts this value because the call itself is
+    already master-BRIDGE_TOKEN-authed loopback from the SSE — no new trust
+    surface, per HQ ruling #3."""
+    return await _bridge_call(
+        "POST",
+        "/api/approval/request",
+        {
+            "summary": summary,
+            "client_id": client_id,
+            "redirect_uri": redirect_uri,
+            "audience": audience,
+            "code": code,
+            "requester_ip": requester_ip,
+        },
+    )
 
 
-def _consume_nonce(nonce: str) -> bool:
-    """Validate then burn a nonce. Returns False on invalid/expired/reused."""
-    if not _nonce_valid(nonce):
-        return False
-    if nonce in _used_nonces:
-        return False
-    if len(_used_nonces) > 10000:
-        _used_nonces.clear()  # coarse GC; nonces self-expire via TTL anyway
-    _used_nonces.add(nonce)
-    return True
+async def _bridge_approval_status(aid: str) -> dict | None:
+    """GET /api/approval/status/{aid} — read-only, no flip, no mint."""
+    return await _bridge_call("GET", f"/api/approval/status/{urllib.parse.quote(aid)}")
+
+
+async def _bridge_approval_confirm(aid: str) -> dict | None:
+    """POST /api/approval/confirm — the atomic approved→consumed flip. Only
+    a returned {approved: true} may ever proceed to mint a code."""
+    return await _bridge_call("POST", "/api/approval/confirm", {"approval_id": aid})
 
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -136,6 +265,7 @@ _OAUTH_DIR = _CLAUDE_DIR / "oauth"
 _CODES_DIR = _OAUTH_DIR / "codes"
 _TOKENS_DIR = _OAUTH_DIR / "tokens"
 _REFRESH_DIR = _OAUTH_DIR / "refresh"
+_APPROVALS_DIR = _OAUTH_DIR / "approvals"
 _CLIENTS_FILE = _CLAUDE_DIR / "oauth_clients.json"
 
 CODE_TTL_SECONDS = 600  # 10 minutes, single-use
@@ -147,19 +277,20 @@ SUBSTRATE = "claude-ai-bridge"
 DEFAULT_SCOPE = "native"
 
 # ── Resource-owner authentication (the load-bearing control) ──────────────────
-# OAuth authenticates the *client*, never the human. Without an approver secret,
-# completing the OAuth dance would equal "Anthony consented", so ANY internet
-# caller could self-approve, mint a token, and reach the base tool tier (full
-# chronicle read + write). The approval secret closes that: the POST /authorize
-# approval is refused unless it carries the operator secret AND a single-use,
-# HMAC-signed nonce minted by the matching GET render. FAIL CLOSED: if the
-# secret is unset, /authorize refuses to mint any code at all — the connector
-# simply cannot be authorized until the operator sets it.
-CLAUDE_AUTHORIZE_SECRET = os.environ.get("CLAUDE_AUTHORIZE_SECRET", "")
-# Signs the GET->POST consent nonce. Falls back to the approver secret so a
-# single env var is enough to stand the bridge up.
-_NONCE_SIGNING_KEY = os.environ.get("CLAUDE_AUTHORIZE_NONCE_KEY", "") or CLAUDE_AUTHORIZE_SECRET
-NONCE_TTL_SECONDS = 900  # 15 min: a consent page must be submitted promptly
+# OAuth authenticates the *client*, never the human. Without a live phone-tap
+# from Anthony, completing the OAuth dance would equal "Anthony consented", so
+# ANY internet caller could self-approve, mint a token, and reach the base
+# tool tier (full chronicle read + write). The gate is now the ntfy tap: GET
+# /authorize delegates a fresh approval request to the bridge over loopback
+# (POST /api/approval/request, master BRIDGE_TOKEN); only Anthony's tap on his
+# phone can flip that approval to approved (bridge-side, HMAC-signed,
+# POST-only — see sovereign-bridge). POST /authorize mints a code ONLY when
+# (a) the submitted params bind, constant-time, to the approval the GET
+# render created, AND (b) the bridge's atomic approved→consumed confirm
+# returns {approved: true}. FAIL CLOSED: any bridge unreachability, non-2xx,
+# or {approved: false} means no code is ever minted. There is no operator
+# passphrase and no admin-approve fallback — the phone tap is the ONLY way to
+# authorize this connector (HQ ruling, 2026-07 phone-tap swap; no break-glass).
 
 # Issuer used in discovery metadata. The MCP endpoint is at /claude/mcp;
 # the OAuth AS is at the parent path.
@@ -189,7 +320,7 @@ _ALLOW_LOOPBACK = (
 # A filesystem error here must NOT crash import — that would take down the whole
 # SSE server (all bridges + native /sse). Fail soft; the handlers surface errors
 # per-request instead.
-for _d in (_CODES_DIR, _TOKENS_DIR, _REFRESH_DIR):
+for _d in (_CODES_DIR, _TOKENS_DIR, _REFRESH_DIR, _APPROVALS_DIR):
     try:
         _d.mkdir(parents=True, exist_ok=True)
         os.chmod(_d, 0o700)
@@ -309,6 +440,53 @@ def _load_code(code: str) -> dict | None:
 def _delete_code(code: str) -> None:
     path = _CODES_DIR / f"{code}.json"
     if path.exists():
+        path.unlink()
+
+
+# ── Pending phone-tap approval records (GET → POST binding carrier) ───────────
+# Keyed by the approval_id the bridge mints at create time. Holds the binding
+# hash (§4) the POST recomputes and compares constant-time. Storage-layer
+# only — the approval's actual pending/approved/denied STATE lives on the
+# bridge; this is just "what the GET render promised", never authoritative
+# for whether a human tapped anything.
+
+def _approval_path(aid: str) -> Path | None:
+    """None only for an empty aid. The filename is sha256(aid), NOT aid
+    itself — the build-spec never pins the bridge's approval_id charset, and
+    keying on the raw string would coupled this module to whatever the
+    (separately-built) bridge happens to mint. Hashing sidesteps that
+    entirely: any string round-trips safely as a filename, GET and POST
+    still hash the identical aid and therefore still find the same record,
+    and there is no path-traversal surface regardless of what the bridge
+    ever puts in `approval_id`."""
+    if not aid:
+        return None
+    return _APPROVALS_DIR / f"{hashlib.sha256(aid.encode()).hexdigest()}.json"
+
+
+def _save_approval(aid: str, data: dict) -> None:
+    path = _approval_path(aid)
+    if path is None:
+        logger.warning("OAuth: refused to persist approval record for malformed aid")
+        return
+    _write_secure(path, json.dumps(data, indent=2))
+
+
+def _load_approval(aid: str) -> dict | None:
+    path = _approval_path(aid)
+    if path is None or not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        # Unreadable = invalid: the gate must degrade to a clean refusal,
+        # never a 500.
+        return None
+
+
+def _delete_approval(aid: str) -> None:
+    path = _approval_path(aid)
+    if path is not None and path.exists():
         path.unlink()
 
 
@@ -593,6 +771,26 @@ def _q(scope: dict) -> dict:
     return {k: v[0] for k, v in urllib.parse.parse_qs(raw).items()}
 
 
+def _real_client_ip(scope: dict) -> str:
+    """The real browser client IP for a request hitting this ASGI app
+    (FIX 3). Cloudflare terminates TLS and forwards over the tunnel to
+    loopback, so `scope['client']` alone is always 127.0.0.1 for tunneled
+    traffic — the true caller only survives in the `cf-connecting-ip`
+    header (same precedence sse_server.py's `_public_ip` already uses for
+    the connect-rate limiter). Falls back to the ASGI socket's client host
+    for local/dev traffic with no Cloudflare in front. Returns "" if
+    neither is present; callers must treat that as "unknown", never as
+    127.0.0.1 standing in for a real address."""
+    headers = dict(scope.get("headers") or [])
+    cf_ip = headers.get(b"cf-connecting-ip", b"").decode("utf-8", errors="replace").strip()
+    if cf_ip:
+        return cf_ip
+    client = scope.get("client")
+    if client:
+        return str(client[0])
+    return ""
+
+
 # ── Dynamic Client Registration endpoint (RFC 7591) ───────────────────────────
 
 
@@ -807,72 +1005,160 @@ async def _authorize_get(scope, send) -> None:
         await _send_text(send, 400, error)
         return
 
-    # Fail closed: with no operator secret configured, this AS refuses to render
-    # an approval path at all — an anonymous approval must never mint a code.
-    if not approval_enabled():
+    bound_audience = _normalize_resource(resource) if resource else CANONICAL_RESOURCE
+    tap_code = _mint_tap_code()
+    summary = f"Approve Claude connector · client {client_id} → {redirect_uri}"
+    requester_ip = _real_client_ip(scope)
+
+    # Delegate the human-approval decision to the bridge's phone-tap gate
+    # (loopback, master BRIDGE_TOKEN). Fail closed on ANY error/non-2xx: no
+    # approval record is persisted, no waiting page that could ever complete
+    # is rendered, no code — mirrors the old unset-passphrase 503 exactly.
+    approval = await _bridge_approval_request(
+        summary=summary,
+        client_id=client_id,
+        redirect_uri=redirect_uri,
+        audience=bound_audience,
+        code=tap_code,
+        requester_ip=requester_ip,
+    )
+    aid = (approval or {}).get("approval_id", "")
+    if not approval or not aid:
         await _send_text(
             send,
             503,
-            "Authorization is disabled: the operator has not set CLAUDE_AUTHORIZE_SECRET. "
-            "No connector can be authorized until it is configured.",
+            "Authorization is unavailable: the phone-tap approval service could not be "
+            "reached. No connector can be authorized until it is.",
         )
         return
 
+    display_code = approval.get("code") or tap_code
+    binding = _compute_binding(client_id, redirect_uri, bound_audience, code_challenge)
+    _save_approval(
+        aid,
+        {
+            "aid": aid,
+            "client_id": client_id,
+            "redirect_uri": redirect_uri,
+            "bound_audience": bound_audience,
+            "code_challenge": code_challenge,
+            "code_challenge_method": code_challenge_method,
+            "scope": scope_str,
+            "state": state,
+            "resource": resource,
+            "code": display_code,
+            "binding": binding,
+            "created_at": _now().isoformat(),
+        },
+    )
+
+    html = _render_waiting_page(
+        aid=aid,
+        code=display_code,
+        client_id=client_id,
+        redirect_uri=redirect_uri,
+        bound_audience=bound_audience,
+        code_challenge=code_challenge,
+        scope_str=scope_str,
+        state=state,
+        resource=resource,
+        notification_sent=bool(approval.get("notification_sent", True)),
+    )
+    await _send_html(send, 200, html)
+
+
+def _render_waiting_page(
+    *,
+    aid: str,
+    code: str,
+    client_id: str,
+    redirect_uri: str,
+    bound_audience: str,
+    code_challenge: str,
+    scope_str: str,
+    state: str,
+    resource: str,
+    notification_sent: bool,
+) -> str:
+    """The 'check your phone' waiting page. All server-known values are
+    HTML-escaped via `_esc` — no value the JS reads is ever interpolated
+    into a script string literal; it is carried via HTML-attribute
+    (`data-*`) round-tripping instead (`_esc` is attribute-safe; a JS
+    string-literal is not the same escaping context)."""
+    deny_params = {"error": "access_denied"}
+    if state:
+        deny_params["state"] = state
+    deny_url = _append_params(redirect_uri, deny_params)
+    status_url = "/claude/oauth/authorize/status?approval_id=" + urllib.parse.quote(aid)
+
+    safe_aid = _esc(aid)
+    safe_code = _esc(code)
     safe_client = _esc(client_id)
     safe_redirect = _esc(redirect_uri)
+    safe_audience = _esc(bound_audience)
     safe_scope = _esc(scope_str or f"{DEFAULT_SCOPE} (full native surface; destructive tier gated)")
     safe_state = _esc(state)
     safe_challenge = _esc(code_challenge)
     safe_resource = _esc(resource)
-    nonce = _esc(_mint_nonce())
+    safe_deny_url = _esc(deny_url)
+    safe_status_url = _esc(status_url)
+    notify_note = (
+        ""
+        if notification_sent
+        else '<p class="muted" id="notify-note">Push notification may not have arrived — '
+        "open the ntfy app and check the topic directly.</p>"
+    )
 
-    html = f"""<!doctype html>
+    return f"""<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>Approve Claude Connector — Sovereign Stack</title>
+<title>Check your phone — Sovereign Stack</title>
 <style>
 body {{ font-family: -apple-system, system-ui, sans-serif; max-width: 560px;
        margin: 4em auto; padding: 0 1.2em; line-height: 1.55; color: #1a1a1a; }}
 h1 {{ font-size: 1.4em; margin-bottom: 0.4em; }}
 .card {{ border: 1px solid #d8d8d8; border-radius: 10px; padding: 2em;
-        background: #fafafa; }}
-dl {{ margin: 1.2em 0; }}
+        background: #fafafa; text-align: center; }}
+dl {{ margin: 1.2em 0; text-align: left; }}
 dt {{ font-weight: 600; margin-top: 0.6em; color: #555; font-size: 0.85em;
       text-transform: uppercase; letter-spacing: 0.04em; }}
 dd {{ margin: 0.2em 0 0.4em 0; }}
 code {{ background: #ececec; padding: 0.15em 0.45em; border-radius: 4px;
         font-size: 0.92em; word-break: break-all; }}
-button {{ background: #111; color: #fff; border: none; padding: 0.8em 1.6em;
-         border-radius: 6px; cursor: pointer; font-size: 1em; margin-right: 0.5em;
-         font-weight: 500; }}
-button.deny {{ background: #888; }}
-button:hover {{ opacity: 0.9; }}
+.tapcode {{ font-size: 1.8em; font-weight: 700; letter-spacing: 0.03em;
+           margin: 0.6em 0; color: #111; }}
+.spinner {{ width: 28px; height: 28px; margin: 1em auto; border-radius: 50%;
+           border: 3px solid #ddd; border-top-color: #111;
+           animation: spin 0.8s linear infinite; }}
+@keyframes spin {{ to {{ transform: rotate(360deg); }} }}
 .muted {{ color: #666; font-size: 0.9em; }}
+.terminal {{ display: none; }}
 </style>
 </head>
 <body>
-<div class="card">
-<h1>Approve Claude connector access</h1>
-<p>The Sovereign Stack received an OAuth authorization request from a
-Claude MCP connector (claude.ai, claude.com, or Claude Code).</p>
+<div class="card" id="wait" data-aid="{safe_aid}" data-deny-url="{safe_deny_url}"
+     data-status-url="{safe_status_url}">
+<h1>Check your phone</h1>
+<p>A Claude MCP connector is requesting access to the Sovereign Stack.
+Only Anthony's tap on his phone can approve it.</p>
+<div class="tapcode" id="tapcode">{safe_code}</div>
+<p class="muted">Match this code to the one on your phone before tapping Approve.</p>
+<div class="spinner" id="spinner"></div>
+<p class="muted" id="waiting-note">Waiting for approval…</p>
+{notify_note}
 <dl>
 <dt>Client</dt><dd><code>{safe_client}</code></dd>
 <dt>Substrate identity</dt><dd><code>claude-ai-bridge</code></dd>
 <dt>Scope requested</dt><dd><code>{safe_scope}</code></dd>
-<dt>Audience</dt><dd><code>{_esc(CANONICAL_RESOURCE)}</code></dd>
+<dt>Audience</dt><dd><code>{safe_audience}</code></dd>
 <dt>Redirect target</dt><dd><code>{safe_redirect}</code></dd>
 </dl>
-<p class="muted">Approving grants this Claude seat the native tool surface at
-<code>/claude/mcp</code>. Destructive-tier tools (policy mutation, supersession,
-quarantine, protected records, service control) additionally require a per-use
-step-up approval on your phone. Access tokens expire hourly and rotate via
-refresh; revoke everything at any time with
-<code>python -m clients.claude_bridge.cli revoke-all</code>.</p>
-<p class="muted"><strong>Only the operator can approve.</strong> Enter the
-Sovereign Stack approval passphrase to confirm this is you.</p>
-<form method="post" action="/claude/oauth/authorize">
+<p class="terminal muted" id="terminal-note">This request expired. Reload the page to try again.</p>
+<form method="post" action="/claude/oauth/authorize" id="complete">
+<input type="hidden" name="action" value="approve"/>
+<input type="hidden" name="approval_id" value="{safe_aid}"/>
 <input type="hidden" name="client_id" value="{safe_client}"/>
 <input type="hidden" name="redirect_uri" value="{safe_redirect}"/>
 <input type="hidden" name="code_challenge" value="{safe_challenge}"/>
@@ -880,17 +1166,66 @@ Sovereign Stack approval passphrase to confirm this is you.</p>
 <input type="hidden" name="state" value="{safe_state}"/>
 <input type="hidden" name="scope" value="{_esc(scope_str)}"/>
 <input type="hidden" name="resource" value="{safe_resource}"/>
-<input type="hidden" name="nonce" value="{nonce}"/>
-<p><input type="password" name="approval_secret" placeholder="approval passphrase"
-   autocomplete="off" style="padding:0.6em;width:100%;box-sizing:border-box;
-   border:1px solid #ccc;border-radius:6px;font-size:1em;"/></p>
-<button type="submit" name="action" value="approve">Approve</button>
-<button type="submit" name="action" value="deny" class="deny">Deny</button>
 </form>
 </div>
+<script>
+(function () {{
+  var el = document.getElementById('wait');
+  var statusUrl = el.getAttribute('data-status-url');
+  var denyUrl = el.getAttribute('data-deny-url');
+  var spinner = document.getElementById('spinner');
+  var waitingNote = document.getElementById('waiting-note');
+  var terminalNote = document.getElementById('terminal-note');
+  var elapsedMs = 0;
+  var intervalMs = 5000;
+  var maxMs = 900000; // 900s pending window
+  var timer = null;
+
+  function stop(message) {{
+    if (timer) {{ clearInterval(timer); timer = null; }}
+    if (spinner) {{ spinner.style.display = 'none'; }}
+    if (message && waitingNote) {{ waitingNote.textContent = message; }}
+  }}
+
+  function poll() {{
+    elapsedMs += intervalMs;
+    if (elapsedMs > maxMs) {{
+      stop('This request expired.');
+      if (terminalNote) {{ terminalNote.style.display = 'block'; }}
+      return;
+    }}
+    fetch(statusUrl, {{ cache: 'no-store' }})
+      .then(function (r) {{ return r.json(); }})
+      .then(function (body) {{
+        var status = body && body.status;
+        if (status === 'approved') {{
+          stop('Approved — completing…');
+          document.getElementById('complete').submit();
+        }} else if (status === 'denied' || status === 'expired') {{
+          // Only these two are an actual decision the phone made. The
+          // server already normalizes anything else (including a stray
+          // slow_down or an unrecognized future value) to 'pending', but
+          // this allowlist is belt-and-suspenders: an unexpected status
+          // must NEVER abort a live wait, so only an explicit denied or
+          // expired ever redirects.
+          stop('Not approved.');
+          window.location.href = denyUrl;
+        }} else {{
+          // pending | unavailable | anything unexpected: keep polling.
+          // 'unavailable' is a transient bridge hiccup, not a decision.
+          if (body && body.notification_sent === false && waitingNote) {{
+            waitingNote.textContent = 'Waiting — push may not have arrived. Open your ntfy app.';
+          }}
+        }}
+      }})
+      .catch(function () {{ /* transient poll hiccup — try again next tick */ }});
+  }}
+
+  timer = setInterval(poll, intervalMs);
+}})();
+</script>
 </body>
 </html>"""
-    await _send_html(send, 200, html)
 
 
 async def _authorize_post(receive, send) -> None:
@@ -907,8 +1242,7 @@ async def _authorize_post(receive, send) -> None:
     state = form.get("state", "")
     scope_str = form.get("scope", "")
     resource = form.get("resource", "")
-    approval_secret = form.get("approval_secret", "")
-    nonce = form.get("nonce", "")
+    aid = form.get("approval_id", "")
 
     if action != "approve":
         params = {"error": "access_denied"}
@@ -921,31 +1255,31 @@ async def _authorize_post(receive, send) -> None:
             await _send_text(send, 400, "redirect_uri not allowed")
         return
 
-    # Fail closed: no operator secret => no code, ever.
-    if not approval_enabled():
-        await _send_text(send, 503, "Authorization is disabled (CLAUDE_AUTHORIZE_SECRET unset).")
+    # THE resource-owner authentication. OAuth authenticates the client; the
+    # ntfy phone-tap (delegated to the bridge, over loopback) authenticates
+    # the human. No known approval_id => no code, ever.
+    record = _load_approval(aid) if aid else None
+    if record is None:
+        await _send_text(
+            send, 403, "Approval refused: unknown, expired, or already-used approval_id."
+        )
         return
 
-    # THE resource-owner authentication. OAuth authenticates the client; this
-    # authenticates the human. Without both the operator passphrase and a
-    # single-use nonce minted by the matching GET render, an anonymous approve
-    # POST cannot mint a code — closing the self-approval token-minting hole.
-    # Order: consume the nonce first (single-use even on a wrong passphrase, so
-    # a captured page cannot be brute-forced by replay), then check the secret.
-    nonce_ok = _consume_nonce(nonce)
-    secret_ok = _approval_secret_ok(approval_secret)
-    if not (nonce_ok and secret_ok):
+    # Binding check (SSE-side, authoritative — the SSE is the only party that
+    # mints the code): recompute from the submitted form and compare
+    # constant-time to what the GET render stored (HQ req #3 / spec §4). A
+    # mismatch means this POST does not describe the request Anthony saw and
+    # tapped approve on — replay/tamper signal.
+    bound_audience = _normalize_resource(resource) if resource else CANONICAL_RESOURCE
+    recomputed_binding = _compute_binding(client_id, redirect_uri, bound_audience, code_challenge)
+    if not hmac.compare_digest(recomputed_binding, record.get("binding", "")):
         logger.warning(
-            "OAuth: authorize approval REFUSED (nonce_ok=%s secret_ok=%s) client=%s",
-            nonce_ok,
-            secret_ok,
+            "OAuth: authorize binding MISMATCH aid=%s client=%s — refused",
+            aid[:12],
             client_id,
         )
         await _send_text(
-            send,
-            403,
-            "Approval refused: invalid passphrase or expired consent page. "
-            "Reload the authorization page and try again.",
+            send, 403, "Approval refused: submitted request does not match the approved one."
         )
         return
 
@@ -957,6 +1291,32 @@ async def _authorize_post(receive, send) -> None:
         await _send_text(send, 400, error)
         return
 
+    # The bridge's atomic approved→consumed flip (loopback, master
+    # BRIDGE_TOKEN). Only a returned {approved: true} may proceed to mint —
+    # any bridge error, non-2xx, or {approved: false} fails closed.
+    confirmation = await _bridge_approval_confirm(aid)
+    if confirmation is None or confirmation.get("approved") is not True:
+        logger.warning(
+            "OAuth: authorize approval NOT confirmed aid=%s client=%s reason=%s",
+            aid[:12],
+            client_id,
+            (confirmation or {}).get("reason", "bridge_unreachable_or_non_2xx"),
+        )
+        await _send_text(
+            send,
+            403,
+            "Approval refused: the phone tap was not confirmed (denied, expired, or already used).",
+        )
+        return
+
+    # Belt-and-suspenders single-use on top of the bridge's atomic flip.
+    # Deleted only on the success path (spec §3c step 4) — a transient
+    # confirm hiccup must not strand the local record before a legitimate
+    # retry finds it again.
+    _delete_approval(aid)
+
+    # THE only code-mint site in this module, reachable only through the
+    # {approved: true} branch above.
     code = secrets.token_urlsafe(32)
     code_data = {
         "client_id": client_id,
@@ -964,7 +1324,7 @@ async def _authorize_post(receive, send) -> None:
         "code_challenge": code_challenge,
         "code_challenge_method": "S256",
         "scope": scope_str or DEFAULT_SCOPE,
-        "audience": _normalize_resource(resource) if resource else CANONICAL_RESOURCE,
+        "audience": bound_audience,
         "issued_at": _now().isoformat(),
         "substrate": SUBSTRATE,
     }
@@ -980,6 +1340,47 @@ async def _authorize_post(receive, send) -> None:
     if state:
         params["state"] = state
     await _redirect(send, _append_params(redirect_uri, params))
+
+
+# Only these three ever count as a DECISION to the polling browser. The
+# connector-authorize status endpoint is master-gated and the only poller is
+# the trusted SSE (~5s, on behalf of one browser) — arrival's anti-abuse
+# poll-discipline (which can emit `slow_down`) does not apply to this path,
+# but even so an unexpected/unrecognized status (a bridge hiccup, a future
+# status value, a `slow_down` that reaches here anyway) must NEVER read as a
+# refusal and abort a live wait (FIX 1). Anything outside this set normalizes
+# to "pending" — the 900s pending-window expiry is what eventually ends a
+# truly stuck wait, not a misread status.
+_TERMINAL_STATUSES = frozenset({"approved", "denied", "expired"})
+
+
+async def handle_claude_oauth_authorize_status(scope, receive, send) -> None:
+    """GET /claude/oauth/authorize/status?approval_id=<aid> — the waiting
+    page's poll target. Proxies to the bridge's read-only status oracle
+    (GET /api/approval/status/{aid}); never flips state, never mints. Fails
+    closed to a non-approved status on any bridge error — an unreachable
+    bridge must never read as 'approved' to the polling browser. Any status
+    the bridge returns that is NOT approved/denied/expired is normalized to
+    'pending' here (FIX 1, belt-and-suspenders against a bridge-side
+    `slow_down` or any other unexpected value aborting the wait)."""
+    if scope.get("method", "GET") != "GET":
+        await _send_json(send, 405, {"error": "method_not_allowed"})
+        return
+    aid = _q(scope).get("approval_id", "")
+    if not aid:
+        await _send_json(send, 400, {"error": "approval_id required"})
+        return
+    body = await _bridge_approval_status(aid)
+    if body is None:
+        await _send_json(send, 503, {"status": "unavailable"})
+        return
+    raw_status = body.get("status", "pending")
+    resp = {"status": raw_status if raw_status in _TERMINAL_STATUSES else "pending"}
+    if "notification_sent" in body:
+        resp["notification_sent"] = body["notification_sent"]
+    if "poll_interval_seconds" in body:
+        resp["poll_interval_seconds"] = body["poll_interval_seconds"]
+    await _send_json(send, 200, resp)
 
 
 # ── Token endpoint ───────────────────────────────────────────────────────────

@@ -20,19 +20,42 @@ model from the other two:
 
 ### Resource-owner authentication (the load-bearing control)
 
-OAuth authenticates the *client*, never the human. So "completed the OAuth
-flow" must NOT be treated as "the operator approved" — otherwise any internet
-caller could self-register, self-approve, and mint a base-tier token to the
-private chronicle. (An adversarial review caught exactly this as a critical
-before deploy.) The fix: **`POST /claude/oauth/authorize` mints a code only
-when the approval carries the operator passphrase (`CLAUDE_AUTHORIZE_SECRET`)
-AND a single-use, HMAC-signed nonce** minted by the matching consent-page
-render. It **fails closed** — with no secret set, the authorize endpoint
-refuses to mint any code at all (503), so the connector simply cannot be
-authorized until the operator configures it. Loopback redirect URIs default
-**off** (`CLAUDE_ALLOW_LOOPBACK_REDIRECT=false`) so a self-approved code can't
-be read straight out of the 302 by a curl-controlled endpoint; enable only for
-local Claude Code dev.
+**Updated 2026-07 — the phone-tap swap.** OAuth authenticates the *client*,
+never the human. So "completed the OAuth flow" must NOT be treated as "the
+operator approved" — otherwise any internet caller could self-register,
+self-approve, and mint a base-tier token to the private chronicle. (An
+adversarial review caught exactly this as a critical before the original
+deploy.) The original fix was an operator passphrase (`CLAUDE_AUTHORIZE_SECRET`)
+plus a single-use signed nonce; that design is **retired**. The load-bearing
+control is now Anthony's **ntfy phone tap**, delegated to the sovereign-bridge
+(port 8100) exactly as the destructive-tier step-up already is:
+
+1. `GET /claude/oauth/authorize` validates the OAuth params (unchanged), then
+   POSTs a fresh approval request to the bridge over loopback
+   (`/api/approval/request`, master `BRIDGE_TOKEN` — the SSE already carries
+   it). The bridge pushes an ntfy notification to Anthony's phone and returns
+   an `approval_id` + a two-word matching code. The browser gets a **"check
+   your phone"** waiting page (not a form) that polls
+   `GET /claude/oauth/authorize/status` every 5s.
+2. Anthony taps Approve on his phone (bridge-side, HMAC-signed, POST-only —
+   a link preview can never approve).
+3. The waiting page sees `status: approved` and submits a hidden form to
+   `POST /claude/oauth/authorize`. The SSE recomputes a sha256 binding over
+   `(client_id, redirect_uri, audience, code_challenge)` and compares it
+   constant-time against what the GET render stored — a mismatch is a
+   replay/tamper signal and refuses (403). Only then does it call the
+   bridge's atomic `approved→consumed` confirm; only `{approved: true}`
+   reaches the single code-mint site in the module.
+
+It **fails closed** at every step — bridge unreachable, non-2xx, gate
+disabled, or `{approved: false}` all mean no code is ever minted (503 at GET,
+403 at POST), so the connector simply cannot be authorized until the phone
+taps it. **There is no passphrase and no admin-approve fallback** — the tap
+is the only way in (Anthony's explicit choice; he accepted the lockout
+tradeoff). Loopback redirect URIs default **off**
+(`CLAUDE_ALLOW_LOOPBACK_REDIRECT=false`) so a self-approved code can't be read
+straight out of the 302 by a curl-controlled endpoint; enable only for local
+Claude Code dev.
 
 ## Spec → implementation map
 
@@ -55,7 +78,8 @@ quadruple-duty already and must not gain a public route).
 
 | Var | Default | Purpose |
 |---|---|---|
-| `CLAUDE_AUTHORIZE_SECRET` | *(unset → authorize fails closed)* | **Required to deploy.** The operator approval passphrase typed on the consent page. |
+| `BRIDGE_TOKEN` | *(unset → authorize fails closed)* | **Required to deploy.** The master bridge token, reused OUTBOUND to authenticate the SSE's loopback calls to the bridge's `/api/approval/*` (the SSE already carries this for other loopback calls — no new secret). |
+| `CLAUDE_DOOR_BASE_URL` | `http://127.0.0.1:8100` | Base URL of the sovereign-bridge the phone-tap approval calls target (same env name `elevation.py` already reads for step-up). |
 | `CLAUDE_ALLOW_LOOPBACK_REDIRECT` | `false` | Allow `http://127.0.0.1`/`localhost` redirect URIs (local Claude Code only). |
 | `CLAUDE_ACCESS_TOKEN_TTL` | `3600` | Access-token lifetime (seconds). |
 | `CLAUDE_REFRESH_TOKEN_TTL` | `2592000` | Refresh-token lifetime (seconds). |
@@ -63,6 +87,11 @@ quadruple-duty already and must not gain a public route).
 | `CLAUDE_MAX_REGISTERED_CLIENTS` | `50` | DCR registry cap (LRU-evicts stale unused clients when full). |
 | `CLAUDE_MAX_OAUTH_BODY_BYTES` | `65536` | Hard body cap on the OAuth POST endpoints. |
 | `CLAUDE_BRIDGE_ISSUER` | `https://stack.templetwo.com/claude` | OAuth issuer / resource base. |
+
+`CLAUDE_AUTHORIZE_SECRET` is **retired** (2026-07 phone-tap swap) — the
+operator passphrase no longer exists, and no `CLAUDE_AUTHORIZE_NONCE_KEY` or
+equivalent replaces it (the nonce was retired too; `approval_id` subsumes its
+job). The ntfy tap on Anthony's phone, via the bridge, is the only gate.
 
 ## Architecture decisions (and why)
 
@@ -120,11 +149,16 @@ The code path is inert until deployed: routes exist only in the new sse
 process, and public reachability requires the tunnel ingress addition.
 
 1. **Merge the PR** (main is branch-protected; review first).
-2. **Set the operator secret** in the sse launchd env (this is what makes the
-   connector authorizable — without it, authorize fail-closes):
-   add `CLAUDE_AUTHORIZE_SECRET` to the `EnvironmentVariables` block of
-   `~/Library/LaunchAgents/com.templetwo.sovereign-sse.plist` (a strong random
-   passphrase you'll type once on the consent page).
+2. **Remove the retired operator secret** from the sse launchd env — delete
+   `CLAUDE_AUTHORIZE_SECRET` from the `EnvironmentVariables` block of
+   `~/Library/LaunchAgents/com.templetwo.sovereign-sse.plist` (it does nothing
+   now; leaving it is inert but stale). No replacement secret is needed —
+   `BRIDGE_TOKEN` is already present in that same plist and is reused outbound
+   for the SSE's loopback calls to the bridge's `/api/approval/*`. Confirm the
+   bridge plist (`com.templetwo.sovereign-bridge.plist`) already carries
+   `NTFY_TOPIC` / `NTFY_SERVER` / `ARRIVAL_DECIDE_SECRET` /
+   `ARRIVAL_GATE_ENABLED` — connector-authorize reuses the arrival gate
+   verbatim, no new bridge secrets.
 3. **Cloudflared ingress** — add to `~/.cloudflared/config.yml` *before* the
    `service: http://localhost:8100` catch-all (paths are unanchored regexes;
    these two rules cover all /claude/* and the root well-known forms):
@@ -147,11 +181,17 @@ process, and public reachability requires the tunnel ingress addition.
    it doesn't disturb the existing openai/grok well-known routes or send other
    root well-knowns to 3434; without it those claude discovery probes 404 at the
    8100 FastAPI catch-all — the #4030 retry-loop fuel.)
-4. **Reinstall editable so the heartbeat reports 1.12.0, then restart:**
+4. **Reinstall editable, then restart the SSE with a full plist reload — NOT
+   `kickstart -k`.** The plist's `EnvironmentVariables` block changed (a key
+   was removed); `kickstart -k` restarts the process without reloading the
+   plist env, so the removed `CLAUDE_AUTHORIZE_SECRET` would persist in the
+   running env and the swap would look like it didn't take:
 
    ```bash
    cd ~/sovereign-stack && ./venv/bin/pip install -e . --no-deps -q
-   launchctl kickstart -k gui/$(id -u)/com.templetwo.sovereign-sse
+   launchctl bootout gui/$(id -u)/com.templetwo.sovereign-sse
+   launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.templetwo.sovereign-sse.plist
+   launchctl kickstart -k gui/$(id -u)/com.templetwo.sovereign-bridge   # code-only change; re-reads its own env file
    launchctl kickstart -k gui/$(id -u)/com.templetwo.cloudflared-tunnel
    ```
 5. **Verify (local, then public):**
@@ -163,12 +203,15 @@ process, and public reachability requires the tunnel ingress addition.
    curl -s https://stack.templetwo.com/.well-known/oauth-protected-resource/claude/mcp
    ```
 6. **Connect claude.ai:** Settings → Connectors → Add custom connector →
-   `https://stack.templetwo.com/claude/mcp`. The OAuth consent page opens in
-   your browser; enter the `CLAUDE_AUTHORIZE_SECRET` passphrase and Approve —
-   that is the human gate for the initial grant.
+   `https://stack.templetwo.com/claude/mcp`. A "check your phone" waiting
+   page opens in your browser; approve the ntfy push on your phone — that is
+   the human gate for the initial grant. (Acceptance test per HQ ruling:
+   confirm the waiting page holds through a real tap over ~15 minutes before
+   trusting this as the standing gate — a webview timeout would break the
+   poll design.)
 7. **Revocation drill (recommended once):**
    `python -m clients.claude_bridge.cli revoke-all` — the connector must 401
-   on its next call and re-prompt for authorization.
+   on its next call and re-prompt for authorization (a fresh phone tap).
 
 **Rollback:** remove the two ingress rules + kickstart the tunnel (public
 surface gone), or `git revert` the merge + kickstart sovereign-sse. The bridge
@@ -192,20 +235,33 @@ Gemini's audit b69882fb". On-disk reality (verified 2026-07-04):
 
 ## Test coverage
 
-`tests/test_claude_bridge_oauth.py` (62 tests: resource-owner auth gate —
-secret + single-use nonce + fail-closed, PKCE both ends, RFC 8707 at
-authorize/token/route, rotation + reuse family revocation, redirect pinning +
-loopback-default-off, DCR dedupe/LRU-evict, body cap, revocation, discovery),
-plus `test_claude_bridge_mcp_gate.py` (auth gate, registry validation,
+`tests/test_claude_bridge_oauth.py` (86 tests: the phone-tap resource-owner
+gate — bridge delegation, sha256 binding + constant-time compare, atomic
+approved→consumed confirm, fail-closed on bridge unreachable/non-2xx/bad-body
+both at the handler level (mocked `_bridge_approval_*`) and the real network
+code path (`httpx.MockTransport`), the status-poll proxy, and confirmation
+that the passphrase + nonce symbols are fully gone — plus PKCE both ends,
+RFC 8707 at authorize/token/route, rotation + reuse family revocation,
+redirect pinning + loopback-default-off, DCR dedupe/LRU-evict, body cap,
+revocation, discovery — all preserved unchanged by the swap), plus
+`test_claude_bridge_mcp_gate.py` (auth gate, registry validation,
 single-use argument-bound elevation), `test_claude_bridge_elevation.py`,
 `test_claude_bridge_routes.py` (routing, rate limits, 401 shape,
 openai/grok-unaffected guards), `test_claude_bridge_tiers.py` (fail-closed +
 registry drift guard), and `clients/claude_bridge/_smoke_test.py` (manual,
 offline-safe). A pre-deploy adversarial multi-agent security review (5 lenses,
-each finding independently verified) found one critical (authorize had no
-resource-owner authentication) plus several highs/mediums — all confirmed
-findings are fixed and covered by tests; the resource-owner fix is
-additionally proven end-to-end against a live server (anonymous self-approve
-now 403). Pre-existing failures NOT from this branch: 2 in
+each finding independently verified) found one critical in the *original*
+passphrase design (authorize had no resource-owner authentication at all)
+plus several highs/mediums — all confirmed findings were fixed and covered by
+tests, and that fix was proven end-to-end against a live server (anonymous
+self-approve 403). Pre-existing failures NOT from this branch: 2 in
 `tests/test_boot_ritual.py` (protected-drawer boot-line tests, fail on clean
 origin/main too — environment-tied).
+
+**The 2026-07 phone-tap swap (this doc's current design) has NOT yet had its
+own live-server proof** — it is covered by the mocked-bridge unit suite above
+plus the real bridge-side companion routes (built in parallel in
+`sovereign-bridge`, not this repo), but the end-to-end acceptance test named
+in the HQ ruling (`revoke-all` → reconnect claude.ai → confirm the waiting
+page holds through a real phone tap over ~15 minutes) is Anthony's deploy-gate
+step, not yet run.

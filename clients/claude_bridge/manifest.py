@@ -34,9 +34,12 @@ MANIFEST = {
         "scopes": [DEFAULT_SCOPE],
     },
     "resource_owner_auth": (
-        "the OAuth consent requires the operator approval passphrase "
-        "(CLAUDE_AUTHORIZE_SECRET) plus a single-use signed nonce — completing "
-        "the OAuth dance alone does NOT equal operator consent"
+        "completing the OAuth dance alone does NOT equal operator consent — "
+        "GET /authorize delegates a fresh approval to the Sovereign Bridge, "
+        "which pushes an ntfy notification to Anthony's phone; POST /authorize "
+        "mints a code only after his tap flips that approval to approved "
+        "(bridge-side, HMAC-signed, atomic single-use). No passphrase, no "
+        "admin-approve fallback — the phone tap is the only gate"
     ),
     "access_model": {
         "base_tier": "every native tool except the destructive tier",

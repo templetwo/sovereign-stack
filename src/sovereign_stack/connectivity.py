@@ -219,8 +219,10 @@ _RE_LAST_EXIT = re.compile(r"^\s*last exit code\s*=\s*(-?\d+)", re.MULTILINE)
 # its last bootstrap (bootout/bootstrap resets it to 1). Source for
 # service_telemetry.restart_count (BUILD_SPEC.md §1b/§4). NEVER surface the
 # raw `launchctl print` block itself — its `environment = {…}` section
-# carries BRIDGE_TOKEN / GROK_BRIDGE_TOKEN / CLAUDE_AUTHORIZE_SECRET in
-# cleartext; only this parsed integer may leave this module.
+# carries BRIDGE_TOKEN / GROK_BRIDGE_TOKEN in cleartext (and, on the bridge's
+# own plist, ARRIVAL_DECIDE_SECRET); only this parsed integer may leave this
+# module. (CLAUDE_AUTHORIZE_SECRET is retired — the Claude connector's
+# resource-owner auth is now an ntfy phone-tap gate, not an env secret.)
 _RE_RUNS = re.compile(r"^\s*runs\s*=\s*(\d+)", re.MULTILINE)
 
 

@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased]
+
+### Claude connector — phone-tap authorize swap (connector-side; pending bridge-side companion + deploy)
+
+`clients/claude_bridge`'s resource-owner control is replaced: the 1.12.0
+operator passphrase (`CLAUDE_AUTHORIZE_SECRET`) plus single-use consent nonce
+is retired entirely — no replacement passphrase, no replacement nonce key.
+`GET /claude/oauth/authorize` now delegates a fresh approval to the
+sovereign-bridge over loopback (master `BRIDGE_TOKEN`, already carried by the
+SSE — zero new secrets) and renders a "check your phone" waiting page instead
+of a consent form; a new `GET /claude/oauth/authorize/status` route lets that
+page poll every 5s. Only Anthony's ntfy tap — confirmed via the bridge's
+atomic `approved→consumed` flip — lets `POST /claude/oauth/authorize` reach
+its single code-mint site. A sha256 binding over `(client_id, redirect_uri,
+audience, code_challenge)`, compared constant-time, ties the completing POST
+to the exact request the GET created (replay/tamper gate). Fails closed on
+any bridge unreachability, non-2xx, or `{approved: false}`. No passphrase, no
+admin-approve fallback — the phone tap is the only gate (Anthony's explicit
+choice, accepted lockout tradeoff). PKCE S256, RFC 8707 audience binding,
+redirect pinning, single-use 10-min codes, and refresh rotation with
+reuse-detection are all unchanged.
+
+Connector-side only (`clients/claude_bridge/oauth.py`, `sse_server.py`,
+`manifest.py`, docs); the bridge-side `/api/approval/*` routes are a
+companion change in `sovereign-bridge`, built to the same spec in parallel.
+**Nothing here is deployed** — the code exists pending HQ review and
+Anthony's deploy gate. Deploying requires the SSE launchd plist's env block
+to actually reload (`launchctl bootout` + `bootstrap`, **not**
+`kickstart -k`, since `CLAUDE_AUTHORIZE_SECRET` is being removed from it).
+See `docs/implementation/CLAUDE_CONNECTOR.md`.
+
+---
+
 ## [1.15.0] - 2026-07-21
 
 ### Call-first heartbeat boot tool + tier-aware connector routing
@@ -132,7 +165,9 @@ radius* — "unfiltered identity, gated blast radius":
   consent — `POST /authorize` mints a code only with the operator passphrase
   (`CLAUDE_AUTHORIZE_SECRET`) plus a single-use signed nonce, and fails closed
   when unset. (Caught as a pre-deploy critical by an adversarial review and
-  fixed before ship.)
+  fixed before ship.) **Superseded — see [Unreleased]:** this passphrase +
+  nonce design was retired 2026-07 in favor of an ntfy phone-tap gate; no
+  replacement passphrase or nonce key exists.
 - **Scoped-native tiers:** the full 94-tool surface, minus a 12-tool destructive
   tier (policy mutation, supersession, quarantine, protected records, service
   control, and the handoff-consuming `where_did_i_leave_off`) that requires a
