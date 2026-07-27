@@ -526,6 +526,34 @@ async def list_tools():
                             "type": "string",
                             "description": "Optional short nuance string on the feeling.",
                         },
+                        "content_class": {
+                            "type": "string",
+                            "enum": [
+                                "outcome",
+                                "specification",
+                                "governance",
+                                "provenance",
+                                "process",
+                            ],
+                            "description": (
+                                "Optional CLOSED-vocabulary tag: WHAT KIND of claim this is. "
+                                "outcome (a result that happened) vs specification (a plan/ask) "
+                                "is the load-bearing cut; also governance, provenance, process. "
+                                "Enforced at write — an out-of-vocab value rejects the whole "
+                                "call and writes nothing. Outside the claim_id preimage, so "
+                                "tagging never shifts an entry's id."
+                            ),
+                        },
+                        "return_claim_id": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": (
+                                "If true, the response appends the derived 64-hex claim_id of "
+                                "the entry just written (the surviving entry's on a dedup hit), "
+                                "so it can be fetched/inspected without re-derivation. Default "
+                                "false: the response is unchanged."
+                            ),
+                        },
                     },
                     "required": ["domain", "content"],
                 },
@@ -2619,6 +2647,8 @@ async def _dispatch_tool(name: str, arguments: dict):
                 emotional_intensity=arguments.get("emotional_intensity"),
                 emotion_source=arguments.get("emotion_source"),
                 emotion_note=arguments.get("emotion_note"),
+                content_class=arguments.get("content_class"),
+                return_claim_id=arguments.get("return_claim_id", False),
             )
         except ValueError as exc:
             # Receipt/supersession/domain validation failures name the
@@ -2630,12 +2660,13 @@ async def _dispatch_tool(name: str, arguments: dict):
             # (mesh-20260719, P1 — the fail-open write path).
             raise ValueError(f"record_insight rejected: {exc}") from exc
         via = f" (via {vantage})" if vantage else ""
-        return [
-            TextContent(
-                type="text",
-                text=f"{glyph_for('memory_sigil')} Insight recorded [{layer}]{via}: {path}",
-            )
-        ]
+        text = f"{glyph_for('memory_sigil')} Insight recorded [{layer}]{via}: {path}"
+        # Only the return_claim_id path carries a claim_id attribute; absent it
+        # the response is byte-identical to before.
+        claim_id = getattr(path, "claim_id", None)
+        if claim_id:
+            text += f"\nclaim_id: {claim_id}"
+        return [TextContent(type="text", text=text)]
 
     if name == "archive_exchange":
         record = experiential.archive_exchange(
@@ -2697,6 +2728,8 @@ async def _dispatch_tool(name: str, arguments: dict):
             domain_contains=arguments.get("domain_contains"),
             order=arguments.get("order", "newest"),
             offset=arguments.get("offset", 0),
+            content_class=arguments.get("content_class"),
+            exclude_content_class=arguments.get("exclude_content_class"),
             # The tool response is always the full read envelope (Phase 1,
             # mesh-20260719): the payload states its own coverage — returned
             # vs total_matched, which scope ran, truncation — instead of a

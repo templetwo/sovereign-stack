@@ -192,6 +192,23 @@ class DedupedInsightPath(str):
         return obj
 
 
+class InsightPath(str):
+    """
+    record_insight return value when the caller asked for the derived
+    claim_id (return_claim_id=True). Subclasses str so the path bytes are
+    IDENTICAL to the plain path string for every existing caller
+    (non-breaking); adds a `claim_id` attribute so a fetch-by-identifier
+    caller can address the just-written entry without re-deriving it.
+    Only surfaced when return_claim_id is set — the default return stays a
+    plain str.
+    """
+
+    def __new__(cls, path: str, claim_id: str):
+        obj = super().__new__(cls, path)
+        obj.claim_id = claim_id
+        return obj
+
+
 # =============================================================================
 # v1.7.0 TOOL-SCHEMA EXTENSIONS (server.py owner: merge these into the
 # existing record_insight / recall_insights inputSchema["properties"] —
@@ -275,6 +292,32 @@ RECALL_INSIGHTS_SCHEMA_EXTENSIONS = {
             "Number of matched insights to skip before `limit` applies (pagination). "
             "The response envelope reports total_matched and, when truncated, a "
             "continuation {offset, limit} for the next page."
+        ),
+    },
+    "content_class": {
+        "type": "array",
+        "items": {"type": "string"},
+        "description": (
+            "INCLUDE filter: keep only entries whose content_class is in this list "
+            "(e.g. ['outcome'] returns just outcome-tagged entries). Untagged entries "
+            "are DROPPED when this is set (include-mode is how the blind reviewer "
+            "blinds). Accepts one class or a list. Omit to include every class "
+            "(default, backward-compatible)."
+        ),
+    },
+    "exclude_content_class": {
+        "type": "array",
+        "items": {"type": "string"},
+        "description": (
+            "EXCLUDE filter: drop entries whose content_class is in this list "
+            "(e.g. ['outcome'] hides outcome-tagged entries). None-VISIBLE: untagged "
+            "entries are KEPT. Accepts one class or a list. Omit (default) to exclude "
+            "nothing. NOTE: this blinding is (a) scoped to recall_insights ONLY — no "
+            "sibling read path (load_entries, scribe, inspect_claim, reflexive_surface, "
+            "recall_reflections) honors content_class in Phase 1 — and (b) conditional "
+            "on write-side tagging: an entry written before the tag existed, or written "
+            "without one, carries no content_class and this filter cannot hide it. It is "
+            "a best-effort blind, NOT an unscoped guarantee that a class never surfaces."
         ),
     },
 }
@@ -632,6 +675,14 @@ class ExperientialMemory:
     # feeling — Anthony is the authority on his own felt experience.
     EMOTION_SOURCES = {"anthony_declared", "witness_interpreted", "anthony_corrected"}
 
+    # Content class (Phase 1) — a CLOSED vocabulary describing WHAT KIND of
+    # claim an entry is, so a reader can separate what happened from what was
+    # asked for. The outcome-vs-specification cut is the load-bearing one (a
+    # result is not a plan). Enforced at write (reject, never coerce); honored
+    # as a recall filter on recall_insights only. Untagged is a valid state —
+    # nothing back-fills historical entries.
+    CONTENT_CLASSES = {"outcome", "specification", "governance", "provenance", "process"}
+
     def __init__(self, root: str = "chronicle"):
         self.root = Path(root)
         self.insights_dir = self.root / "insights"
@@ -677,6 +728,8 @@ class ExperientialMemory:
         emotional_intensity: float = None,
         emotion_source: str = None,
         emotion_note: str = None,
+        content_class: str = None,
+        return_claim_id: bool = False,
         **metadata,
     ) -> str:
         """
@@ -728,6 +781,21 @@ class ExperientialMemory:
                    fixing it is anthony_declared / anthony_corrected. He is the
                    authority on his own felt experience.
             emotion_note: Optional short nuance string on the feeling.
+            content_class: Optional CLOSED-vocabulary tag naming WHAT KIND of
+                   claim this is — one of CONTENT_CLASSES (outcome |
+                   specification | governance | provenance | process). The
+                   outcome-vs-specification cut is load-bearing: a result is
+                   not a plan. ENFORCED at write — an out-of-vocab value raises
+                   ValueError and NOTHING is written (reject, never coerce).
+                   OUTSIDE the claim_id preimage (timestamp+domain+content), so
+                   tagging never shifts an entry's id. When omitted the stored
+                   entry is byte-identical to an untagged write.
+            return_claim_id: If True, the return is an InsightPath (str
+                   subclass, path bytes unchanged) carrying `.claim_id` — the
+                   derived 64-hex id of the entry just written, so a caller can
+                   fetch/inspect it without re-deriving. On a dedup hit the
+                   claim_id is the SURVIVING entry's. Default False returns a
+                   plain str, byte-identical to today.
             **metadata: Additional context
 
         Returns:
@@ -784,6 +852,13 @@ class ExperientialMemory:
         if emotion_note is not None and not isinstance(emotion_note, str):
             raise ValueError("emotion_note must be a string")
 
+        # Content class (Phase 1) — fail fast, BEFORE the timestamp/dedup and
+        # any filesystem call, so an out-of-vocab value writes nothing. Reject,
+        # never coerce: silently dropping an invalid tag would let a typo pass
+        # as untagged.
+        if content_class is not None and content_class not in self.CONTENT_CLASSES:
+            raise ValueError(f"content_class must be one of {sorted(self.CONTENT_CLASSES)}")
+
         timestamp = datetime.now(timezone.utc)
         session_id = session_id or f"session_{timestamp.strftime('%Y%m%d_%H%M%S')}"
         layer = layer if layer in self.VALID_LAYERS else self.LAYER_HYPOTHESIS
@@ -808,7 +883,11 @@ class ExperientialMemory:
         # lock below, where the answer is authoritative.
         deduped = _dedup_hit(jsonl_path, content, domain, layer, timestamp)
         if deduped is not None:
-            return DedupedInsightPath(str(jsonl_path), deduped)
+            hit = DedupedInsightPath(str(jsonl_path), deduped)
+            if return_claim_id:
+                # Surviving-entry id: the caller asked what's now on disk.
+                hit.claim_id = provenance.derive_claim_id(deduped)
+            return hit
 
         # Receipts: verify refs and stamp write-time verdicts. A dangling /
         # ambiguous / malformed receipt rejects the whole call (ReceiptError
@@ -828,7 +907,11 @@ class ExperientialMemory:
         with provenance.chronicle_write_lock():
             deduped = _dedup_hit(jsonl_path, content, domain, layer, timestamp)
             if deduped is not None:
-                return DedupedInsightPath(str(jsonl_path), deduped)
+                hit = DedupedInsightPath(str(jsonl_path), deduped)
+                if return_claim_id:
+                    # Surviving-entry id: the caller asked what's now on disk.
+                    hit.claim_id = provenance.derive_claim_id(deduped)
+                return hit
 
             # Supersedes: resolve each ref (unknown/ambiguous rejects the call).
             resolved_predecessors: list[tuple[str, dict]] = []
@@ -859,6 +942,11 @@ class ExperientialMemory:
                 insight["emotion_source"] = emotion_source
             if emotion_note is not None:
                 insight["emotion_note"] = emotion_note
+            # Content class (Phase 1) — assigned AFTER the **metadata splat so
+            # the named param always wins. Guarded so an unset value leaves the
+            # dict (and thus the JSONL bytes) identical to an untagged write.
+            if content_class is not None:
+                insight["content_class"] = content_class
             if stamped_receipts:
                 insight["verified_by"] = stamped_receipts
             if resolved_predecessors:
@@ -913,6 +1001,11 @@ class ExperientialMemory:
             path_str += f" (receipts: {counts['verified']} verified, {counts['attested']} attested)"
         if resolved_predecessors:
             path_str += f" ⊃ supersedes {len(resolved_predecessors)}"
+        # Fetch-by-identifier: surface the derived claim_id only when asked.
+        # content_class is outside derive_claim_id's preimage, so tagging never
+        # shifts this id. Default (False) returns a plain str — byte-identical.
+        if return_claim_id:
+            return InsightPath(path_str, provenance.derive_claim_id(insight))
         return path_str
 
     def record_learning(
@@ -1524,6 +1617,8 @@ class ExperientialMemory:
         order: str = "newest",
         offset: int = 0,
         envelope: bool = False,
+        content_class: str | list = None,
+        exclude_content_class: str | list = None,
     ) -> list[dict] | dict:
         """
         Recall insights, optionally filtered by domain, intensity, and time window.
@@ -1572,6 +1667,26 @@ class ExperientialMemory:
                     partial_reasons, continuation} instead of a bare list —
                     the read-side sibling of the P1 write fix: the response
                     states its own coverage instead of implying completeness.
+            content_class: INCLUDE filter (Phase 1). One class or a list; keep
+                    only entries whose content_class is in the set. Untagged
+                    entries are DROPPED when this is given (include-mode is how
+                    the blind reviewer blinds). None (default) includes every
+                    class. Read-only structural drop before the query filter, so
+                    an excluded entry can never be resurfaced by matching its own
+                    text; excluded entries never enter the result, so
+                    total_matched counts only survivors (no new partial_reason).
+            exclude_content_class: EXCLUDE filter (Phase 1). One class or a list;
+                    drop entries whose content_class is in the set. None-VISIBLE:
+                    untagged entries are KEPT. Empty/None (default) excludes
+                    nothing.
+
+            Phase 1 SCOPE (Option B): the content_class filter lives on
+            recall_insights ONLY. The sibling read paths — load_entries, the
+            scribe, inspect_claim, reflexive_surface, recall_reflections — do
+            NOT honor content_class in Phase 1, and the blinding is conditional
+            on write-side tagging (an untagged or pre-tag entry carries no
+            content_class and cannot be hidden). Treat exclude_content_class as
+            a best-effort blind, not an unscoped guarantee.
 
         Returns:
             List of insight dicts sorted per `order`. Data-gated annotation: when
@@ -1646,6 +1761,22 @@ class ExperientialMemory:
         if query:
             query_terms = [t.lower() for t in query.split() if t]
 
+        # Content-class filters (Phase 1). Normalize a bare string to a 1-set.
+        # include_classes is None (include everything) unless the caller gave a
+        # non-empty include set; exclude_classes defaults to empty (exclude
+        # nothing). Both are read-only structural filters applied in the loop.
+        def _as_class_set(value) -> set | None:
+            if value is None:
+                return None
+            if isinstance(value, str):
+                return {value}
+            return set(value)
+
+        # An empty include set collapses to None (no include filter) rather
+        # than the surprising "match nothing"; exclude defaults to empty set.
+        include_classes = _as_class_set(content_class) or None
+        exclude_classes = _as_class_set(exclude_content_class) or set()
+
         for domain_dir in search_dirs:
             for jsonl_file in domain_dir.glob("*.jsonl"):
                 with open(jsonl_file) as f:
@@ -1655,6 +1786,17 @@ class ExperientialMemory:
                             if insight.get("intensity", 0) < min_intensity:
                                 continue
                             if layer_filter and insight.get("layer") != layer_filter:
+                                continue
+                            # Content-class filter (Phase 1) — structural drop,
+                            # read-only on the entry. An excluded entry NEVER
+                            # enters `insights`, so it can't be resurfaced by a
+                            # query matching its own text, and total_matched
+                            # counts only survivors. None-VISIBLE on exclude
+                            # (untagged kept); include-mode drops untagged.
+                            entry_class = insight.get("content_class")
+                            if entry_class in exclude_classes:
+                                continue
+                            if include_classes is not None and entry_class not in include_classes:
                                 continue
                             ts = insight.get("timestamp", "")
                             if start_date and ts < start_date:
