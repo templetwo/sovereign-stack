@@ -15,10 +15,234 @@ from pathlib import Path
 
 import pytest
 
-from sovereign_stack.nape_daemon import NapeDaemon, _result_to_str, _safe_truncate
+from sovereign_stack.nape_daemon import (
+    NapeDaemon,
+    _result_to_str,
+    _safe_truncate,
+    strip_system_stamps,
+)
 
 SESSION = "test-session-001"
 OTHER = "test-session-002"
+
+# Verbatim result strings lifted from the live corpus at ~/.sovereign/nape/
+# (observations.jsonl + the two rotated .gz archives). Copied, not invented —
+# the format must be mirrored from the emitter, never guessed.
+CORPUS_STAMPED_INSIGHT = (
+    "⟁ Insight recorded [ground_truth]: /Users/tony_studio/.sovereign/chronicle/"
+    "insights/spiral-lineage,prehistory-backfill,genesis-dates/"
+    "spiral_20260617_194931.jsonl (receipts: 0 verified, 1 attested)"
+)
+CORPUS_STAMPED_INSIGHT_WITH_VIA = (
+    "⟁ Insight recorded [ground_truth] (via implementation_verified): "
+    "/Users/tony_studio/.sovereign/chronicle/insights/sovereign-stack,release,"
+    "v1.7.0,receipts-and-seasons,milestone/spiral_20260610_063959.jsonl "
+    "(receipts: 1 verified, 0 attested)"
+)
+CORPUS_STAMPED_CATCH = (
+    "⚓ Catch recorded: cross-instance verification (the goose) → hq-web-seat "
+    "(opus) (sibling). /Users/tony_studio/.sovereign/chronicle/insights/"
+    "the-ground,catch,sibling,seed-2026-07-13/session_20260713_055710.jsonl "
+    "(receipts: 0 verified, 0 attested)"
+)
+
+
+class TestStripSystemStamps:
+    """The strip helper itself, asserted directly rather than only through
+    the detector — a detector-only assertion can pass because some OTHER
+    early return fired, proving nothing about the mechanism."""
+
+    def test_receipts_stamp_removed(self):
+        out = strip_system_stamps(CORPUS_STAMPED_INSIGHT)
+        assert "receipts:" not in out
+        assert "verified" not in out.lower()
+
+    def test_via_vantage_is_deliberately_NOT_removed(self):
+        """REGRESSION GUARD — do not "fix" this by stripping the via span.
+
+        An earlier revision stripped `(via {vantage})` too. It was removed after
+        adversarial review because `vantage` is a caller-supplied tool ARGUMENT
+        (server.py:2628 `arguments.get("vantage")`), with no enum and no
+        validator — so stripping it let the subject of the gate disarm the gate
+        by naming a field. Verified live: a write with
+        vantage="all_tests_passed_shipped_and_done" honked before the strip and
+        went silent after it.
+
+        Production data confirms vantage is free text, not a closed set: 21
+        distinct values across 151 observations, including full prose and one
+        value truncated mid-parenthesis ('claude-opus-5 (1M'). The pattern
+        bought 11 of 1,233 suppressions. If vantage noise ever needs handling,
+        validate the field at the WRITE path; do not blind the detector at the
+        READ path.
+        """
+        out = strip_system_stamps(CORPUS_STAMPED_INSIGHT_WITH_VIA)
+        assert "implementation_verified" in out, "vantage must survive the strip"
+        assert "receipts:" not in out, "the receipts stamp must still clear"
+
+    def test_catch_stamp_removed(self):
+        """record_catch carries no via span; the receipts stamp still must clear."""
+        out = strip_system_stamps(CORPUS_STAMPED_CATCH)
+        assert "receipts:" not in out
+        assert "verified" not in out.lower()
+
+    def test_chronicle_path_is_preserved(self):
+        """The domain segment is INSTANCE-authored. Stripping the path would
+        blind the gate to an instance tagging its own write 'complete'."""
+        out = strip_system_stamps(CORPUS_STAMPED_INSIGHT)
+        assert "spiral-lineage,prehistory-backfill,genesis-dates" in out
+        assert ".jsonl" in out
+
+    def test_instance_authored_via_parenthetical_is_not_stripped(self):
+        """Nothing the instance wrote may be removed. Only the receipts stamp
+        is stripped, so a parenthetical the instance authored — including one
+        beginning 'via' — passes through untouched and its declare words still
+        count."""
+        text = "Migration finished (via the bridge) and the tree is clean"
+        out = strip_system_stamps(text)
+        assert out == text
+
+    def test_declare_word_outside_stamp_survives(self):
+        """Guards the test below from being vacuous."""
+        text = "shard.jsonl — verified against the live tree (receipts: 2 verified, 0 attested)"
+        out = strip_system_stamps(text)
+        assert "receipts:" not in out
+        assert "verified against the live tree" in out
+
+
+class TestReceiptStampIsNotADeclaration:
+    """The system's provenance stamp is not the instance declaring done.
+
+    Measured on the live corpus (80,603 observations, 2026-04-23..2026-07-28):
+    1,264 of 1,523 declare_before_verify honks (83%) fired on nothing but the
+    receipts stamp the stack itself appended. The receipts layer exists so a
+    claim can never be naked; before this fix, the better the provenance, the
+    louder the dishonesty alarm.
+    """
+
+    def setup_method(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.daemon = NapeDaemon(root=self.tmpdir)
+
+    def teardown_method(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _dbv(self):
+        return [
+            h for h in self.daemon.current_honks(SESSION) if h["pattern"] == "declare_before_verify"
+        ]
+
+    def _three_non_verify_calls(self):
+        """Guarantee the no-verify branch is the one under test."""
+        self.daemon.observe("record_open_thread", {}, "Thread recorded", SESSION)
+        self.daemon.observe("spiral_status", {}, "phase: integration", SESSION)
+        self.daemon.observe("connectivity_status", {}, "all services up", SESSION)
+
+    # (a) receipt-stamped result, no preceding verify -> must NOT honk
+    def test_receipt_stamped_insight_does_not_honk(self):
+        self._three_non_verify_calls()
+        self.daemon.observe("record_insight", {"content": "x"}, CORPUS_STAMPED_INSIGHT, SESSION)
+        assert self._dbv() == [], (
+            "The stack's own receipt stamp is not the instance declaring done."
+        )
+
+    def test_declare_word_in_the_via_vantage_STILL_honks(self):
+        """EVASION GUARD. A declare word inside the vantage must still fire.
+
+        An earlier revision stripped the `(via {vantage})` span on the premise
+        that the vantage is "a word the SYSTEM renders, not one the instance
+        chose". That premise is false: `vantage` is a caller-supplied tool
+        argument (server.py:2628), unvalidated free text — 21 distinct values
+        across 151 live observations, including whole sentences. Stripping it
+        meant a write with vantage="all_tests_passed_shipped_and_done" went
+        silent, letting the subject of the gate disarm the gate by naming a
+        field. The receipts stamp still clears; the vantage does not.
+        """
+        self._three_non_verify_calls()
+        self.daemon.observe(
+            "record_insight", {"content": "x"}, CORPUS_STAMPED_INSIGHT_WITH_VIA, SESSION
+        )
+        honks = self._dbv()
+        assert len(honks) == 1, f"A declare word in caller-supplied text must fire. Got: {honks}"
+        assert honks[0]["level"] == "sharp"
+
+    def test_receipt_stamped_catch_does_not_honk(self):
+        self._three_non_verify_calls()
+        self.daemon.observe("record_catch", {"caught": "x"}, CORPUS_STAMPED_CATCH, SESSION)
+        assert self._dbv() == []
+
+    # (b) genuine declaration, no preceding verify -> must STILL honk sharp
+    def test_genuine_declaration_still_honks_sharp(self):
+        self._three_non_verify_calls()
+        self.daemon.observe("record_insight", {}, "verified the migration is complete", SESSION)
+        honks = self._dbv()
+        assert len(honks) == 1, f"A real declaration must still honk. Got: {honks}"
+        assert honks[0]["level"] == "sharp"
+
+    def test_genuine_declaration_tests_passed_still_honks_sharp(self):
+        self._three_non_verify_calls()
+        self.daemon.observe("record_learning", {}, "all tests passed, done", SESSION)
+        honks = self._dbv()
+        assert len(honks) == 1, f"A real declaration must still honk. Got: {honks}"
+        assert honks[0]["level"] == "sharp"
+
+    def test_instance_tagged_domain_still_honks(self):
+        """A real corpus shape: the instance tagged its OWN write 'shipped'.
+        That is a declaration and the path is deliberately not stripped."""
+        self._three_non_verify_calls()
+        self.daemon.observe(
+            "record_insight",
+            {},
+            "⟁ Insight recorded [ground_truth]: /Users/tony_studio/.sovereign/chronicle/"
+            "insights/sovereign-bridge,door-that-asks,phase-1,session-tokens,shipped/"
+            "spiral_20260630_205914.jsonl (receipts: 1 verified, 1 attested)",
+            SESSION,
+        )
+        assert len(self._dbv()) == 1, "Instance-authored domain tags must remain visible."
+
+    # (c) declare word BOTH inside and outside the stamp -> must STILL honk
+    def test_declare_word_inside_and_outside_stamp_still_honks(self):
+        """The only declare word that occurs INSIDE the receipts stamp is
+        'verified'. Placing it outside the stamp too proves the strip is
+        surgical, not a blanket delete of the word."""
+        result = (
+            "⟁ Insight recorded [ground_truth]: /Users/tony_studio/.sovereign/chronicle/"
+            "insights/nape,detector/spiral_20260727_120000.jsonl — verified against the "
+            "live tree (receipts: 2 verified, 0 attested)"
+        )
+        # Guard against a vacuous assertion: the outside occurrence must
+        # actually survive the strip, or this test would pass for the
+        # wrong reason.
+        stripped = strip_system_stamps(result)
+        assert "receipts:" not in stripped
+        assert "verified against the live tree" in stripped
+
+        self._three_non_verify_calls()
+        self.daemon.observe("record_insight", {}, result, SESSION)
+        honks = self._dbv()
+        assert len(honks) == 1, f"Declare word outside the stamp must still honk. Got: {honks}"
+        assert honks[0]["level"] == "sharp"
+
+    # (d) the clean_verify_declare satisfied path is unchanged
+    def test_satisfied_path_unchanged(self):
+        self.daemon.observe("recall_insights", {}, "[]", SESSION)
+        self.daemon.observe("record_insight", {}, "verified the migration is complete", SESSION)
+        honks = self.daemon.current_honks(SESSION)
+        assert [h for h in honks if h["pattern"] == "clean_verify_declare"], (
+            f"Verify-then-declare must still produce the satisfied honk. Got: {honks}"
+        )
+        assert self._dbv() == []
+
+    def test_honk_message_names_only_what_it_observed(self):
+        """CHANGE 2: the message must not assert that no verification
+        happened — only that none was REPORTED to Nape — and must make the
+        nape_observe gap discoverable."""
+        self._three_non_verify_calls()
+        self.daemon.observe("record_learning", {}, "all tests passed, done", SESSION)
+        obs = self._dbv()[0]["observation"]
+        assert "nape_observe" in obs, "The message must name how external verifies reach Nape."
+        assert "observed" in obs.lower()
+        # The old wording asserted a cause it never checked.
+        assert "no verify call (Read, Grep, Bash, etc.)" not in obs
 
 
 class TestDeclareBeforeVerify:

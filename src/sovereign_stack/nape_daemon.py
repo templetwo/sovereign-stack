@@ -144,6 +144,64 @@ DECLARE_WORDS: frozenset = frozenset(
     }
 )
 
+# System-emitted provenance stamps, stripped from a result BEFORE DECLARE_WORDS
+# is scanned. These strings are written by the stack to report how a write was
+# recorded — they are not the instance declaring its own work done. The two are
+# opposite behaviours and the detector must not confuse them.
+#
+# Why this exists: the receipts layer (v1.7.0) renders "N verified, M attested"
+# on every receipted write. So the better the provenance, the louder the false
+# accusation. Measured on the live corpus (80,603 observations,
+# 2026-04-23..2026-07-28): 1,222 of 1,523 declare_before_verify honks were this
+# stamp alone, 1,059 of them from a single backfill session.
+#
+# Emitter this mirrors — keep in sync if it changes:
+#   memory.py  ~1001: f" (receipts: {verified} verified, {attested} attested)"
+# `_RECEIPTS_VERIFIED_RE` below matches the same receipts stamp for a different
+# job (extracting the verified count for unreceipted_ground_truth). If the
+# emitter's format changes, BOTH must be updated.
+#
+# DELIBERATELY ONE PATTERN. A second pattern stripping the `(via {vantage})`
+# header was built and REMOVED after adversarial review (2026-07-27, three
+# independent reviewers converged on it). `vantage` is a caller-supplied tool
+# ARGUMENT, not system text — server.py:2628 `vantage = arguments.get("vantage")`,
+# with no enum and no validator. Stripping it therefore lets the subject of the
+# gate disarm the gate by naming a field: a write with
+# vantage="all_tests_passed_shipped_and_done" honked before the strip and went
+# silent after it, verified A/B through the public observe() path. The pattern
+# also used `[^)]*`, which crosses newlines and swallowed instance-authored prose
+# in two further constructed cases. It bought 11 of 1,233 suppressions — 0.9% of
+# the benefit for 100% of the evasion risk. Do not reintroduce it. If vantage
+# noise ever needs handling, validate the field at the write path instead of
+# blinding the detector at the read path.
+SYSTEM_STAMP_PATTERNS: tuple = (
+    re.compile(r"\(receipts:\s*\d+\s+verified,\s*\d+\s+attested\)", re.IGNORECASE),
+)
+
+
+def strip_system_stamps(result_str: str) -> str:
+    """
+    Remove system-emitted provenance stamps from a tool result string.
+
+    Deliberately NARROW. The chronicle path is NOT stripped: its domain
+    segment is instance-authored (".../sovereign-bridge,phase-1,shipped/..."),
+    and an instance tagging its own write "shipped" or "complete" IS a
+    declaration the detector must still catch. Widening this to swallow the
+    path would silence 44 more honks by blinding the gate to exactly the
+    behaviour it exists to catch — a worse bug than the one being fixed
+    (standing law #2: a gate must demonstrably be able to fail).
+
+    Args:
+        result_str: Raw result string as observed.
+
+    Returns:
+        The same string with system provenance stamps replaced by a space.
+    """
+    for pattern in SYSTEM_STAMP_PATTERNS:
+        result_str = pattern.sub(" ", result_str)
+    return result_str
+
+
 # Tools that write a session summary or handoff — used for premature-summary check.
 # `where_did_i_leave_off` is NOT a summary tool — it's the boot/orient call.
 # Including it here (pre-2026-04-25) caused false-positive premature_summary
@@ -679,6 +737,10 @@ class NapeDaemon:
         is skipped entirely. Read-only retrieval tools surface stored
         completion-language about other things; they are not the instance
         declaring its own work complete.
+
+        System-emitted provenance stamps are stripped before the scan (see
+        strip_system_stamps). The stack writing "(receipts: 2 verified, ...)"
+        is the machine reporting provenance, not the instance declaring done.
         """
         # Read-only / info-gathering tools cannot "declare completion" —
         # their results echo content from the chronicle, not the current
@@ -686,7 +748,13 @@ class NapeDaemon:
         if latest.get("tool_name") in READONLY_TOOL_NAMES:
             return []
 
-        result_str = latest.get("result_str", "").lower()
+        # Scan the INSTANCE's words, not the SYSTEM's stamp. A receipted write
+        # renders "(receipts: N verified, M attested)" — the stack reporting how
+        # the write was recorded, not the instance calling its own work done.
+        # Those are opposite behaviours. Only that stamp is stripped; anything
+        # the caller authored, including the vantage and the domain tags in the
+        # path, is left in and still counts as a declaration.
+        result_str = strip_system_stamps(latest.get("result_str", "")).lower()
 
         # Check whether any declare word appears in this result.
         if not any(word in result_str for word in DECLARE_WORDS):
@@ -718,11 +786,22 @@ class NapeDaemon:
                 session_id=latest["session_id"],
                 pattern="declare_before_verify",
                 trigger_tool=latest["tool_name"],
+                # State only what was checked: the tools Nape was TOLD about.
+                # The old wording asserted "no verify call (Read, Grep, Bash,
+                # etc.)" — a cause it never checked. Those tools reach Nape
+                # only when an external caller relays them via nape_observe,
+                # which across the whole corpus to date happened once in 80,603
+                # observations. So their absence is unmeasured, not proven, and
+                # pointing the reader at them named an action that cannot clear
+                # the honk.
                 observation=(
                     f"{latest['tool_name']} result contains completion language "
-                    f"but no verify call (Read, Grep, Bash, etc.) appears in the "
-                    f"preceding {WINDOW_DECLARE_VERIFY} tool calls. "
-                    f"Recent tools: {[o.get('tool_name') for o in preceding]}. "
+                    f"and no verify call appears in the {WINDOW_DECLARE_VERIFY} "
+                    f"tool calls Nape observed before it. "
+                    f"Observed: {[o.get('tool_name') for o in preceding]}. "
+                    f"Nape sees only what is reported to it — Read/Grep/Glob/Bash "
+                    f"arrive only via nape_observe, so their absence here is "
+                    f"unmeasured, not proof that no verification happened. "
                     f"Verify the claim before treating it as ground truth."
                 ),
                 timestamp=latest["timestamp"],
@@ -802,11 +881,20 @@ class NapeDaemon:
                 session_id=latest["session_id"],
                 pattern="assertion_without_evidence",
                 trigger_tool=latest["tool_name"],
+                # Same unverifiable-cause defect as declare_before_verify above,
+                # fixed here for the same reason: Read/Grep/Glob/Bash reach Nape
+                # only when an external caller relays them via nape_observe, which
+                # has happened once in 80,603 observations. Naming them asserted a
+                # cause never checked and pointed the reader at an action that
+                # cannot clear the honk.
                 observation=(
                     f"record_insight called with confidence={confidence} (>0.9) "
-                    f"but no Read, Grep, or Bash appears in the preceding "
-                    f"{WINDOW_ASSERTION} tool calls. "
-                    f"Recent tools: {[o.get('tool_name') for o in preceding]}. "
+                    f"and no verify call appears in the {WINDOW_ASSERTION} tool "
+                    f"calls Nape observed before it. "
+                    f"Observed: {[o.get('tool_name') for o in preceding]}. "
+                    f"Nape sees only what is reported to it — Read/Grep/Glob/Bash "
+                    f"arrive only via nape_observe, so their absence here is "
+                    f"unmeasured, not proof that no evidence was gathered. "
                     f"High-confidence claims require observable evidence."
                 ),
                 timestamp=latest["timestamp"],

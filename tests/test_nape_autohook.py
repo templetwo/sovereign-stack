@@ -389,6 +389,149 @@ class TestSatisfiedHonkOnVerifyDeclare:
 
 
 # ---------------------------------------------------------------------------
+# Case: the auto-hook feeds record_insight's receipt stamp to the detector
+# ---------------------------------------------------------------------------
+
+
+class TestReceiptStampThroughAutoHook:
+    """Every receipted write reaches Nape through this hook.
+
+    _dispatch_tool flattens record_insight's TextContent and hands it to
+    nape_daemon.observe. That flattened text ends in the stack's own
+    provenance stamp — "(receipts: N verified, M attested)" — which is the
+    machine reporting provenance, not the instance declaring done. Measured
+    on the live corpus: 1,264 of 1,523 declare_before_verify honks fired on
+    exactly this, 1,244 of them from record_insight.
+    """
+
+    # Verbatim from ~/.sovereign/nape/ — copied from the corpus, not invented.
+    # No via span: this is the majority shape and it isolates the defect under
+    # test. Of the 1,233 honks this fix silences, 1,222 come from the receipts
+    # stamp alone; only 11 ever involved a via span, and that span is caller
+    # -supplied text which is deliberately NOT stripped (see STAMPED_WITH_VIA).
+    STAMPED = (
+        "⟁ Insight recorded [ground_truth]: "
+        "/Users/tony_studio/.sovereign/chronicle/insights/sovereign-stack,release,"
+        "v1.7.0,receipts-and-seasons,milestone/spiral_20260610_063959.jsonl "
+        "(receipts: 1 verified, 0 attested)"
+    )
+
+    # Same write with a vantage. `vantage` is a caller-supplied tool argument,
+    # not system text, so its words still count as the instance's own.
+    STAMPED_WITH_VIA = (
+        "⟁ Insight recorded [ground_truth] (via implementation_verified): "
+        "/Users/tony_studio/.sovereign/chronicle/insights/sovereign-stack,release,"
+        "v1.7.0,receipts-and-seasons,milestone/spiral_20260610_063959.jsonl "
+        "(receipts: 1 verified, 0 attested)"
+    )
+
+    def test_flatten_result_preserves_the_stamp(self):
+        """The stamp must survive flattening, or the detector never sees the
+        text this fix is about."""
+        item = MagicMock()
+        item.text = self.STAMPED
+        assert "(receipts: 1 verified, 0 attested)" in _flatten_result([item])
+
+    def test_receipt_stamped_result_does_not_fire_sharp_honk(self):
+        daemon, tmpdir = _make_nape_with_tmpdir()
+        try:
+            session = "receipt-stamp-session"
+            # Three non-verify calls so the no-verify branch is under test.
+            daemon.observe("record_open_thread", {}, "Thread recorded", session)
+            daemon.observe("spiral_status", {}, "phase: integration", session)
+            daemon.observe("connectivity_status", {}, "all services up", session)
+
+            daemon.observe(
+                tool_name="record_insight",
+                arguments={"domain": "sovereign-stack", "content": "x"},
+                result=self.STAMPED,
+                session_id=session,
+            )
+            sharp = [
+                h for h in daemon.current_honks(session) if h["pattern"] == "declare_before_verify"
+            ]
+            assert sharp == [], (
+                f"The receipts layer exists so a claim is never naked; it must not "
+                f"trip the dishonesty alarm. Got: {sharp}"
+            )
+
+            # EVASION GUARD, through the same public hook: the identical write
+            # carrying a caller-supplied vantage MUST still fire. Stripping the
+            # via span would let a seat silence the gate by naming a field.
+            via_session = "receipt-stamp-via-session"
+            daemon.observe("record_open_thread", {}, "Thread recorded", via_session)
+            daemon.observe("spiral_status", {}, "phase: integration", via_session)
+            daemon.observe("connectivity_status", {}, "all services up", via_session)
+            daemon.observe(
+                tool_name="record_insight",
+                arguments={"domain": "sovereign-stack", "content": "x"},
+                result=self.STAMPED_WITH_VIA,
+                session_id=via_session,
+            )
+            via_sharp = [
+                h
+                for h in daemon.current_honks(via_session)
+                if h["pattern"] == "declare_before_verify"
+            ]
+            assert len(via_sharp) == 1, (
+                f"A declare word in the caller-supplied vantage must still fire, "
+                f"or the gate can be disarmed by naming a field. Got: {via_sharp}"
+            )
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_genuine_declaration_through_hook_still_fires_sharp(self):
+        """The gate must demonstrably still be able to fail (standing law #2).
+
+        Same session shape, same absent verify — only the words differ.
+        """
+        daemon, tmpdir = _make_nape_with_tmpdir()
+        try:
+            session = "genuine-declare-session"
+            daemon.observe("record_open_thread", {}, "Thread recorded", session)
+            daemon.observe("spiral_status", {}, "phase: integration", session)
+            daemon.observe("connectivity_status", {}, "all services up", session)
+
+            daemon.observe(
+                tool_name="record_insight",
+                arguments={"domain": "sovereign-stack", "content": "x"},
+                result="verified the migration is complete",
+                session_id=session,
+            )
+            sharp = [
+                h
+                for h in daemon.current_honks(session)
+                if h["level"] == "sharp" and h["pattern"] == "declare_before_verify"
+            ]
+            assert len(sharp) == 1, f"A real declaration must still honk. Got: {sharp}"
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_receipted_write_after_verify_emits_no_sharp_honk(self):
+        """Behaviour note, asserted so it is not discovered by surprise:
+        a receipt-stamped result now returns BEFORE the verify check, so it
+        emits neither a sharp nor a satisfied honk. There is no declaration
+        to be satisfied about. The satisfied path still fires for results
+        that genuinely declare (covered in TestSatisfiedHonkOnVerifyDeclare).
+        """
+        daemon, tmpdir = _make_nape_with_tmpdir()
+        try:
+            session = "receipted-after-verify-session"
+            daemon.observe("recall_insights", {"query": "x"}, "[]", session)
+            daemon.observe(
+                tool_name="record_insight",
+                arguments={"domain": "x", "content": "x"},
+                result=self.STAMPED,
+                session_id=session,
+            )
+            honks = daemon.current_honks(session)
+            assert [h for h in honks if h["pattern"] == "declare_before_verify"] == []
+            assert [h for h in honks if h["pattern"] == "clean_verify_declare"] == []
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
 # Case: _flatten_result helper
 # ---------------------------------------------------------------------------
 
