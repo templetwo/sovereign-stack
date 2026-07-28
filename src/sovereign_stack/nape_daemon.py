@@ -58,10 +58,48 @@ VERIFY_TOOL_NAMES: frozenset = frozenset(
         "route",
         "derive",
         "handoff_acted_on_records",
-        "comms_get_acks",
         "comms_recall",
     }
 )
+
+# `comms_get_acks` was removed from VERIFY_TOOL_NAMES on 2026-07-28.
+#
+# It is not called by a seat. It is called by BaseDaemon._count_recent_unacked
+# (daemons/base.py:247) in a per-message loop, by the metabolize and uncertainty
+# daemons, polling the comms corpus that was RETIRED 2026-06-12. Measured on the
+# live corpus: 60,703 of 81,101 observations — 74.85% of everything Nape has ever
+# seen — are that one poll. A background daemon's bookkeeping landing in a seat's
+# trailing-3 window is not that seat verifying anything, yet its presence or
+# absence decided sharp-vs-satisfied for whatever the seat did next.
+#
+# This makes MORE honks fire, not fewer. That is the point: the suppressions it
+# was granting were never earned. Full replay over the corpus with the word-
+# boundary and readonly fixes also applied, per-session chronological windows:
+#   declare_before_verify      104 -> 214  (+110)
+#   clean_verify_declare       171 ->  61  (-110)
+#   assertion_without_evidence  15 ->  76  (+61)
+# The +110 and the -110 are the SAME 110 events re-verdicted, not two unrelated
+# deltas that happen to match: compared by (session, observation index), the
+# gained-sharp set and the lost-satisfied set are identical, with zero honks
+# disappearing and zero satisfied verdicts appearing.
+# The assertion_without_evidence row is why this set matters twice: it feeds
+# BOTH that detector (window 5) and declare_before_verify (window 3). 61 high-
+# confidence record_insight writes were being vouched for by a daemon poll.
+#
+# It deliberately STAYS in READONLY_TOOL_NAMES below. That entry does a different
+# job — it stops the poller TRIGGERING honks on its own results — and removing it
+# from there would have the 60,703-call poller self-honk.
+#
+# Sibling audit of the rest of this set, by corpus volume:
+#   comms_recall (14 obs) shares the retired-subsystem property but has no poller
+#     volume, and a seat reading comms history genuinely is gathering evidence.
+#   connectivity_status (8,700 obs) is the other high-volume background poller
+#     (sovereign-monitor), but it is not in this set, so it cannot suppress a
+#     honk. Same poller shape, not the same defect.
+#   Everything else in this set is under 3,000 observations and seat-driven.
+#   Read appears exactly ONCE in 81,101 observations — external verify tools
+#   reach Nape only via nape_observe, which is why the honk text says their
+#   absence is unmeasured rather than proven.
 
 # Read-only retrieval / introspection tools whose RESULTS naturally contain
 # completion-language about OTHER things (handoffs, insights, threads) but
@@ -76,6 +114,34 @@ VERIFY_TOOL_NAMES: frozenset = frozenset(
 # "resolved" / "shipped" / "completed" from the chronicle records they
 # returned. Pattern detection was technically correct but contextually
 # noise — these tools ARE the verification, not declarations of completion.
+#
+# THE TEST FOR MEMBERSHIP, and it is narrow: is the result built from STORED
+# content, or from what THIS TURN just did? Membership is not free — this set
+# also exempts a tool from contributing error words to premature_summary and
+# from ever triggering repeated_mistake. Adding a tool that reports its own
+# action would blind the gate to exactly what it exists to catch.
+#
+# DECLINED on 2026-07-28, having failed that test, with their surviving-honk
+# counts so the cost of declining is on the record:
+#   resolve_thread_by_id (25) / resolve_thread (1) — the biggest single
+#     omission from this pass, and deliberate. The result is
+#     "Thread {id} resolved -> ground_truth insight: {path}", so the word is
+#     system template text — but the ACTION is the instance asserting a
+#     question is settled and writing that assertion into the chronicle as
+#     ground_truth. Resolving a thread with no verification in the window is
+#     precisely the declare-before-verify shape. HQ's replay ladder counted
+#     these as suppressible; this build does not.
+#   handoff (8) / record_open_thread (4) / record_insight (59) / close_session,
+#     comms_acknowledge, thread_touch, set_policy, supersede_insight,
+#     archive_exchange, mark_uncertainty, resolve_uncertainty,
+#     retire_hypothesis, spiral_reflect, stack_write_check — writes whose
+#     results report the current turn's own action. In the corpus the declare
+#     words in the handoff results come from the instance's own note text
+#     ("Step 2 of v1.3.2 shipped"), which is the honk working correctly.
+#   connectivity_status (8,700 observations, 0 surviving honks) — read-only,
+#     but it fires nothing here, and adding it would change two OTHER detectors
+#     for a poller whose DOWN/DEGRADED output is a live current-session fact,
+#     not echoed chronicle content. No benefit, real blast radius.
 READONLY_TOOL_NAMES: frozenset = frozenset(
     {
         # Per-turn / boot reflexes
@@ -83,6 +149,22 @@ READONLY_TOOL_NAMES: frozenset = frozenset(
         "where_did_i_leave_off",
         "my_toolkit",
         "start_here",
+        # The other arrival doors. Same projection as where_did_i_leave_off
+        # above (build_arrival_state), rendered at a different depth, and
+        # explicitly side-effect-free: `arrive` is "Pure read: does NOT consume
+        # handoffs, does NOT spawn the scribe" (server.py:3004), `arrive_lineage`
+        # carries the same hard constraint (server.py:3075), `arrive_delta` is
+        # recall_insights + unconsumed handoffs + open threads. Every declare
+        # word in their output came out of the chronicle they are reading.
+        "arrive",
+        "arrive_delta",
+        "arrive_lineage",
+        # Porous inheritance. Rotates the spiral session, but the result is the
+        # PREVIOUS session's handoff, ground truths, hypotheses and threads —
+        # its own opening line is "This is not your memory. These are traces
+        # left by previous instances." Starting a session is not a claim that
+        # any work is finished.
+        "spiral_inherit",
         # Surface / triage
         "reflexive_surface",
         "triage_threads",
@@ -101,10 +183,91 @@ READONLY_TOOL_NAMES: frozenset = frozenset(
         "get_my_patterns",
         "get_unresolved_uncertainties",
         "get_pending_experiments",
+        # Chronicle / provenance read-side. Each verified against its handler
+        # before being added: the result is built from STORED content, not from
+        # what this turn just did.
+        #   current_policies   -> registry.current_policies(), a listing
+        #                         (policies.py:536)
+        #   inspect_claim      -> a forensics report on an existing claim
+        #                         (provenance_tools.py:545)
+        #   season_review      -> "read-only digest" over the window
+        #                         (seasons.py:1126)
+        #   recall_reflections -> list_reflections(), daemon-authored bodies
+        #                         (server.py:3715)
+        #   reflection_ack     -> marks one daemon-written reflection read and
+        #                         echoes that reflection back; the completion
+        #                         language is the REFLECTOR's prose, and acking
+        #                         someone else's note is not a work claim
+        #                         (server.py:3743)
+        #   recall_exchange    -> re-reads and re-hashes an archived exchange and
+        #                         stamps integrity verified|mismatch|missing.
+        #                         That "verified" is the archive layer's re-hash
+        #                         verdict — the same system-emitted-provenance
+        #                         shape as the receipts stamp (server.py:2683)
+        #   list_exchanges     -> the listing sibling of recall_exchange
+        #   context_retrieve   -> scores and returns stored insights
+        #                         (metabolism.py:839)
+        #   the_ground         -> reads the catch ledger. Its WRITE sibling
+        #                         record_catch is deliberately NOT here
+        #                         (ground.py:573)
+        #   ask_scribe         -> the WEAKEST add, and justified differently from
+        #                         the rest. It does not echo stored bytes; the
+        #                         resident librarian (a separate Sonnet) generates
+        #                         prose, and one live survivor is the scribe
+        #                         asserting a deliverable was "Delivered
+        #                         2026-05-18 ... followed a verification pass".
+        #                         That IS a completion claim — but the AUTHOR is
+        #                         the scribe, not the calling instance, and this
+        #                         detector exists to catch the instance declaring
+        #                         its OWN work done. Read-only and redaction-gated.
+        #                         If the scribe ever gains a write path, this entry
+        #                         should be reconsidered first.
+        "current_policies",
+        "inspect_claim",
+        "season_review",
+        "recall_reflections",
+        "recall_exchange",
+        "list_exchanges",
+        "the_ground",
+        # WITHDRAWN 2026-07-28 by HQ review, after adversarial review returned a
+        # blocker. Do not re-add without re-running the three-clause test below.
+        #
+        #   reflection_ack   — server.py:2128 classifies it intent "write", and
+        #     the caller's free-text `note` is persisted (reflections.py:239) and
+        #     echoed back through to_dict (reflections.py:77-78). Exempting it
+        #     let a seat write a completion claim into the note and have it land
+        #     in the observation stream unhonkable. That is the SAME class as the
+        #     `(via {vantage})` channel withdrawn in the previous round: caller-
+        #     controlled text becoming invisible to the gate. Third occurrence.
+        #   context_retrieve — its header echoes the caller's `current_focus`,
+        #     truncated to ~40 chars but verbatim: "(focus: Conditioned Kernel
+        #     RUN 00.6C live plumbi)". Forty characters is ample for a declare
+        #     word. Cost of withdrawing: 3 honks.
+        #   ask_scribe — fails the membership test's FIRST clause, not the
+        #     caller-text one. Its result is a synthesis the scribe generates
+        #     THIS TURN in answer to the caller, not stored content echoed back.
+        #     8 of its 48 observations carry error text in-band, so exempting it
+        #     would also blind repeated_mistake to a tool that reports its own
+        #     failures.
+        #
+        # THE MEMBERSHIP TEST, now three clauses. All must hold:
+        #   1. Is the result built from STORED content rather than what this
+        #      turn just did?
+        #   2. Does the result contain NO caller-supplied text? (Anything the
+        #      caller writes into a field it can name is a disarm channel.)
+        #   3. Does the tool never report its own failures through result_str?
+        #      Membership is a THREE-detector exemption — declare_before_verify
+        #      (:952), premature_summary's error scan (:1037) and
+        #      repeated_mistake (:1128) — and the auto-hook writes
+        #      f"ERROR: {exc}" as result_str for any tool that raises
+        #      (server.py:3871).
         # Comms read-side
         "comms_unread_bodies",
         "comms_channels",
         "comms_recall",
+        # comms_get_acks stays HERE (so the 60,703-call daemon poller cannot
+        # self-honk) while being removed from VERIFY_TOOL_NAMES above (so it
+        # cannot vouch for a seat). The two sets answer different questions.
         "comms_get_acks",
         # Nape introspection
         "nape_honks",
@@ -126,7 +289,8 @@ READONLY_TOOL_NAMES: frozenset = frozenset(
 )
 
 # Words in a tool result that suggest the instance is declaring completion.
-# These are checked case-insensitively in the string representation of result.
+# Matched case-insensitively AND word-bounded — see contains_declare_word below,
+# which is the only supported way to test this set against text.
 DECLARE_WORDS: frozenset = frozenset(
     {
         "done",
@@ -143,6 +307,75 @@ DECLARE_WORDS: frozenset = frozenset(
         "passed",
     }
 )
+
+# Word-boundary matching for DECLARE_WORDS.
+#
+# The predicate used to be `any(word in result_str for word in DECLARE_WORDS)`
+# — a raw substring scan. Measured on the live corpus (81,102 observations as of
+# 2026-07-28; it grows continuously): 69 of the 262 surviving
+# declare_before_verify honks — 262 -> 193, this fix alone — fired on nothing but
+# a longer word that happens to CONTAIN a declare word:
+#
+#   already    -> ready     abandoned  -> done      cleanup    -> clean
+#   bypassed   -> passed    surpassed  -> passed    incomplete -> complete
+#   completely -> complete  prefixed   -> fixed     unresolved -> resolved
+#   undone     -> done      successor  -> success
+#
+# Note the SEMANTIC INVERSIONS. "unresolved" fired the "resolved" alarm,
+# "incomplete" fired "complete", "undone" fired "done": the completion
+# detector was firing on words that mean the opposite of completion.
+#
+# THE BOUNDARY IS DELIBERATELY NOT `\b`. Python's `\b` counts `_` as a word
+# character, so `\bpassed\b` does NOT match `all_tests_passed_shipped_and_done`
+# — the exact evasion string the vantage regression guard is built on — and
+# `\bverified\b` does NOT match the live vantage `implementation_verified`
+# (tests/test_nape_daemon.py::test_declare_word_in_the_via_vantage_STILL_honks).
+# Underscores, hyphens, commas and slashes are how tokens are joined in
+# vantages, domain tags and chronicle paths, and a declare word on either side
+# of one is still a declare word. `\b` here would have silently disarmed the
+# gate against caller-supplied text while the suite stayed green. The rule is
+# therefore "not adjacent to an ASCII letter or digit".
+
+
+def _declare_word_pattern(word: str) -> str:
+    """
+    Wrap one declare word in non-alphanumeric boundaries.
+
+    A boundary is added only on an end that is itself alphanumeric, so an entry
+    that is not a plain word — punctuation, a leading symbol, or a multi-token
+    phrase in the shape of ERROR_WORDS' "not found" — stays matchable instead
+    of becoming unmatchable behind a boundary it can never satisfy.
+    """
+
+    def _alnum(ch: str) -> bool:
+        return bool(ch) and ch.isascii() and ch.isalnum()
+
+    left = r"(?<![0-9A-Za-z])" if _alnum(word[:1]) else ""
+    right = r"(?![0-9A-Za-z])" if _alnum(word[-1:]) else ""
+    return f"{left}{re.escape(word)}{right}"
+
+
+# sorted() because frozenset iteration order is hash-randomized per process —
+# the compiled pattern must be identical on every run. `(?!)` is a negative
+# lookahead on the empty string: it can never match, which is the correct
+# behaviour if DECLARE_WORDS is ever emptied. An empty alternation would
+# compile to a pattern that matches EVERYTHING and honk on every observation.
+_DECLARE_WORD_RE = re.compile(
+    "|".join(_declare_word_pattern(w) for w in sorted(DECLARE_WORDS) if w) or r"(?!)",
+    re.IGNORECASE,
+)
+
+
+def contains_declare_word(text: str) -> bool:
+    """
+    True when `text` contains a DECLARE_WORD as a standalone token.
+
+    The single supported way to test DECLARE_WORDS against text. Case-
+    insensitive; "unresolved" / "incomplete" / "already" do not count, while
+    "all_tests_passed" and ",shipped/" do.
+    """
+    return bool(_DECLARE_WORD_RE.search(text))
+
 
 # System-emitted provenance stamps, stripped from a result BEFORE DECLARE_WORDS
 # is scanned. These strings are written by the stack to report how a write was
@@ -754,10 +987,12 @@ class NapeDaemon:
         # Those are opposite behaviours. Only that stamp is stripped; anything
         # the caller authored, including the vantage and the domain tags in the
         # path, is left in and still counts as a declaration.
-        result_str = strip_system_stamps(latest.get("result_str", "")).lower()
+        result_str = strip_system_stamps(latest.get("result_str", ""))
 
-        # Check whether any declare word appears in this result.
-        if not any(word in result_str for word in DECLARE_WORDS):
+        # Check whether any declare word appears in this result as a whole
+        # token. Substring matching read "unresolved" as "resolved" and
+        # "incomplete" as "complete" — see contains_declare_word.
+        if not contains_declare_word(result_str):
             return []
 
         # Look at the preceding observations (not including this one).

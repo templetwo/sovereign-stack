@@ -333,8 +333,22 @@ class TestSatisfiedHonkOnVerifyDeclare:
     def test_route_in_verify_tool_names(self):
         assert "route" in VERIFY_TOOL_NAMES
 
-    def test_comms_get_acks_in_verify_tool_names(self):
-        assert "comms_get_acks" in VERIFY_TOOL_NAMES
+    def test_comms_get_acks_is_NOT_in_verify_tool_names(self):
+        """INVERTED 2026-07-28. This used to assert membership.
+
+        comms_get_acks is not called by a seat: BaseDaemon._count_recent_unacked
+        (daemons/base.py:247) polls it per-message from the metabolize and
+        uncertainty daemons, over the comms corpus retired 2026-06-12. It is
+        60,703 of 81,101 observations — 74.85% of everything Nape has ever seen.
+        A background daemon's bookkeeping landing in a seat's trailing-3 window
+        is not that seat verifying anything, and its presence there was deciding
+        sharp-vs-satisfied. It stays in READONLY_TOOL_NAMES, which does the
+        different job of stopping the poller honking at its own results.
+        """
+        from sovereign_stack.nape_daemon import READONLY_TOOL_NAMES
+
+        assert "comms_get_acks" not in VERIFY_TOOL_NAMES
+        assert "comms_get_acks" in READONLY_TOOL_NAMES
 
     def test_satisfied_honk_emitted_after_verify_then_declare(self):
         """recall_insights before record_insight with completion language → satisfied honk."""

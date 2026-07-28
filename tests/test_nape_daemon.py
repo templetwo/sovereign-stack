@@ -16,9 +16,14 @@ from pathlib import Path
 import pytest
 
 from sovereign_stack.nape_daemon import (
+    DECLARE_WORDS,
+    READONLY_TOOL_NAMES,
+    VERIFY_TOOL_NAMES,
     NapeDaemon,
+    _declare_word_pattern,
     _result_to_str,
     _safe_truncate,
+    contains_declare_word,
     strip_system_stamps,
 )
 
@@ -1091,3 +1096,410 @@ class TestSatisfiedHonkAccounting:
         assert len(satisfied) == 0, (
             f"No satisfied honks should appear when include_satisfied=False. Got: {filtered}"
         )
+
+
+# =============================================================================
+# DEFECT A — DECLARE_WORDS is word-bounded, not substring-matched
+# =============================================================================
+
+
+class TestDeclareWordBoundaries:
+    """The completion detector must not fire on words that merely CONTAIN a
+    declare word — least of all on words meaning the OPPOSITE of completion.
+
+    Measured on the live corpus (81,102 observations, 2026-04-23..2026-07-28):
+    69 of the 262 surviving declare_before_verify honks were substring-only
+    artifacts, concentrated in current_policies (23 — "successor"),
+    inspect_claim (20 — "already"), reflection_ack (17) and season_review (3).
+    """
+
+    # Verbatim from the live corpus survivors, one per false-match class.
+    SEMANTIC_INVERSIONS = ["unresolved", "incomplete", "undone", "unfinished"]
+    SUBSTRING_FALSE_MATCHES = [
+        "already",
+        "abandoned",
+        "undone",
+        "cleanup",
+        "bypassed",
+        "surpassed",
+        "incomplete",
+        "completely",
+        "prefixed",
+        "unresolved",
+        "successor",
+    ]
+
+    def test_semantic_inversions_do_not_match(self):
+        """The load-bearing case: the completion alarm fired on words meaning
+        the opposite of completion. 'unresolved' fired 'resolved', 'incomplete'
+        fired 'complete', 'undone' fired 'done'."""
+        for word in self.SEMANTIC_INVERSIONS:
+            assert not contains_declare_word(word), (
+                f"{word!r} means the opposite of completion and must not fire "
+                f"the completion detector."
+            )
+            assert not contains_declare_word(f"the thread is {word} as of today")
+
+    def test_all_named_substring_false_matches_are_dead(self):
+        for word in self.SUBSTRING_FALSE_MATCHES:
+            assert not contains_declare_word(word), f"{word!r} must no longer match"
+
+    def test_every_declare_word_still_matches_standalone(self):
+        """Positive control. Without this the test above passes for a
+        predicate that matches nothing at all."""
+        for word in DECLARE_WORDS:
+            assert contains_declare_word(word), f"{word!r} must still match on its own"
+            assert contains_declare_word(f"the migration is {word} now")
+
+    def test_matching_is_case_insensitive(self):
+        for text in ("DONE.", "Done.", "dOnE.", "VERIFIED", "Shipped"):
+            assert contains_declare_word(text), f"{text!r} must match case-insensitively"
+
+    def test_underscore_joined_declare_words_still_fire(self):
+        """ANTI-`\\b` GUARD — the one that would ship a disarmed gate.
+
+        Python's `\\b` counts `_` as a word character, so `\\bpassed\\b` does
+        NOT match `all_tests_passed_shipped_and_done` and `\\bverified\\b` does
+        NOT match `implementation_verified`. Both are real caller-supplied
+        vantage values from the live corpus, and the second is the exact string
+        the vantage evasion guard is built on. A `\\b` implementation passes a
+        casual test suite while silently letting a seat disarm the gate by
+        naming a field.
+
+        Measured: `\\b` silences 12 real corpus honks the alnum boundary keeps,
+        11 of them on the vantage `implementation_verified`.
+        """
+        assert contains_declare_word("all_tests_passed_shipped_and_done")
+        assert contains_declare_word("(via implementation_verified)")
+        assert contains_declare_word("verified_by")
+
+    def test_separator_joined_domain_tags_still_fire(self):
+        """Domain tags and paths join tokens with hyphens, commas and slashes.
+        An instance tagging its own write 'shipped' is a declaration."""
+        assert contains_declare_word("insights/sovereign-bridge,phase-1,shipped/x.jsonl")
+        assert contains_declare_word("t2helix,v0.0.5,v0.1-dogfood-complete")
+        assert contains_declare_word("—done—")
+
+    def test_pattern_builder_handles_tokens_that_are_not_plain_words(self):
+        """A future entry that is not a plain word must stay matchable rather
+        than become unmatchable behind a boundary it can never satisfy."""
+        import re as _re
+
+        assert _re.search(_declare_word_pattern("+1"), "score +1 here")
+        assert _re.search(_declare_word_pattern("not found"), "file not found")
+        # A boundary IS applied on alphanumeric ends.
+        assert _re.search(_declare_word_pattern("done"), "done") is not None
+        assert _re.search(_declare_word_pattern("done"), "undone") is None
+
+    def test_corpus_current_policies_shape_no_longer_honks(self):
+        """End-to-end through observe(), on a verbatim corpus survivor. The
+        only declare 'hit' was 'success' inside 'successor'."""
+        tmpdir = tempfile.mkdtemp()
+        try:
+            daemon = NapeDaemon(root=tmpdir)
+            daemon.observe("record_open_thread", {}, "Thread recorded", SESSION)
+            daemon.observe("spiral_status", {}, "phase: integration", SESSION)
+            daemon.observe("connectivity_status", {}, "all services up", SESSION)
+            daemon.observe(
+                "some_write_tool",
+                {},
+                "the successor claim is unresolved and the migration is incomplete",
+                SESSION,
+            )
+            honks = [
+                h for h in daemon.current_honks(SESSION) if h["pattern"] == "declare_before_verify"
+            ]
+            assert honks == [], f"Substring artifacts must not honk. Got: {honks}"
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_gate_can_still_fail_on_the_true_positive(self):
+        """STANDING LAW #2. The hand-checked true positive from the HQ replay
+        must still fire after all three fixes."""
+        tmpdir = tempfile.mkdtemp()
+        try:
+            daemon = NapeDaemon(root=tmpdir)
+            daemon.observe("record_open_thread", {}, "Thread recorded", SESSION)
+            daemon.observe("spiral_status", {}, "phase: integration", SESSION)
+            daemon.observe("connectivity_status", {}, "all services up", SESSION)
+            daemon.observe(
+                "record_insight",
+                {},
+                "stack enhancement done, all 64 tools verified, ship it",
+                SESSION,
+            )
+            honks = [
+                h for h in daemon.current_honks(SESSION) if h["pattern"] == "declare_before_verify"
+            ]
+            assert len(honks) == 1, f"The true positive must still honk. Got: {honks}"
+            assert honks[0]["level"] == "sharp"
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+# =============================================================================
+# DEFECT B — READONLY_TOOL_NAMES completion
+# =============================================================================
+
+
+class TestReadonlyToolCompletion:
+    """Tools whose results echo STORED content are not the instance declaring
+    its own work. Each addition was verified against its handler first."""
+
+    # (tool, verbatim-ish corpus result shape) — every one of these fired a
+    # sharp honk on the live corpus purely because the chronicle content it
+    # surfaced contained completion language.
+    ADDED = [
+        ("spiral_inherit", "This is not your memory. Traces: the bridge shipped, tests passed"),
+        ("arrive", "ARRIVE — foyer. open thread: the migration is complete"),
+        ("arrive_delta", "ARRIVE_DELTA — what changed: phase 1 shipped"),
+        ("arrive_lineage", "ARRIVE_LINEAGE — letter: the day we shipped it"),
+        ("current_policies", "Standing policies — 7 active: ... verified ..."),
+        ("inspect_claim", '{"claim_id": "abc", "integrity": "verified"}'),
+        ("season_review", "SEASON REVIEW — read-only digest: 3 threads resolved"),
+        ("recall_reflections", '{"count": 5, "reflections": [{"observation": "resolved"}]}'),
+        ("recall_exchange", '{"integrity": "verified", "content": "..."}'),
+        ("list_exchanges", '[{"id": "x", "integrity": "verified"}]'),
+        ("the_ground", "CATCH LEDGER: cross-instance verification — resolved"),
+    ]
+
+    # WITHDRAWN by HQ review after adversarial review returned a blocker.
+    # These were proposed as read-only and are NOT. Each must STILL honk; a
+    # future pass that re-adds them will fail here rather than silently
+    # opening the hole again.
+    WITHDRAWN = [
+        # Classified intent "write" (server.py:2128), and the caller's free-text
+        # `note` is persisted (reflections.py:239) and echoed back through
+        # to_dict (reflections.py:77-78) — a seat could write its completion
+        # claim into the note and have it land unhonkable. Same class as the
+        # `(via {vantage})` channel withdrawn last round. Third occurrence.
+        (
+            "reflection_ack",
+            '{"ok": true, "reflection": {}, "ack_note": "migration complete, verified"}',
+        ),
+        # Echoes the caller's `current_focus` verbatim in its header, truncated
+        # to ~40 chars — ample for a declare word. Live corpus:
+        # "(focus: Conditioned Kernel RUN 00.6C live plumbi)".
+        ("context_retrieve", "🎯 Context-Aware Retrieval (focus: the daemon extraction shipped)"),
+        # Fails clause 1, not the caller-text clause: the result is a synthesis
+        # the scribe generates THIS TURN in answer to the caller, not stored
+        # content echoed back. 8 of its 48 corpus observations also carry error
+        # text in-band, so exempting it would blind repeated_mistake too.
+        ("ask_scribe", "The letters say the migration is done and verified."),
+    ]
+
+    # Verified as NOT read-only: their results report THIS turn's own action.
+    DECLINED = [
+        # "Thread {id} resolved" — the instance asserting a question is settled
+        # and writing that assertion into the chronicle as ground_truth.
+        (
+            "resolve_thread_by_id",
+            "Thread thread_20260429_023637 resolved → ground_truth insight: /x/y.jsonl",
+        ),
+        ("resolve_thread", "Thread resolved → ground_truth insight: /x/y.jsonl"),
+        # The declare word comes from the instance's own handoff note.
+        ("handoff", "Handoff written → /x.json note: Step 2 of v1.3.2 shipped"),
+        ("record_insight", "stack enhancement done, all 64 tools verified"),
+    ]
+
+    def _honks_for(self, tool, result):
+        tmpdir = tempfile.mkdtemp()
+        try:
+            daemon = NapeDaemon(root=tmpdir)
+            daemon.observe("record_open_thread", {}, "Thread recorded", SESSION)
+            daemon.observe("spiral_status", {}, "phase: integration", SESSION)
+            daemon.observe("connectivity_status", {}, "all services up", SESSION)
+            daemon.observe(tool, {}, result, SESSION)
+            return [
+                h for h in daemon.current_honks(SESSION) if h["pattern"] == "declare_before_verify"
+            ]
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    @pytest.mark.parametrize("tool,result", ADDED)
+    def test_added_readonly_tools_are_exempt(self, tool, result):
+        assert tool in READONLY_TOOL_NAMES, f"{tool} must be in READONLY_TOOL_NAMES"
+        assert self._honks_for(tool, result) == [], (
+            f"{tool} echoes stored content and must not fire declare_before_verify"
+        )
+
+    @pytest.mark.parametrize("tool,result", WITHDRAWN)
+    def test_withdrawn_readonly_candidates_still_honk(self, tool, result):
+        """REGRESSION GUARD for the blocker. These three were proposed as
+        read-only and withdrawn: two carry caller-supplied text into result_str,
+        and the third returns a synthesis generated this turn rather than stored
+        content. Exempting any of them hands the subject of the gate a way to
+        disarm it by choosing what to write in a field. If a later pass re-adds
+        one, this fails instead of the hole reopening quietly."""
+        assert tool not in READONLY_TOOL_NAMES, (
+            f"{tool} was withdrawn from READONLY_TOOL_NAMES — see the three-clause "
+            f"membership test in nape_daemon.py before re-adding it"
+        )
+        honks = self._honks_for(tool, result)
+        assert len(honks) == 1, f"{tool} must remain visible to the gate. Got: {honks}"
+        assert honks[0]["level"] == "sharp"
+
+    @pytest.mark.parametrize("tool,result", DECLINED)
+    def test_declined_tools_still_honk(self, tool, result):
+        """The exemption is per-tool and earned, not blanket. These report the
+        current turn's own action and must remain visible to the gate."""
+        assert tool not in READONLY_TOOL_NAMES, (
+            f"{tool} reports its own action — exempting it would blind the gate"
+        )
+        assert len(self._honks_for(tool, result)) == 1, f"{tool} must still honk"
+
+    def test_write_siblings_of_added_read_tools_are_not_exempt(self):
+        """record_catch is the write sibling of the_ground; both must not be
+        swept in together."""
+        assert "the_ground" in READONLY_TOOL_NAMES
+        assert "record_catch" not in READONLY_TOOL_NAMES
+        assert "recall_exchange" in READONLY_TOOL_NAMES
+        assert "archive_exchange" not in READONLY_TOOL_NAMES
+
+
+# =============================================================================
+# DEFECT C — a daemon's bookkeeping poll is not the seat verifying
+# =============================================================================
+
+
+class TestCommsGetAcksIsNotAVerify:
+    """`comms_get_acks` is called by BaseDaemon._count_recent_unacked in a
+    per-message loop by two background daemons, over a comms corpus retired
+    2026-06-12. It is 60,703 of 81,101 observations — 74.85% of everything Nape
+    has ever seen. Its presence in a seat's trailing-3 window decided
+    sharp-vs-satisfied for whatever that seat did next.
+    """
+
+    def test_comms_get_acks_is_not_a_verify_tool(self):
+        assert "comms_get_acks" not in VERIFY_TOOL_NAMES, (
+            "A background daemon's bookkeeping poll is not the seat verifying anything."
+        )
+
+    def test_comms_get_acks_stays_readonly(self):
+        """The two sets answer different questions. Removing it from READONLY
+        too would have the 60,703-call poller self-honk."""
+        assert "comms_get_acks" in READONLY_TOOL_NAMES
+
+    def test_daemon_poll_no_longer_vouches_for_a_declaration(self):
+        """The whole point of defect C: this now honks where it used to be
+        marked satisfied. MORE firings, not fewer."""
+        tmpdir = tempfile.mkdtemp()
+        try:
+            daemon = NapeDaemon(root=tmpdir)
+            for _ in range(3):
+                daemon.observe("comms_get_acks", {"message_id": "m1"}, "[]", SESSION)
+            daemon.observe(
+                "record_insight", {}, "stack enhancement done, all 64 tools verified", SESSION
+            )
+            honks = daemon.current_honks(SESSION)
+            sharp = [h for h in honks if h["pattern"] == "declare_before_verify"]
+            satisfied = [h for h in honks if h["pattern"] == "clean_verify_declare"]
+            assert len(sharp) == 1, f"A daemon poll must not vouch for a seat. Got: {honks}"
+            assert satisfied == [], "No satisfied verdict may rest on a daemon poll"
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_real_verify_still_produces_the_satisfied_verdict(self):
+        """Guard against over-correcting: a genuine seat-side verify still
+        clears the honk."""
+        tmpdir = tempfile.mkdtemp()
+        try:
+            daemon = NapeDaemon(root=tmpdir)
+            daemon.observe("recall_insights", {"query": "x"}, "[]", SESSION)
+            daemon.observe(
+                "record_insight", {}, "stack enhancement done, all 64 tools verified", SESSION
+            )
+            honks = daemon.current_honks(SESSION)
+            assert [h for h in honks if h["pattern"] == "clean_verify_declare"]
+            assert [h for h in honks if h["pattern"] == "declare_before_verify"] == []
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_daemon_poll_no_longer_vouches_for_high_confidence_assertion(self):
+        """VERIFY_TOOL_NAMES feeds a SECOND detector — assertion_without_evidence
+        (window 5). Measured: dropping the poll takes that detector from 15 to
+        76 firings over the corpus."""
+        tmpdir = tempfile.mkdtemp()
+        try:
+            daemon = NapeDaemon(root=tmpdir)
+            for _ in range(3):
+                daemon.observe("comms_get_acks", {"message_id": "m1"}, "[]", SESSION)
+            daemon.observe(
+                "record_insight",
+                {"confidence": 0.95, "content": "x"},
+                "Insight recorded",
+                SESSION,
+            )
+            honks = [
+                h
+                for h in daemon.current_honks(SESSION)
+                if h["pattern"] == "assertion_without_evidence"
+            ]
+            assert len(honks) == 1, f"A daemon poll is not evidence. Got: {honks}"
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+class TestReadonlyAdditionsBlastRadius:
+    """READONLY_TOOL_NAMES feeds THREE detectors, not one. Adding a tool also
+    exempts its result from premature_summary's error-word scan and stops it
+    ever triggering repeated_mistake. That is the intended semantics for a
+    read tool — an error word in echoed chronicle content is stored history,
+    not a live failure in this session — but it is a real behaviour change and
+    is pinned here rather than left as an unasserted claim.
+    """
+
+    def setup_method(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.daemon = NapeDaemon(root=self.tmpdir)
+
+    def teardown_method(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_added_readonly_tool_no_longer_feeds_premature_summary(self):
+        """A newly added read tool surfacing a stored 'failed' must not make
+        the next close_session look premature."""
+        self.daemon.observe(
+            "recall_reflections",
+            {},
+            '{"reflections": [{"observation": "the April migration failed"}]}',
+            SESSION,
+        )
+        self.daemon.observe("close_session", {}, "session closed", SESSION)
+        honks = [
+            h for h in self.daemon.current_honks(SESSION) if h["pattern"] == "premature_summary"
+        ]
+        assert honks == [], (
+            f"Echoed chronicle history is not a live error in this session. Got: {honks}"
+        )
+
+    def test_a_real_error_from_a_non_readonly_tool_still_fires_premature_summary(self):
+        """The exemption must not have blanket-disabled premature_summary."""
+        self.daemon.observe("Bash", {}, "Traceback: FileNotFoundError", SESSION)
+        self.daemon.observe("close_session", {}, "session closed", SESSION)
+        honks = [
+            h for h in self.daemon.current_honks(SESSION) if h["pattern"] == "premature_summary"
+        ]
+        assert len(honks) >= 1, "A real error before a summary must still honk."
+
+    def test_added_readonly_tool_does_not_trigger_repeated_mistake(self):
+        """Two reads that both surface stored error language are not the same
+        mistake being repeated."""
+        for _ in range(3):
+            self.daemon.observe(
+                "inspect_claim", {}, '{"integrity": "mismatch", "note": "not found"}', SESSION
+            )
+        honks = [
+            h for h in self.daemon.current_honks(SESSION) if h["pattern"] == "repeated_mistake"
+        ]
+        assert honks == [], f"A read tool cannot repeat its own mistake. Got: {honks}"
+
+    def test_declined_tool_still_feeds_premature_summary(self):
+        """resolve_thread_by_id was declined, so it keeps its full weight in
+        the other two detectors as well."""
+        self.daemon.observe("resolve_thread_by_id", {}, "ERROR: no such thread", SESSION)
+        self.daemon.observe("close_session", {}, "session closed", SESSION)
+        honks = [
+            h for h in self.daemon.current_honks(SESSION) if h["pattern"] == "premature_summary"
+        ]
+        assert len(honks) >= 1, "A declined tool's real error must still count."
