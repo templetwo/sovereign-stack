@@ -6,22 +6,25 @@ Runs alongside stdio server for local Claude Code access.
 """
 
 import asyncio
+import hashlib
 import hmac
 import json
 import logging
 import os
+import secrets
 import sys
 import threading
 import time
 from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
 from urllib.parse import parse_qs
+from uuid import UUID
 
 import uvicorn
 from mcp.server.sse import SseServerTransport
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
 # Import the existing sovereign-stack server
@@ -202,9 +205,19 @@ async def handle_sse(request: Request):
 # or a `?token=<token>` query parameter (clients whose connector config only
 # exposes a URL field, e.g. the claude.ai remote connector).
 #
-# POST /messages stays capability-gated: the mcp transport only accepts a
-# session_id minted by an authenticated /sse connect (unknown ids → 404), so
-# the token check on the connect covers the whole session.
+# POST /messages is ALSO credential-gated, and bound to the principal that
+# opened the session. It used to be capability-gated only — the reasoning was
+# that the mcp transport accepts nothing but a session_id minted by an
+# authenticated connect (unknown ids → 404), so the connect-time check covered
+# the session. GHSA-jpw9-pfvf-9f58 (HIGH, fixed upstream in mcp 1.27.2)
+# invalidated exactly that: "HTTP transports serve session requests without
+# verifying the authenticated principal." The venv runs mcp 1.26.0, whose
+# handle_post_message checks only that the session_id parses and exists.
+#
+# The practical exposure was not remote-unauthenticated-write (unknown ids
+# still 404) — it was that a live session_id became a bearer credential all by
+# itself. Anyone who OBTAINED one could drive that session with a wrong token
+# or none at all. Leak became takeover. See _messages_verdict below.
 #
 # Fail-closed: if BRIDGE_TOKEN is unset, /sse refuses everything unless
 # SSE_ALLOW_UNAUTHENTICATED=true is set explicitly (local-dev escape hatch).
@@ -302,10 +315,27 @@ def _allow_unauthenticated() -> bool:
     return os.environ.get("SSE_ALLOW_UNAUTHENTICATED", "").strip().lower() == "true"
 
 
+def _first_header(scope: dict, name: bytes) -> bytes:
+    """
+    Return the FIRST occurrence of a header, or b'' if absent.
+
+    Deliberately not dict(scope["headers"]) — that collapses duplicates
+    LAST-wins, while bridge_core.identity_gate._extract_bearer_token loops and
+    takes FIRST-wins. Two auth paths on the same server disagreeing about which
+    duplicate Authorization header is authoritative is the kind of ambiguity a
+    request smuggler goes looking for. All authorization reads in this module
+    are now first-wins, matching the identity gate. Legitimate traffic sends
+    exactly one Authorization header, so behaviour is unchanged in practice.
+    """
+    for key, value in scope.get("headers") or []:
+        if key == name:
+            return value
+    return b""
+
+
 def _scope_credential(scope: dict) -> str:
     """Extract the presented credential from header or query param ('' if absent)."""
-    headers = dict(scope.get("headers") or [])
-    auth = headers.get(b"authorization", b"").decode("utf-8", errors="replace")
+    auth = _first_header(scope, b"authorization").decode("utf-8", errors="replace")
     if auth.startswith("Bearer "):
         return auth[7:].strip()
     query = parse_qs(scope.get("query_string", b"").decode("utf-8", errors="replace"))
@@ -336,8 +366,7 @@ def _bridge_auth_ok(scope: dict) -> bool:
             return True
         logger.error("BRIDGE_TOKEN not set — refusing /openai/sse (fail-closed)")
         return False
-    headers = dict(scope.get("headers") or [])
-    auth = headers.get(b"authorization", b"").decode("utf-8", errors="replace")
+    auth = _first_header(scope, b"authorization").decode("utf-8", errors="replace")
     if auth.startswith("Bearer "):
         return hmac.compare_digest(auth[7:].strip(), expected)
     return False
@@ -356,6 +385,239 @@ async def _send_401(send, detail: str = "Valid Bearer token required for /openai
         }
     )
     await send({"type": "http.response.body", "body": body})
+
+
+# ── POST /messages: door check + principal binding (GHSA-jpw9-pfvf-9f58) ─────
+#
+# Two checks, in this order. The order is load-bearing.
+#
+#   1. DOOR. The same credential check that guards GET /sse now guards
+#      POST /messages. This is the fix. A stolen session_id on its own stops
+#      being sufficient to drive a session. It matches the in-repo precedent
+#      exactly — /grok/messages and /openai/messages have run their door check
+#      on the POST leg since the day those bridges landed, and both connectors
+#      work in production, which is the evidence that real remote MCP SSE
+#      clients do present their credential on the POST leg.
+#
+#   2. BINDING. The first POST that PASSES THE DOOR binds the session_id to a
+#      digest of the credential it presented. Every later POST for that
+#      session must present the same principal, compared constant-time.
+#
+# Why first-use binding is not trust-on-first-use: TOFU is a hole when the
+# first use is unauthenticated. Here it cannot be — check 1 runs first and
+# returns before any binding is read or written, and the middleware is the
+# ONLY route to sse.handle_post_message (the inner Starlette app routes just
+# /health and the three /*/info paths; there is no Route or Mount for
+# /messages, so /messages/ and every other variant falls through to Starlette
+# and 404s without reaching the transport). An attacker holding a leaked
+# session_id but no credential never reaches binding at all. An attacker
+# holding a valid credential gains nothing from stealing a session id — they
+# can open their own.
+#
+# The session_id is parsed with Starlette's QueryParams, which is what
+# mcp.server.sse.handle_post_message uses. This is NOT interchangeable with
+# parse_qs: on a duplicated parameter Starlette's .get() returns the LAST
+# value and parse_qs()[0] returns the FIRST. A gate that disagreed with the
+# transport about which session a request names would let
+# "?session_id=<mine>&session_id=<victim>" pass a binding check against the
+# attacker's own session and then be delivered into the victim's. Parsing the
+# way the consumer parses makes that divergence impossible by construction.
+
+# Kill switch, same shape as SSE_ALLOW_UNAUTHENTICATED: exact "true" opts out.
+# Reverts BOTH checks — POST /messages behaves exactly as it did before this
+# change. Rejections are still logged while disengaged, so the rollout is
+# "deploy with the switch on, watch the log for would-be rejections, then
+# unset it" with no second code path to test.
+_MESSAGES_KILL_SWITCH_ENV = "SSE_ALLOW_UNVERIFIED_MESSAGES"
+
+# Hard cap on the binding map. mcp 1.26.0 NEVER removes entries from its own
+# _read_stream_writers (no pop/del anywhere in the file — 1.27.2 adds one), so
+# session ids are immortal for the process lifetime. This map must therefore
+# bound itself rather than inherit upstream's lifetime. Oldest-first eviction
+# on a dict, which preserves insertion order.
+#
+# Sized against MEASURED churn, not a guess: ~/.sovereign/sse.log shows 6,166
+# connects and 18,669 POSTs in a 2h01m process lifetime — ~3,050 sessions/hour
+# at 3.03 POSTs each, because the REST bridge opens a fresh sse_client per
+# /api/call. At that rate a 4,096-entry cap recycles every ~80 minutes, which
+# would make eviction the steady state. 16,384 covers ~5.4 hours of that churn
+# for roughly 5MB.
+#
+# What eviction costs, stated honestly: a session's own POSTs land within
+# milliseconds of each other, so binding is a real match for the traffic that
+# actually exists. Only a session still alive after 16,384 NEWER sessions can
+# be evicted, and its next POST simply re-binds — after passing the door. So
+# the property degrades to "door check only", which is still the whole CVE fix.
+# Binding is defence in depth on top of the door, never a substitute for it.
+_BINDING_MAX_DEFAULT = 16384
+_BINDING_MAX_FLOOR = 256
+
+
+def _read_binding_max() -> int:
+    """
+    Read the cap without introducing two new outage modes.
+
+    A bare int(os.environ[...]) at import gave the knob that documents this
+    change two ways to take the service down, both flagged in review:
+      * SSE_BINDING_MAX_SESSIONS=0 makes the eviction loop pop until the map is
+        empty and then re-bind every time, i.e. POST /messages never settles.
+      * a non-integer value raises at MODULE IMPORT, and the sovereign-sse job
+        has KeepAlive true, so a typo is a permanent crash loop rather than a
+        bad setting.
+    A misconfigured safety knob must never be worse than the default. Both
+    cases now log loudly and fall back.
+    """
+    raw = os.environ.get("SSE_BINDING_MAX_SESSIONS", "").strip()
+    if not raw:
+        return _BINDING_MAX_DEFAULT
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.error(
+            "SSE_BINDING_MAX_SESSIONS=%r is not an integer — using default %d",
+            raw,
+            _BINDING_MAX_DEFAULT,
+        )
+        return _BINDING_MAX_DEFAULT
+    if value < _BINDING_MAX_FLOOR:
+        logger.error(
+            "SSE_BINDING_MAX_SESSIONS=%d is below the floor %d — clamping",
+            value,
+            _BINDING_MAX_FLOOR,
+        )
+        return _BINDING_MAX_FLOOR
+    return value
+
+
+_MESSAGES_BINDING_MAX = _read_binding_max()
+
+# Per-process random salt. The map never holds anything derived from the token
+# that is stable across restarts or comparable against an offline guess.
+_PRINCIPAL_SALT = secrets.token_bytes(32)
+
+_session_principals: dict[str, str] = {}
+_binding_lock = threading.Lock()
+
+_MESSAGES_ALLOW = "allow"
+_MESSAGES_DENY_DOOR = "door"
+_MESSAGES_DENY_BINDING = "binding"
+
+
+def _messages_gate_disabled() -> bool:
+    """Kill switch for the POST /messages checks. Exact 'true' opts out."""
+    return os.environ.get(_MESSAGES_KILL_SWITCH_ENV, "").strip().lower() == "true"
+
+
+def _principal_digest(scope: dict) -> str:
+    """Salted, non-reversible id for the credential presented on this request."""
+    presented = _scope_credential(scope)
+    return hashlib.sha256(_PRINCIPAL_SALT + presented.encode("utf-8")).hexdigest()
+
+
+def _scope_session_id(scope: dict) -> str:
+    """
+    The session_id this request names, parsed the way the mcp transport parses
+    it. Must stay Starlette QueryParams — see the note above on duplicate
+    parameters. Returns '' when absent.
+    """
+    return Request(scope).query_params.get("session_id") or ""
+
+
+def _canonical_session_id(raw: str) -> str | None:
+    """
+    Normalize a session_id EXACTLY as the consumer does, or refuse it.
+
+    This is the whole correction to the first cut of this binding, and three
+    independent reviewers found the same hole in it. The mcp transport resolves
+    a session with `UUID(hex=session_id_param)` (mcp/server/sse.py:217), which
+    accepts urn:/uuid: prefixes, braces and any dash placement, case-insensitively.
+    Keying our map on the RAW caller-supplied string while the transport keys on
+    the PARSED uuid meant six spellings of one live session produced six separate
+    bindings that all routed to the same writer — so an attacker binds an alias
+    and delivers into a victim's bound session. Parsing the way the consumer
+    parses is the invariant; anything else is a divergence waiting to be found.
+
+    Parsing also fixes the key SIZE by construction, which closes a second
+    finding: the cap bounds ENTRY COUNT, not bytes, so an 8 KB session_id gave
+    ~134 MB at cap instead of the documented ~3 MB. A uuid cannot be 8 KB.
+
+    Returns None for anything the transport itself would reject — it answers 400
+    on an unparseable id, so refusing here is the same refusal one step earlier.
+    """
+    try:
+        return str(UUID(hex=raw))
+    except (ValueError, AttributeError, TypeError):
+        return None
+
+
+def _binding_ok(session_id: str, digest: str) -> bool:
+    """
+    Bind session_id → principal on first authenticated use; require an exact
+    match thereafter. Callers MUST have passed the door check first.
+
+    Fail-closed: an unnamed or unparseable session cannot be bound or matched,
+    so it is refused rather than waved through.
+    """
+    if not session_id:
+        return False
+    canonical = _canonical_session_id(session_id)
+    if canonical is None:
+        return False
+    with _binding_lock:
+        known = _session_principals.get(canonical)
+        if known is None:
+            while len(_session_principals) >= _MESSAGES_BINDING_MAX:
+                _session_principals.pop(next(iter(_session_principals)))
+            _session_principals[canonical] = digest
+            return True
+        return hmac.compare_digest(known, digest)
+
+
+def _messages_verdict(scope: dict) -> str:
+    """Decide whether a POST /messages may reach the mcp transport."""
+    if not _native_auth_ok(scope):
+        return _MESSAGES_DENY_DOOR
+    if not _binding_ok(_scope_session_id(scope), _principal_digest(scope)):
+        return _MESSAGES_DENY_BINDING
+    return _MESSAGES_ALLOW
+
+
+def _log_messages_rejection(scope: dict, verdict: str, enforced: bool) -> None:
+    """
+    Record a would-be rejection with enough detail to identify the client.
+    Never logs the credential itself — only which form carried it.
+
+    This is what makes the observe-first rollout real: with the kill switch
+    engaged the same line fires and nothing is refused, so Anthony can watch
+    for a client this change would break before enforcing.
+    """
+    credential_form = "absent"
+    if _first_header(scope, b"authorization"):
+        credential_form = "header"
+    elif parse_qs(scope.get("query_string", b"").decode("utf-8", errors="replace")).get("token"):
+        credential_form = "query"
+    session_id = _scope_session_id(scope)
+    logger.warning(
+        "POST /messages %s verdict=%s credential=%s session=%s cf_ip=%s ua=%s client=%s",
+        "REJECTED" if enforced else "would-reject (kill switch engaged)",
+        verdict,
+        credential_form,
+        (session_id[:8] + "…") if session_id else "(none)",
+        _public_ip(scope) or "(local)",
+        _first_header(scope, b"user-agent").decode("utf-8", errors="replace")[:120] or "(none)",
+        scope.get("client"),
+    )
+
+
+async def _send_no_session_404(scope, receive, send) -> None:
+    """
+    The binding-mismatch response. Byte-identical to the unknown-session 404
+    that mcp.server.sse.handle_post_message returns at sse.py:227, by using
+    the same construction. Deliberately indistinguishable: a caller holding a
+    valid credential learns nothing about which sessions exist, and a
+    connector is not bounced into an OAuth re-auth loop by a 401.
+    """
+    await Response("Could not find session", status_code=404)(scope, receive, send)
 
 
 # ── OpenAI bridge request diagnostics ─────────────────────────────────────────
@@ -441,6 +703,25 @@ class SovereignAsgiMiddleware:
                 return
 
         if scope["type"] == "http" and path == "/messages" and method == "POST":
+            # GHSA-jpw9-pfvf-9f58: door first, then session→principal binding.
+            verdict = _messages_verdict(scope)
+            if verdict != _MESSAGES_ALLOW:
+                enforced = not _messages_gate_disabled()
+                _log_messages_rejection(scope, verdict, enforced)
+                if enforced:
+                    if verdict == _MESSAGES_DENY_DOOR:
+                        # 401 at the door, matching the /openai/messages and
+                        # /grok/messages precedent — a credential failure says
+                        # nothing about which sessions exist.
+                        await _send_401(
+                            send,
+                            "Credential required for /messages: "
+                            "Authorization: Bearer <token> or ?token=<token>",
+                        )
+                    else:
+                        # 404 on a binding mismatch — see _send_no_session_404.
+                        await _send_no_session_404(scope, receive, send)
+                    return
             logger.info("Message received")
             await sse.handle_post_message(scope, receive, send)
         elif scope["type"] == "http" and path == "/sse" and method == "GET":

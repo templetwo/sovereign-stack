@@ -36,6 +36,19 @@ dependencies = [
     "click>=8.0",
     "httpx>=0.24.0",
     "anthropic>=0.100",
+    # fastapi is imported by ~/sovereign-bridge/bridge.py, which is NOT part of
+    # this package — but com.templetwo.sovereign-bridge.plist runs it with THIS
+    # venv's interpreter (/Users/tony_studio/sovereign-stack/venv/bin/python3).
+    # This venv is therefore the bridge's runtime, and a runtime manifest must
+    # carry what its processes import. Nothing declared fastapi before, so
+    # `pip show fastapi` reported an empty Required-by and a clean rebuild
+    # (`pip install -e ".[dev]"`) produced a venv where the bridge dies at
+    # import; the plist sets KeepAlive=true, so that is a permanent crash loop
+    # at ThrottleInterval=10s, not a clean stop. An optional extra would NOT
+    # fix this — the documented rebuild command does not request extras.
+    # Upper bound per the mcp 2.0.0 incident (commit 5e37463): fastapi is
+    # pre-1.0 and a major bump may remove APIs bridge.py uses.
+    "fastapi>=0.110,<1.0",
 ]
 
 [project.urls]
