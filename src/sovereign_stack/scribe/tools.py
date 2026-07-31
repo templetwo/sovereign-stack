@@ -100,9 +100,92 @@ def _resolve_chronicle_path(rel_path: str) -> Path:
 
 
 def _truncate_result(text: str, max_chars: int = MAX_RESULT_CHARS_PER_TOOL) -> str:
+    """
+    Cap PLAIN TEXT at max_chars with a visible marker.
+
+    FOR PLAIN TEXT ONLY. Do not use this on a serialized structure. A character
+    slice through JSON produces a string that is not JSON, and the caller finds
+    out by way of a JSONDecodeError rather than anything the payload said.
+    Structured results go through _truncate_json_result below.
+    """
     if len(text) <= max_chars:
         return text
     return text[:max_chars] + f"\n\n[... result truncated at {max_chars} chars ...]"
+
+
+def _truncate_json_result(
+    payload: dict,
+    items_key: str,
+    max_chars: int = MAX_RESULT_CHARS_PER_TOOL,
+) -> str:
+    """
+    Serialize a payload whose bulk lives in payload[items_key], dropping WHOLE
+    items until it fits. The return value ALWAYS parses as JSON.
+
+    Why this exists: `_truncate_result` sliced the serialized JSON at a raw
+    character offset, so a large chronicle_recall returned a string cut
+    mid-value — 80,000 characters of almost-JSON that raised JSONDecodeError in
+    every caller that tried to read it. The truncation was invisible in the
+    payload and only discoverable by the parse failing.
+
+    Two properties this guarantees, and they are the whole point:
+      1. VALID. Whole items are dropped, never bytes, so the structure closes.
+         The result is re-parsed before returning, and a failure raises rather
+         than handing back something unreadable.
+      2. HONEST. The payload states its own truncation: `truncated`, `omitted`,
+         and a `count` that always equals the number of items actually present.
+         A caller can see it was cut without having to infer it from a crash.
+
+    Found 2026-07-30 because a live-data test tripped it. The same defect was
+    latent at the threads call site, which had not grown large enough to fail
+    yet; both were fixed together.
+    """
+
+    def _dump(obj: dict) -> str:
+        return json.dumps(obj, indent=2, ensure_ascii=False)
+
+    full = _dump(payload)
+    if len(full) <= max_chars:
+        return full
+
+    items = list(payload.get(items_key) or [])
+    total = len(items)
+
+    def _build(n: int) -> dict:
+        trimmed = dict(payload)
+        trimmed[items_key] = items[:n]
+        trimmed["count"] = n
+        trimmed["truncated"] = True
+        trimmed["omitted"] = total - n
+        trimmed["truncation_reason"] = (
+            f"payload exceeded {max_chars} chars; whole items were dropped so the "
+            f"response stays valid JSON. Narrow the query or lower the limit to see the rest."
+        )
+        return trimmed
+
+    # Largest prefix that fits. Binary search rather than a linear walk so a
+    # pathological item count does not turn a read into a stall.
+    lo, hi, best = 0, total, 0
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        if len(_dump(_build(mid))) <= max_chars:
+            best = mid
+            lo = mid + 1
+        else:
+            hi = mid - 1
+
+    out = _dump(_build(best))
+
+    # Fail closed. If this cannot be made valid, raising is correct — handing
+    # back unparseable text is the defect being fixed.
+    try:
+        json.loads(out)
+    except json.JSONDecodeError as exc:  # pragma: no cover - defensive
+        raise ScribeToolError(
+            f"could not produce a valid truncated response for {items_key!r} "
+            f"within {max_chars} chars"
+        ) from exc
+    return out
 
 
 def tool_chronicle_recall(
@@ -150,7 +233,7 @@ def tool_chronicle_recall(
         "limit": limit,
         "insights": redacted,
     }
-    return _truncate_result(json.dumps(out, indent=2, ensure_ascii=False))
+    return _truncate_json_result(out, "insights")
 
 
 def tool_chronicle_read_file(path: str) -> str:
@@ -234,19 +317,19 @@ def tool_chronicle_get_threads(
             }
         )
     redacted, _counts = redact_structure(slim)
-    return _truncate_result(
-        json.dumps(
-            {
-                "count": len(redacted),
-                "total": total,
-                "has_more": has_more,
-                "domain_filter": domain,
-                "domain_contains_filter": domain_contains,
-                "threads": redacted,
-            },
-            indent=2,
-            ensure_ascii=False,
-        )
+    # Same defect as chronicle_recall above, latent here only because thread
+    # lists have not yet grown past the cap. Fixed at the same time rather than
+    # left to be discovered by a future JSONDecodeError.
+    return _truncate_json_result(
+        {
+            "count": len(redacted),
+            "total": total,
+            "has_more": has_more,
+            "domain_filter": domain,
+            "domain_contains_filter": domain_contains,
+            "threads": redacted,
+        },
+        "threads",
     )
 
 

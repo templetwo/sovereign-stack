@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from sovereign_stack.scribe import tools
 from sovereign_stack.scribe.tools import (
     anthropic_tool_definitions,
@@ -118,3 +120,102 @@ class TestErrorEnvelope:
         assert is_error is False
         # Should parse as JSON
         json.loads(result)
+
+
+class TestTruncationAlwaysProducesValidJson:
+    """The invariant this fix exists for: a truncated structured result must
+    still be JSON.
+
+    `_truncate_result` sliced serialized JSON at a raw character offset, so a
+    large chronicle_recall returned ~80,000 characters of almost-JSON. Callers
+    discovered the truncation by way of a JSONDecodeError, and the payload
+    itself said nothing about having been cut. Found 2026-07-30 when a live-data
+    test tripped it; the threads call site had the identical defect and was
+    simply not large enough to fail yet.
+    """
+
+    CAP = 5_000  # small cap so these run fast; the logic is size-independent
+
+    def _payload(self, n_items, item_chars):
+        return {
+            "count": n_items,
+            "limit": 30,
+            "insights": [
+                {"timestamp": "2026-07-30T00:00:00", "content": "x" * item_chars}
+                for _ in range(n_items)
+            ],
+        }
+
+    @pytest.mark.parametrize(
+        "n_items,item_chars",
+        [
+            (0, 0),
+            (1, 10),
+            (1, 100_000),  # a SINGLE item bigger than the whole cap
+            (3, 40),
+            (30, 400),
+            (30, 4_000),
+            (200, 900),
+            (5, 1_100),  # sits near the boundary
+        ],
+    )
+    def test_output_always_parses(self, n_items, item_chars):
+        out = tools._truncate_json_result(
+            self._payload(n_items, item_chars), "insights", max_chars=self.CAP
+        )
+        parsed = json.loads(out)  # the whole point — must not raise
+        assert isinstance(parsed, dict)
+        assert len(out) <= self.CAP or parsed.get("count") == 0
+
+    def test_truncation_is_declared_in_the_payload_not_only_in_its_length(self):
+        out = tools._truncate_json_result(self._payload(50, 1_000), "insights", max_chars=self.CAP)
+        p = json.loads(out)
+        assert p["truncated"] is True
+        assert p["omitted"] > 0
+        assert "truncation_reason" in p
+        assert p["count"] + p["omitted"] == 50, "returned + omitted must equal the original total"
+
+    def test_count_always_equals_the_items_actually_present(self):
+        """A count that does not match the array is the same class of lie as a
+        silent truncation."""
+        for n, chars in ((50, 1_000), (3, 40), (200, 900)):
+            p = json.loads(
+                tools._truncate_json_result(self._payload(n, chars), "insights", max_chars=self.CAP)
+            )
+            assert p["count"] == len(p["insights"])
+
+    def test_an_untruncated_payload_is_left_alone(self):
+        """No truncation metadata may appear on a response that was not cut."""
+        p = json.loads(
+            tools._truncate_json_result(self._payload(2, 10), "insights", max_chars=self.CAP)
+        )
+        assert "truncated" not in p
+        assert "omitted" not in p
+        assert p["count"] == 2
+
+    def test_one_oversized_item_yields_zero_items_not_a_mangled_one(self):
+        """Better to return nothing and say so than to hand back half an entry."""
+        p = json.loads(
+            tools._truncate_json_result(self._payload(1, 100_000), "insights", max_chars=self.CAP)
+        )
+        assert p["insights"] == []
+        assert p["count"] == 0
+        assert p["omitted"] == 1
+        assert p["truncated"] is True
+
+    def test_the_old_slice_really_did_break_and_the_new_path_does_not(self):
+        """Anti-vacuity: proves these tests would have caught the original bug."""
+        payload = self._payload(3, 40_000)
+        sliced = tools._truncate_result(
+            json.dumps(payload, indent=2, ensure_ascii=False), max_chars=self.CAP
+        )
+        with pytest.raises(json.JSONDecodeError):
+            json.loads(sliced)
+        json.loads(tools._truncate_json_result(payload, "insights", max_chars=self.CAP))
+
+    def test_plain_text_truncation_is_unchanged(self):
+        """_truncate_result is still correct for its actual job."""
+        out = tools._truncate_result("y" * 10_000, max_chars=self.CAP)
+        assert len(out) > self.CAP  # marker appended
+        assert out.startswith("y" * 100)
+        assert "truncated at" in out
