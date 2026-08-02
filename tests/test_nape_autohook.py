@@ -29,6 +29,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from sovereign_stack.handoff import HandoffEngine
 from sovereign_stack.memory import ExperientialMemory
 from sovereign_stack.nape_daemon import VERIFY_TOOL_NAMES, NapeDaemon
 from sovereign_stack.server import _NAPE_AUTOHOOK_EXCLUDE, _flatten_result
@@ -57,6 +58,15 @@ def _isolated_server(session_id: str):
     - srv_module.experiential  → ExperientialMemory rooted in tmp_root/chronicle
     - srv_module.SPIRAL_STATE_PATH → tmp_root/spiral_state.json
     - srv_module.spiral_state.session_id → session_id (restored on exit)
+    - srv_module.handoff_engine → HandoffEngine rooted in tmp_root. Added
+      2026-08-01: handoff_engine is a module-level singleton built from
+      DEFAULT_ROOT at import time, so it was NOT covered by the experiential/
+      spiral_state patches above — any dispatched tool that writes or
+      consumes handoffs (`handoff`, `where_did_i_leave_off`) went straight
+      through to the live ~/.sovereign/handoffs/. Confirmed on the live
+      store: 51 real "healthy probe" records under source_instance
+      "p1c-test" from tests/test_p1_fail_closed_continuation.py, which uses
+      this fixture and calls the `handoff` tool.
     """
     from sovereign_stack import server as srv_module
 
@@ -66,9 +76,11 @@ def _isolated_server(session_id: str):
 
     tmp_experiential = ExperientialMemory(root=str(chronicle_root))
     tmp_spiral_path = tmp_root / "spiral_state.json"
+    tmp_handoff_engine = HandoffEngine(root=str(tmp_root))
 
     original_experiential = srv_module.experiential
     original_spiral_path = srv_module.SPIRAL_STATE_PATH
+    original_handoff_engine = srv_module.handoff_engine
     # Snapshot the ENTIRE spiral state, not just session_id. Dispatched tools
     # mutate other fields on this shared object (phase_history, counters); a
     # partial restore let test session ids leak into the live
@@ -78,6 +90,7 @@ def _isolated_server(session_id: str):
 
     srv_module.experiential = tmp_experiential
     srv_module.SPIRAL_STATE_PATH = tmp_spiral_path
+    srv_module.handoff_engine = tmp_handoff_engine
     srv_module.spiral_state.session_id = session_id
 
     try:
@@ -85,6 +98,7 @@ def _isolated_server(session_id: str):
     finally:
         srv_module.experiential = original_experiential
         srv_module.SPIRAL_STATE_PATH = original_spiral_path
+        srv_module.handoff_engine = original_handoff_engine
         srv_module.spiral_state.__dict__.clear()
         srv_module.spiral_state.__dict__.update(original_spiral_snapshot)
         shutil.rmtree(tmp_root, ignore_errors=True)

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
+from sovereign_stack.handoff import HandoffEngine
 from sovereign_stack.memory import ExperientialMemory
 from sovereign_stack.reflexive import ReflexiveSurface
 
@@ -63,6 +64,15 @@ def test_where_did_i_leave_off_without_domain_tags_has_no_resonance_section(tmp_
     # Reset module-level singletons to use tmp_path
     srv.experiential = ExperientialMemory(root=str(tmp_path / "chronicle"))
     srv.reflexive_surface = ReflexiveSurface(sovereign_root=tmp_path)
+    # srv.handoff_engine is a module-level singleton constructed at import
+    # time from DEFAULT_ROOT — setting SOVEREIGN_ROOT via monkeypatch above
+    # does NOT rebind it (the constant was already resolved). Without this
+    # line, the where_did_i_leave_off call below (consume defaults to True)
+    # marks REAL handoffs in ~/.sovereign/handoffs/ consumed with
+    # consumed_by="test" (confirmed on the live store 2026-08-01: 78/251
+    # records carried exactly this). Patch the engine itself, matching the
+    # pattern already used for experiential/reflexive_surface.
+    srv.handoff_engine = HandoffEngine(root=str(tmp_path))
 
     result = asyncio.run(srv.handle_tool("where_did_i_leave_off", {"source_instance": "test"}))
     text = result[0].text
@@ -82,6 +92,15 @@ def test_where_did_i_leave_off_with_domain_tags_adds_resonance_section(tmp_path,
         domain="compass,witness,governance",
     )
     srv.reflexive_surface = ReflexiveSurface(sovereign_root=tmp_path)
+    # srv.handoff_engine is a module-level singleton constructed at import
+    # time from DEFAULT_ROOT — setting SOVEREIGN_ROOT via monkeypatch above
+    # does NOT rebind it (the constant was already resolved). Without this
+    # line, the where_did_i_leave_off call below (consume defaults to True)
+    # marks REAL handoffs in ~/.sovereign/handoffs/ consumed with
+    # consumed_by="test" (confirmed on the live store 2026-08-01: 78/251
+    # records carried exactly this). Patch the engine itself, matching the
+    # pattern already used for experiential/reflexive_surface.
+    srv.handoff_engine = HandoffEngine(root=str(tmp_path))
 
     result = asyncio.run(
         srv.handle_tool(
@@ -107,6 +126,15 @@ def test_where_did_i_leave_off_with_project_shows_project_in_header(tmp_path, mo
         domain="stack,architecture",
     )
     srv.reflexive_surface = ReflexiveSurface(sovereign_root=tmp_path)
+    # srv.handoff_engine is a module-level singleton constructed at import
+    # time from DEFAULT_ROOT — setting SOVEREIGN_ROOT via monkeypatch above
+    # does NOT rebind it (the constant was already resolved). Without this
+    # line, the where_did_i_leave_off call below (consume defaults to True)
+    # marks REAL handoffs in ~/.sovereign/handoffs/ consumed with
+    # consumed_by="test" (confirmed on the live store 2026-08-01: 78/251
+    # records carried exactly this). Patch the engine itself, matching the
+    # pattern already used for experiential/reflexive_surface.
+    srv.handoff_engine = HandoffEngine(root=str(tmp_path))
 
     result = asyncio.run(
         srv.handle_tool(
@@ -130,6 +158,15 @@ def test_where_did_i_leave_off_empty_domain_tags_list_does_not_trigger(tmp_path,
 
     srv.experiential = ExperientialMemory(root=str(tmp_path / "chronicle"))
     srv.reflexive_surface = ReflexiveSurface(sovereign_root=tmp_path)
+    # srv.handoff_engine is a module-level singleton constructed at import
+    # time from DEFAULT_ROOT — setting SOVEREIGN_ROOT via monkeypatch above
+    # does NOT rebind it (the constant was already resolved). Without this
+    # line, the where_did_i_leave_off call below (consume defaults to True)
+    # marks REAL handoffs in ~/.sovereign/handoffs/ consumed with
+    # consumed_by="test" (confirmed on the live store 2026-08-01: 78/251
+    # records carried exactly this). Patch the engine itself, matching the
+    # pattern already used for experiential/reflexive_surface.
+    srv.handoff_engine = HandoffEngine(root=str(tmp_path))
 
     result = asyncio.run(
         srv.handle_tool(

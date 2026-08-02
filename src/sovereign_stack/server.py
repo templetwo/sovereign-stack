@@ -2950,9 +2950,22 @@ async def _dispatch_tool(name: str, arguments: dict):
         # "N marked consumed" line; consumed_count=None means not consumed.
         consumed_count = None
         if consume and state.handoffs:
-            consumed_count = handoff_engine.mark_consumed(
-                [r["_path"] for r in state.handoffs], consumed_by=reader
-            )
+            try:
+                consumed_count = handoff_engine.mark_consumed(
+                    [r["_path"] for r in state.handoffs], consumed_by=reader
+                )
+            except ValueError as e:
+                # reader didn't identify itself (missing/placeholder
+                # source_instance, e.g. the default "unknown") — refuse to
+                # retire the handoffs on its behalf rather than stamping a
+                # meaningless consumed_by. consumed_count stays None (the
+                # existing "not consumed" signal), so the handoffs remain on
+                # disk and resurface on the next boot instead of vanishing.
+                logger.warning(
+                    "where_did_i_leave_off: skipped marking %d handoff(s) consumed — %s",
+                    len(state.handoffs),
+                    e,
+                )
 
         boot_text = render_full(
             state,

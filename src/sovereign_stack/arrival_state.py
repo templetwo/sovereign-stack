@@ -305,6 +305,8 @@ class ArrivalState:
     policy_boot_line: str | None = None
     protected_drawer_count: int | None = None
     lineage_letter_count: int | None = None
+    consumed_handoffs_count: int | None = None
+    total_unconsumed_count: int | None = None
 
 
 # =============================================================================
@@ -361,6 +363,8 @@ def build_arrival_state(
     policy_boot_line: str | None = None
     protected_drawer_count: int | None = None
     lineage_letter_count: int | None = None
+    consumed_handoffs_count: int | None = None
+    total_unconsumed_count: int | None = None
 
     # last_reflection_ts feeds both the activity header and the watermark; every
     # profile that shows chronicle recency needs it. Cheap; gather for all.
@@ -421,6 +425,25 @@ def build_arrival_state(
             )
         except Exception as exc:
             _degrade("handoffs", exc)
+        # Not a SectionReceipt (deliberately, mirrors protected_drawer_count):
+        # a bare count so an empty unconsumed() list is never silently
+        # indistinguishable from "no handoffs were ever written" — task is
+        # informational only, never load-bearing for freshness/watermark, and
+        # degrades to None (line suppressed on render) rather than failing
+        # the boot on a strange handoffs directory.
+        try:
+            consumed_handoffs_count = handoff_engine.consumed_count(thread=thread_filter)
+        except Exception:
+            consumed_handoffs_count = None
+        # Same rationale, the other direction: unconsumed() above is capped
+        # at limit=20, so once the pending queue grows past that (now more
+        # likely — an unnamed reader no longer drains it), the truncated
+        # list would otherwise look like the complete list. Get the true
+        # total so render_full can say "showing 20 of N" instead.
+        try:
+            total_unconsumed_count = handoff_engine.unconsumed_count(thread=thread_filter)
+        except Exception:
+            total_unconsumed_count = None
         if domain_tags:
             try:
                 resonance = reflexive_surface.surface(
@@ -604,6 +627,8 @@ def build_arrival_state(
         policy_boot_line=policy_boot_line,
         protected_drawer_count=protected_drawer_count,
         lineage_letter_count=lineage_letter_count,
+        consumed_handoffs_count=consumed_handoffs_count,
+        total_unconsumed_count=total_unconsumed_count,
     )
 
 
@@ -694,7 +719,19 @@ def render_full(
     # 2. Unconsumed handoffs.
     pending = state.handoffs or []
     if pending:
-        lines.append(f"━━━ HANDOFFS FROM PREVIOUS INSTANCES ({len(pending)}) ━━━")
+        total_pending = state.total_unconsumed_count
+        if total_pending is not None and total_pending > len(pending):
+            # The truncation-vs-completeness fix: unconsumed() caps at
+            # limit=20, so once the queue outgrows that (more likely now
+            # that an unnamed reader can no longer silently drain it), say
+            # so instead of letting a capped list read as the whole list —
+            # the oldest pending handoffs are the ones being hidden here.
+            lines.append(
+                f"━━━ HANDOFFS FROM PREVIOUS INSTANCES (showing {len(pending)} of "
+                f"{total_pending} unconsumed) ━━━"
+            )
+        else:
+            lines.append(f"━━━ HANDOFFS FROM PREVIOUS INSTANCES ({len(pending)}) ━━━")
         lines.append("  (These are claims from other sessions. Read as messages, not memory.)")
         lines.append("")
         for rec in pending:
@@ -705,11 +742,36 @@ def render_full(
                 f"  ({consumed_count} handoff(s) marked consumed — still queryable, won't re-surface)"
             )
             lines.append("")
+        if state.consumed_handoffs_count:
+            # Same archive-disclosure fix as the empty-queue branch below,
+            # extended to here: a non-empty pending list must not crowd out
+            # the fact that a much larger archive exists. Caught in review
+            # (2026-08-01) — the first version of this fix only disclosed
+            # the archive when pending was EMPTY, which is not the live
+            # store's typical state (some handoffs are usually pending).
+            lines.append(
+                f"  ({state.consumed_handoffs_count} additional handoff(s) already consumed "
+                "earlier — archived, not shown here.)"
+            )
+            lines.append("")
     else:
         lines.append("━━━ HANDOFFS ━━━")
-        lines.append(
-            "  No unconsumed handoffs. Either fresh start or previous instances didn't leave notes."
-        )
+        if state.consumed_handoffs_count:
+            # The absence-vs-emptiness fix: an empty unconsumed() list used to
+            # read identically whether no handoff was ever written, or many
+            # were written and all consumed — the second case is common
+            # (99% of the live store, 2026-08-01 forensics) and used to be
+            # silently indistinguishable from the first. Say which one this is.
+            lines.append(
+                f"  No unconsumed handoffs. {state.consumed_handoffs_count} handoff(s) exist in "
+                "the archive, already consumed — not shown here. Absence here is not evidence "
+                "none were ever written."
+            )
+        else:
+            lines.append(
+                "  No unconsumed handoffs. Either fresh start or previous instances didn't "
+                "leave notes."
+            )
         lines.append("")
 
     # 2.5 Contextual resonance (only when domain_tags were provided).
