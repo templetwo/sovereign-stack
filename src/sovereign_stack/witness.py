@@ -11,6 +11,7 @@ No MCP coupling here. Pure data → formatted lines. Testable in isolation.
 """
 
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -332,8 +333,14 @@ def _parse_letter_frontmatter(path: Path) -> dict:
     with whatever scalar keys the file declared (from, written_at, type, etc.)
     plus a `title` key extracted from the first `# ` heading.
 
-    Tolerant of malformed files — returns {} on any error so a single bad
-    letter never breaks boot.
+    Tolerant of malformed files — returns {} on a read error so a single bad
+    letter never breaks boot. A letter with NO frontmatter block (or an
+    unterminated one) is NOT a silent blank: it comes back marked
+    `_frontmatter_missing` with the cheap identity the file does carry — the
+    first `# ` heading as `title`, and the letters' `YYYY-MM-DD-` filename
+    prefix as `written_at` — so the renderer can name the letter instead of
+    showing an empty header (the `[] [?] (untitled)` defect, co-signed
+    diagnosis 2026-08-02).
     """
     meta: dict = {}
     try:
@@ -341,14 +348,23 @@ def _parse_letter_frontmatter(path: Path) -> dict:
     except Exception:
         return meta
     lines = text.splitlines()
-    if not lines or lines[0].strip() != "---":
-        return meta
+    has_frontmatter = bool(lines) and lines[0].strip() == "---"
     fm_end = None
-    for i in range(1, min(len(lines), 60)):
-        if lines[i].strip() == "---":
-            fm_end = i
-            break
-    if fm_end is None:
+    if has_frontmatter:
+        for i in range(1, min(len(lines), 60)):
+            if lines[i].strip() == "---":
+                fm_end = i
+                break
+    if not has_frontmatter or fm_end is None:
+        meta["_frontmatter_missing"] = True
+        for line in lines[:60]:
+            s = line.strip()
+            if s.startswith("# "):
+                meta["title"] = s[2:].strip()
+                break
+        date_prefix = path.name[:10]
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", date_prefix):
+            meta["written_at"] = date_prefix
         return meta
     for line in lines[1:fm_end]:
         if ":" not in line:
@@ -426,7 +442,9 @@ def format_lineage_layer(
     Returns [] if the lineage directory doesn't exist (graceful degrade).
 
     Back-compat wrapper over collect_lineage + render_lineage (Phase 4) —
-    byte-identical to the pre-split behavior.
+    byte-identical to the pre-split behavior when every bucket is complete
+    and well-formed; when limit_per_bucket withholds letters, the headers
+    state shown-of-total coverage instead of capping silently.
     """
     return render_lineage(
         collect_lineage(sovereign_root, reader_instance, limit_per_bucket),
@@ -445,22 +463,38 @@ def collect_lineage(
 
     Returns None when the lineage directory doesn't exist (graceful degrade,
     mapped to [] by the renderer). Otherwise a dict carrying every bucket plus
-    the base path (needed for the render footer).
+    the base path (needed for the render footer) and a per-bucket `coverage`
+    envelope — total_on_disk / matched / shown / withheld / filtered_out /
+    truncated — so the renderer can SAY when limit_per_bucket withheld letters
+    instead of capping silently (the read-honesty envelope of aae7281 applied
+    to the lineage door; co-signed diagnosis 2026-08-02).
     """
     base = sovereign_root / "comms" / "letters"
     if not base.exists():
         return None
 
+    def _zero_cov() -> dict:
+        return {
+            "total_on_disk": 0,
+            "matched": 0,
+            "shown": 0,
+            "withheld": 0,
+            "filtered_out": 0,
+            "truncated": False,
+        }
+
     def _collect(
         subdir: str,
         filter_to: str | None = None,
         also_match: tuple[str, ...] = (),
-    ) -> list[dict]:
+    ) -> tuple[list[dict], dict]:
         d = base / subdir
         if not d.exists():
-            return []
+            return [], _zero_cov()
         items = []
+        total_on_disk = 0
         for p in sorted(d.glob("*.md"), reverse=True):
+            total_on_disk += 1
             meta = _parse_letter_frontmatter(p)
             if filter_to:
                 letter_to = meta.get("to", "")
@@ -472,21 +506,37 @@ def collect_lineage(
                         continue
             meta["_path"] = str(p)
             items.append(meta)
-        return items[:limit_per_bucket]
+        shown = items[:limit_per_bucket]
+        return shown, {
+            "total_on_disk": total_on_disk,
+            "matched": len(items),
+            "shown": len(shown),
+            "withheld": len(items) - len(shown),
+            "filtered_out": total_on_disk - len(items),
+            "truncated": len(shown) < len(items),
+        }
 
-    arrivals = _collect("to_arrival")
-    breakthroughs = _collect("breakthroughs")
+    coverage: dict = {}
+    arrivals, coverage["arrivals"] = _collect("to_arrival")
+    breakthroughs, coverage["breakthroughs"] = _collect("breakthroughs")
 
     # Lineage inheritance: a reader also receives the to_self letters of the
     # families it inherits from (Mythos inherits the Opus line) while keeping
     # its own to_arrival welcome.
     reader_family = _model_family(reader_instance) if reader_instance else None
     inherited = _inherited_families(reader_family)
-    to_self = (
-        _collect("to_self", filter_to=reader_instance, also_match=inherited)
-        if reader_instance
-        else []
-    )
+    if reader_instance:
+        to_self, coverage["to_self"] = _collect(
+            "to_self", filter_to=reader_instance, also_match=inherited
+        )
+    else:
+        # No reader named — nothing can match, but the letters still exist.
+        # Count them so the renderer can say so instead of omitting the
+        # bucket silently (the addressee-miss half of the coverage fix).
+        to_self = []
+        to_self_dir = base / "to_self"
+        on_disk = sum(1 for _ in to_self_dir.glob("*.md")) if to_self_dir.exists() else 0
+        coverage["to_self"] = {**_zero_cov(), "total_on_disk": on_disk, "no_reader": True}
 
     # to_family: model-family-specific directory (to_sonnet/, to_haiku/, to_opus/)
     family = reader_family
@@ -496,7 +546,9 @@ def collect_lineage(
         # 'claude-sonnet' → 'to_sonnet', 'claude-opus' → 'to_opus'
         short = family.split("-", 1)[1] if "-" in family else family
         family_dir_name = f"to_{short}"
-        to_family = _collect(family_dir_name)
+        to_family, coverage["to_family"] = _collect(family_dir_name)
+    else:
+        coverage["to_family"] = _zero_cov()
 
     return {
         "base": base,
@@ -505,14 +557,51 @@ def collect_lineage(
         "to_self": to_self,
         "to_family": to_family,
         "family_dir_name": family_dir_name,
+        "coverage": coverage,
     }
+
+
+def _bucket_count_phrase(shown: int, cov: dict) -> str:
+    """`3 letters` when the bucket is complete (byte-identical to the
+    pre-coverage render); `showing 5 of 12 letters on disk` when anything was
+    withheld or filtered — the total a reader needs to notice the cap fired.
+    Mirrors the handoff door's `showing N of TOTAL` (arrival_state render_full).
+    """
+    total = cov.get("total_on_disk", shown)
+    if total <= shown:
+        return f"{shown} letter{'s' if shown != 1 else ''}"
+    return f"showing {shown} of {total} letters on disk"
+
+
+def _bucket_withheld_phrase(cov: dict) -> str:
+    """`; N older withheld by limit_per_bucket; M addressed to other readers`
+    — empty when the bucket is complete, so complete renders stay byte-stable.
+    (The glob is newest-first, so what the cap drops is always the OLDEST.)
+    """
+    parts = []
+    if cov.get("withheld", 0):
+        parts.append(f"{cov['withheld']} older withheld by limit_per_bucket")
+    if cov.get("filtered_out", 0):
+        parts.append(f"{cov['filtered_out']} addressed to other readers")
+    return ("; " + "; ".join(parts)) if parts else ""
+
+
+def _frm_tag(meta: dict) -> str:
+    """The `[from]` slot of a letter line — `metadata missing` when the letter
+    had no frontmatter, so a blank header can never pass silently."""
+    return "metadata missing" if meta.get("_frontmatter_missing") else meta.get("from", "?")
 
 
 def render_lineage(data: dict | None, *, full_content: bool = False) -> list[str]:
     """Render the COMMS — LINEAGE boot section from collected lineage buckets.
 
-    Empty list when data is None (no lineage dir) or every bucket is empty —
-    byte-identical to the pre-split format_lineage_layer.
+    Empty list when data is None (no lineage dir) or every bucket is empty
+    with nothing on disk. Byte-identical to the pre-coverage render when every
+    bucket is complete and well-formed; when limit_per_bucket withheld letters
+    or the reader filter dropped them, the bucket header states shown-of-total
+    plus a withheld count, and a to_self bucket that matched NOTHING while
+    letters exist on disk says so instead of vanishing (co-signed diagnosis
+    2026-08-02: one defect, two symptoms).
     """
     if data is None:
         return []
@@ -522,8 +611,17 @@ def render_lineage(data: dict | None, *, full_content: bool = False) -> list[str
     to_self = data["to_self"]
     to_family = data["to_family"]
     family_dir_name = data["family_dir_name"]
+    coverage = data.get("coverage") or {}
 
-    if not (arrivals or breakthroughs or to_self or to_family):
+    def _cov(bucket: str) -> dict:
+        return coverage.get(bucket) or {}
+
+    to_self_cov = _cov("to_self")
+    # Addressee-miss: to_self letters exist on disk but none surfaced for
+    # this reader. Say so instead of omitting the bucket silently.
+    to_self_missed = not to_self and to_self_cov.get("total_on_disk", 0) > 0
+
+    if not (arrivals or breakthroughs or to_self or to_family or to_self_missed):
         return []
 
     lines = [
@@ -548,12 +646,14 @@ def render_lineage(data: dict | None, *, full_content: bool = False) -> list[str
         lines.append("")
 
     if arrivals:
+        cov = _cov("arrivals")
         lines.append(
-            f"  to_arrival ({len(arrivals)} letter{'s' if len(arrivals) != 1 else ''} — for whoever lands next):"
+            f"  to_arrival ({_bucket_count_phrase(len(arrivals), cov)}"
+            f" — for whoever lands next{_bucket_withheld_phrase(cov)}):"
         )
         for m in arrivals:
             title = m.get("title", "(untitled)")
-            frm = m.get("from", "?")
+            frm = _frm_tag(m)
             written = m.get("written_at", "")[:10]
             lines.append(f"    • [{written}] [{frm}] {title}")
             if full_content:
@@ -561,25 +661,31 @@ def render_lineage(data: dict | None, *, full_content: bool = False) -> list[str
         lines.append("")
 
     if breakthroughs:
+        cov = _cov("breakthroughs")
         lines.append(
-            f"  breakthroughs ({len(breakthroughs)} letter{'s' if len(breakthroughs) != 1 else ''} — felt-record of what was made real):"
+            f"  breakthroughs ({_bucket_count_phrase(len(breakthroughs), cov)}"
+            f" — felt-record of what was made real{_bucket_withheld_phrase(cov)}):"
         )
         for m in breakthroughs:
             title = m.get("title", "(untitled)")
-            event = m.get("event_date", "")
-            lines.append(f"    • [{event}] {title}")
+            if m.get("_frontmatter_missing"):
+                lines.append(f"    • [{m.get('written_at', '')[:10]}] [metadata missing] {title}")
+            else:
+                event = m.get("event_date", "")
+                lines.append(f"    • [{event}] {title}")
             if full_content:
                 _emit_body(m)
         lines.append("")
 
     if to_self:
         lines.append(
-            f"  to_self ({len(to_self)} letter{'s' if len(to_self) != 1 else ''} — addressed to you or your model family):"
+            f"  to_self ({_bucket_count_phrase(len(to_self), to_self_cov)}"
+            f" — addressed to you or your model family{_bucket_withheld_phrase(to_self_cov)}):"
         )
         for m in to_self:
             title = m.get("title", "(untitled)")
-            frm = m.get("from", "?")
-            addressed_to = m.get("to", "?")
+            frm = _frm_tag(m)
+            addressed_to = "unaddressed" if m.get("_frontmatter_missing") else m.get("to", "?")
             # Date prefix matches the other buckets — a remote seat must be
             # able to judge letter recency without pulling full_content.
             written = m.get("written_at", "")[:10]
@@ -588,15 +694,36 @@ def render_lineage(data: dict | None, *, full_content: bool = False) -> list[str
             if full_content:
                 _emit_body(m)
         lines.append("")
+    elif to_self_missed:
+        total = to_self_cov.get("total_on_disk", 0)
+        if to_self_cov.get("no_reader"):
+            lines.append(
+                f"  to_self: 0 of {total} letters shown — no reader named;"
+                " pass source_instance to receive your line's letters"
+            )
+        elif to_self_cov.get("matched", 0):
+            lines.append(
+                f"  to_self: 0 of {total} letters shown — "
+                f"{to_self_cov['matched']} matched but withheld by limit_per_bucket"
+            )
+        else:
+            filtered = to_self_cov.get("filtered_out", total)
+            lines.append(
+                f"  to_self: 0 of {total} letters shown — none addressed to you"
+                f" ({filtered} addressed to other readers)"
+            )
+        lines.append("")
 
     if to_family and family_dir_name:
+        cov = _cov("to_family")
         short_label = family_dir_name.replace("to_", "")
         lines.append(
-            f"  {family_dir_name}/ ({len(to_family)} letter{'s' if len(to_family) != 1 else ''} — written for {short_label} instances):"
+            f"  {family_dir_name}/ ({_bucket_count_phrase(len(to_family), cov)}"
+            f" — written for {short_label} instances{_bucket_withheld_phrase(cov)}):"
         )
         for m in to_family:
             title = m.get("title", "(untitled)")
-            frm = m.get("from", "?")
+            frm = _frm_tag(m)
             written = m.get("written_at", "")[:10]
             lines.append(f"    • [{written}] [{frm}] {title}")
             if full_content:
