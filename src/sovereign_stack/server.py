@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import difflib
 import json
 import os
 from pathlib import Path
@@ -2525,6 +2526,104 @@ def _flatten_result(result) -> str:
 # depth.
 
 
+# Known cross-tool parameter confusions: {tool_name: {wrong_key: right_key}}.
+# The historical incident this closes (mesh-2026-08, "the manufactured false
+# finding"): an HQ seat wanted a claim id back from recall_insights and passed
+# record_insight's `return_claim_id`, the write-path parameter name. The read
+# path silently dropped the unknown key (arguments.get() has no
+# unknown-key rejection) and returned normally with no ids and no error. The
+# seat read that silence as "there is no supported read-side way to get a
+# claim id" and wrote the false conclusion into the chronicle as
+# ground_truth — it had to be superseded. The real read-side parameter is
+# with_ids (memory.py recall_insights). This map exists so that EXACT,
+# previously-observed confusion gets a direct answer instead of a generic
+# "unknown key" — a plain nearest-match (difflib) would not catch it, because
+# "return_claim_id" and "with_ids" are not textually similar; the confusion
+# is semantic (same intent, two tools, two names), not a typo.
+_KNOWN_PARAM_ALIASES: dict[str, dict[str, str]] = {
+    "recall_insights": {"return_claim_id": "with_ids"},
+    "record_insight": {"with_ids": "return_claim_id"},
+}
+
+# Keys a REAL caller injects today that are NOT in the MCP-facing inputSchema,
+# tolerated so this guard cannot itself cause a live regression. Found during
+# the caller sweep for this guard (mesh-2026-08): ~/sovereign-bridge's
+# /api/call (used by the Claude connector's scoped-session-token "Door That
+# Asks" step-up path — clients/claude_bridge) does
+#   req.arguments.setdefault("session_token_id", ctx["token_id"])
+#   req.arguments.setdefault("source_instance", ctx["source_instance"])
+# for record_insight ONLY (bridge.py's own comment: "record_insight accepts
+# **metadata; other write tools do not take arbitrary kwargs"). This is
+# ALREADY a no-op today — experiential.record_insight has a **metadata
+# catch-all, but this dispatch branch below forwards only named arguments,
+# never **arguments, so these two keys are silently dropped before they
+# reach it (memory.py's own comment at the insight-dict construction site:
+# "Survives the MCP dispatch because these are named args (metadata is
+# dropped by the server before it reaches here)"). That is a real,
+# PRE-EXISTING, separate defect — the bridge believes it is stamping
+# grant-attribution onto the chronicle entry for inspect_claim traceability
+# (spec §4.4) and it silently isn't — but it is not this task's defect and
+# not fixed here. Without this allowance, THIS guard would turn that silent
+# no-op into a hard ValueError on every scoped-session-token record_insight
+# call, i.e. would newly break a live, deployed surface. Report this
+# forward; do not silently widen it to "fixed."
+_ADDITIONAL_ALLOWED_PARAMS: dict[str, frozenset[str]] = {
+    "record_insight": frozenset({"session_token_id", "source_instance"}),
+}
+
+
+async def _reject_unknown_params(tool_name: str, arguments: dict) -> None:
+    """Raise ValueError naming every argument key `tool_name`'s live schema
+    doesn't declare, instead of the pre-existing behavior (every branch below
+    reads via `arguments.get(key, default)`, which silently drops anything
+    not explicitly read — a fail-open: the caller gets a confident,
+    well-formed, WRONG answer instead of a correction).
+
+    The allowlist is derived from `list_tools()` — the same live registry
+    `my_toolkit`/`heartbeat` already treat as the source of truth — not a
+    second hand-maintained copy that could drift from the registered
+    inputSchema. Called only for tools where the caller survey in
+    mesh-2026-08 (recall_insights, record_insight) is complete; see the
+    scope note where this is invoked.
+
+    Deliberately uncached: this dispatches on the same request path as
+    `test_contract_walker.py`'s live-schema assumption, and rebuilding a
+    ~97-entry list of Tool object literals (no I/O, no network) is cheap
+    next to a chronicle write already going through a worker thread.
+    """
+    if not arguments:
+        return
+    tools = await list_tools()
+    schema_map = {t.name: set((t.inputSchema.get("properties") or {}).keys()) for t in tools}
+    valid_keys = schema_map.get(tool_name)
+    if valid_keys is None:
+        return  # tool not in the live registry — not this guard's problem
+    tolerated = _ADDITIONAL_ALLOWED_PARAMS.get(tool_name, frozenset())
+    unknown = [k for k in arguments if k not in valid_keys and k not in tolerated]
+    if not unknown:
+        return
+
+    def _describe(key: str) -> str:
+        alias = _KNOWN_PARAM_ALIASES.get(tool_name, {}).get(key)
+        if alias is None:
+            close = difflib.get_close_matches(key, valid_keys, n=1)
+            alias = close[0] if close else None
+        owner = next(
+            (n for n, keys in schema_map.items() if n != tool_name and key in keys),
+            None,
+        )
+        msg = f"unknown parameter '{key}' for {tool_name}"
+        if alias:
+            msg += f"; did you mean '{alias}'?"
+        if owner:
+            msg += f" ({key} is a {owner} parameter)"
+        if not alias and not owner:
+            msg += ". No close match found among this tool's valid parameters."
+        return msg
+
+    raise ValueError("; also: ".join(_describe(k) for k in unknown))
+
+
 async def _dispatch_tool(name: str, arguments: dict):
     """Inner dispatcher — contains the original handle_tool body.
 
@@ -2612,6 +2711,7 @@ async def _dispatch_tool(name: str, arguments: dict):
         return [TextContent(type="text", text=json.dumps(result, indent=2))]
 
     if name == "record_insight":
+        await _reject_unknown_params("record_insight", arguments)
         domain = arguments.get("domain")
         content = arguments.get("content")
         # The schema marks both required — don't invent defaults for callers
@@ -2708,6 +2808,7 @@ async def _dispatch_tool(name: str, arguments: dict):
         ]
 
     if name == "recall_insights":
+        await _reject_unknown_params("recall_insights", arguments)
         query = arguments.get("query")
         domain = arguments.get("domain")
         if domain and domain.lower() == "all":
