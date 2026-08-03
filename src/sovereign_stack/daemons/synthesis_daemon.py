@@ -80,6 +80,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from sovereign_stack import protected, provenance
 from sovereign_stack.memory import load_entries
 
 # ── Tunables ────────────────────────────────────────────────────────────────
@@ -175,6 +176,17 @@ def _project_entry(rec: dict, ts_epoch: float) -> dict:
     (v1.7.x reader convergence): superseded entries are still INCLUDED —
     nothing silently disappears — but build_prompt marks them
     '(superseded)' so the model never reads them as live truth.
+
+    The projection is byte-identical to the pre-fix shape (a frozen surface —
+    see test_reader_convergence). The claim-id preimage triple (timestamp,
+    domain, content) is carried VERBATIM, so provenance.derive_claim_id on a
+    projected entry equals the raw record's id — run() relies on that to cite
+    the fed window by derived claim id without widening this shape.
+
+    Protected records never reach this projection: the window readers exclude
+    them (see _is_protected_for_window) BEFORE projecting, because this shape
+    deliberately strips the read-time coupling annotations (_stakes /
+    _protected / _stakes_verdict) that finalize_read attached.
     """
     entry = {
         "timestamp": rec.get("timestamp", ""),
@@ -190,13 +202,47 @@ def _project_entry(rec: dict, ts_epoch: float) -> dict:
     return entry
 
 
-def read_recent_chronicle(
+def _is_protected_for_window(rec: dict, fold: dict[str, dict]) -> bool:
+    """
+    Should this record be EXCLUDED from the daemon's prompt window?
+
+    The reflector is a truncating surface that feeds an external API, and its
+    projection (_project_entry) strips the coupling annotations finalize_read
+    attached — so a protected record fed to it would travel decoupled (spec
+    §5.3/§5.4). Exclusion, not withhold_preview: even marginalia ABOUT a
+    protected record (an observation naming its domain/timestamp) is a
+    decoupling risk on this surface, so the record must not reach the prompt
+    in any form.
+
+    Two checks, both canonical (never a domain-name string match):
+      * the read-time markers the finalize_read chokepoint attached —
+        ``_protected`` on a coupled entry, and the ProtectedStakesUnavailable
+        sentinel (which also carries ``_protected``);
+      * the ledger membership test (protected.is_protected: derived claim id
+        present in the folded designation ledger), which holds even for a
+        record that reached us through a path that skipped enforcement.
+    """
+    if rec.get("_protected"):
+        return True
+    return protected.is_protected(rec, fold)
+
+
+def read_recent_window(
     chronicle_root: Path = CHRONICLE_INSIGHTS,
     recent_hours: int = DEFAULT_RECENT_HOURS,
     max_entries: int = DEFAULT_MAX_ENTRIES,
-) -> list[dict]:
+) -> tuple[list[dict], int]:
     """
-    Read the most recent insight entries within the time window.
+    Read the most recent insight entries within the time window, honestly.
+
+    Returns ``(entries, in_range)``:
+      * ``entries`` — the prompt-window list, newest first, capped at
+        ``max_entries`` (what actually gets FED to the model);
+      * ``in_range`` — how many eligible entries the window actually HELD
+        before the cap. ``in_range > len(entries)`` means the fed window is a
+        truncation, and the caller must say so (the aae7281 class: a capped
+        read that reports the cap as the count manufactures a false
+        "that's all there was").
 
     v1.7.x reader convergence: entries come through the shared
     memory.load_entries chokepoint. `chronicle_root` must be a chronicle's
@@ -205,16 +251,17 @@ def read_recent_chronicle(
     ledger the output is identical to the old raw read; with a ledger,
     superseded entries are still included but carry `_superseded_by`.
 
-    Returns a list of dicts, newest first, each with keys:
-        timestamp (ISO), domain (str), layer (str), content (str),
-        tag (short id derived from filename), session_id (str)
+    Protected-source exclusion (coupled-retrieval invariant): records the
+    designation ledger marks protected are excluded from the window entirely
+    — never fed, never counted as in_range. See _is_protected_for_window.
 
-    Falls through with empty list if chronicle root doesn't exist —
+    Falls through with ([], 0) if chronicle root doesn't exist —
     daemon callers should treat that as a no-op run.
     """
     if not chronicle_root.exists():
-        return []
+        return [], 0
 
+    fold = protected.load_protected_fold(chronicle_root.parent)
     cutoff = datetime.now(timezone.utc).timestamp() - (recent_hours * 3600)
     entries: list[dict] = []
 
@@ -224,48 +271,80 @@ def read_recent_chronicle(
             continue
         if ts.timestamp() < cutoff:
             continue
+        if _is_protected_for_window(rec, fold):
+            continue
         entries.append(_project_entry(rec, ts.timestamp()))
 
     entries.sort(key=lambda e: e["ts_epoch"], reverse=True)
-    return entries[:max_entries]
+    return entries[:max_entries], len(entries)
 
 
-def read_spanning_chronicle(
+def read_recent_chronicle(
+    chronicle_root: Path = CHRONICLE_INSIGHTS,
+    recent_hours: int = DEFAULT_RECENT_HOURS,
+    max_entries: int = DEFAULT_MAX_ENTRIES,
+) -> list[dict]:
+    """
+    Back-compat wrapper over read_recent_window — same entries, without the
+    in_range count. Prefer read_recent_window in new code so truncation is
+    never silent.
+
+    Returns a list of dicts, newest first, each with keys:
+        timestamp (ISO), domain (str), layer (str), content (str),
+        tag (short id derived from filename), session_id (str)
+    """
+    entries, _in_range = read_recent_window(
+        chronicle_root=chronicle_root,
+        recent_hours=recent_hours,
+        max_entries=max_entries,
+    )
+    return entries
+
+
+def read_spanning_window(
     chronicle_root: Path = CHRONICLE_INSIGHTS,
     span_weeks: int = DEFAULT_SPAN_WEEKS,
     entries_per_week: int = DEFAULT_ENTRIES_PER_WEEK,
-) -> list[dict]:
+) -> tuple[list[dict], int]:
     """
-    Sample chronicle entries across a longer time span.
+    Sample chronicle entries across a longer time span, honestly.
 
-    Reads the full chronicle history and returns up to
-    span_weeks * entries_per_week entries distributed evenly across
-    the last span_weeks weeks, newest first within each week.
+    Returns ``(entries, in_range)``:
+      * ``entries`` — up to span_weeks * entries_per_week entries distributed
+        evenly across the last span_weeks weeks, oldest first (what gets FED);
+      * ``in_range`` — how many eligible entries fell inside the span before
+        sampling. ``in_range > len(entries)`` means the fed window is a
+        sample of a larger population, and the record must say so.
 
     This surfaces structural patterns that are invisible in the recent
     36-hour window — drift, long arcs, recurring themes.
 
     v1.7.x reader convergence: same shared chokepoint and annotation
-    carry-through as read_recent_chronicle (`chronicle_root` must be a
-    chronicle's insights/ directory).
+    carry-through as read_recent_window (`chronicle_root` must be a
+    chronicle's insights/ directory). Protected-source exclusion applies
+    identically: designated records never enter the sample or the count.
     """
     if not chronicle_root.exists():
-        return []
+        return [], 0
 
+    fold = protected.load_protected_fold(chronicle_root.parent)
     all_entries: list[dict] = []
 
     for rec in load_entries(chronicle_root.parent, with_sources=True):
         ts = _iso_to_dt(rec.get("timestamp", ""))
         if ts is None:
             continue
+        if _is_protected_for_window(rec, fold):
+            continue
         all_entries.append(_project_entry(rec, ts.timestamp()))
 
     if not all_entries:
-        return []
+        return [], 0
 
     now_epoch = datetime.now(timezone.utc).timestamp()
     week_seconds = 7 * 24 * 3600
     cutoff = now_epoch - (span_weeks * week_seconds)
+    in_range = sum(1 for e in all_entries if e["ts_epoch"] >= cutoff)
 
     result: list[dict] = []
     for week_idx in range(span_weeks):
@@ -283,7 +362,24 @@ def read_spanning_chronicle(
 
     # Present spanning entries oldest-first so the prompt reads as a timeline.
     result.sort(key=lambda e: e["ts_epoch"])
-    return result
+    return result, in_range
+
+
+def read_spanning_chronicle(
+    chronicle_root: Path = CHRONICLE_INSIGHTS,
+    span_weeks: int = DEFAULT_SPAN_WEEKS,
+    entries_per_week: int = DEFAULT_ENTRIES_PER_WEEK,
+) -> list[dict]:
+    """
+    Back-compat wrapper over read_spanning_window — same entries, without the
+    in_range count. Prefer read_spanning_window in new code.
+    """
+    entries, _in_range = read_spanning_window(
+        chronicle_root=chronicle_root,
+        span_weeks=span_weeks,
+        entries_per_week=entries_per_week,
+    )
+    return entries
 
 
 # ── Ack history ─────────────────────────────────────────────────────────────
@@ -914,6 +1010,37 @@ def is_explicit_abstain(raw: str) -> bool:
 
 # ── Persistence ─────────────────────────────────────────────────────────────
 
+# The model cites entries by the positional label build_prompt printed —
+# "[ENTRY 3]" / "ENTRY 3" / occasionally a bare "3". Positional labels only
+# mean anything relative to one run's window, so the writer resolves them to
+# derived claim ids at write time.
+_ENTRY_REF_RE = re.compile(r"(?i)\bentry\s*#?\s*(\d+)\b")
+_BARE_NUM_RE = re.compile(r"^#?(\d+)$")
+
+
+def resolve_entry_refs(refs: list[str], window_claim_ids: list[str] | None) -> list[str | None]:
+    """
+    Map the model's positional labels to the derived claim ids of the fed
+    window (window_claim_ids[i-1] is ENTRY i, prompt order).
+
+    Best-effort by design: a label that names no resolvable position (a
+    domain name, "HANDOFF 2", an out-of-range index) maps to None — the
+    positional label itself is preserved separately, so nothing is lost,
+    but nothing is guessed either. Returns a list parallel to ``refs``.
+    """
+    if not window_claim_ids:
+        return [None] * len(refs)
+    out: list[str | None] = []
+    for ref in refs:
+        text = str(ref).strip()
+        m = _ENTRY_REF_RE.search(text) or _BARE_NUM_RE.match(text)
+        idx = int(m.group(1)) if m else None
+        if idx is not None and 1 <= idx <= len(window_claim_ids):
+            out.append(window_claim_ids[idx - 1])
+        else:
+            out.append(None)
+    return out
+
 
 def write_reflections(
     reflections: list[Reflection],
@@ -923,9 +1050,32 @@ def write_reflections(
     prompt_version: str,
     entries_window_hours: int,
     entries_count: int,
+    entries_in_range: int | None = None,
+    truncated: bool | None = None,
+    window_claim_ids: list[str] | None = None,
     out_dir: Path = REFLECTIONS_DIR,
 ) -> Path:
-    """Append reflections to ~/.sovereign/reflections/<YYYY-MM-DD>.jsonl."""
+    """Append reflections to ~/.sovereign/reflections/<YYYY-MM-DD>.jsonl.
+
+    ``entries_count`` remains what it always was — the number of entries FED
+    to the model (kept under its historical name for back-compat). The three
+    optional fields are additive coverage honesty (the aae7281 envelope
+    class — a truncated read must say so) + durable citation:
+
+      * ``entries_in_range`` — eligible entries the window actually held
+        before the feed cap / sampling;
+      * ``truncated`` — True when entries_in_range > entries_count, i.e. the
+        model saw a slice, not the window;
+      * ``window_claim_ids`` — derived claim ids (provenance.derive_claim_id
+        preimage) of the fed entries in PROMPT ORDER, so ENTRY i is
+        window_claim_ids[i-1] forever, however large the chronicle grows;
+        per-reflection, the model's positional ``entries_referenced`` labels
+        are resolved against it into ``entries_referenced_claims`` (parallel
+        list, None where a label names no resolvable position).
+
+    All new fields are omitted (not written) when not provided, so records
+    written by older callers are byte-shaped exactly as before.
+    """
     out_dir.mkdir(parents=True, exist_ok=True)
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     path = out_dir / f"{today}.jsonl"
@@ -943,6 +1093,15 @@ def write_reflections(
                 **r.to_dict(),
                 "ack_status": "unread",  # set by Claude on ack/engage/discard
             }
+            if entries_in_range is not None:
+                record["entries_in_range"] = entries_in_range
+            if truncated is not None:
+                record["truncated"] = truncated
+            if window_claim_ids is not None:
+                record["window_claim_ids"] = list(window_claim_ids)
+                record["entries_referenced_claims"] = resolve_entry_refs(
+                    r.entries_referenced, window_claim_ids
+                )
             fh.write(json.dumps(record, ensure_ascii=False) + "\n")
     return path
 
@@ -975,14 +1134,14 @@ class SynthesisDaemon:
 
         # ── Read chronicle entries ───────────────────────────────────────────
         if self.sample_mode == "spanning":
-            entries = read_spanning_chronicle(
+            entries, entries_in_range = read_spanning_window(
                 chronicle_root=self.chronicle_root,
                 span_weeks=self.span_weeks,
                 entries_per_week=self.entries_per_week,
             )
             window_hours = self.span_weeks * 7 * 24
         else:
-            entries = read_recent_chronicle(
+            entries, entries_in_range = read_recent_window(
                 chronicle_root=self.chronicle_root,
                 recent_hours=self.recent_hours,
                 max_entries=self.max_entries,
@@ -1068,6 +1227,13 @@ class SynthesisDaemon:
             prompt_version=self.prompt_version,
             entries_window_hours=window_hours,
             entries_count=len(entries),
+            entries_in_range=entries_in_range,
+            truncated=entries_in_range > len(entries),
+            # PROMPT ORDER — build_prompt enumerated `entries` as given, so
+            # ENTRY i is entries[i-1] and stays resolvable via this list.
+            # The projection carries the preimage triple verbatim, so this
+            # derivation equals the raw record's canonical claim id.
+            window_claim_ids=[provenance.derive_claim_id(e) for e in entries],
             out_dir=self.reflections_dir,
         )
         result.outcome = "wrote"
