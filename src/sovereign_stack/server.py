@@ -2995,11 +2995,17 @@ async def _dispatch_tool(name: str, arguments: dict):
         # knows they can ignore it.
         #
         # Failures are swallowed so a degraded scribe never breaks boot.
+        # SCRIBE_BOOT_GREETING=off skips the greeting entirely (no session
+        # spawn, no model call, no spend) — the real cost kill switch, unlike
+        # SCRIBE_BOOT_INJECT which only hides the text while still billing.
         try:
-            session = await scribe_bridge.boot_spawn_and_greet_async(
-                parent_instance=reader,
-                boot_text=boot_text,
-            )
+            if scribe_bridge.boot_greeting_enabled():
+                session = await scribe_bridge.boot_spawn_and_greet_async(
+                    parent_instance=reader,
+                    boot_text=boot_text,
+                )
+            else:
+                session = None
         except Exception:
             session = None
 
