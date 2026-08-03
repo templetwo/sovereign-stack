@@ -128,16 +128,10 @@
           </div>
         </section>
 
-        <section class="panel panel-chronicle" aria-labelledby="h-chr">
-          <div class="panel-head">
-            <span class="panel-title" id="h-chr">CHRONICLE · LATEST</span>
-            <span class="panel-note">by type</span>
-          </div>
-          <div class="chronicle-list" id="chronicle-list">
-            <div class="chr-empty">Reading chronicle…</div>
-          </div>
-        </section>
-
+        <!-- Placed above CHRONICLE (not below): CHRONICLE is the long,
+             already-scrolling list — putting WATCHMAN second would push it
+             out of the first screenful on a typical viewport, which misses
+             Anthony's ask to actually SEE the watchman's moves. -->
         <section class="panel panel-watchman" aria-labelledby="h-wm">
           <div class="panel-head">
             <span class="panel-title" id="h-wm">WATCHMAN</span>
@@ -145,6 +139,16 @@
           </div>
           <div class="watchman-list" id="watchman-list">
             <div class="wm-empty">Reading watchman…</div>
+          </div>
+        </section>
+
+        <section class="panel panel-chronicle" aria-labelledby="h-chr">
+          <div class="panel-head">
+            <span class="panel-title" id="h-chr">CHRONICLE · LATEST</span>
+            <span class="panel-note">by type</span>
+          </div>
+          <div class="chronicle-list" id="chronicle-list">
+            <div class="chr-empty">Reading chronicle…</div>
           </div>
         </section>
       </div>

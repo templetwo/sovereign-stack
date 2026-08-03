@@ -16,7 +16,7 @@
  *   7. Cockpit grid + cards
  *   8. Services panel (topology + list + drill-down)
  *   9. Activity panel (filters + timeline/brush + feed)
- *  10. Right column (bridge latency + chronicle latest + watchman sweeps)
+ *  10. Right column (bridge latency + watchman sweeps + chronicle latest)
  *  11. Footer
  *  12. Category / status semantics
  *  13. Motion (reduced-motion aware) & responsive
@@ -603,9 +603,17 @@ input::placeholder { color: var(--text-faint); }
 .col-chr { grid-area: chr; display: flex; flex-direction: column; gap: var(--sp-4); min-width: 0; min-height: 0; }
 .panel-latency { flex-shrink: 0; gap: 9px; }
 .panel-chronicle { flex: 1; min-height: 0; gap: 9px; }
-/* WATCHMAN shares the chronicle's flex:1 (not flex-shrink:0 like latency)
-   so the two lists split col-chr's remaining height instead of one of
-   them growing unbounded — each scrolls internally past its share. */
+/* WATCHMAN shares the chronicle's flex:1 (not flex-shrink:0 like latency),
+   matching its sizing intent rather than latency's fixed one. CORRECTION
+   (verified live, both themes, at the >=1360px breakpoint): this does NOT
+   currently make each list scroll independently within a bounded height —
+   `.cockpit`'s `align-items: start` at that breakpoint leaves col-chr
+   unstretched, so flex:1 has no free space to divide and the whole
+   .cockpit scrolls instead (pre-existing behavior; panel-chronicle alone
+   had the identical flex:1/min-height:0/overflow-y:auto shape before this
+   panel existed). True independent inner-scrolling would need col-chr (or
+   .cockpit at this breakpoint) given a bounded height to stretch into —
+   left as a follow-up, out of this panel's scope. */
 .panel-watchman { flex: 1; min-height: 0; gap: 9px; }
 
 .panel-head {

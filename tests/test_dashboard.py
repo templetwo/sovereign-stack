@@ -354,6 +354,29 @@ class TestReadWatchmanSweeps:
         assert s["grok_scope"] == {"classified": None, "mechanical_only": None}
         assert s["reasons"] == []
 
+    def test_reason_text_is_redacted_before_reaching_the_snapshot(self, tmp_path):
+        """surfaces_sanitized attests to the SURFACES the watchman read, not
+        to Grok's own free-text judgment about them — a reason string must
+        pass through the same redact_log_line() every other text path in
+        this module runs before it can enter a snapshot."""
+        path = tmp_path / "spool.jsonl"
+        env = _wm_envelope(
+            grok_reply={
+                "items": [
+                    {
+                        "severity": "attend",
+                        "reason": "leaked Bearer sk-ant-abcdefghijklmnopqrstuvwxyz123456 in transit",
+                    }
+                ]
+            },
+        )
+        path.write_text(json.dumps(env) + "\n")
+        sweeps, _malformed, _surfaces = dash.read_watchman_sweeps(path)
+        assert len(sweeps) == 1
+        (reason,) = sweeps[0]["reasons"]
+        assert "sk-ant-abcdefghijklmnopqrstuvwxyz123456" not in reason
+        assert "redacted" in reason
+
 
 class TestWatchmanLogLine:
     def test_parses_quiet_line(self):

@@ -353,7 +353,12 @@ def _reduce_watchman_sweep(env: dict) -> dict:
             )
             if not flagged:
                 continue
-            reason = _preview_text(it.get("reason") or "", limit=140)
+            # surfaces_sanitized attests to the SURFACES (queue/halt/honk/
+            # comms previews), not to Grok's own free-text judgment about
+            # them — run the same credential-redaction pass every other
+            # text path in this module runs (redact_log_line, §1b/§2c)
+            # before an unbounded Grok-authored string reaches a snapshot.
+            reason = _preview_text(redact_log_line(it.get("reason") or ""), limit=140)
             if reason:
                 reasons.append(reason)
             if len(reasons) >= 3:
@@ -417,14 +422,22 @@ def _parse_watchman_log_line(line: str) -> dict | None:
 
 def read_watchman_sweeps(spool_path: Path, *, limit: int = 8) -> tuple[list[dict], int, int | None]:
     """Tail-read the last `limit` sweep envelopes from watchman's
-    spool.jsonl and reduce each to panel shape, newest-first. Seek-tail,
-    never a full read — observed spool lines run 400KB+ each, so even an
-    8-row panel must not load the whole file. Missing/empty file -> ([], 0,
-    None), the same present-but-empty semantics every reader in this module
-    uses. A malformed JSON line (or a line that parses but isn't a JSON
-    object) is skipped and counted, never raised. Also returns the newest
-    envelope's raw `surfaces` key count, as a fallback source for the
-    snapshot's `surfaces_watched` when watchman.log can't supply one."""
+    spool.jsonl and reduce each to panel shape, newest-first. Uses
+    seek_tail_lines rather than a naive `.read_text().splitlines()`, so a
+    spool that holds MORE than `limit` sweeps never needs a full read —
+    the common case as the file grows over time. CORRECTION: this is not
+    an unconditional guarantee — seek_tail_lines grows its read window
+    toward `max_chunk` whenever it can't find `limit` newlines yet, so a
+    spool holding FEWER lines than `limit` (true of the live file as of
+    this writing: 6 lines, 150-414KB each) gets read in full today, same
+    as every other seek_tail_lines caller in this module in that
+    situation — this reader inherits that behavior rather than changing
+    it. Missing/empty file -> ([], 0, None), the same present-but-empty
+    semantics every reader in this module uses. A malformed JSON line (or
+    a line that parses but isn't a JSON object) is skipped and counted,
+    never raised. Also returns the newest envelope's raw `surfaces` key
+    count, as a fallback source for the snapshot's `surfaces_watched` when
+    watchman.log can't supply one."""
     lines, _truncated = seek_tail_lines(spool_path, want_lines=limit)
     sweeps: list[dict] = []
     malformed = 0

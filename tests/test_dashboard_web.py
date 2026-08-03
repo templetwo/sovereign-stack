@@ -19,7 +19,7 @@ from sovereign_stack import dashboard_web as web
 
 
 @pytest.fixture
-def running_server(monkeypatch):
+def running_server(monkeypatch, tmp_path):
     """Start the web server on an ephemeral port; tear down after."""
     # Patch connectivity calls so the server doesn't actually shell out
     # to launchctl during tests.
@@ -33,6 +33,12 @@ def running_server(monkeypatch):
         "_http_probe",
         lambda url, timeout=2.0: {"http_status": None, "body": "", "error": "mocked"},
     )
+    # build_snapshot() now reads watchman's spool.jsonl + watchman.log (via
+    # dashboard.build_watchman_summary) in addition to the pre-existing
+    # chronicle/honks/halts/decisions reads — isolate the whole snapshot
+    # data layer to a tmp root so every request this fixture serves stays
+    # off the live ~/.sovereign tree, watchman spool included.
+    monkeypatch.setenv("SOVEREIGN_ROOT", str(tmp_path))
 
     server = web.serve(host="127.0.0.1", port=0)  # 0 = ephemeral
     host, port = server.server_address[:2]
@@ -122,13 +128,17 @@ class TestEndpoints:
 
 
 class TestBuildSnapshot:
-    def test_snapshot_shape(self, monkeypatch):
+    def test_snapshot_shape(self, monkeypatch, tmp_path):
         monkeypatch.setattr(conn, "_launchctl_print_text", lambda label: None)
         monkeypatch.setattr(
             conn,
             "_http_probe",
             lambda url, timeout=2.0: {"http_status": None, "body": "", "error": "mocked"},
         )
+        # build_snapshot() reads the filesystem directly (chronicle, honks,
+        # halts, decisions, and now watchman's spool.jsonl/watchman.log) —
+        # isolate to a tmp root so this test never touches the live tree.
+        monkeypatch.setenv("SOVEREIGN_ROOT", str(tmp_path))
         snapshot = web.build_snapshot()
         assert "timestamp" in snapshot
         assert "connectivity" in snapshot
