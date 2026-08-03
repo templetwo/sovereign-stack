@@ -39,9 +39,11 @@ from .interceptor import (
     pending_summary,
 )
 from .pending_writes import (
+    PROVENANCE_PASSTHROUGH_TARGETS,
     Proposal,
     ValidationError,
     approve_pending_write,
+    build_commit_arguments,
     commit_pending_write,
     create_pending_write,
     list_pending_writes,
@@ -78,9 +80,9 @@ __all__ = [
     # Audit
     "AuditEvent", "append_audit_event", "read_audit_trail",
     # Pending writes
-    "Proposal", "ValidationError",
-    "approve_pending_write", "commit_pending_write", "create_pending_write",
-    "list_pending_writes", "needs_revision_pending_write",
+    "PROVENANCE_PASSTHROUGH_TARGETS", "Proposal", "ValidationError",
+    "approve_pending_write", "build_commit_arguments", "commit_pending_write",
+    "create_pending_write", "list_pending_writes", "needs_revision_pending_write",
     "reject_pending_write", "validate_pending_write",
     # Canonical ring system + Claude exemption
     "CANONICAL_RING_1", "CANONICAL_RING_2", "CANONICAL_COMMIT_TARGETS",
