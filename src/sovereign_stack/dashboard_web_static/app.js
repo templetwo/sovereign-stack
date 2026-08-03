@@ -16,6 +16,14 @@
 //     `name`s: { restart_count, current_uptime_seconds, p95_probe_ms,
 //     recent_log_lines[] }. Every field individually may be null. The whole
 //     key may be absent (older server). Every read below is defensive.
+//   watchman (NEW) — top-level key: { sweeps: [...up to 8, newest-first],
+//     malformed_skipped, summary: { last_sweep_age_seconds, status
+//     ('quiet'|'active'|'unknown'), surfaces_watched, flagged_trend } }.
+//     Each sweep: { sweep_id, timestamp (epoch SECONDS), items_seen,
+//     grok_scope: {classified, mechanical_only}, grok_reply_state,
+//     severity_ceiling ('urgent'|'attend'|'info'|null), reasons[] (already-
+//     sanitized, <=3, <=140 chars each) }. Whole key and every field may be
+//     absent/null — same defensive-read discipline as service_telemetry.
 //
 // The service denominator is ALWAYS endpoints.length — never hardcoded.
 // Topology is laid out radially for N endpoints, hub = "bridge".
@@ -896,6 +904,87 @@ function renderChronicle(snapshot) {
   }
 }
 
+// ── Watchman (client-derived read of the `watchman` snapshot key) ────────
+const WM_CEILING_LABEL = { urgent: 'URGENT', attend: 'ATTEND', info: 'QUIET' };
+
+function wmCeilingClass(ceiling) {
+  const c = (ceiling || '').toLowerCase();
+  return (c === 'urgent' || c === 'attend') ? c : 'info';
+}
+
+function renderWatchman(snapshot) {
+  const container = $('watchman-list');
+  const summaryEl = $('wm-summary');
+  const wm = (snapshot && snapshot.watchman) || null;
+  const sweeps = (wm && Array.isArray(wm.sweeps)) ? wm.sweeps : [];
+  const summary = (wm && wm.summary) || {};
+
+  if (summaryEl) {
+    const parts = [];
+    if (summary.surfaces_watched != null) parts.push(`${summary.surfaces_watched} watched`);
+    if (summary.status === 'quiet' || summary.status === 'active') parts.push(summary.status);
+    if (summary.last_sweep_age_seconds != null) {
+      const age = fmtAge(summary.last_sweep_age_seconds);
+      if (age) parts.push(`${age} ago`);
+    }
+    if (summary.flagged_trend === 'rising' || summary.flagged_trend === 'falling') {
+      parts.push(`flagged ${summary.flagged_trend}`);
+    }
+    summaryEl.textContent = parts.length ? parts.join(' · ') : '—';
+  }
+
+  container.replaceChildren();
+
+  if (!sweeps.length) {
+    const n = summary.surfaces_watched;
+    const msg = n != null ? `all quiet — ${n} surfaces watched` : 'all quiet — no sweep data yet';
+    container.appendChild(el('div', 'wm-empty', msg));
+    return;
+  }
+
+  for (const sweep of sweeps) {
+    const ceilingClass = wmCeilingClass(sweep.severity_ceiling);
+    const entry = el('div', `wm-entry is-${ceilingClass}`);
+
+    const head = el('div', 'wm-head');
+    head.append(
+      el('span', 'wm-when', sweep.timestamp != null ? fmtRelTime(sweep.timestamp) : ''),
+      el('span', `wm-pill is-${ceilingClass}`, WM_CEILING_LABEL[ceilingClass]),
+    );
+    entry.appendChild(head);
+
+    const meta = el('div', 'wm-meta');
+    const scope = sweep.grok_scope || {};
+
+    const deltaSpan = el('span');
+    deltaSpan.append(document.createTextNode('Δ '));
+    deltaSpan.appendChild(el('b', null, sweep.items_seen != null ? String(sweep.items_seen) : '—'));
+    meta.appendChild(deltaSpan);
+
+    const classifiedSpan = el('span');
+    classifiedSpan.append(document.createTextNode('classified '));
+    classifiedSpan.appendChild(el('b', null, scope.classified != null ? String(scope.classified) : '—'));
+    meta.appendChild(classifiedSpan);
+
+    if (sweep.grok_reply_state) {
+      const isUnparseable = String(sweep.grok_reply_state).includes('unparseable');
+      meta.appendChild(el('span', 'wm-reply' + (isUnparseable ? ' is-unparseable' : ''), sweep.grok_reply_state));
+    }
+    entry.appendChild(meta);
+
+    const reasons = Array.isArray(sweep.reasons) ? sweep.reasons : [];
+    if (reasons.length) {
+      const reasonsWrap = el('div', 'wm-reasons');
+      for (const reason of reasons) {
+        reasonsWrap.appendChild(el('div', 'wm-reason', reason));
+      }
+      entry.appendChild(reasonsWrap);
+    }
+
+    container.appendChild(entry);
+  }
+}
+
 // ── Bridge latency + throughput (client-derived — §1b) ───────────────────
 function renderLatencyCard() {
   const lat = state.latencyBuf;
@@ -990,6 +1079,7 @@ async function poll() {
     renderActivity(snapshot);
     renderChronicle(snapshot);
     renderLatencyCard();
+    renderWatchman(snapshot);
 
     status.className = '';
     status.textContent = `live · last poll ${fmtClock(Date.now() / 1000)} · polling /snapshot.json every 3s`;

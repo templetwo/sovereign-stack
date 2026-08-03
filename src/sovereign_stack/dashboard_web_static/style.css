@@ -16,7 +16,7 @@
  *   7. Cockpit grid + cards
  *   8. Services panel (topology + list + drill-down)
  *   9. Activity panel (filters + timeline/brush + feed)
- *  10. Right column (bridge latency + chronicle latest)
+ *  10. Right column (bridge latency + chronicle latest + watchman sweeps)
  *  11. Footer
  *  12. Category / status semantics
  *  13. Motion (reduced-motion aware) & responsive
@@ -151,6 +151,24 @@
   --c-error:    #ff4d6a;
   --c-unknown:  #5c687a;
 
+  /* Watchman accent — dedicated hue, unused anywhere else in the console.
+     Every other hue on the wheel is already spoken for (cyan=accent,
+     green=up, amber=degraded/decision/honk, red=down/halt/error,
+     blue=insight, violet=thread/handoff, teal=comms/tools/learning,
+     orange=commit) — this sits in the one wide gap left (~262°-350°,
+     between thread's violet and down's red): a jewel-toned amethyst-
+     magenta that reads as "the night watch" without being mistaken for
+     the pastel-lavender thread color at a glance. */
+  --watchman:       #d84cf0;
+  --watchman-hover: #e786f9;
+  --watchman-a06:   rgba(216, 76, 240, .06);
+  --watchman-a10:   rgba(216, 76, 240, .10);
+  --watchman-a14:   rgba(216, 76, 240, .14);
+  --watchman-a20:   rgba(216, 76, 240, .20);
+  --watchman-a30:   rgba(216, 76, 240, .30);
+  --watchman-a45:   rgba(216, 76, 240, .45);
+  --watchman-a60:   rgba(216, 76, 240, .60);
+
   /* Aurora */
   --aurora-cyan:   rgba(0, 229, 255, .13);
   --aurora-violet: rgba(179, 136, 255, .11);
@@ -258,6 +276,18 @@
   --c-learning: #137e6d;
   --c-error:    #cf222e;
   --c-unknown:  #6e7781;
+
+  /* Watchman accent — darker/more saturated for AA contrast on white,
+     same hue family as the dark-theme value above. */
+  --watchman:       #a01fc4;
+  --watchman-hover: #81149f;
+  --watchman-a06:   rgba(160, 31, 196, .06);
+  --watchman-a10:   rgba(160, 31, 196, .10);
+  --watchman-a14:   rgba(160, 31, 196, .14);
+  --watchman-a20:   rgba(160, 31, 196, .20);
+  --watchman-a30:   rgba(160, 31, 196, .30);
+  --watchman-a45:   rgba(160, 31, 196, .45);
+  --watchman-a60:   rgba(160, 31, 196, .60);
 
   --aurora-cyan:   rgba(0, 145, 168, .08);
   --aurora-violet: rgba(107, 78, 230, .07);
@@ -567,12 +597,16 @@ input::placeholder { color: var(--text-faint); }
   gap: 11px;
   min-height: 0;
 }
-.panel-act, .panel-latency, .panel-chronicle { padding: 16px; }
+.panel-act, .panel-latency, .panel-chronicle, .panel-watchman { padding: 16px; }
 .panel-svc { grid-area: svc; }
 .panel-act { grid-area: act; min-width: 0; }
 .col-chr { grid-area: chr; display: flex; flex-direction: column; gap: var(--sp-4); min-width: 0; min-height: 0; }
 .panel-latency { flex-shrink: 0; gap: 9px; }
 .panel-chronicle { flex: 1; min-height: 0; gap: 9px; }
+/* WATCHMAN shares the chronicle's flex:1 (not flex-shrink:0 like latency)
+   so the two lists split col-chr's remaining height instead of one of
+   them growing unbounded — each scrolls internally past its share. */
+.panel-watchman { flex: 1; min-height: 0; gap: 9px; }
 
 .panel-head {
   display: flex; align-items: baseline; justify-content: space-between;
@@ -906,6 +940,59 @@ input::placeholder { color: var(--text-faint); }
 .t-decision { border-left-color: var(--c-decision); } .t-decision .chr-type { color: var(--c-decision); text-shadow: 0 0 8px var(--c-decision); }
 .t-halt     { border-left-color: var(--c-halt); }     .t-halt     .chr-type { color: var(--c-halt); text-shadow: 0 0 8px var(--c-halt); }
 .t-honk     { border-left-color: var(--c-honk); }     .t-honk     .chr-type { color: var(--c-honk); text-shadow: 0 0 8px var(--c-honk); }
+
+/* ── 10b. Watchman panel ───────────────────────────────────────────────────── */
+/* The watchman's own sweeps (queue/halt/honk/comms), reduced server-side.
+   Deliberately its own accent (--watchman, defined in §2) rather than any
+   --c-* category color: this is a distinct surface from the general
+   chronicle/activity feed, not one more category within it. Severity
+   coloring (border-left + pill) follows the console's existing alarm/warn
+   vocabulary for the ceiling itself — --down for urgent, --degraded for
+   attend — falling back to --watchman for info/quiet/unset so the panel
+   still reads as "the night watch" even when nothing is wrong. */
+
+.watchman-list { display: flex; flex-direction: column; gap: 9px; overflow-y: auto; flex: 1; min-height: 0; padding-right: 4px; }
+.wm-entry {
+  background: var(--bg-raised);
+  border: 1px solid var(--border-hair);
+  border-left: 2px solid var(--watchman);
+  border-radius: var(--r);
+  padding: 10px 12px;
+  display: flex; flex-direction: column; gap: 6px;
+  flex-shrink: 0;
+  transition: transform .15s ease, background .15s ease;
+}
+.wm-entry:hover { transform: translateY(-1px); background: var(--bg-hover); }
+.wm-entry.is-urgent { border-left-color: var(--down); }
+.wm-entry.is-attend { border-left-color: var(--degraded); }
+
+.wm-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+.wm-when { font-size: 11px; color: var(--text-faint); white-space: nowrap; }
+
+.wm-meta { display: flex; flex-wrap: wrap; gap: 10px; font-size: 11px; color: var(--text-dim); }
+.wm-meta b { color: var(--text-primary); font-weight: 600; }
+.wm-reply { color: var(--text-faint); }
+.wm-reply.is-unparseable { color: var(--degraded); }
+
+.wm-reasons { display: flex; flex-direction: column; gap: 4px; margin-top: 1px; }
+.wm-reason {
+  font-size: 11.5px; color: var(--text-body); line-height: 1.4;
+  padding-left: 9px; border-left: 2px solid var(--border-strong);
+  overflow-wrap: anywhere;
+}
+
+.wm-empty { font-size: 12.5px; color: var(--text-faint); font-style: italic; }
+
+.wm-pill {
+  font-size: 9.5px; font-weight: 700; letter-spacing: .1em;
+  border-radius: var(--r-pill); padding: 3px 9px;
+  border: 1px solid transparent;
+  white-space: nowrap;
+  text-transform: uppercase;
+}
+.wm-pill.is-urgent { color: var(--down); text-shadow: 0 0 8px var(--down); border-color: var(--down-a50); background: var(--down-a14); }
+.wm-pill.is-attend { color: var(--degraded); text-shadow: 0 0 8px var(--degraded); border-color: var(--degraded-a50); background: var(--degraded-a14); }
+.wm-pill.is-info    { color: var(--watchman); text-shadow: 0 0 8px var(--watchman); border-color: var(--watchman-a45); background: var(--watchman-a14); }
 
 /* ── 11. Footer ─────────────────────────────────────────────────────────────── */
 

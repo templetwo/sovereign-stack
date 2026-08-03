@@ -291,6 +291,206 @@ def current_uptime_seconds(pid: int | None) -> float | None:
     return _parse_ps_etime(proc.stdout)
 
 
+# ── Watchman panel (ops-console) ────────────────────────────────────────────
+#
+# The watchman (successor to comms-listener/comms-dispatcher, 2026-08-03 —
+# see connectivity.ENDPOINTS) spools one already-sanitized JSON envelope per
+# ACTIVE sweep (deltas > 0) to ~/.sovereign/watchman/spool.jsonl. A sweep
+# with zero deltas ("quiet") is logged to watchman.log but never spooled, so
+# the freshest "last sweep" signal lives in the log, not the spool — this
+# section reads BOTH. Sanitization (denylist, content-flagging, preview
+# truncation) already happened upstream inside the watchman process itself
+# (an envelope's own `surfaces_sanitized` flag records that); this reader
+# never opens queue or chronicle content, only the two files the watchman
+# already wrote for exactly this purpose.
+
+_WATCHMAN_FLAGGED_CEILINGS = {"attend", "urgent"}
+_RE_WATCHMAN_LOG_LINE = re.compile(r"^(?P<ts>\S+)\s+sweep\s+(?P<sweep_id>\S+)\s+(?P<rest>.*)$")
+_RE_WATCHMAN_SURFACES_OK = re.compile(r"(\d+)\s+surfaces\s+ok")
+
+
+def _watchman_dir(root: Path) -> Path:
+    return root / "watchman"
+
+
+def _parse_iso_epoch(text: Any) -> float | None:
+    """ISO-8601 string -> epoch seconds. None on anything that isn't a
+    parseable string (missing field, wrong type, malformed timestamp) —
+    never raises."""
+    if not isinstance(text, str) or not text:
+        return None
+    try:
+        return datetime.fromisoformat(text).timestamp()
+    except ValueError:
+        return None
+
+
+def _reduce_watchman_sweep(env: dict) -> dict:
+    """Reduce one sanitized watchman sweep envelope to the panel's fields.
+    Defensive key-by-key: an envelope with a missing or wrong-shaped field
+    degrades that one field to None/empty rather than the whole sweep being
+    dropped. Field set is deliberately narrow — sweep_id, timestamp,
+    items_seen, grok_scope, grok_reply_state, severity_ceiling, and up to 3
+    flagged/attend reasons (already-sanitized text, capped at 140 chars)."""
+    counts = env.get("counts")
+    items_seen = counts.get("items_seen") if isinstance(counts, dict) else None
+
+    scope = env.get("grok_scope")
+    grok_scope = {
+        "classified": scope.get("classified") if isinstance(scope, dict) else None,
+        "mechanical_only": scope.get("mechanical_only") if isinstance(scope, dict) else None,
+    }
+
+    reasons: list[str] = []
+    reply = env.get("grok_reply")
+    reply_items = reply.get("items") if isinstance(reply, dict) else None
+    if isinstance(reply_items, list):
+        for it in reply_items:
+            if not isinstance(it, dict):
+                continue
+            flagged = it.get("severity") in _WATCHMAN_FLAGGED_CEILINGS or bool(
+                it.get("flagged_for_richer_review")
+            )
+            if not flagged:
+                continue
+            reason = _preview_text(it.get("reason") or "", limit=140)
+            if reason:
+                reasons.append(reason)
+            if len(reasons) >= 3:
+                break
+
+    timestamp = _parse_iso_epoch(env.get("finished_at")) or _parse_iso_epoch(env.get("started_at"))
+
+    return {
+        "sweep_id": env.get("sweep_id"),
+        "timestamp": timestamp,
+        "items_seen": items_seen,
+        "grok_scope": grok_scope,
+        "grok_reply_state": env.get("grok_reply_state"),
+        "severity_ceiling": env.get("severity_ceiling"),
+        "reasons": reasons,
+    }
+
+
+def _flagged_trend(sweeps_newest_first: list[dict]) -> str:
+    """Cheap, envelope-only proxy for whether attend/urgent judgments are
+    rising or falling across the loaded window — NOT an ack-state trend
+    (that would require reading nape's honks/acks stores, which this reader
+    deliberately never touches). 'flagged' means severity_ceiling in
+    {attend, urgent} on the already-reduced sweep. Fewer than 2 sweeps in
+    the window -> 'unknown' (nothing to compare); zero flagged anywhere ->
+    'none'; otherwise the second half of the (chronological) window is
+    compared against the first half."""
+    if len(sweeps_newest_first) < 2:
+        return "unknown"
+    chronological = list(reversed(sweeps_newest_first))
+    flags = [s.get("severity_ceiling") in _WATCHMAN_FLAGGED_CEILINGS for s in chronological]
+    if not any(flags):
+        return "none"
+    mid = len(flags) // 2
+    older, newer = flags[:mid], flags[mid:]
+    older_rate = (sum(older) / len(older)) if older else 0.0
+    newer_rate = sum(newer) / len(newer)
+    if newer_rate > older_rate:
+        return "rising"
+    if newer_rate < older_rate:
+        return "falling"
+    return "flat"
+
+
+def _parse_watchman_log_line(line: str) -> dict | None:
+    """Parse one watchman.log line — either the 'quiet' form ('quiet — N
+    surfaces ok, M deltas; ...') or the active form ('— M deltas,
+    grok_process=..., reply=...'). Returns None for a line that doesn't
+    match the 'sweep <id>' shape at all (never raises)."""
+    m = _RE_WATCHMAN_LOG_LINE.match(line.strip())
+    if not m:
+        return None
+    rest = m.group("rest")
+    surfaces_m = _RE_WATCHMAN_SURFACES_OK.search(rest)
+    return {
+        "timestamp": _parse_iso_epoch(m.group("ts")),
+        "quiet": rest.startswith("quiet"),
+        "surfaces_watched": int(surfaces_m.group(1)) if surfaces_m else None,
+    }
+
+
+def read_watchman_sweeps(spool_path: Path, *, limit: int = 8) -> tuple[list[dict], int, int | None]:
+    """Tail-read the last `limit` sweep envelopes from watchman's
+    spool.jsonl and reduce each to panel shape, newest-first. Seek-tail,
+    never a full read — observed spool lines run 400KB+ each, so even an
+    8-row panel must not load the whole file. Missing/empty file -> ([], 0,
+    None), the same present-but-empty semantics every reader in this module
+    uses. A malformed JSON line (or a line that parses but isn't a JSON
+    object) is skipped and counted, never raised. Also returns the newest
+    envelope's raw `surfaces` key count, as a fallback source for the
+    snapshot's `surfaces_watched` when watchman.log can't supply one."""
+    lines, _truncated = seek_tail_lines(spool_path, want_lines=limit)
+    sweeps: list[dict] = []
+    malformed = 0
+    newest_surfaces_count: int | None = None
+    for line in lines:  # ascending: oldest of the window first
+        try:
+            env = json.loads(line)
+        except json.JSONDecodeError:
+            malformed += 1
+            continue
+        if not isinstance(env, dict):
+            malformed += 1
+            continue
+        sweeps.append(_reduce_watchman_sweep(env))
+        surfaces = env.get("surfaces")
+        if isinstance(surfaces, dict):
+            newest_surfaces_count = len(surfaces)  # last valid envelope wins == newest
+    sweeps.reverse()  # panel wants newest-first
+    return sweeps[:limit], malformed, newest_surfaces_count
+
+
+def build_watchman_summary(*, sovereign_root: Path | None = None, limit: int = 8) -> dict:
+    """Build the `watchman` snapshot key: the last `limit` sweeps plus a
+    summary line. Two data sources, both already-sanitized by the watchman
+    process itself: spool.jsonl (active sweeps only) and watchman.log
+    (every sweep, including quiet ones — the only place a fully-current
+    'last sweep age' / quiet-vs-active read can come from, since a quiet
+    sweep never reaches the spool)."""
+    root = sovereign_root or _sovereign_root()
+    wm_dir = _watchman_dir(root)
+
+    sweeps, malformed, spool_surfaces_count = read_watchman_sweeps(
+        wm_dir / "spool.jsonl", limit=limit
+    )
+
+    log_lines, _t = seek_tail_lines(wm_dir / "watchman.log", want_lines=1)
+    log_status = _parse_watchman_log_line(log_lines[-1]) if log_lines else None
+
+    if log_status is not None:
+        last_age = (
+            max(0.0, time.time() - log_status["timestamp"])
+            if log_status["timestamp"] is not None
+            else None
+        )
+        status = "quiet" if log_status["quiet"] else "active"
+        surfaces_watched = log_status["surfaces_watched"]
+    else:
+        last_age = None
+        status = "unknown"
+        surfaces_watched = None
+
+    if surfaces_watched is None:
+        surfaces_watched = spool_surfaces_count
+
+    return {
+        "sweeps": sweeps,
+        "malformed_skipped": malformed,
+        "summary": {
+            "last_sweep_age_seconds": last_age,
+            "status": status,
+            "surfaces_watched": surfaces_watched,
+            "flagged_trend": _flagged_trend(sweeps),
+        },
+    }
+
+
 # ── Activity feed ───────────────────────────────────────────────────────────
 
 # Categories — fixed vocabulary so the renderer can color-code consistently.

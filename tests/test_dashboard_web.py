@@ -135,3 +135,35 @@ class TestBuildSnapshot:
         assert "endpoints" in snapshot["connectivity"]
         assert isinstance(snapshot["unacked_honks"], int)
         assert isinstance(snapshot["listener_stale"], bool)
+
+    def test_snapshot_carries_watchman_key_additively(self, tmp_path, monkeypatch):
+        """`watchman` is appended, not substituted — every pre-existing key
+        (the 9 keys through service_telemetry) must still be present and
+        typed as before, per build_snapshot's additive-only discipline."""
+        monkeypatch.setattr(conn, "_launchctl_print_text", lambda label: None)
+        monkeypatch.setattr(
+            conn,
+            "_http_probe",
+            lambda url, timeout=2.0: {"http_status": None, "body": "", "error": "mocked"},
+        )
+        monkeypatch.setenv("SOVEREIGN_ROOT", str(tmp_path))
+        snapshot = web.build_snapshot()
+
+        for key in (
+            "timestamp",
+            "connectivity",
+            "halts_count",
+            "decisions_count",
+            "unacked_honks",
+            "listener_stale",
+            "latest",
+            "feed",
+            "service_telemetry",
+        ):
+            assert key in snapshot, key
+
+        assert "watchman" in snapshot
+        wm = snapshot["watchman"]
+        assert wm["sweeps"] == []  # tmp_path has no watchman/ dir at all
+        assert wm["malformed_skipped"] == 0
+        assert wm["summary"]["status"] == "unknown"

@@ -239,6 +239,189 @@ class TestChronicleTail:
         assert dash.read_chronicle_tail(f) is None
 
 
+# ── Watchman panel ───────────────────────────────────────────────────────────
+#
+# Fixtures use tmp_path exclusively — never the live ~/.sovereign/watchman
+# spool. Envelope shape below was learned by reading a few real (already-
+# sanitized) lines of ~/.sovereign/watchman/spool.jsonl; only the fields
+# _reduce_watchman_sweep actually consumes are represented here.
+
+
+def _wm_envelope(**overrides) -> dict:
+    env = {
+        "sweep_id": "20260803T120000Z",
+        "finished_at": "2026-08-03T12:00:00+00:00",
+        "counts": {"items_seen": 3},
+        "grok_scope": {"classified": 2, "mechanical_only": 1},
+        "grok_reply_state": "parsed",
+        "severity_ceiling": None,
+        "grok_reply": None,
+        "surfaces": {
+            "pending_writes": {},
+            "halts": {},
+            "handoffs": {},
+            "heartbeat": {},
+            "comms": {},
+        },
+    }
+    env.update(overrides)
+    return env
+
+
+class TestReadWatchmanSweeps:
+    def test_absent_spool_returns_empty_not_error(self, tmp_path):
+        sweeps, malformed, surfaces = dash.read_watchman_sweeps(tmp_path / "nope.jsonl")
+        assert sweeps == []
+        assert malformed == 0
+        assert surfaces is None
+
+    def test_malformed_line_skipped_and_counted(self, tmp_path):
+        path = tmp_path / "spool.jsonl"
+        path.write_text(
+            "{garbage}\n"
+            + json.dumps(_wm_envelope(sweep_id="good-1"))
+            + "\n"
+            + "not json either\n"
+            + "42\n"  # valid JSON, but not an object — also malformed for us
+        )
+        sweeps, malformed, _surfaces = dash.read_watchman_sweeps(path)
+        assert malformed == 3
+        assert len(sweeps) == 1
+        assert sweeps[0]["sweep_id"] == "good-1"
+
+    def test_n_cap_and_newest_first(self, tmp_path):
+        path = tmp_path / "spool.jsonl"
+        lines = [
+            json.dumps(
+                _wm_envelope(
+                    sweep_id=f"S{i}",
+                    finished_at=f"2026-08-03T12:{i:02d}:00+00:00",
+                )
+            )
+            for i in range(12)
+        ]
+        path.write_text("\n".join(lines) + "\n")
+        sweeps, _malformed, _surfaces = dash.read_watchman_sweeps(path, limit=8)
+        assert len(sweeps) == 8
+        assert [s["sweep_id"] for s in sweeps] == [f"S{i}" for i in range(11, 3, -1)]
+
+    def test_reduction_shape_and_reason_cap(self, tmp_path):
+        path = tmp_path / "spool.jsonl"
+        env = _wm_envelope(
+            severity_ceiling="attend",
+            grok_reply={
+                "items": [
+                    {"severity": "attend", "reason": "a" * 200, "flagged_for_richer_review": True},
+                    {"severity": "info", "reason": "should not appear — not flagged"},
+                    {"severity": "urgent", "reason": "second flagged reason"},
+                    {"severity": "attend", "reason": "third flagged reason"},
+                    {"severity": "attend", "reason": "fourth flagged reason — past the cap"},
+                ]
+            },
+        )
+        path.write_text(json.dumps(env) + "\n")
+        sweeps, _malformed, _surfaces = dash.read_watchman_sweeps(path)
+        assert len(sweeps) == 1
+        s = sweeps[0]
+        assert set(s.keys()) == {
+            "sweep_id",
+            "timestamp",
+            "items_seen",
+            "grok_scope",
+            "grok_reply_state",
+            "severity_ceiling",
+            "reasons",
+        }
+        assert s["sweep_id"] == "20260803T120000Z"
+        assert s["items_seen"] == 3
+        assert s["grok_scope"] == {"classified": 2, "mechanical_only": 1}
+        assert s["grok_reply_state"] == "parsed"
+        assert s["severity_ceiling"] == "attend"
+        assert len(s["reasons"]) == 3  # 4 items qualified; capped at 3
+        assert all(len(r) <= 141 for r in s["reasons"])  # 140 chars + ellipsis
+        assert not any("should not appear" in r for r in s["reasons"])
+
+    def test_missing_fields_degrade_to_none_not_crash(self, tmp_path):
+        path = tmp_path / "spool.jsonl"
+        path.write_text(json.dumps({"sweep_id": "bare"}) + "\n")
+        sweeps, malformed, _surfaces = dash.read_watchman_sweeps(path)
+        assert malformed == 0
+        assert len(sweeps) == 1
+        s = sweeps[0]
+        assert s["sweep_id"] == "bare"
+        assert s["timestamp"] is None
+        assert s["items_seen"] is None
+        assert s["grok_scope"] == {"classified": None, "mechanical_only": None}
+        assert s["reasons"] == []
+
+
+class TestWatchmanLogLine:
+    def test_parses_quiet_line(self):
+        line = (
+            "2026-08-03T23:06:38+00:00 sweep 20260803T230638Z quiet — "
+            "6 surfaces ok, 0 deltas; state touched, grok not invoked"
+        )
+        parsed = dash._parse_watchman_log_line(line)
+        assert parsed["quiet"] is True
+        assert parsed["surfaces_watched"] == 6
+        assert parsed["timestamp"] is not None
+
+    def test_parses_active_line(self):
+        line = (
+            "2026-08-03T07:59:44+00:00 sweep 20260803T075742Z — "
+            "86 deltas, grok_process=spawned, reply=parsed"
+        )
+        parsed = dash._parse_watchman_log_line(line)
+        assert parsed["quiet"] is False
+        assert parsed["surfaces_watched"] is None
+
+    def test_unparseable_line_returns_none(self):
+        assert dash._parse_watchman_log_line("not a watchman line at all") is None
+
+
+class TestBuildWatchmanSummary:
+    def test_absent_everything_is_empty_not_error(self, tmp_path):
+        result = dash.build_watchman_summary(sovereign_root=tmp_path)
+        assert result["sweeps"] == []
+        assert result["malformed_skipped"] == 0
+        assert result["summary"]["status"] == "unknown"
+        assert result["summary"]["last_sweep_age_seconds"] is None
+        assert result["summary"]["surfaces_watched"] is None
+        assert result["summary"]["flagged_trend"] == "unknown"
+
+    def test_status_and_age_come_from_the_log_not_the_spool(self, tmp_path):
+        # Quiet sweeps never reach spool.jsonl — the log is the only place
+        # a fully-current status/age can come from.
+        wm = tmp_path / "watchman"
+        wm.mkdir()
+        (wm / "watchman.log").write_text(
+            "2026-08-03T23:06:38+00:00 sweep 20260803T230638Z quiet — "
+            "6 surfaces ok, 0 deltas; state touched, grok not invoked\n"
+        )
+        result = dash.build_watchman_summary(sovereign_root=tmp_path)
+        assert result["summary"]["status"] == "quiet"
+        assert result["summary"]["surfaces_watched"] == 6
+        assert result["summary"]["last_sweep_age_seconds"] is not None
+        assert result["summary"]["last_sweep_age_seconds"] >= 0
+
+    def test_surfaces_watched_falls_back_to_spool_when_log_absent(self, tmp_path):
+        wm = tmp_path / "watchman"
+        wm.mkdir()
+        env = _wm_envelope()
+        (wm / "spool.jsonl").write_text(json.dumps(env) + "\n")
+        result = dash.build_watchman_summary(sovereign_root=tmp_path)
+        assert result["summary"]["status"] == "unknown"  # no log to say quiet/active
+        assert result["summary"]["surfaces_watched"] == len(env["surfaces"])
+
+    def test_limit_is_honored_end_to_end(self, tmp_path):
+        wm = tmp_path / "watchman"
+        wm.mkdir()
+        lines = [json.dumps(_wm_envelope(sweep_id=f"S{i}")) for i in range(5)]
+        (wm / "spool.jsonl").write_text("\n".join(lines) + "\n")
+        result = dash.build_watchman_summary(sovereign_root=tmp_path, limit=3)
+        assert len(result["sweeps"]) == 3
+
+
 # ── parse_spiral_status_text ───────────────────────────────────────────────
 
 

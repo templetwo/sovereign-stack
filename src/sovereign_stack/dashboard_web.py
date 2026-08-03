@@ -322,7 +322,14 @@ def build_snapshot() -> dict:
     introduces: `feed` is no longer the LAST key in the dict, so its JSON
     line now ends with a comma where it previously ended the object — that
     is the unavoidable cost of "appended", not a change to any of the 8
-    keys' own bytes."""
+    keys' own bytes.
+
+    `watchman` is appended strictly as the 10th key (WATCHMAN panel, held
+    for review — see dashboard.build_watchman_summary): the last 8
+    already-sanitized sweep envelopes from watchman's spool.jsonl, reduced,
+    plus a summary line derived from spool.jsonl + watchman.log alone. Same
+    additive discipline as `service_telemetry` — the 9 keys above it are
+    untouched."""
     restart_counts: dict[str, int | None] = {}
     state = dashboard.collect_state(_GLOBAL_FEED, restart_counts=restart_counts)
 
@@ -357,6 +364,7 @@ def build_snapshot() -> dict:
         "latest": state.latest,
         "feed": _GLOBAL_FEED.to_list(limit=_FEED_LIMIT_IN_SNAPSHOT),
         "service_telemetry": service_telemetry,
+        "watchman": dashboard.build_watchman_summary(),
     }
 
 
