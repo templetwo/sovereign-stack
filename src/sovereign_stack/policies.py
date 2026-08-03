@@ -210,8 +210,11 @@ class PolicyRegistry:
 
         Returns:
             Display text ending with a self-describing footer: the
-            source-of-truth path, active/retired counts, and how to enact
-            (set_policy, human-gated).
+            source-of-truth path, active/retired counts, a Coverage line in
+            the aae7281 envelope vocabulary (returned of total_matched,
+            scope.mode, truncated, partial_reasons — this surface never
+            caps, and the line says so), and how to enact (set_policy,
+            human-gated).
         """
         folded_all = list(self.fold().values())
         if domain:
@@ -264,6 +267,32 @@ class PolicyRegistry:
             "(append-only; latest record per policy_id wins)."
         )
         lines.append(f"{len(active)} active · {retired_clause}")
+        # Read-side coverage line (the aae7281 envelope vocabulary, rendered —
+        # this is a string surface, so coverage rides as a footer line instead
+        # of restructured JSON): returned / total_matched / scope.mode /
+        # truncated / partial_reasons. A 9,324-char listing with no coverage
+        # statement is indistinguishable from a complete one (measured
+        # 2026-08-02). partial_reasons is empty IFF the read is complete —
+        # a held-back retired set is a partial read and says so.
+        if not domain:
+            scope_mode = "all"
+        elif scoped:
+            scope_mode = "domain"
+        else:
+            scope_mode = "domain-empty"
+        partial_reasons: list[str] = []
+        if scope_mode == "domain-empty":
+            partial_reasons.append("domain_no_match")
+        if held_back:
+            partial_reasons.append(f"retired_held_back:{held_back}")
+        scope_clause = f'domain:"{domain}"' if domain else "all"
+        reasons_clause = "[" + ", ".join(partial_reasons) + "]" if partial_reasons else "[]"
+        lines.append(
+            f"Coverage: returned={len(shown)} of total_matched={len(scoped)} folded policies "
+            f"in scope ({len(folded_all)} registered across all domains) · "
+            f"scope.mode={scope_mode} ({scope_clause}) · truncated=false (this surface "
+            f"never caps) · partial_reasons={reasons_clause}"
+        )
         lines.append(
             "To enact, amend, or retire: set_policy(statement, domain, set_by=<human>) — "
             "human-gated; set_by names the approving human."

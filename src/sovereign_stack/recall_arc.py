@@ -55,6 +55,28 @@ def stack_call(tool, args, timeout=30, retries=2):
     return None
 
 
+def _items(resp):
+    """
+    Unwrap a Schema v1 read-envelope response to its items list.
+
+    recall_insights has returned the envelope ({items, returned,
+    total_matched, ...}) instead of a bare list since aae7281 (2026-07-20);
+    get_open_threads speaks it as of this change. The isinstance(resp, list)
+    gates this module used before were silently skipping every envelope
+    response — phases 1-3 of the arc returned nothing from a healthy stack.
+
+    Bare lists (pre-envelope servers) pass through unchanged; anything else
+    yields [].
+    """
+    if isinstance(resp, list):
+        return resp
+    if isinstance(resp, dict):
+        items = resp.get("items")
+        if isinstance(items, list):
+            return items
+    return []
+
+
 def recall_arc(
     topic,
     temporal_window_hours=72,
@@ -74,9 +96,7 @@ def recall_arc(
     - Phase 4: open threads with topic overlap
     """
     # Phase 1: direct matches
-    direct = stack_call("recall_insights", {"query": topic, "limit": direct_limit})
-    if not isinstance(direct, list):
-        direct = []
+    direct = _items(stack_call("recall_insights", {"query": topic, "limit": direct_limit}))
 
     seen = {}
     for entry in direct:
@@ -93,19 +113,20 @@ def recall_arc(
             continue
         start = (ts - window).isoformat()
         end = (ts + window).isoformat()
-        neighbors = stack_call(
-            "recall_insights",
-            {
-                "query": "",
-                "limit": temporal_limit,
-                "start_date": start,
-                "end_date": end,
-            },
+        neighbors = _items(
+            stack_call(
+                "recall_insights",
+                {
+                    "query": "",
+                    "limit": temporal_limit,
+                    "start_date": start,
+                    "end_date": end,
+                },
+            )
         )
-        if neighbors and isinstance(neighbors, list):
-            for n in neighbors:
-                if n["timestamp"] not in seen:
-                    seen[n["timestamp"]] = {**n, "_source": "temporal_neighbor"}
+        for n in neighbors:
+            if n["timestamp"] not in seen:
+                seen[n["timestamp"]] = {**n, "_source": "temporal_neighbor"}
 
     # Phase 3: domain-adjacent
     GENERIC_DOMAINS = {"reflection", "surprise", "hypothesis", "ground_truth", "open_thread"}
@@ -116,16 +137,15 @@ def recall_arc(
             if d and d not in GENERIC_DOMAINS and d not in domains:
                 domains.append(d)
     for domain in domains[:max_domain_seeds]:
-        dom_hits = stack_call("recall_insights", {"query": domain, "limit": 4})
-        if dom_hits and isinstance(dom_hits, list):
-            for h in dom_hits:
-                if h["timestamp"] not in seen:
-                    seen[h["timestamp"]] = {**h, "_source": f"domain:{domain}"}
+        dom_hits = _items(stack_call("recall_insights", {"query": domain, "limit": 4}))
+        for h in dom_hits:
+            if h["timestamp"] not in seen:
+                seen[h["timestamp"]] = {**h, "_source": f"domain:{domain}"}
 
     # Phase 4: open threads
     topic_terms = {t.lower() for t in topic.split() if len(t) >= 3}
-    open_threads = stack_call("get_open_threads", {})
-    if open_threads and isinstance(open_threads, list):
+    open_threads = _items(stack_call("get_open_threads", {}))
+    if open_threads:
         for t in open_threads:
             q = t.get("question", "").lower()
             d = t.get("domain", "").lower()

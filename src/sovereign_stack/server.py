@@ -750,7 +750,14 @@ async def list_tools():
             ),
             Tool(
                 name="get_open_threads",
-                description="Get unresolved questions waiting for answers",
+                description=(
+                    "Get unresolved questions waiting for answers. The response is the "
+                    "Schema v1 read envelope {items, returned, total_matched, offset, "
+                    "scope, truncated, partial_reasons, continuation} — the same shape "
+                    "recall_insights returns. total_matched counts every matched thread "
+                    "before the limit; when truncated, continuation carries the "
+                    "{offset, limit} for the next page."
+                ),
                 inputSchema={
                     "type": "object",
                     "properties": {
@@ -785,10 +792,11 @@ async def list_tools():
                             "type": "boolean",
                             "default": False,
                             "description": (
-                                "When true, return a dict {threads, total, has_more, offset} "
-                                "instead of a plain list. Use this to detect silent cap: if "
-                                "total > len(threads) then more exist beyond this page. "
-                                "Default false preserves the original list return."
+                                "SUPERSEDED (accepted, ignored): the response is now always "
+                                "the Schema v1 read envelope, whose total_matched / truncated / "
+                                "continuation fields carry everything with_total carried and "
+                                "more. Kept declared so existing callers passing it do not "
+                                "break."
                             ),
                         },
                     },
@@ -2784,24 +2792,26 @@ async def _dispatch_tool(name: str, arguments: dict):
         if domain and domain.lower() == "all":
             domain = None  # "all" means no filter
         limit = arguments.get("limit", 10)
-        with_total = arguments.get("with_total", False)
         result = experiential.get_open_threads(
             domain,
             limit,
             coalesce_families=arguments.get("coalesce_families", True),
             domain_contains=arguments.get("domain_contains"),
             offset=arguments.get("offset", 0),
-            with_total=with_total,
+            # The tool response is always the full read envelope (the aae7281
+            # rule recall_insights already follows): the payload states its
+            # own coverage — returned vs total_matched, which scope ran,
+            # truncation + continuation — instead of a bare array that implies
+            # completeness. limit:25 returning exactly 25 rows was
+            # indistinguishable from completeness while the store held 157
+            # open threads (measured 2026-08-02). The envelope supersedes
+            # with_total at this surface (its fields are a superset); the
+            # memory-level with_total parameter is unchanged for internal
+            # callers. The empty case returns the envelope too — items:[] with
+            # scope.mode says whether the store is empty or the filter missed
+            # (D1), which the old prose line could not.
+            envelope=True,
         )
-        # When with_total=True, result is a dict {threads, total, has_more, offset}.
-        # When with_total=False (default), result is a plain list (backward-compat).
-        threads_list = result["threads"] if with_total else result
-        if not threads_list:
-            return [
-                TextContent(
-                    type="text", text="No open threads. All questions resolved or none recorded."
-                )
-            ]
         return [TextContent(type="text", text=json.dumps(result, indent=2))]
 
     if name == "get_inheritable_context":

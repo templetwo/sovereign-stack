@@ -1256,6 +1256,7 @@ class ExperientialMemory:
         domain_contains: str = None,
         offset: int = 0,
         with_total: bool = False,
+        envelope: bool = False,
     ) -> list[dict]:
         """
         Get unresolved open threads - questions waiting for answers.
@@ -1286,6 +1287,15 @@ class ExperientialMemory:
             with_total: When True, return a dict with keys "threads", "total",
                     "has_more", and "offset" instead of a plain list. Default False
                     preserves the original list return for all existing callers.
+            envelope: When True, return the Schema v1 read envelope
+                    (the aae7281 shape recall_insights already speaks):
+                    {items, returned, total_matched, offset, scope, truncated,
+                    partial_reasons, continuation} instead of a bare list —
+                    the payload states its own coverage. Takes precedence
+                    over with_total (the envelope's fields are a superset of
+                    with_total's). Default False keeps every internal caller
+                    (boot ritual, arrival_state, reflexive, scribe) on the
+                    original list shape.
 
         Returns:
             When with_total=False (default): list of unresolved thread dicts,
@@ -1296,22 +1306,44 @@ class ExperientialMemory:
                 total   — total number of matched threads (pre-slice)
                 has_more — whether there are more threads beyond this page
                 offset  — the offset that was applied
+            When envelope=True: the Schema v1 envelope (see above) —
+                scope.mode is the closed 3-value enum ("all" / "domain" /
+                "domain-empty", D1 rule: a filter matching nothing says so
+                instead of implying an empty store), and partial_reasons is
+                the closed tagged vocabulary ("truncated:{total}",
+                "domain_no_match", "corrupt_line_skipped:{n}"). Empty
+                partial_reasons IFF the read is complete and lossless.
         """
         threads = []
+        corrupt_lines = 0
 
-        if domain:
-            # Match any file whose domain string contains `domain` as a
-            # comma-separated element (e.g. domain="openai-bridge" matches
-            # both "openai-bridge.jsonl" and
-            # "openai-bridge,cross-system-inquiry,...jsonl").
-            files = [f for f in self.threads_dir.glob("*.jsonl") if domain in f.stem.split(",")]
-        else:
-            files = list(self.threads_dir.glob("*.jsonl"))
+        all_files = list(self.threads_dir.glob("*.jsonl"))
+        domains_total = len(all_files)
+
+        # Match any file whose domain string contains `domain` as a
+        # comma-separated element (e.g. domain="openai-bridge" matches
+        # both "openai-bridge.jsonl" and
+        # "openai-bridge,cross-system-inquiry,...jsonl").
+        files = [f for f in all_files if domain in f.stem.split(",")] if domain else all_files
 
         # Apply domain_contains substring filter (case-insensitive) on top.
         if domain_contains:
             needle = domain_contains.lower()
             files = [f for f in files if needle in f.stem.lower()]
+
+        # Schema v1 scope.mode (closed 3-value enum, mirroring
+        # recall_insights): EITHER domain argument makes this a domain-scoped
+        # read, and a filter matching NOTHING reports "domain-empty" — an
+        # explicit, self-describing empty (D1) — instead of an empty list
+        # indistinguishable from an empty store.
+        domain_scoped = bool(domain) or bool(domain_contains)
+        if not domain_scoped:
+            scope_mode = "all"
+        elif files:
+            scope_mode = "domain"
+        else:
+            scope_mode = "domain-empty"
+        domains_searched = len(files)
 
         for jsonl_file in files:
             if not jsonl_file.exists():
@@ -1332,6 +1364,9 @@ class ExperientialMemory:
                                 )
                             threads.append(thread)
                     except json.JSONDecodeError:
+                        # Counted, not silently dropped — a skipped line is a
+                        # partial read and the envelope says so.
+                        corrupt_lines += 1
                         continue
 
         threads.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
@@ -1370,6 +1405,41 @@ class ExperientialMemory:
             else:
                 thread["last_touched_at"] = None
 
+        if envelope:
+            # Schema v1 read envelope — the aae7281 shape, field-for-field
+            # (items / returned / total_matched / offset / scope / truncated /
+            # partial_reasons / continuation). Built so invariant 5 holds by
+            # construction: partial_reasons is empty IFF the read is complete,
+            # exact, and lossless. limit:N returning exactly N rows was
+            # indistinguishable from completeness (157 open threads behind a
+            # 25-row page, measured 2026-08-02); this surface states its own
+            # coverage instead.
+            returned = len(threads)
+            truncated = total_matched > offset + returned
+            partial_reasons: list[str] = []
+            if truncated:
+                partial_reasons.append(f"truncated:{total_matched}")
+            if scope_mode == "domain-empty":
+                partial_reasons.append("domain_no_match")
+            if corrupt_lines:
+                partial_reasons.append(f"corrupt_line_skipped:{corrupt_lines}")
+            return {
+                "items": threads,
+                "returned": returned,
+                "total_matched": total_matched,
+                "offset": offset,
+                "scope": {
+                    "mode": scope_mode,
+                    "domain_query": domain if domain else None,
+                    "domains_searched": domains_searched,
+                    "domains_total": domains_total,
+                },
+                "truncated": truncated,
+                "partial_reasons": partial_reasons,
+                "continuation": (
+                    {"offset": offset + returned, "limit": limit} if truncated else None
+                ),
+            }
         if with_total:
             return {
                 "threads": threads,
