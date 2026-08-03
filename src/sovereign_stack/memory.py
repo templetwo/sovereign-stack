@@ -15,6 +15,7 @@ Distilled from:
 
 import hashlib
 import json
+import logging
 import os
 import re
 from datetime import datetime, timezone
@@ -25,6 +26,8 @@ from typing import Any
 from . import protected as protected_module
 from . import provenance
 from .coherence import Coherence
+
+logger = logging.getLogger(__name__)
 
 # Pattern: "(1) ... (2) ..." with sequential numbered items is a bundle.
 # Requires at least items (1) and (2) so a single parenthetical "(e.g. foo)" is never mistaken.
@@ -636,6 +639,24 @@ def finalize_read(
     protected_fold = protected_module.load_protected_fold(root)
     if protected_fold:
         result = protected_module.enforce_coupling(result, protected_fold, root)
+    elif result and not (root / "protected.jsonl").exists():
+        # Guard-shape assert (mesh-20260802 audit, surviving finding): an
+        # empty fold from an ABSENT ledger is indistinguishable from a
+        # mis-rooted caller, and skipping coupling silently there is the
+        # fail-open shape — a wrong root yields zero protection with zero
+        # signal. A ledger that EXISTS with zero designations stays silent
+        # (legitimate empty drawer, announced at boot); an absent ledger
+        # announces itself on every read that carries entries. Annotate,
+        # never mutate (copies, like annotate_superseded); underscore key
+        # is derived at read, never persisted.
+        logger.warning(
+            "protected ledger absent at %s — coupling skipped for %d "
+            "entries; if this root should carry designations, the caller "
+            "is mis-rooted",
+            root,
+            len(result),
+        )
+        result = [{**entry, "_protected_fold_state": "ledger-absent"} for entry in result]
 
     return result
 

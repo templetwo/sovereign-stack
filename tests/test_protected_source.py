@@ -285,12 +285,18 @@ class TestDesignationGate:
         assert not (mem.root / "protected.jsonl").exists()
 
     def test_designation_is_not_automatic(self, mem):
-        """A record is bare until a human designates it — nothing auto-protects."""
+        """A record is bare until a human designates it — nothing auto-protects.
+
+        With no ledger on disk the read is bare-but-ANNOUNCED: the absent
+        ledger stamps `_protected_fold_state` (guard-shape assert,
+        mesh-20260802 audit) while coupling keys stay absent.
+        """
         recs = _seed_records(mem)
         _archive_stakes(mem)  # stakes exist in the archive but nothing is designated
         [entry] = mem.recall_insights(domain="personal")
-        assert entry == recs["protected"]
+        assert {k: v for k, v in entry.items() if not k.startswith("_")} == recs["protected"]
         assert "_protected" not in entry
+        assert entry["_protected_fold_state"] == "ledger-absent"
 
 
 # ── 4. Non-protected recall unchanged (same-fixture smoke) ───────────────────
@@ -300,12 +306,16 @@ class TestNonProtectedUnchanged:
     def test_no_ledger_no_change(self, mem):
         recs = _seed_records(mem)
         result = mem.recall_insights(limit=50)
-        # No protected ledger -> every entry is the raw record, no derived keys.
+        # No protected ledger -> no COUPLING keys; the absent ledger announces
+        # itself via `_protected_fold_state` (guard-shape assert, mesh-20260802
+        # audit: silent skip was the fail-open shape).
         for entry in result:
             assert "_protected" not in entry
             assert "_stakes" not in entry
-        assert recs["protected"] in result
-        assert recs["ordinary"] in result
+            assert entry["_protected_fold_state"] == "ledger-absent"
+        bare = [{k: v for k, v in e.items() if not k.startswith("_")} for e in result]
+        assert recs["protected"] in bare
+        assert recs["ordinary"] in bare
 
 
 # ── Unit: the protected data layer in isolation ──────────────────────────────
