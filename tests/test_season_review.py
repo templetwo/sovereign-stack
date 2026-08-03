@@ -327,6 +327,73 @@ class TestHygiene:
         )
 
 
+# ── Section 4 (continued): ledger integrity — D1 corpus-wide reconciliation
+# and D2 corrupt-line reporting. Per standing law #2: these assert the
+# FIXED/desired hygiene output, which must fail cleanly (missing text, not a
+# crash) against the pre-fix seasons.py. ──
+
+
+class TestLedgerReconciliation:
+    def test_corrupt_ledger_line_reported_in_hygiene(self, tmp_path):
+        root = tmp_path / "chronicle"
+        pred = write_entry(root, "a", "pred one", days_ago=5)
+        succ = write_entry(
+            root,
+            "a",
+            "succ one",
+            days_ago=1,
+            supersedes=[derive_claim_id(pred)],
+            carry_forward_summary="carried",
+        )
+        ledger = root / "supersessions.jsonl"
+        append_supersession(
+            ledger,
+            build_supersession_record(
+                action="supersede",
+                superseded_id=derive_claim_id(pred),
+                successor_id=derive_claim_id(succ),
+                carry_forward_summary="carried",
+                predecessor=pred,
+            ),
+        )
+        # Corrupt the one ledger line in place.
+        ledger.write_text("{not valid json at all\n", encoding="utf-8")
+
+        report = review(root)
+        assert "4. HYGIENE" in report
+        assert "supersession ledger: 1 corrupt line(s) skipped" in report
+
+    def test_no_corrupt_lines_reports_clean(self, season_root):
+        report = review(season_root)
+        assert "supersession ledger: no corrupt lines." in report
+
+    def test_orphaned_successor_breadcrumb_reported_as_divergent(self, tmp_path):
+        root = tmp_path / "chronicle"
+        pred = write_entry(root, "a", "the predecessor", days_ago=5)
+        pred_id = derive_claim_id(pred)
+        succ = write_entry(
+            root,
+            "a",
+            "the successor",
+            days_ago=1,
+            supersedes=[pred_id],
+            carry_forward_summary="carried",
+        )
+        succ_id = derive_claim_id(succ)
+        # The ledger never gets the corresponding record at all (lost,
+        # never written, or reconciled away) — the breadcrumb is now the
+        # only trace this supersession ever happened.
+
+        report = review(root)
+        assert "4. HYGIENE" in report
+        assert "breadcrumb divergence:" in report
+        assert display_id(succ_id) in report
+
+    def test_consistent_breadcrumbs_report_clean(self, season_root):
+        report = review(season_root)
+        assert "every entry's supersedes breadcrumb matches an effective ledger record." in report
+
+
 # ── Section 5: dormancy / fragmentation ──
 
 

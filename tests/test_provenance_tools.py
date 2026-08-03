@@ -212,7 +212,7 @@ def test_revoke_restores_surfacing(tmp_path):
     assert record["successor_id"] is None
     # Append-only: both records remain; the fold nullifies.
     assert len(_ledger(root).read_text().strip().splitlines()) == 2
-    fold = prov.fold_supersessions(prov.load_supersessions(_ledger(root)))
+    fold = prov.fold_supersessions(prov.load_supersessions(_ledger(root))[0])
     assert fold == {}
     report = _inspect(root, pred_id)
     assert "superseded_by" not in report

@@ -23,7 +23,9 @@ from sovereign_stack.memory import ExperientialMemory
 from sovereign_stack.reflexive import ReflexiveSurface
 
 _REASON_RE = re.compile(
-    r"^(truncated:\d+|domain_no_match|query_term_ignored:[^:]+:.+|corrupt_line_skipped:\d+)$"
+    r"^(truncated:\d+|domain_no_match|query_term_ignored:[^:]+:.+|corrupt_line_skipped:\d+"
+    r"|supersession-ledger-missing-but-chronicle-references-it"
+    r"|supersession_ledger_corrupt_line_skipped:\d+)$"
 )
 
 
@@ -87,7 +89,14 @@ def _assert_schema_v1(env: dict, limit: int):
         not env["truncated"]
         and env["scope"]["mode"] != "domain-empty"
         and not any(
-            r.startswith(("corrupt_line_skipped", "query_term_ignored"))
+            r.startswith(
+                (
+                    "corrupt_line_skipped",
+                    "query_term_ignored",
+                    "supersession_ledger_corrupt_line_skipped",
+                )
+            )
+            or r == "supersession-ledger-missing-but-chronicle-references-it"
             for r in env["partial_reasons"]
         )
     )

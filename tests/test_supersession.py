@@ -41,7 +41,8 @@ def chronicle(tmp_path: Path) -> ExperientialMemory:
 
 
 def _ledger_records(chronicle: ExperientialMemory) -> list[dict]:
-    return prov.load_supersessions(chronicle.supersessions_path)
+    records, _corrupt_count = prov.load_supersessions(chronicle.supersessions_path)
+    return records
 
 
 def _claim_id_of(chronicle: ExperientialMemory, content: str) -> str:

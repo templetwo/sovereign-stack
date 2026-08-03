@@ -66,6 +66,7 @@ from .provenance import (
     under_chronicle_write_lock,
     verify_archive_ref,
 )
+from .provenance_tools import ledger_vs_breadcrumb
 from .witness import days_old
 
 
@@ -678,6 +679,11 @@ def season_review(
     # claim-ref checks key off it, so filtering protected ids here would make
     # ledger-referenced protected claims look falsely dangling.
     ids_present = {derive_claim_id(entry) for entry, _file, _location in scanned}
+    # Same completeness requirement for the D1 breadcrumb-reconciliation
+    # check below: a protected entry's `supersedes` breadcrumb is still a
+    # fact about the ledger's coverage, so this snapshot is taken BEFORE
+    # the protected filter reassigns `entries` just below.
+    all_insight_entries = list(entries)
     # §5.4: season_review is a model-facing digest that PREVIEWS insight content
     # in its candidate scans (supersession / policy lines render _preview(...)).
     # A preview surface cannot carry the full stakes, so it cannot honor the
@@ -689,7 +695,8 @@ def season_review(
     protected_fold = load_protected_fold(root)
     if protected_fold:
         entries = [e for e in entries if derive_claim_id(e) not in protected_fold]
-    sup_fold = fold_supersessions(load_supersessions(root / "supersessions.jsonl"))
+    sup_records, sup_corrupt_count = load_supersessions(root / "supersessions.jsonl")
+    sup_fold = fold_supersessions(sup_records)
     fam_fold = fold_families(load_families(families_path))
     threads = _load_threads_readonly(root)
     policies = list(PolicyRegistry(policies_path).fold().values())
@@ -845,6 +852,45 @@ def season_review(
         if successor and successor not in ids_present:
             dangling.append(f"  • dangling successor {display_id(successor)}")
     hyg.extend(dangling or ["  ✓ supersession pointers: all resolve."])
+
+    # D2 — corrupt ledger lines. Never silently repaired: this pass changes
+    # nothing on disk, it only names the count so a human decides what to
+    # do about it.
+    if sup_corrupt_count:
+        hyg.append(
+            f"  • supersession ledger: {sup_corrupt_count} corrupt line(s) skipped on"
+            " read — a predecessor whose supersede record failed to parse reads back"
+            " as live with no other signal (the read-side D2 fix)."
+        )
+    else:
+        hyg.append("  ✓ supersession ledger: no corrupt lines.")
+
+    # D1 (corpus-wide) — full breadcrumb reconciliation. The live
+    # finalize_read chokepoint only catches ledger loss when the WHOLE
+    # fold is empty (O(returned), no corpus scan); this pass has no such
+    # constraint, so it checks every in-shard `supersedes` breadcrumb
+    # against the fold directly, including the partially-degraded case
+    # finalize_read's fast path cannot see (some ledger records survived,
+    # but not the one this breadcrumb depends on). Reuses
+    # provenance_tools.ledger_vs_breadcrumb rather than re-deriving the
+    # same divergence logic a second time.
+    divergent: list[str] = []
+    for entry in all_insight_entries:
+        if not entry.get("supersedes"):
+            continue
+        full_id = derive_claim_id(entry)
+        if ledger_vs_breadcrumb(entry, full_id, sup_fold) == "divergent":
+            divergent.append(
+                f"  • breadcrumb divergence: {display_id(full_id)}"
+                f" [{entry.get('domain', '?')}] claims supersedes="
+                f"{[display_id(pid) for pid in entry.get('supersedes', [])]}, but the"
+                " ledger holds no effective record naming it successor for at least"
+                " one of them — lost ledger line, hand-written breadcrumb, or a"
+                " revoke whose denormalized copy is now stale."
+            )
+    hyg.extend(
+        divergent or ["  ✓ every entry's supersedes breadcrumb matches an effective ledger record."]
+    )
 
     reverify_failures: list[str] = []
     receipted = 0

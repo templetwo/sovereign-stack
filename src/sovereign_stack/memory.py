@@ -580,6 +580,7 @@ def finalize_read(
     chronicle_root: str | Path,
     *,
     exclude_superseded: bool = False,
+    partial_reasons: list[str] | None = None,
 ) -> list[dict]:
     """
     The shared read-finalization tail — the single supersession chokepoint.
@@ -605,6 +606,60 @@ def finalize_read(
          - non-empty, exclude_superseded=True: superseded/retired entries
            are DROPPED here (before any caller limit).
 
+       D1/D2 (ledger integrity — a lost, mis-rooted, or corrupted ledger
+       must never silently read as "nothing was ever superseded"):
+         - D1 (ledger-loss): if the FOLD reduces to empty (whether because
+           the ledger is missing/empty, or because every record folds
+           away — e.g. an all-revoked ledger), any entry in THIS call's
+           already-filtered `entries` that still carries a stored
+           `supersedes` breadcrumb (denormalized onto the successor at
+           write time — record_insight, memory.py) is annotated
+           `_ledger_suspect: True`. O(len(entries)) — no corpus scan, and
+           it fires regardless of whether `partial_reasons` is given (the
+           annotation is data-level).
+             NARROW BY DESIGN, KNOWN GAPS (do not widen without a
+             separate design pass):
+             * A PARTIALLY-restored ledger that still folds non-empty
+               (some records survived) does NOT trip this path — an
+               orphaned breadcrumb whose OWN record is the one that's
+               gone stays invisible here. That corpus-wide case is
+               `seasons.season_review`'s reconciliation section, which
+               compares every breadcrumb against the fold directly
+               (`provenance_tools.ledger_vs_breadcrumb`).
+             * This path fires only when the ENTIRE fold folds away to
+               {} — e.g. an all-revoked ledger, or one where every
+               surviving record happens to be a revoke for an id with
+               no other entry. On a ledger with any OTHER surviving
+               supersede record (the common case — Anthony's live
+               ledger has 20 records, not all revokes), the fold stays
+               non-empty and this path does not run at all, so a
+               routine revoke elsewhere does not trip it. Only in the
+               all-folds-to-empty case: the successor's `supersedes`
+               breadcrumb is never removed by a revoke (it is a
+               permanent historical fact of what happened at write
+               time), so a correctly-revoked supersession CAN trip this
+               annotation. A known, narrow false positive, accepted:
+               annotate-never-drop makes over-flagging the safe
+               direction, and distinguishing "revoked" from "lost"
+               would require carrying ledger history past its current
+               fold, which this chokepoint deliberately does not do.
+         - D2 (corrupt ledger lines): `provenance.load_supersessions` now
+           returns a corrupt-line count alongside its records. A nonzero
+           count means the ledger file itself is damaged — independent
+           of whether the resulting fold is empty or not (a ledger with
+           surviving records can still have lost exactly the one line
+           that mattered, the D1 fold stays non-empty, and D1 alone would
+           miss it entirely — this is why D2 is not optional given D1).
+
+         Both D1 and D2 write their reason string into `partial_reasons`
+         IN PLACE (append, never replace/clear) when the caller passes a
+         list — the read-side sibling of the P1 write fix, so a response
+         states its own coverage instead of implying completeness.
+         Callers that don't build an envelope (load_entries, ground.py)
+         simply don't pass it and are otherwise unaffected; the
+         `_ledger_suspect` entry annotation still lands for them, since
+         it's data-level, not envelope-level.
+
     B. Protected coupling (spec §5.3 — runs UNCONDITIONALLY, NOT gated on
        the supersession ledger): for any entry the protected ledger marks
        protected, the stakes are loaded from the archive-coupled pointer
@@ -623,14 +678,42 @@ def finalize_read(
 
     # Stage A — supersession (data-gated).
     result = entries
-    ledger_records = provenance.load_supersessions(root / "supersessions.jsonl")
-    if ledger_records:
-        fold = provenance.fold_supersessions(ledger_records)
-        if fold:
-            if exclude_superseded:
-                result, _superseded = provenance.partition_superseded(result, fold)
-            else:
-                result = provenance.annotate_superseded(result, fold)
+    ledger_records, ledger_corrupt_count = provenance.load_supersessions(
+        root / "supersessions.jsonl"
+    )
+    fold = provenance.fold_supersessions(ledger_records)
+    if fold:
+        if exclude_superseded:
+            result, _superseded = provenance.partition_superseded(result, fold)
+        else:
+            result = provenance.annotate_superseded(result, fold)
+    else:
+        # D1 — ledger-loss detection. A chronicle that never called
+        # supersede has no `supersedes` breadcrumbs anywhere, so this is a
+        # true no-op for the byte-identity case (empty entries list here,
+        # nothing annotated, nothing appended). Copy-on-annotate, matching
+        # annotate_superseded's contract (test_provenance.py pins
+        # "_superseded_by" not in the original dict — copies, never
+        # mutation): `result = entries` above means these are the CALLER's
+        # dicts, and writing `_ledger_suspect` into them in place would be
+        # the one read annotation that leaks into the caller's object graph.
+        found_suspect = False
+        annotated_result: list[dict] = []
+        for entry in result:
+            if entry.get("supersedes"):
+                entry = dict(entry)
+                entry["_ledger_suspect"] = True
+                found_suspect = True
+            annotated_result.append(entry)
+        result = annotated_result
+        if found_suspect and partial_reasons is not None:
+            partial_reasons.append("supersession-ledger-missing-but-chronicle-references-it")
+
+    # D2 — corrupt ledger lines, independent of whether the fold above
+    # ended up empty or not (see docstring: this is why D1 alone is not
+    # enough).
+    if ledger_corrupt_count and partial_reasons is not None:
+        partial_reasons.append(f"supersession_ledger_corrupt_line_skipped:{ledger_corrupt_count}")
 
     # Stage B — protected coupling (unconditional; see protected.enforce_coupling).
     protected_fold = protected_module.load_protected_fold(root)
@@ -961,9 +1044,10 @@ class ExperientialMemory:
             successor_id = None
             if resolved_predecessors:
                 successor_id = provenance.derive_claim_id(insight)
-                fold = provenance.fold_supersessions(
-                    provenance.load_supersessions(self.supersessions_path)
+                _ledger_records, _ledger_corrupt_count = provenance.load_supersessions(
+                    self.supersessions_path
                 )
+                fold = provenance.fold_supersessions(_ledger_records)
                 for claim_id, _entry in resolved_predecessors:
                     provenance.check_supersession_guards(claim_id, successor_id, fold)
 
@@ -1847,7 +1931,12 @@ class ExperientialMemory:
         # never hides); exclude_superseded drops pre-limit. Routing through
         # finalize_read instead of an inline copy means recall_insights and
         # load_entries fold supersession identically, in ONE place.
-        insights = finalize_read(insights, self.root, exclude_superseded=exclude_superseded)
+        insights = finalize_read(
+            insights,
+            self.root,
+            exclude_superseded=exclude_superseded,
+            partial_reasons=partial_reasons,
+        )
 
         # Capture total AFTER finalize_read, BEFORE slicing — the same rule
         # get_open_threads already follows for with_total. The function knows

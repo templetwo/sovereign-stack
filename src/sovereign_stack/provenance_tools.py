@@ -149,7 +149,7 @@ def _receipt_views(entry: dict, chronicle_root: Path, verify_receipts: bool) -> 
     return views
 
 
-def _ledger_vs_breadcrumb(entry: dict, full_id: str, fold: dict[str, dict]) -> str:
+def ledger_vs_breadcrumb(entry: dict, full_id: str, fold: dict[str, dict]) -> str:
     """
     Compare the entry's `supersedes` breadcrumb against the ledger fold.
 
@@ -237,7 +237,8 @@ def inspect_claim(
         return {"claim_id": ref, "found": False, "integrity": "unknown", "error": str(exc)}
 
     full_id = prov.derive_claim_id(entry)
-    fold = prov.fold_supersessions(prov.load_supersessions(ledger))
+    ledger_records, ledger_corrupt_count = prov.load_supersessions(ledger)
+    fold = prov.fold_supersessions(ledger_records)
 
     # Protected-source gate (spec §5.4): inspect_claim returns the FULL
     # entry body, so it is a full-content surface — its `entry` must be
@@ -274,7 +275,12 @@ def inspect_claim(
         report["supersedes"] = predecessors
 
     report["lineage"] = prov.walk_lineage(full_id, fold, root)
-    report["ledger_vs_breadcrumb"] = _ledger_vs_breadcrumb(entry, full_id, fold)
+    report["ledger_vs_breadcrumb"] = ledger_vs_breadcrumb(entry, full_id, fold)
+    # D2: a damaged ledger is context this forensic surface should never
+    # swallow quietly — named only when nonzero, so a clean read stays
+    # byte-identical to pre-D2 output.
+    if ledger_corrupt_count:
+        report["ledger_corrupt_lines"] = ledger_corrupt_count
     return report
 
 
@@ -350,7 +356,8 @@ def supersede_insight(
         AmbiguousClaimError): any guard or resolution failure.
     """
     root, ledger = _live_paths(chronicle_root, ledger_path)
-    fold = prov.fold_supersessions(prov.load_supersessions(ledger))
+    ledger_records, _ledger_corrupt_count = prov.load_supersessions(ledger)
+    fold = prov.fold_supersessions(ledger_records)
 
     if action == "link":
         if not isinstance(successor_id, str) or not successor_id.strip():

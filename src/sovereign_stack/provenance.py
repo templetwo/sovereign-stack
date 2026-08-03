@@ -778,13 +778,47 @@ def resolve_supersedes(supersedes: list[str], chronicle_root: Path) -> list[tupl
 # ── Supersession ledger ──────────────────────────────────────────────────────
 
 
-def load_supersessions(ledger_path: Path) -> list[dict]:
+def load_supersessions(ledger_path: Path) -> tuple[list[dict], int]:
     """
-    Read all ledger records in file order. Missing ledger -> [] (the
-    file is created lazily on first append; reading never creates it).
-    Corrupt lines are skipped, matching the chronicle read convention.
+    Read all ledger records in file order, plus a count of corrupt
+    (unparseable, or parseable-but-not-a-dict) lines skipped. Missing
+    ledger -> ([], 0) (the file is created lazily on first append;
+    reading never creates it).
+
+    Unlike the general chronicle read convention (`_iter_jsonl`, which
+    silently skips malformed lines — acceptable for insight shards,
+    where a lost row is a lost opinion), this ledger is the SOLE
+    authoritative record of what is currently superseded. A silently
+    skipped line here can resurrect a corpse: a predecessor whose
+    supersede record failed to parse reads back as live, with nothing
+    in a bare `list[dict]` return to say so (D2, the read-side
+    complement to D1's ledger-loss detection in memory.finalize_read).
+    Corrupt lines are still skipped — never crash a read — but the
+    caller gets the count and is expected to surface a nonzero one
+    (finalize_read's `partial_reasons` out-param; seasons.season_review's
+    nightly hygiene digest), never silently repair it.
     """
-    return list(_iter_jsonl(Path(ledger_path)))
+    path = Path(ledger_path)
+    records: list[dict] = []
+    corrupt = 0
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    corrupt += 1
+                    continue
+                if isinstance(obj, dict):
+                    records.append(obj)
+                else:
+                    corrupt += 1
+    except OSError:
+        return [], 0
+    return records, corrupt
 
 
 def build_supersession_record(

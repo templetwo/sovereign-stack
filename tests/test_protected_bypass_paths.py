@@ -148,7 +148,7 @@ class TestResolveClaimPath:
         seeded = _seed_and_protect(mem)
         full_id = derive_claim_id(seeded["record"])
         fold = provenance.fold_supersessions(
-            provenance.load_supersessions(mem.root / "supersessions.jsonl")
+            provenance.load_supersessions(mem.root / "supersessions.jsonl")[0]
         )
         rows = walk_lineage(full_id, fold, mem.root)
         self_row = next(r for r in rows if r["role"] == "self")

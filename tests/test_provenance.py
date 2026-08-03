@@ -448,7 +448,9 @@ def test_resolve_supersedes_list(tmp_path):
 
 def test_load_missing_ledger_returns_empty_and_creates_nothing(tmp_path):
     ledger = tmp_path / "nowhere" / "supersessions.jsonl"
-    assert prov.load_supersessions(ledger) == []
+    records, corrupt_count = prov.load_supersessions(ledger)
+    assert records == []
+    assert corrupt_count == 0
     assert not ledger.parent.exists()  # reading never creates
 
 
@@ -467,7 +469,9 @@ def test_append_creates_parent_lazily_and_round_trips(tmp_path):
     )
     prov.append_supersession(ledger, record)
     assert ledger.exists()
-    assert prov.load_supersessions(ledger) == [record]
+    records, corrupt_count = prov.load_supersessions(ledger)
+    assert records == [record]
+    assert corrupt_count == 0
 
 
 def test_record_schema_exact_fields(tmp_path):
@@ -654,7 +658,7 @@ def _two_generation_fixture(tmp_path):
     pred_id = _add_insight(root, pred, domain="memory_children")
     succ_id = _add_insight(root, succ, domain="memory_policy")
     _link(root, pred_id, succ_id, summary="exclusion rule confirmed, scope widened")
-    fold = prov.fold_supersessions(prov.load_supersessions(_ledger(root)))
+    fold = prov.fold_supersessions(prov.load_supersessions(_ledger(root))[0])
     return root, pred, succ, pred_id, succ_id, fold
 
 
@@ -703,7 +707,7 @@ def test_lineage_walk_chain_roles_and_order(tmp_path):
     ids = [_add_insight(root, e, filename=f"s{i}.jsonl") for i, e in enumerate((a, b, c))]
     _link(root, ids[0], ids[1], summary="a still true in part")
     _link(root, ids[1], ids[2], summary="b refined")
-    fold = prov.fold_supersessions(prov.load_supersessions(_ledger(root)))
+    fold = prov.fold_supersessions(prov.load_supersessions(_ledger(root))[0])
 
     rows = prov.walk_lineage(ids[1], fold, root)
     assert [(r["claim_id"], r["role"]) for r in rows] == [
@@ -726,7 +730,7 @@ def test_lineage_n_to_1_consolidation(tmp_path):
     ids = [_add_insight(root, e, filename=f"s{i}.jsonl") for i, e in enumerate((a, b, c))]
     _link(root, ids[0], ids[2], summary="a folded in")
     _link(root, ids[1], ids[2], summary="b folded in")
-    fold = prov.fold_supersessions(prov.load_supersessions(_ledger(root)))
+    fold = prov.fold_supersessions(prov.load_supersessions(_ledger(root))[0])
 
     rows = prov.walk_lineage(ids[2], fold, root)
     roles = [(r["claim_id"], r["role"]) for r in rows]
@@ -742,7 +746,7 @@ def test_lineage_cycle_safe_on_corrupt_ledger(tmp_path):
     id_b = _add_insight(root, b, filename="sb.jsonl")
     _link(root, id_a, id_b, summary="s")
     _link(root, id_b, id_a, summary="s")
-    fold = prov.fold_supersessions(prov.load_supersessions(_ledger(root)))
+    fold = prov.fold_supersessions(prov.load_supersessions(_ledger(root))[0])
     rows = prov.walk_lineage(id_a, fold, root)
     assert any(r["role"] == "self" for r in rows)
     assert len(rows) <= 3  # bounded, no infinite walk
@@ -766,7 +770,7 @@ def test_lineage_dangling_predecessor_falls_back_to_ledger_hints(tmp_path):
         predecessor=pred,
     )
     prov.append_supersession(_ledger(root), record)
-    fold = prov.fold_supersessions(prov.load_supersessions(_ledger(root)))
+    fold = prov.fold_supersessions(prov.load_supersessions(_ledger(root))[0])
 
     rows = prov.walk_lineage(succ_id, fold, root)
     dangling = rows[0]
