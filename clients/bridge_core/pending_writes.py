@@ -295,6 +295,66 @@ def _precondition_check(ctx: BridgeContext, proposal: Proposal) -> list[str]:
     return errors
 
 
+# Stack commit targets whose inputSchema accepts source_instance.
+#
+# VERIFIED 2026-08-02 against src/sovereign_stack/server.py inputSchemas:
+#   handoff        — properties: note, thread, source_instance
+#   close_session  — properties: what_i_learned, what_surprised_me,
+#                    what_to_pick_up, thread, source_instance
+#
+# record_insight (and every other commit target) is DELIBERATELY absent.
+# The Stack's tool handlers read only the named args they know; anything
+# else is dropped SILENTLY, not rejected (documented on branch
+# fix/tool-dispatch-unknown-key-rejection). Injecting source_instance into
+# a record_insight body would vanish without an error — the same fail-open
+# shape this module exists to close. For those targets the origin carrier
+# is line-one self-naming in the content body, asserted by tests, never by
+# a kwarg the server discards.
+PROVENANCE_PASSTHROUGH_TARGETS: frozenset[str] = frozenset({"handoff", "close_session"})
+
+
+def build_commit_arguments(ctx: BridgeContext, proposal: Proposal) -> dict[str, Any]:
+    """
+    Build the exact ``arguments`` dict forwarded to the Stack REST call.
+
+    This is the single assembly point for the commit request body, so the
+    dry-run review surface and the live call cannot diverge.
+
+    Substrate provenance: the proposal ENVELOPE carries source_instance and
+    session_id (popped out of the tool args by dispatch.pop_bridge_metadata
+    at proposal time). Before this function existed, only proposal.arguments
+    was forwarded — so the Stack handler defaulted source_instance to
+    "unknown" and stamped the DRAIN OPERATOR's live spiral session (live
+    specimen 2026-08-03T00:36Z: six Grok proposals drained via
+    ``cli --source=grok``; both handoffs landed as source_instance='unknown'
+    under the HQ seat's session id).
+
+    The PROPOSAL's identity travels. The drain operator's never does.
+
+    proposal.session_id does NOT travel for handoff/close_session: their
+    Stack inputSchemas expose no session parameter (server.py stamps its own
+    spiral_state.session_id server-side), so there is nothing to inject it
+    into — a made-up kwarg would be silently dropped. It stays in the
+    proposal envelope and audit trail, which remain the record of the
+    proposer's session identity.
+    """
+    commit_args = dict(proposal.arguments)
+
+    # Bridge → Stack layer translation
+    if "layer" in commit_args:
+        commit_args["layer"] = ctx.layer_translation.get(
+            commit_args["layer"], commit_args["layer"]
+        )
+
+    # Provenance passthrough — envelope wins over anything already in the
+    # args dict (a proposal file is reviewable state; the envelope's
+    # source_instance is what the identity gate established at proposal time).
+    if proposal.commit_target in PROVENANCE_PASSTHROUGH_TARGETS:
+        commit_args["source_instance"] = proposal.source_instance
+
+    return commit_args
+
+
 def commit_pending_write(
     ctx: BridgeContext, proposal_id: str, live: bool = False,
 ) -> Proposal:
@@ -312,12 +372,17 @@ def commit_pending_write(
     if errors:
         raise ValueError("Pre-commit checks failed:\n" + "\n".join(f"  • {e}" for e in errors))
 
+    commit_args = build_commit_arguments(ctx, proposal)
+
     if not live:
         proposal.commit_result = {
             "mocked": False,
             "live": False,
             "would_call": proposal.commit_target,
-            "with_arguments": proposal.arguments,
+            # The dry run shows the body a live commit would actually send
+            # (layer translated, provenance injected) — a review surface that
+            # differs from the wire is how 'unknown' authorship shipped.
+            "with_arguments": commit_args,
         }
         return proposal
 
@@ -326,13 +391,6 @@ def commit_pending_write(
     if not token:
         raise RuntimeError(
             f"{ctx.bridge_rest_token_env} not set — cannot commit without auth"
-        )
-
-    # Bridge → Stack layer translation
-    commit_args = dict(proposal.arguments)
-    if "layer" in commit_args:
-        commit_args["layer"] = ctx.layer_translation.get(
-            commit_args["layer"], commit_args["layer"]
         )
 
     try:
