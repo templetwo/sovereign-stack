@@ -108,19 +108,20 @@ ENDPOINTS: list[Endpoint] = [
         description="Cloudflare tunnel exposing SSE to internet",
         # Tunnel itself is opaque from the host side; rely on launchctl.
     ),
+    # 2026-08-03 succession: the watchman replaced BOTH comms organs under the
+    # dispatcher's launchd label (addresses outlast occupants). It is PERIODIC
+    # (WatchPaths + 30-min heartbeat; the process exits between sweeps), so the
+    # old always-on dispatcher endpoint and the dead comms-listener endpoint
+    # (log silent since 2026-07-30) both read falsely against it. One honest
+    # endpoint replaces the pair; retired plists live in
+    # ~/.sovereign/watchman/retired/.
     Endpoint(
-        name="dispatcher",
+        name="watchman",
         label="com.templetwo.comms-dispatcher",
-        kind=KIND_ALWAYS_ON,
-        description="Comms message router (no HTTP surface)",
-    ),
-    Endpoint(
-        name="listener",
-        label="com.templetwo.comms-listener",
         kind=KIND_PERIODIC,
-        description="Comms inbox poll-style listener (every 5 min)",
-        cadence_seconds=300,
-        log_path=str(Path.home() / ".sovereign" / "comms_listener.log"),
+        description="The watchman — queue/halt/honk/comms sweeps (30-min heartbeat + WatchPaths)",
+        cadence_seconds=1800,
+        log_path=str(Path.home() / ".sovereign" / "watchman" / "watchman.log"),
     ),
     # ollama removed 2026-06-20: decommissioned as redundant compute when the
     # synthesis reflector moved to the Anthropic API. Re-add an Endpoint here if

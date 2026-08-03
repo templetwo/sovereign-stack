@@ -890,8 +890,10 @@ def collect_state(
 
     summary = connectivity.aggregate(statuses)
 
+    # The "listener" badge now tracks the house's actual listening organ: the
+    # watchman (successor to comms-listener AND comms-dispatcher, 2026-08-03).
     listener_stale = any(
-        s["name"] == "listener" and s["status"] == connectivity.STATUS_STALE
+        s["name"] == "watchman" and s["status"] == connectivity.STATUS_STALE
         for s in summary["endpoints"]
     )
 

@@ -309,7 +309,9 @@ class TestCollectState:
         def fake_check_all():
             return [
                 conn.EndpointStatus(
-                    name="listener",
+                    # The stale badge tracks the WATCHMAN since the 2026-08-03
+                    # succession (comms-listener + dispatcher retired).
+                    name="watchman",
                     label="x",
                     kind=conn.KIND_PERIODIC,
                     status=conn.STATUS_STALE,
