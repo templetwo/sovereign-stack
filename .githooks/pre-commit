@@ -4,15 +4,36 @@
 #
 # Deliberately narrow: lint + format check only, nothing else. No pytest,
 # no coverage, no other tooling — CI is the authority on the rest.
+#
+# Worktree-aware since 2026-08-02: inside a `git worktree`, ./venv does not
+# exist at the worktree toplevel, and the old bare-`ruff` fallback aborted
+# every commit silently (set -e) when ruff was not on PATH. Resolve the MAIN
+# checkout's venv via --git-common-dir (the common dir's parent is the main
+# worktree) before falling back, and if no ruff can be found at all, say so
+# unmissably instead of dying on a bare command-not-found.
 
 set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
 
+# In the main checkout --git-common-dir resolves to ".git", so
+# main_checkout == toplevel and the first branch below wins as before.
+# In a linked worktree it resolves to <main>/.git, whose parent is the
+# main checkout that owns ./venv.
+common_dir="$(git rev-parse --git-common-dir)"
+main_checkout="$(cd "$common_dir/.." && pwd)"
+
 if [ -x "./venv/bin/ruff" ]; then
   RUFF="./venv/bin/ruff"
-else
+elif [ -x "$main_checkout/venv/bin/ruff" ]; then
+  RUFF="$main_checkout/venv/bin/ruff"
+elif command -v ruff >/dev/null 2>&1; then
   RUFF="ruff"
+else
+  echo "PRE-COMMIT HOOK CANNOT RUN (ruff unavailable)" >&2
+  echo "  looked for: ./venv/bin/ruff, $main_checkout/venv/bin/ruff, and 'ruff' on PATH" >&2
+  echo "  aborting the commit; install ruff or commit with --no-verify" >&2
+  exit 1
 fi
 
 "$RUFF" check src/sovereign_stack/ tests/
