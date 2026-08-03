@@ -58,6 +58,19 @@ class ReflectionRecord:
     ack_by: str | None = None
     entries_window_hours: int | None = None
     entries_count: int | None = None
+    # Coverage honesty + durable citation (additive, daemon writes them since
+    # the coupled-retrieval fix; None on older records):
+    #   entries_count is the FED count (historical name, unchanged);
+    #   entries_in_range is what the window actually held before the cap;
+    #   truncated says the model saw a slice, not the window;
+    #   window_claim_ids are the fed entries' derived claim ids in PROMPT
+    #     ORDER (ENTRY i == window_claim_ids[i-1]);
+    #   entries_referenced_claims resolves the model's positional labels to
+    #     claim ids (parallel to entries_referenced, None where unresolvable).
+    entries_in_range: int | None = None
+    truncated: bool | None = None
+    window_claim_ids: list[str] | None = None
+    entries_referenced_claims: list[str | None] | None = None
     _path: Path = field(default=Path(), repr=False)
     _line_index: int = field(default=-1, repr=False)
 
@@ -84,6 +97,14 @@ class ReflectionRecord:
             d["entries_window_hours"] = self.entries_window_hours
         if self.entries_count is not None:
             d["entries_count"] = self.entries_count
+        if self.entries_in_range is not None:
+            d["entries_in_range"] = self.entries_in_range
+        if self.truncated is not None:
+            d["truncated"] = self.truncated
+        if self.window_claim_ids is not None:
+            d["window_claim_ids"] = list(self.window_claim_ids)
+        if self.entries_referenced_claims is not None:
+            d["entries_referenced_claims"] = list(self.entries_referenced_claims)
         return d
 
 
@@ -116,6 +137,10 @@ def _record_from_dict(data: dict, path: Path, line_index: int) -> ReflectionReco
         ack_by=data.get("ack_by"),
         entries_window_hours=data.get("entries_window_hours"),
         entries_count=data.get("entries_count"),
+        entries_in_range=data.get("entries_in_range"),
+        truncated=data.get("truncated"),
+        window_claim_ids=data.get("window_claim_ids"),
+        entries_referenced_claims=data.get("entries_referenced_claims"),
         _path=path,
         _line_index=line_index,
     )
