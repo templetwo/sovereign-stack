@@ -58,6 +58,105 @@ def _root() -> Path:
     return Path(os.environ.get("SOVEREIGN_ROOT", str(Path.home() / ".sovereign")))
 
 
+# =============================================================================
+# PROBE CAPABILITY GATE  (red-team F-02, 2026-08-10 — fail CLOSED)
+# =============================================================================
+#
+# WHAT WAS WRONG. `post_fix_verify` sat in BASE_TOOLS on the Claude bridge —
+# no step-up — while accepting caller-supplied probe dicts that this module
+# turned into (a) arbitrary outbound HTTP via urlopen and (b) arbitrary process
+# execution via subprocess.run. Native /sse has no tiering at all, so a single
+# bearer reached the same surface. One leaked token was remote code execution
+# as the stack user. This house has rotated that bearer three times, twice
+# after real exposure, so "the token will not leak" is not a control.
+#
+# THE CORRECTION THE ORIGINAL SAFETY NOTE GOT WRONG. The old comment framed
+# shell=False as the safe path and shell=True as the surface a caller "owns".
+# That is not the boundary. shell=False still runs shlex.split(cmd) through
+# subprocess.run, which executes whatever binary the string names. shell only
+# decides whether METACHARACTERS are interpreted; it never decided whether a
+# command runs. The command probe is the RCE surface in both branches, so the
+# gate is on the probe type, not on the shell flag.
+#
+# THE MODEL. Both dangerous probe types are DENIED unless the operator opts in
+# through the process environment, which a remote caller cannot set. A denied
+# probe returns a structured refusal with a reason — it does not raise, so one
+# hostile probe cannot break an otherwise legitimate watch, and it never
+# reports ok/clean for something it refused to run (no fail-open).
+#
+# Opt-ins (local operator, deliberately env-only — there is no tool argument
+# that turns these on):
+#   POST_FIX_ALLOW_COMMAND=1      enable command probes at all
+#   POST_FIX_ALLOW_SHELL=1        additionally permit shell=True (implies the above)
+#   POST_FIX_HTTP_ALLOW=host,host extend the HTTP allowlist beyond loopback
+#
+# Default HTTP reach is loopback only: the tool's real job is verifying that a
+# service on THIS box came back healthy, which never requires reaching out.
+
+_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "[::1]"})
+
+
+def _env_flag(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _command_probes_allowed() -> bool:
+    return _env_flag("POST_FIX_ALLOW_COMMAND") or _env_flag("POST_FIX_ALLOW_SHELL")
+
+
+def _shell_allowed() -> bool:
+    return _env_flag("POST_FIX_ALLOW_SHELL")
+
+
+def _http_allowlist() -> frozenset[str]:
+    extra = os.environ.get("POST_FIX_HTTP_ALLOW", "")
+    hosts = {h.strip().lower() for h in extra.split(",") if h.strip()}
+    return frozenset(_LOOPBACK_HOSTS | hosts)
+
+
+def _refused(probe_type: str, reason: str, **extra: Any) -> dict[str, Any]:
+    """A refusal is a RESULT, not an exception, and never counts as ok.
+
+    Callers treat a missing "ok" as not-ok; `refused` is carried explicitly so
+    a watch's coverage is legible rather than silently thinner than it looks.
+    """
+    return {
+        "type": probe_type,
+        "ok": False,
+        "refused": True,
+        "reason": reason,
+        "remediation": (
+            "This probe class is disabled by default because post_fix_verify is "
+            "reachable by remote authenticated sessions. Enable it in the stack "
+            "process environment on the host that owns the fix, or run the check "
+            "from a local shell instead."
+        ),
+        **extra,
+    }
+
+
+def _http_host_permitted(url: str) -> tuple[bool, str]:
+    """Allow only loopback (plus explicit opt-ins). Fails closed on unparsable input."""
+    from urllib.parse import urlparse
+
+    try:
+        parsed = urlparse(url)
+    except Exception as exc:  # pragma: no cover - urlparse is total in practice
+        return False, f"url could not be parsed: {exc}"
+    scheme = (parsed.scheme or "").lower()
+    if scheme not in {"http", "https"}:
+        return False, f"scheme {scheme!r} is not permitted (http/https only)"
+    host = (parsed.hostname or "").lower()
+    if not host:
+        return False, "url has no host"
+    if host in _http_allowlist():
+        return True, ""
+    return False, (
+        f"host {host!r} is not in the HTTP probe allowlist "
+        f"(default: loopback only; extend with POST_FIX_HTTP_ALLOW)"
+    )
+
+
 def _post_fix_root() -> Path:
     return _root() / "post_fix"
 
@@ -198,6 +297,13 @@ def _run_http_probe(probe: dict[str, Any]) -> dict[str, Any]:
     samples = max(1, int(probe.get("samples", HTTP_DEFAULT_SAMPLES)))
     expected_status = probe.get("expected", {}).get("status", 200)
 
+    # SSRF gate (F-02). A caller-supplied URL let a remote session use this
+    # host as a probe against anything it could reach — cloud metadata
+    # endpoints, LAN services, the bridge's own loopback admin surface.
+    permitted, why = _http_host_permitted(url)
+    if not permitted:
+        return _refused("http", why, url=url)
+
     ok_count = 0
     status_codes: list[int] = []
     errors: list[str] = []
@@ -234,8 +340,23 @@ def _run_command_probe(probe: dict[str, Any]) -> dict[str, Any]:
     cmd = probe["cmd"]
     timeout = probe.get("timeout_sec", COMMAND_DEFAULT_TIMEOUT)
     shell = probe.get("shell", False)
-    # Safety: default to shell=False with split args. Users who need a pipeline
-    # set shell=True explicitly and own the injection surface.
+
+    # Capability gate (F-02). Denied by default for BOTH branches: shell=False
+    # is not a safe path, it just declines to interpret metacharacters while
+    # still executing whatever binary the caller named.
+    if not _command_probes_allowed():
+        return _refused(
+            "command",
+            "command probes are disabled on this host (POST_FIX_ALLOW_COMMAND unset)",
+            cmd=cmd,
+        )
+    if shell and not _shell_allowed():
+        return _refused(
+            "command",
+            "shell=True is disabled on this host (POST_FIX_ALLOW_SHELL unset)",
+            cmd=cmd,
+        )
+
     if shell:
         run_arg: Any = cmd
     else:

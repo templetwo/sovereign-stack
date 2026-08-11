@@ -375,6 +375,64 @@ def _append_manifest(record: dict) -> None:
         f.write(json.dumps(record) + "\n")
 
 
+def _isolate_allowlist() -> list[Path]:
+    """Directory roots under which isolate_file may remove an original.
+
+    Red-team F-01 (2026-08-10): isolate_file resolved any caller-supplied path
+    and unlinked it, with no root restriction. The native /sse surface has no
+    step-up, so a single bearer could delete anything this process can unlink —
+    including the chronicle, the protected drawer, and the lineage letters,
+    i.e. exactly the irreplaceable half of this house.
+
+    DEFAULT IS EMPTY: no path is isolatable until an operator names a root in
+    GUARDIAN_ISOLATE_ROOTS (colon-separated) in the stack process environment.
+    A quarantine tool that cannot reach anything is inconvenient; one that can
+    reach everything is the incident.
+    """
+    raw = os.environ.get("GUARDIAN_ISOLATE_ROOTS", "")
+    roots: list[Path] = []
+    for chunk in raw.split(":"):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        try:
+            roots.append(Path(chunk).expanduser().resolve())
+        except Exception:
+            continue
+    return roots
+
+
+# Never isolatable, even if an operator names a parent root. These are the
+# records that cannot be restored from a backup because they are the original.
+_ISOLATE_NEVER = ("/.sovereign/chronicle", "/.sovereign/comms", "/.sovereign/protected")
+
+
+def _isolate_permitted(src: Path) -> tuple[bool, str]:
+    """Fails closed: unknown or unnamed roots are refused, not allowed."""
+    resolved = str(src)
+    for forbidden in _ISOLATE_NEVER:
+        if forbidden in resolved:
+            return False, (
+                f"path is inside a protected record store ({forbidden}) and is never isolatable"
+            )
+    roots = _isolate_allowlist()
+    if not roots:
+        return False, (
+            "isolate is disabled on this host: no roots configured in "
+            "GUARDIAN_ISOLATE_ROOTS. Quarantine cannot remove files until an "
+            "operator names the directories it may act on."
+        )
+    for root in roots:
+        try:
+            src.relative_to(root)
+        except ValueError:
+            continue
+        return True, ""
+    return False, (
+        f"path is outside every configured isolate root ({', '.join(str(r) for r in roots)})"
+    )
+
+
 def isolate_file(file_path: str) -> dict:
     """
     DESTRUCTIVE: copy the file into the quarantine, remove the original.
@@ -382,8 +440,18 @@ def isolate_file(file_path: str) -> dict:
     The file is stored at quarantine/<sha256>.bin and a sibling meta.json
     records the original path + timestamp + size. Every isolate event
     appends to quarantine_manifest.jsonl.
+
+    Restricted to GUARDIAN_ISOLATE_ROOTS and never permitted inside the
+    chronicle, comms, or protected stores — see _isolate_permitted (F-01).
     """
     src = Path(file_path).expanduser().resolve()
+
+    # Allowlist check BEFORE existence, so a refusal cannot be used to probe
+    # which paths exist on the host.
+    permitted, why = _isolate_permitted(src)
+    if not permitted:
+        return {"ok": False, "error": "isolate_not_permitted", "reason": why, "path": str(src)}
+
     if not src.exists():
         return {"ok": False, "error": "file_not_found", "path": str(src)}
     if not src.is_file():

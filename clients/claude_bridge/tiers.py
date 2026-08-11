@@ -66,6 +66,16 @@ DESTRUCTIVE_TOOLS: frozenset[str] = frozenset(
         # HQ — require a step-up tap. Remote seats are steered to the
         # side-effect-free arrive_lineage (base tier) for ordinary boots.
         "where_did_i_leave_off",
+        # ARBITRARY OUTBOUND HTTP + PROCESS EXECUTION on this host. Red-team
+        # finding F-02 (2026-08-10): this sat in BASE_TOOLS, between
+        # guardian_status and self_model, reading like a status query. It takes
+        # caller-supplied probe dicts and turns them into urlopen() and
+        # subprocess.run(). Note shell=False was never the safe branch — it
+        # declines to interpret metacharacters while still executing the named
+        # binary. The tool itself now fails closed (see post_fix_tools.py:
+        # probe capability gate); this demotion is the second layer, so a
+        # remote seat must take an explicit step-up before it can even try.
+        "post_fix_verify",
     }
 )
 
@@ -146,7 +156,9 @@ BASE_TOOLS: frozenset[str] = frozenset(
         "self_model",
         "session_handoff",
         "context_retrieve",
-        "post_fix_verify",
+        # "post_fix_verify" REMOVED from base 2026-08-10 (red-team F-02) —
+        # it is now in DESTRUCTIVE_TOOLS above. Do not re-add: it executes
+        # caller-supplied commands and HTTP requests on this host.
         "watch_status",
         "connectivity_status",
         "stack_write_check",

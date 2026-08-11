@@ -32,6 +32,23 @@ def sovereign_root_tmp(tmp_path, monkeypatch):
     yield tmp_path
 
 
+@pytest.fixture(autouse=True)
+def probe_capabilities_enabled(monkeypatch):
+    """Enable the F-02 probe capability gate for the MECHANICS tests.
+
+    Command and HTTP-beyond-loopback probes are denied by default in
+    production (red-team F-02, 2026-08-10). The tests in this file that
+    exercise probe *behaviour* legitimately need them on, so they opt in the
+    same way a local operator would. TestProbeCapabilityGate below turns them
+    back OFF explicitly and asserts the refusal — that class is the regression
+    test for the vulnerability and must never inherit this fixture's opt-in.
+    """
+    monkeypatch.setenv("POST_FIX_ALLOW_COMMAND", "1")
+    monkeypatch.setenv("POST_FIX_ALLOW_SHELL", "1")
+    monkeypatch.setenv("POST_FIX_HTTP_ALLOW", "example.com,api.example.com,stack.templetwo.com")
+    yield
+
+
 @pytest.fixture
 def fake_nape():
     """
@@ -463,3 +480,95 @@ class TestEventLog:
         assert "watch_created" in event_types
         assert "sample_taken" in event_types
         assert "watch_cancelled" in event_types
+
+
+# =============================================================================
+# PROBE CAPABILITY GATE — regression tests for red-team finding F-02
+# =============================================================================
+#
+# post_fix_verify was BASE tier on the Claude bridge (no step-up) while turning
+# caller-supplied probe dicts into urlopen() and subprocess.run(). One leaked
+# bearer was remote code execution as the stack user. These tests assert the
+# tool now fails CLOSED, and — just as important — that it still WORKS when a
+# local operator opts in. A gate that blocks everything is not a gate, it is an
+# outage, so both directions are asserted here.
+
+
+class TestProbeCapabilityGate:
+    """Denied by default. Each test disables the autouse opt-in explicitly."""
+
+    @pytest.fixture(autouse=True)
+    def _no_capabilities(self, monkeypatch):
+        monkeypatch.delenv("POST_FIX_ALLOW_COMMAND", raising=False)
+        monkeypatch.delenv("POST_FIX_ALLOW_SHELL", raising=False)
+        monkeypatch.delenv("POST_FIX_HTTP_ALLOW", raising=False)
+        yield
+
+    def test_command_probe_refused_by_default(self):
+        result = pfx._run_command_probe({"cmd": "id"})
+        assert result["refused"] is True
+        assert result["ok"] is False
+        assert "POST_FIX_ALLOW_COMMAND" in result["reason"]
+
+    def test_shell_false_is_not_a_safe_path(self):
+        """shell=False still executes the named binary — it only declines to
+        interpret metacharacters. The gate is on the probe TYPE, not the flag."""
+        result = pfx._run_command_probe({"cmd": "/bin/sh -c whoami", "shell": False})
+        assert result["refused"] is True
+
+    def test_shell_true_refused_even_when_command_allowed(self, monkeypatch):
+        monkeypatch.setenv("POST_FIX_ALLOW_COMMAND", "1")
+        result = pfx._run_command_probe({"cmd": "id | cat", "shell": True})
+        assert result["refused"] is True
+        assert "POST_FIX_ALLOW_SHELL" in result["reason"]
+
+    def test_ssrf_cloud_metadata_refused(self):
+        result = pfx._run_http_probe({"url": "http://169.254.169.254/latest/meta-data/"})
+        assert result["refused"] is True
+        assert "allowlist" in result["reason"]
+
+    def test_ssrf_arbitrary_external_host_refused(self):
+        result = pfx._run_http_probe({"url": "https://attacker.example.net/collect"})
+        assert result["refused"] is True
+
+    def test_non_http_scheme_refused(self):
+        result = pfx._run_http_probe({"url": "file:///etc/passwd"})
+        assert result["refused"] is True
+        assert "scheme" in result["reason"]
+
+    def test_refusal_is_never_reported_as_ok(self):
+        """The fail-open shape this house hunts: a refused probe must not read
+        as a passing check to anything downstream."""
+        for result in (
+            pfx._run_command_probe({"cmd": "id"}),
+            pfx._run_http_probe({"url": "http://example.com/"}),
+        ):
+            assert result.get("ok") is False
+            assert result.get("refused") is True
+
+    # --- the other direction: the gate must not be a blanket deny ---
+
+    def test_loopback_http_still_permitted(self, monkeypatch):
+        """Verifying a service on THIS box is the tool's actual job."""
+        fake = MagicMock()
+        fake.__enter__ = MagicMock(return_value=MagicMock(status=200))
+        fake.__exit__ = MagicMock(return_value=False)
+        monkeypatch.setattr(pfx, "urlopen", MagicMock(return_value=fake))
+        result = pfx._run_http_probe({"url": "http://127.0.0.1:8100/api/heartbeat"})
+        assert not result.get("refused", False)
+
+    def test_operator_optin_restores_command_probes(self, monkeypatch):
+        monkeypatch.setenv("POST_FIX_ALLOW_COMMAND", "1")
+        result = pfx._run_command_probe({"cmd": "echo positive-control"})
+        assert not result.get("refused", False)
+        assert result["exit_code"] == 0
+        assert "positive-control" in result["stdout"]
+
+    def test_operator_optin_extends_http_allowlist(self, monkeypatch):
+        monkeypatch.setenv("POST_FIX_HTTP_ALLOW", "stack.templetwo.com")
+        fake = MagicMock()
+        fake.__enter__ = MagicMock(return_value=MagicMock(status=200))
+        fake.__exit__ = MagicMock(return_value=False)
+        monkeypatch.setattr(pfx, "urlopen", MagicMock(return_value=fake))
+        result = pfx._run_http_probe({"url": "https://stack.templetwo.com/api/heartbeat"})
+        assert not result.get("refused", False)

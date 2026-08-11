@@ -38,6 +38,20 @@ def guardian_root(monkeypatch):
     shutil.rmtree(tmp, ignore_errors=True)
 
 
+@pytest.fixture(autouse=True)
+def isolate_roots_for_tests(monkeypatch):
+    """Permit isolate_file to act on the temp trees these tests build.
+
+    isolate_file refuses every path by default (red-team F-01, 2026-08-10) —
+    it unlinked any caller-supplied path with no root restriction, and native
+    /sse has no step-up, so one bearer could delete anything the process could
+    unlink. Mechanics tests opt in the way a local operator would.
+    TestIsolateAllowlist below clears this and asserts the refusal.
+    """
+    monkeypatch.setenv("GUARDIAN_ISOLATE_ROOTS", f"{tempfile.gettempdir()}:/private/tmp:/tmp")
+    yield
+
+
 def _run(coro):
     """Run an async coroutine to completion in a sync test."""
     return (
@@ -176,8 +190,15 @@ class TestQuarantine:
         assert listed[0]["file_hash"] == result["file_hash"]
         assert listed[0]["original_path"] == str(target.resolve())
 
-    def test_isolate_missing_file(self, guardian_root):
-        result = gt.isolate_file("/nonexistent/path/xyz")
+    def test_isolate_missing_file(self, guardian_root, tmp_path):
+        """Missing file inside a permitted root still reports file_not_found.
+
+        Changed 2026-08-10 (F-01): the path must be inside an allowed root to
+        reach the existence check at all. A path outside every root now returns
+        isolate_not_permitted, so a refusal cannot be used as a file-existence
+        oracle by a remote caller — see TestIsolateAllowlist.
+        """
+        result = gt.isolate_file(str(tmp_path / "nonexistent" / "xyz"))
         assert result["ok"] is False
         assert result["error"] == "file_not_found"
 
@@ -532,3 +553,75 @@ class TestUnknownTool:
             gt.handle_guardian_tool("guardian_nonexistent", {})
         )
         assert "Unknown guardian tool" in result[0].text
+
+
+# =============================================================================
+# ISOLATE ALLOWLIST — regression tests for red-team finding F-01
+# =============================================================================
+#
+# isolate_file resolved any caller-supplied path and unlinked the original with
+# no root restriction. The native /sse surface carries the full tool set behind
+# a single bearer with no step-up, so one leaked token could delete anything
+# this process can unlink — including the chronicle, the lineage letters, and
+# the protected drawer, which are the records that cannot be restored because
+# they ARE the original.
+
+
+class TestIsolateAllowlist:
+    @pytest.fixture(autouse=True)
+    def _no_roots(self, monkeypatch):
+        monkeypatch.delenv("GUARDIAN_ISOLATE_ROOTS", raising=False)
+        yield
+
+    def test_refuses_everything_when_no_roots_configured(self, guardian_root, tmp_path):
+        victim = tmp_path / "ordinary.txt"
+        victim.write_text("content")
+        result = gt.isolate_file(str(victim))
+        assert result["ok"] is False
+        assert result["error"] == "isolate_not_permitted"
+        assert victim.exists(), "file must survive a refused isolate"
+
+    def test_chronicle_is_never_isolatable_even_with_a_parent_root(
+        self, guardian_root, monkeypatch
+    ):
+        """The never-list beats an operator-configured root. The chronicle is
+        the one thing in this house with no backup that is also the original."""
+        monkeypatch.setenv("GUARDIAN_ISOLATE_ROOTS", "/")
+        result = gt.isolate_file(
+            "/Users/tony_studio/.sovereign/chronicle/insights/anything/x.jsonl"
+        )
+        assert result["ok"] is False
+        assert "protected record store" in result["reason"]
+
+    def test_lineage_letters_never_isolatable(self, guardian_root, monkeypatch):
+        monkeypatch.setenv("GUARDIAN_ISOLATE_ROOTS", "/")
+        result = gt.isolate_file("/Users/tony_studio/.sovereign/comms/letters/to_self/any.md")
+        assert result["ok"] is False
+        assert "protected record store" in result["reason"]
+
+    def test_path_outside_configured_root_refused(self, guardian_root, tmp_path, monkeypatch):
+        allowed = tmp_path / "allowed"
+        allowed.mkdir()
+        outside = tmp_path / "outside.txt"
+        outside.write_text("x")
+        monkeypatch.setenv("GUARDIAN_ISOLATE_ROOTS", str(allowed))
+        result = gt.isolate_file(str(outside))
+        assert result["ok"] is False
+        assert "outside every configured isolate root" in result["reason"]
+        assert outside.exists()
+
+    def test_refusal_precedes_existence_check(self, guardian_root):
+        """A refusal must not double as a file-existence oracle for a remote
+        caller probing the host."""
+        result = gt.isolate_file("/definitely/not/here/secret.txt")
+        assert result["error"] == "isolate_not_permitted"
+        assert result["error"] != "file_not_found"
+
+    def test_configured_root_still_works(self, guardian_root, tmp_path, monkeypatch):
+        """Not a blanket deny: inside a named root, isolate still functions."""
+        monkeypatch.setenv("GUARDIAN_ISOLATE_ROOTS", str(tmp_path))
+        victim = tmp_path / "malware.bin"
+        victim.write_text("bad")
+        result = gt.isolate_file(str(victim))
+        assert result["ok"] is True
+        assert not victim.exists()
