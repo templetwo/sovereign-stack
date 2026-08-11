@@ -974,7 +974,23 @@ async def handle_post_fix_tool(
 
 
 def _baseline_summary(r: dict[str, Any]) -> dict[str, Any]:
-    """Compact view of a probe result for post_fix_verify's return payload."""
+    """Compact view of a probe result for post_fix_verify's return payload.
+
+    A REFUSED probe must say so here. Found in live verification of the F-02
+    fix (2026-08-11): the gate correctly refused an RCE and an SSRF probe on
+    the running stack, but this summary rendered them as an ordinary baseline
+    with exit_code=None and an empty stdout_head — indistinguishable from a
+    command that ran and printed nothing. The gate was closed and the report
+    was fail-open, which is the same defect one layer out: a caller reading
+    the return payload would believe a baseline had been captured.
+    """
+    if r.get("refused"):
+        return {
+            "type": r.get("type"),
+            "refused": True,
+            "ok": False,
+            "reason": r.get("reason"),
+        }
     t = r.get("type")
     if t == "http":
         return {

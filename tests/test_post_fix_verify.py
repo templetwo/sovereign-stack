@@ -572,3 +572,23 @@ class TestProbeCapabilityGate:
         monkeypatch.setattr(pfx, "urlopen", MagicMock(return_value=fake))
         result = pfx._run_http_probe({"url": "https://stack.templetwo.com/api/heartbeat"})
         assert not result.get("refused", False)
+
+    def test_refusal_is_visible_in_the_returned_summary(self):
+        """The gate closing must be legible to the CALLER, not only in storage.
+
+        Live-verification finding 2026-08-11: refused probes rendered in
+        post_fix_verify's return payload as exit_code=None + empty stdout,
+        which reads as "a command ran and printed nothing". A closed gate with
+        a fail-open report is still a fail-open.
+        """
+        summary = pfx._baseline_summary(pfx._run_command_probe({"cmd": "id"}))
+        assert summary["refused"] is True
+        assert summary["ok"] is False
+        assert "POST_FIX_ALLOW_COMMAND" in summary["reason"]
+        assert "exit_code" not in summary
+
+        http_summary = pfx._baseline_summary(
+            pfx._run_http_probe({"url": "http://169.254.169.254/"})
+        )
+        assert http_summary["refused"] is True
+        assert http_summary.get("success_rate") is None
