@@ -49,7 +49,10 @@ _RING1_DESCRIPTIONS: dict[str, str] = {
     "get_my_patterns": "Read observed patterns for this instance type.",
     "recall_insights": (
         "Query the chronicle. Pass domain='grok-bridge' to find your own "
-        "pre-crossing entries. Supports date bounds, since_last_reflection."
+        "pre-crossing entries. Supports date bounds, since_last_reflection. "
+        "Every returned item carries claim_id (full 64-hex) — that is the "
+        "address for inspect_claim / supersede_insight, so you can correct "
+        "your own entry without asking a local seat to derive its id."
     ),
     "context_retrieve": "Session-weighted chronicle retrieval.",
     "get_inheritable_context": ("Layered inheritance: ground truths + hypotheses + open threads."),

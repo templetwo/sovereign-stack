@@ -661,7 +661,11 @@ async def list_tools():
                 description=(
                     "Recall insights from chronicle. Supports date-bounded recall. "
                     "For 'what has happened since I last looked up?', pass "
-                    "since_last_reflection=true — inhabitant syntax, preferred over raw dates."
+                    "since_last_reflection=true — inhabitant syntax, preferred over raw dates. "
+                    "Every returned item carries `claim_id` (full 64-hex, derived on read, "
+                    "never stored) — that is the address you pass to inspect_claim or "
+                    "supersede_insight to correct an entry, including one you wrote "
+                    "yourself. Set with_ids=false to suppress it."
                 ),
                 inputSchema={
                     "type": "object",
@@ -2731,7 +2735,17 @@ async def _dispatch_tool(name: str, arguments: dict):
             start_date=start_date,
             end_date=end_date,
             since_last_reflection=since_last_reflection,
-            with_ids=arguments.get("with_ids", False),
+            # Default ON (was False). Every returned item carries the derived
+            # 64-hex claim_id, so the seat that reads an entry can address it
+            # — supersede_insight and inspect_claim both take a claim id, and
+            # a remote seat has no filesystem to re-derive one from. While
+            # this was off, a remote seat could recall its own entry and still
+            # not correct it: the whole supersession burden fell on whichever
+            # seat could run derive_claim_id locally (record 2026-08-13,
+            # domain "...,claim-id-unreachable"). Both bridge adapters publish
+            # recall_insights with an EMPTY properties schema, so no remote
+            # caller could opt in either. Explicit false still suppresses.
+            with_ids=arguments.get("with_ids", True),
             exclude_superseded=arguments.get("exclude_superseded", False),
             domain_contains=arguments.get("domain_contains"),
             order=arguments.get("order", "newest"),

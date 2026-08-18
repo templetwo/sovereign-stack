@@ -250,8 +250,18 @@ RECORD_INSIGHT_SCHEMA_EXTENSIONS = {
 RECALL_INSIGHTS_SCHEMA_EXTENSIONS = {
     "with_ids": {
         "type": "boolean",
-        "default": False,
-        "description": "If true, annotate every returned entry with its derived claim_id (64-hex).",
+        "default": True,
+        "description": (
+            "Annotate every returned entry with its derived claim_id — the full "
+            "64-hex sha256 over timestamp + domain + content, computed on read and "
+            "never stored. ON BY DEFAULT since the read-side unreachability fix: a "
+            "remote seat could not address its own entry for supersede_insight / "
+            "inspect_claim, so every correction had to route through a seat with "
+            "local filesystem access to re-derive the id. Pass the FULL id — "
+            "inspect_claim reports integrity 'verified' only for the full 64-hex; "
+            "a truncated prefix reports 'ambiguous' and can raise on collision. "
+            "Set false to suppress the key (pre-fix payload shape)."
+        ),
     },
     "exclude_superseded": {
         "type": "boolean",
@@ -1715,6 +1725,13 @@ class ExperientialMemory:
                 "what has happened since I last looked up?"
             with_ids: If True, every returned entry carries its derived
                 `claim_id` (full 64-hex, computed on read, never persisted).
+                THE TWO DEFAULTS DIFFER ON PURPOSE. This library-level default
+                stays False so every in-process caller (get_inheritable_context,
+                the boot surface, load_entries) keeps its exact pre-existing
+                payload; the MCP *tool* `recall_insights` defaults it to True,
+                because a seat reading over the bridge has no other way to learn
+                the id of its own entry and so cannot address it with
+                supersede_insight / inspect_claim.
             exclude_superseded: If True, entries the supersession ledger marks
                 superseded/retired are dropped BEFORE the limit (successors
                 fill the slots). Default False: the raw query tool never

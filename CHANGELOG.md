@@ -9,6 +9,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### `recall_insights` emits `claim_id` by default — the read-side address is reachable again
+
+The `recall_insights` MCP tool now returns `claim_id` (full 64-hex, derived on
+read via `provenance.derive_claim_id`, never stored) on every item. The
+machinery already existed — `with_ids` + `provenance.annotate_claim_ids` — but
+defaulted to false, and BOTH bridge adapters publish `recall_insights` with an
+empty `properties` schema, so no remote seat could opt in. The consequence, on
+the record 2026-08-13: a remote seat could recall its own entry and still not
+correct it, because `supersede_insight` and `inspect_claim` both take a claim
+id and only a seat with local filesystem access could derive one. The whole
+supersession burden fell on that seat.
+
+Scope is deliberately the tool boundary only: `ExperientialMemory.recall_insights`
+keeps `with_ids=False`, so every in-process caller (`get_inheritable_context`,
+the boot surface, `load_entries`) is byte-identical. Envelope keys
+(`items`, `returned`, `total_matched`, `offset`, `scope`, `truncated`,
+`partial_reasons`, `continuation`) are untouched, as is every other item key.
+Explicit `with_ids=false` still suppresses the key. The full 64-hex is emitted
+rather than the 16-hex `display_id` because `inspect_claim` reports integrity
+`verified` only for the full id, and a prefix can raise `AmbiguousClaimError`.
+
+Open threads deliberately get NO `claim_id`: they live under
+`chronicle/open_threads/`, which `provenance.iter_chronicle_entries` does not
+scan, and they carry `question` rather than `content` — so a derived id would
+be unresolvable AND identical across every thread of one auto-split bundle.
+`thread_id` + `resolve_thread_by_id` remains their address.
+
+`src/sovereign_stack/server.py`, `src/sovereign_stack/memory.py`,
+`clients/{grok,openai}_bridge/tool_adapter.py`, `tests/test_recall_claim_id.py`.
+
 ### Claude connector — phone-tap authorize swap (connector-side; pending bridge-side companion + deploy)
 
 `clients/claude_bridge`'s resource-owner control is replaced: the 1.12.0

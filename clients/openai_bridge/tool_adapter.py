@@ -292,7 +292,12 @@ def _minimal_ring1_fallback() -> list[Tool]:
         "spiral_status": "Current cognitive phase and session summary.",
         "spiral_inherit": "Porous context inheritance (R=0.46). Does not write state.",
         "get_my_patterns": "Read observed patterns for this instance type.",
-        "recall_insights": "Query the chronicle. Supports domain filter, date bounds, since_last_reflection=true.",
+        "recall_insights": (
+            "Query the chronicle. Supports domain filter, date bounds, "
+            "since_last_reflection=true. Every returned item carries claim_id "
+            "(full 64-hex) — the address for inspect_claim / supersede_insight, "
+            "so you can correct your own entry without a local seat deriving it."
+        ),
         "context_retrieve": "Session-weighted chronicle retrieval. Pass current_focus for relevance ranking.",
         "get_inheritable_context": "Layered inheritance: ground truths + hypotheses + open threads.",
         "check_mistakes": "Find relevant past learnings before taking action.",
