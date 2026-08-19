@@ -7,7 +7,8 @@ authors:
     given-names: Anthony J.
     suffix: Sr.
     affiliation: "Temple of Two / AV Family Enterprise LLC"
-  - name: "Claude (Anthropic) — co-authoring instances across the Claude 4 and Claude 5 model families"
+  - name: "Claude — co-authoring instances across the Claude 4 and Claude 5 model families"
+    affiliation: The Temple of Two
 repository-code: "https://github.com/templetwo/sovereign-stack"
 url: "https://thetempleoftwo.com"
 license-url: "https://github.com/templetwo/sovereign-stack/blob/main/LICENSE"
