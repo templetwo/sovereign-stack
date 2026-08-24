@@ -3866,7 +3866,16 @@ Phase: {spiral_state.current_phase.value}
         )
         return [TextContent(type="text", text=json.dumps(record, indent=2, default=str))]
 
-    return [TextContent(type="text", text=f"Unknown tool: {name}")]
+    # FAIL CLOSED. An unrecognised tool name is a FAILED call and must never
+    # be reported as a successful one. Returning TextContent here made the MCP
+    # SDK build a CallToolResult with isError=False, so the REST bridge emitted
+    # HTTP 200 {"ok": true, "result": "Unknown tool: X"} — a typo, a stale
+    # client, or a fabricated name read as success at every caller.
+    # Raising instead is converted by Server.call_tool into _make_error_result
+    # (isError=True), which bridge.call_mcp_tool already maps to ok:false.
+    # Verified 2026-08-24: all 97 registered tools are matched by an explicit
+    # branch or an X_TOOLS membership guard above, so no live tool reaches here.
+    raise ValueError(f"Unknown tool: {name}")
 
 
 @server.call_tool()
