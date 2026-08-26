@@ -122,7 +122,7 @@ See detailed docs:
 
 ---
 
-## Operations (v1.5.1 — managing the running stack)
+## Operations (managing the running stack, as of v1.5.1)
 
 The Sovereign Stack runs continuously on the host machine. Five always-on services + one periodic listener + Ollama. Three Python CLIs manage them:
 
