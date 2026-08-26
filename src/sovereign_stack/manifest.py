@@ -63,6 +63,10 @@ END_MARK = "<!-- MANIFEST:END -->"
 # floor rather than an equality, and the checker honours that difference
 # because the prose does.
 _COUNT_RE = re.compile(r"(?<![\w.])(\d[\d,]*)(\+?)\s+(tools|tests)\b")
+# Badge URLs hide their counts behind URL-encoding: `tests-1918%20passing`
+# never matches `\d+ tests`. The checker policed the prose for a day while
+# the headline badges rotted, which is why this pattern exists.
+_BADGE_RE = re.compile(r"img\.shields\.io/badge/(?:version|tools|tests)-([\d.,]+)", re.IGNORECASE)
 _AS_OF_RE = re.compile(r"\bas of\s+\S", re.IGNORECASE)
 _VERSION_RE = re.compile(r'^version\s*=\s*"([^"]+)"', re.MULTILINE)
 
@@ -140,12 +144,28 @@ def render_block(manifest: dict) -> str:
     check's verdict depend on whether the caller happened to pass one:
     the same README would pass or fail based on the caller's argument,
     which is a gate with a mood rather than a rule.
+
+    The BADGES live here too, as of 2026-08-26, and that was the sharper
+    hole: the header badges read `tests-1918%20passing` and
+    `version-1.15.0`, which are hand-typed counts in the most-read line
+    of the repository — and URL-encoding made them INVISIBLE to the drift
+    check, so the checker was policing the prose while the headline
+    rotted. Version and tool badges are now generated. The test badge is
+    gone entirely, replaced in the README by a live CI status badge that
+    cannot drift because nobody types it.
     """
+    ver, tools = manifest["version"], manifest["tools_count"]
+    badges = (
+        f"![Version](https://img.shields.io/badge/version-{ver}-purple) "
+        f"![Tools](https://img.shields.io/badge/tools-{tools}-orange)"
+    )
     return "\n".join(
         [
             BEGIN_MARK,
             "",
-            f"**v{manifest['version']} · {manifest['tools_count']} tools**",
+            badges,
+            "",
+            f"**v{ver} · {tools} tools**",
             "",
             "_Generated from the live tool registry. Every current count in this "
             "document lives here and nowhere else; a count elsewhere must carry "
@@ -200,6 +220,9 @@ def check_docs_against_manifest(manifest: dict, readme: str, pyproject: str) -> 
     outside = _strip_generated_block(readme)
     undated: list[str] = []
     for line in outside.splitlines():
+        if _BADGE_RE.search(line) and not _AS_OF_RE.search(line):
+            for value in _BADGE_RE.findall(line):
+                undated.append(f"badge:{value}")
         if not _COUNT_RE.search(line):
             continue
         if _AS_OF_RE.search(line):
