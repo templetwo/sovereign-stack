@@ -29,6 +29,7 @@ Public API:
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
@@ -70,6 +71,15 @@ class Endpoint:
         health_url: Optional HTTP URL probed alongside launchctl status.
             HTTP 2xx + (optionally) `health_match` substring required.
         health_match: Optional substring required in HTTP body for OK.
+        health_count_key: Optional JSON key in the probe body whose numeric
+            value must be >= `health_count_min`. Exists because a binary
+            up/down probe blesses a DEGRADED service: cloudflared's /ready
+            returns 200 whenever at least ONE edge connection is registered,
+            so a tunnel that fell from 3 connections to 1 reads as healthy.
+            Fails CLOSED — a missing or unparseable key is a failed probe,
+            never a pass. (2026-08-25, after a 12h57m outage during which
+            every local surface stayed green.)
+        health_count_min: Minimum acceptable value for `health_count_key`.
         cadence_seconds: For periodic kinds: expected run interval.
         log_path: For periodic kinds: file whose mtime is used as the
             "last run" indicator (stdout/stderr file from launchd).
@@ -81,6 +91,8 @@ class Endpoint:
     description: str
     health_url: str | None = None
     health_match: str | None = None
+    health_count_key: str | None = None
+    health_count_min: int | None = None
     cadence_seconds: int | None = None
     log_path: str | None = None
 
@@ -101,12 +113,51 @@ ENDPOINTS: list[Endpoint] = [
         description="REST/JSON bridge over MCP (port 8100)",
         health_url="http://127.0.0.1:8100/api/heartbeat",
     ),
+    # 2026-08-25: this comment used to read "Tunnel itself is opaque from the
+    # host side; rely on launchctl." It is not opaque, and the cost of
+    # believing it was measured: the public door was DEAD FOR 12h57m on
+    # 2026-08-25 (edge connections dropped 10:03:36Z, never re-registered
+    # until a machine reboot at 23:00:23Z) while cloudflared never exited —
+    # so launchctl said "running" and this row said "ok" for thirteen hours.
+    # cloudflared's own metrics server answers /ready with the live edge
+    # connection count. Requires the PINNED --metrics port in the plist;
+    # unpinned, cloudflared scans upward from 20241 and the probe chases a
+    # moving target. The floor is a COUNT, not a binary: /ready returns 200
+    # whenever >=1 connection is registered, so a tunnel degraded from 3 to
+    # 1 would otherwise read as perfectly healthy.
+    # THRESHOLD PROVENANCE: 3 is the OBSERVED steady state across every
+    # registration in ~/.sovereign/tunnel.err on 2026-08-24 and 2026-08-25.
+    # cloudflared's documented default --ha-connections is 4 and a 4th has
+    # never been seen registering here. That discrepancy is an OPEN
+    # QUESTION, recorded rather than tuned away: setting 4 without evidence
+    # would mean a permanent false red, which is its own dishonesty.
     Endpoint(
         name="tunnel",
         label="com.templetwo.cloudflared-tunnel",
         kind=KIND_ALWAYS_ON,
         description="Cloudflare tunnel exposing SSE to internet",
-        # Tunnel itself is opaque from the host side; rely on launchctl.
+        health_url="http://127.0.0.1:20241/ready",
+        health_count_key="readyConnections",
+        health_count_min=3,
+    ),
+    # 2026-08-25: the ONLY entry in this registry that leaves the machine.
+    # Every other probe targets 127.0.0.1, which is why the registry could
+    # not tell "the processes are running on this box" from "the world can
+    # reach us" — different facts, and only the second one is the promise
+    # the stack makes to an arriving architecture. Kept SEPARATE from
+    # `tunnel` on purpose: "the process died" and "the world cannot reach
+    # us" are different diagnoses and must not collapse into one amber light.
+    # LIMIT, in code because it will otherwise be forgotten: since Cloudflare
+    # WARP went Always-On (2026-08-24) this host's egress rides Cloudflare's
+    # own network, so a green here is NOT proof an outside user is served.
+    # A true external vantage lives off this machine entirely.
+    Endpoint(
+        name="edge",
+        label=None,  # not a launchd service; HTTP-only, per check_status
+        kind=KIND_ALWAYS_ON,
+        description="Public round trip through Cloudflare to the bridge",
+        health_url="https://stack.templetwo.com/api/heartbeat",
+        health_match='"status":"ok"',
     ),
     # 2026-08-03 succession: the watchman replaced BOTH comms organs under the
     # dispatcher's launchd label (addresses outlast occupants). It is PERIODIC
@@ -171,6 +222,36 @@ def _run(cmd: list[str], timeout: float = 5.0) -> subprocess.CompletedProcess:
         timeout=timeout,
         check=False,
     )
+
+
+def _extract_count(body: str, key: str) -> int | float | None:
+    """
+    Pull a numeric value for `key` out of a probe body.
+
+    Accepts a JSON object (`{"readyConnections": 3}`) or a Prometheus text
+    line (`some_metric 3`). Returns None when the key is absent or the
+    value is not numeric — callers MUST treat None as a failed measurement,
+    not as a pass.
+
+    Deliberately JSON-first and small: `_http_probe` reads only the first
+    4096 bytes, and cloudflared's `cloudflared_tunnel_ha_connections` sits
+    at byte ~4131 of /metrics — past the cap. A /metrics-based probe would
+    have silently found nothing. /ready carries the same number in 88 bytes.
+    """
+    try:
+        parsed = json.loads(body)
+        if isinstance(parsed, dict) and key in parsed:
+            value = parsed[key]
+            return value if isinstance(value, (int, float)) else None
+    except (ValueError, TypeError):
+        pass
+    match = re.search(rf"^{re.escape(key)}\s+([0-9.]+)$", body, re.MULTILINE)
+    if match:
+        try:
+            return float(match.group(1))
+        except ValueError:
+            return None
+    return None
 
 
 def _http_probe(url: str, timeout: float = 2.0) -> dict:
@@ -324,7 +405,11 @@ def check_status(
     if endpoint.label:
         launchctl_text = _launchctl_print_text(endpoint.label)
 
-    if launchctl_text is None and endpoint.label:
+    if endpoint.label is None:
+        # HTTP-only endpoint (e.g. `edge`). It has no launchd identity, so
+        # nothing below should read as a launchctl-derived verdict.
+        status.notes.append("no launchd label — the HTTP probe is the sole source of truth")
+    elif launchctl_text is None and endpoint.label:
         status.notes.append("launchctl: service not loaded")
         # Fall through — HTTP probe might still tell us something.
     elif launchctl_text is not None:
@@ -393,6 +478,30 @@ def check_status(
                         status.notes.append(f"health body missing match {endpoint.health_match!r}")
                 else:
                     status.http_ok = True
+
+                # Numeric floor. Runs only if the checks above passed, and
+                # can only ever DOWNGRADE. Fails closed: an absent or
+                # non-numeric key means we could not measure, and "could
+                # not measure" is not "healthy".
+                if status.http_ok and endpoint.health_count_key is not None:
+                    observed = _extract_count(probe["body"], endpoint.health_count_key)
+                    minimum = endpoint.health_count_min or 0
+                    if observed is None:
+                        status.http_ok = False
+                        status.notes.append(
+                            f"count key {endpoint.health_count_key!r} absent or "
+                            "unparseable — probe cannot measure, failing closed"
+                        )
+                    elif observed < minimum:
+                        status.http_ok = False
+                        status.notes.append(
+                            f"{endpoint.health_count_key}={observed} below "
+                            f"minimum {minimum} — reachable but DEGRADED"
+                        )
+                    else:
+                        status.notes.append(
+                            f"{endpoint.health_count_key}={observed} (min {minimum})"
+                        )
             else:
                 status.http_ok = False
 

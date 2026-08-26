@@ -665,3 +665,130 @@ class TestCli:
         # One subprocess invocation per labeled endpoint.
         labeled = [e for e in ENDPOINTS if e.label]
         assert len(calls) == len(labeled)
+
+
+class TestReachProbes:
+    """
+    2026-08-25. These exist because the tunnel row read `ok` for 12h57m
+    while the public door was dead. Every test here asserts a probe can
+    FAIL — a gate that has never been shown to fail is not a gate.
+    """
+
+    @staticmethod
+    def _tunnel_ep(**kw):
+        defaults = {
+            "name": "tunnel",
+            "label": "com.templetwo.test-tunnel",
+            "kind": KIND_ALWAYS_ON,
+            "description": "test tunnel",
+            "health_url": "http://127.0.0.1:20241/ready",
+            "health_count_key": "readyConnections",
+            "health_count_min": 3,
+        }
+        defaults.update(kw)
+        return Endpoint(**defaults)
+
+    @staticmethod
+    def _running(text="state = running\npid = 100\n"):
+        return patch.object(conn, "_launchctl_print_text", return_value=text)
+
+    @staticmethod
+    def _probe(status_code, body):
+        return patch.object(
+            conn,
+            "_http_probe",
+            return_value={"http_status": status_code, "body": body, "error": None},
+        )
+
+    def test_healthy_when_count_meets_minimum(self):
+        body = '{"status":200,"readyConnections":3,"connectorId":"x"}'
+        with self._running(), self._probe(200, body):
+            s = check_status(self._tunnel_ep())
+        assert s.status == STATUS_OK
+        assert s.http_ok is True
+
+    def test_zero_connections_is_not_ok(self):
+        """The literal shape of the 2026-08-25 outage."""
+        body = '{"status":503,"readyConnections":0}'
+        with self._running(), self._probe(503, body):
+            s = check_status(self._tunnel_ep())
+        assert s.http_ok is False
+        assert s.status == STATUS_DEGRADED
+
+    def test_degraded_count_is_caught(self):
+        """3 -> 1 returns HTTP 200. A binary probe would call this healthy."""
+        body = '{"status":200,"readyConnections":1,"connectorId":"x"}'
+        with self._running(), self._probe(200, body):
+            s = check_status(self._tunnel_ep())
+        assert s.http_ok is False
+        assert s.status == STATUS_DEGRADED
+        assert any("below minimum" in n for n in s.notes)
+
+    def test_missing_count_key_fails_closed(self):
+        """
+        The load-bearing control. A 200 with no count key means we could
+        not measure, and 'could not measure' must never read as healthy —
+        this is the case a /metrics probe would have hit, since the counter
+        sits past _http_probe's 4096-byte read cap.
+        """
+        with self._running(), self._probe(200, '{"status":200}'):
+            s = check_status(self._tunnel_ep())
+        assert s.http_ok is False
+        assert s.status == STATUS_DEGRADED
+        assert any("failing closed" in n for n in s.notes)
+
+    def test_non_numeric_count_fails_closed(self):
+        body = '{"readyConnections":"three"}'
+        with self._running(), self._probe(200, body):
+            s = check_status(self._tunnel_ep())
+        assert s.http_ok is False
+
+    def test_edge_endpoint_has_no_label_and_is_external(self):
+        edge = conn.get_endpoint("edge")
+        assert edge.label is None
+        assert edge.health_url.startswith("https://")
+        assert edge.health_url != "http://127.0.0.1"
+
+    def test_edge_unreachable_is_not_ok(self):
+        edge = conn.get_endpoint("edge")
+        with patch.object(
+            conn,
+            "_http_probe",
+            return_value={"http_status": None, "body": "", "error": "url_error: timed out"},
+        ):
+            s = check_status(edge)
+        assert s.http_ok is False
+        assert s.status != STATUS_OK
+
+    def test_edge_wrong_body_is_not_ok(self):
+        edge = conn.get_endpoint("edge")
+        with self._probe(200, '{"status":"degraded"}'):
+            s = check_status(edge)
+        assert s.http_ok is False
+
+    def test_registry_has_exactly_one_external_probe(self):
+        external = [
+            e
+            for e in conn.ENDPOINTS
+            if e.health_url and not e.health_url.startswith("http://127.0.0.1")
+        ]
+        assert [e.name for e in external] == ["edge"]
+
+
+class TestExtractCount:
+    def test_json_key(self):
+        assert conn._extract_count('{"readyConnections":3}', "readyConnections") == 3
+
+    def test_prometheus_line(self):
+        body = "# HELP x\ncloudflared_tunnel_ha_connections 4\n"
+        assert conn._extract_count(body, "cloudflared_tunnel_ha_connections") == 4.0
+
+    def test_absent_key_is_none_not_zero(self):
+        """None means 'unmeasured'. Returning 0 would silently read as degraded-but-measured."""
+        assert conn._extract_count('{"other":1}', "readyConnections") is None
+
+    def test_non_numeric_is_none(self):
+        assert conn._extract_count('{"readyConnections":"3"}', "readyConnections") is None
+
+    def test_garbage_body_is_none(self):
+        assert conn._extract_count("<html>502</html>", "readyConnections") is None
