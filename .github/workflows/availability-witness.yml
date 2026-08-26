@@ -1,0 +1,109 @@
+# The witness of absence.
+#
+# WHY THIS LIVES ON GITHUB AND NOT ON THE MAC STUDIO
+# --------------------------------------------------
+# On 2026-08-25 the public door was dead for 12 hours 57 minutes and every
+# health surface on the origin machine read GREEN, because cloudflared never
+# exited and every probe in the connectivity registry targeted 127.0.0.1.
+# An origin cannot witness its own absence: while it is unreachable it is
+# also unable to write down that it was unreachable, so its availability
+# history records only recoveries. That is survivorship bias built into the
+# honesty layer.
+#
+# It cannot live on the Studio for a second reason: Cloudflare WARP runs
+# Always-On there, so that host's egress rides Cloudflare's own network. A
+# probe from inside is not an independent vantage on a Cloudflare-side
+# failure. This runner is off our network, and its timestamps are GitHub's,
+# not ours.
+#
+# THE RECEIPT IS THE RUN ITSELF. A failed probe fails this job, which
+# produces a GitHub-timestamped record of the dark period that no process
+# of ours had to survive in order to write.
+#
+# HONEST LIMITS, stated here so nobody reads more into a quiet log than it
+# holds:
+#   * GitHub's scheduled runs are best-effort and are delayed or dropped
+#     under load. A GAP IN SAMPLES IS NOT EVIDENCE OF AN OUTAGE, and an
+#     unbroken run of green is not proof of continuous uptime — it is proof
+#     of the samples that were actually taken.
+#   * This witnesses REACHABILITY of one public endpoint. It says nothing
+#     about whether the data behind it is correct.
+#   * Sampling every 15 minutes means an outage shorter than that can pass
+#     unseen. The 2026-08-25 outage would have produced ~52 failed runs.
+
+name: Availability Witness
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: availability-witness
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Probe the public door
+        id: probe
+        run: |
+          set -uo pipefail
+          URL="https://stack.templetwo.com/api/heartbeat"
+          OBSERVED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+          # --fail-with-body is deliberately NOT used: a 5xx body is
+          # evidence. We want the code and the body, then we judge.
+          BODY="$(curl -sS --max-time 20 -w '\n%{http_code}\n%{time_total}' "$URL" 2>/dev/null || true)"
+          CODE="$(printf '%s' "$BODY" | tail -n 2 | head -n 1)"
+          SECS="$(printf '%s' "$BODY" | tail -n 1)"
+          PAYLOAD="$(printf '%s' "$BODY" | sed '$d' | sed '$d')"
+
+          # Empty code means curl never got a response at all — that is an
+          # absence, not a zero. Name it rather than letting it read as 000.
+          [ -z "${CODE:-}" ] && CODE="no-response"
+
+          echo "observed_at=$OBSERVED_AT" >> "$GITHUB_OUTPUT"
+          echo "http_code=$CODE"          >> "$GITHUB_OUTPUT"
+          echo "seconds=${SECS:-unknown}" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### Availability sample"
+            echo ""
+            echo "| field | value |"
+            echo "|---|---|"
+            echo "| observed_at (UTC, GitHub's clock) | \`$OBSERVED_AT\` |"
+            echo "| url | \`$URL\` |"
+            echo "| http_code | \`$CODE\` |"
+            echo "| seconds | \`${SECS:-unknown}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$CODE" != "200" ]; then
+            {
+              echo ""
+              echo "**UNREACHABLE.** This run is the absence receipt."
+              echo ""
+              echo '```'
+              printf '%s\n' "$PAYLOAD" | head -c 800
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error title=Sovereign Stack unreachable::$URL returned $CODE at $OBSERVED_AT"
+            exit 1
+          fi
+
+          # Reachable is not the same as healthy. A 200 whose body does not
+          # say ok is a different failure and must not pass silently.
+          case "$PAYLOAD" in
+            *'"status":"ok"'*) : ;;
+            *)
+              echo "::error title=Sovereign Stack answered but not ok::200 with unexpected body at $OBSERVED_AT"
+              exit 1
+              ;;
+          esac
+
+          echo "reachable and ok at $OBSERVED_AT (${SECS}s)"
