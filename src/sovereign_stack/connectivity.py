@@ -125,12 +125,17 @@ ENDPOINTS: list[Endpoint] = [
     # moving target. The floor is a COUNT, not a binary: /ready returns 200
     # whenever >=1 connection is registered, so a tunnel degraded from 3 to
     # 1 would otherwise read as perfectly healthy.
-    # THRESHOLD PROVENANCE: 3 is the OBSERVED steady state across every
-    # registration in ~/.sovereign/tunnel.err on 2026-08-24 and 2026-08-25.
-    # cloudflared's documented default --ha-connections is 4 and a 4th has
-    # never been seen registering here. That discrepancy is an OPEN
-    # QUESTION, recorded rather than tuned away: setting 4 without evidence
-    # would mean a permanent false red, which is its own dishonesty.
+    # THRESHOLD PROVENANCE, and the open question closed itself the same
+    # night: the observed steady state was 3 across every registration on
+    # 2026-08-24/25, while cloudflared's documented default is 4. That gap
+    # was recorded here as an open question rather than tuned away. At
+    # 2026-08-26T00:27:20Z the Cloudflare edge ranges (198.41.192.0/24,
+    # 198.41.200.0/24, 2606:4700:a0::/48, 2606:4700:a8::/48) were excluded
+    # from Cloudflare WARP's split tunnel, and readyConnections went 3 -> 4
+    # within seconds and held. The 4th connection had never registered in
+    # any log examined. It was 3 because WARP was carrying cloudflared's
+    # own edge traffic; it is 4 now. The floor is therefore 4 -- the
+    # documented default, and now also the measured state.
     Endpoint(
         name="tunnel",
         label="com.templetwo.cloudflared-tunnel",
@@ -138,7 +143,7 @@ ENDPOINTS: list[Endpoint] = [
         description="Cloudflare tunnel exposing SSE to internet",
         health_url="http://127.0.0.1:20241/ready",
         health_count_key="readyConnections",
-        health_count_min=3,
+        health_count_min=4,
     ),
     # 2026-08-25: the ONLY entry in this registry that leaves the machine.
     # Every other probe targets 127.0.0.1, which is why the registry could

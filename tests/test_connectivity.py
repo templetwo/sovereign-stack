@@ -683,7 +683,7 @@ class TestReachProbes:
             "description": "test tunnel",
             "health_url": "http://127.0.0.1:20241/ready",
             "health_count_key": "readyConnections",
-            "health_count_min": 3,
+            "health_count_min": 4,
         }
         defaults.update(kw)
         return Endpoint(**defaults)
@@ -701,7 +701,7 @@ class TestReachProbes:
         )
 
     def test_healthy_when_count_meets_minimum(self):
-        body = '{"status":200,"readyConnections":3,"connectorId":"x"}'
+        body = '{"status":200,"readyConnections":4,"connectorId":"x"}'
         with self._running(), self._probe(200, body):
             s = check_status(self._tunnel_ep())
         assert s.status == STATUS_OK
@@ -716,13 +716,25 @@ class TestReachProbes:
         assert s.status == STATUS_DEGRADED
 
     def test_degraded_count_is_caught(self):
-        """3 -> 1 returns HTTP 200. A binary probe would call this healthy."""
+        """4 -> 1 returns HTTP 200. A binary probe would call this healthy."""
         body = '{"status":200,"readyConnections":1,"connectorId":"x"}'
         with self._running(), self._probe(200, body):
             s = check_status(self._tunnel_ep())
         assert s.http_ok is False
         assert s.status == STATUS_DEGRADED
         assert any("below minimum" in n for n in s.notes)
+
+    def test_three_of_four_is_degraded(self):
+        """
+        The literal state this machine sat in for days while WARP carried
+        cloudflared's edge traffic: 3 of 4 connections, HTTP 200, and every
+        surface green. It is DEGRADED, and the floor must say so.
+        """
+        body = '{"status":200,"readyConnections":3,"connectorId":"x"}'
+        with self._running(), self._probe(200, body):
+            s = check_status(self._tunnel_ep())
+        assert s.http_ok is False
+        assert s.status == STATUS_DEGRADED
 
     def test_missing_count_key_fails_closed(self):
         """
