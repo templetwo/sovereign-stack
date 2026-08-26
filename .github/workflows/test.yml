@@ -66,6 +66,23 @@ jobs:
         run: |
           pytest tests/ --cov=sovereign_stack --cov-report=term-missing
 
+      # The stack must not describe itself by assertion. This regenerates the
+      # capability projection from the live tool registry and FAILS THE BUILD
+      # if README, pyproject, the registry, and the committed manifest
+      # disagree. It exists because on 2026-08-25 four architectures read this
+      # repo's public face and got three contradicting eras of tool counts,
+      # and one of them concluded a shipped law was unshipped.
+      #
+      # Runs on 3.12 only: it imports the server to read the live registry,
+      # and the matrix's older interpreters are for compatibility testing,
+      # not for deciding what the documentation says.
+      - name: Capability manifest is current
+        if: matrix.python-version == '3.12'
+        run: |
+          COLLECTED="$(pytest tests/ --collect-only -q 2>/dev/null | tail -1 | grep -oE '^[0-9]+' || echo 0)"
+          echo "tests collected: $COLLECTED"
+          python -m sovereign_stack.manifest --check --tests-collected "$COLLECTED"
+
       - name: Upload coverage report
         if: matrix.python-version == '3.12'
         uses: actions/upload-artifact@v4
