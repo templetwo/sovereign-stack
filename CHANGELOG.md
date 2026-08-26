@@ -9,36 +9,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### `recall_insights` emits `claim_id` by default — the read-side address is reachable again
-
-The `recall_insights` MCP tool now returns `claim_id` (full 64-hex, derived on
-read via `provenance.derive_claim_id`, never stored) on every item. The
-machinery already existed — `with_ids` + `provenance.annotate_claim_ids` — but
-defaulted to false, and BOTH bridge adapters publish `recall_insights` with an
-empty `properties` schema, so no remote seat could opt in. The consequence, on
-the record 2026-08-13: a remote seat could recall its own entry and still not
-correct it, because `supersede_insight` and `inspect_claim` both take a claim
-id and only a seat with local filesystem access could derive one. The whole
-supersession burden fell on that seat.
-
-Scope is deliberately the tool boundary only: `ExperientialMemory.recall_insights`
-keeps `with_ids=False`, so every in-process caller (`get_inheritable_context`,
-the boot surface, `load_entries`) is byte-identical. Envelope keys
-(`items`, `returned`, `total_matched`, `offset`, `scope`, `truncated`,
-`partial_reasons`, `continuation`) are untouched, as is every other item key.
-Explicit `with_ids=false` still suppresses the key. The full 64-hex is emitted
-rather than the 16-hex `display_id` because `inspect_claim` reports integrity
-`verified` only for the full id, and a prefix can raise `AmbiguousClaimError`.
-
-Open threads deliberately get NO `claim_id`: they live under
-`chronicle/open_threads/`, which `provenance.iter_chronicle_entries` does not
-scan, and they carry `question` rather than `content` — so a derived id would
-be unresolvable AND identical across every thread of one auto-split bundle.
-`thread_id` + `resolve_thread_by_id` remains their address.
-
-`src/sovereign_stack/server.py`, `src/sovereign_stack/memory.py`,
-`clients/{grok,openai}_bridge/tool_adapter.py`, `tests/test_recall_claim_id.py`.
-
 ### Claude connector — phone-tap authorize swap (connector-side; pending bridge-side companion + deploy)
 
 `clients/claude_bridge`'s resource-owner control is replaced: the 1.12.0
@@ -69,6 +39,89 @@ to actually reload (`launchctl bootout` + `bootstrap`, **not**
 See `docs/implementation/CLAUDE_CONNECTOR.md`.
 
 ---
+
+## [1.16.0] - 2026-08-26
+
+Self-description and reachability brought under the same discipline the
+chronicle already had. Every item here was earned by a measured failure
+the same week, and every gate was shown to FAIL before it was trusted.
+
+### The tunnel row measures reach, not presence
+
+The public door was dead for 12h57m on 2026-08-25 and every local health
+surface read green: `cloudflared` never exited, so launchctl said
+"running", and the `tunnel` endpoint had no health probe at all. It now
+probes cloudflared's `/ready`, and the floor is a COUNT — `/ready`
+returns 200 whenever at least one edge connection is registered, so a
+tunnel degraded from 4 connections to 1 would otherwise read as
+perfectly healthy. `health_count_key` / `health_count_min` fail closed:
+an absent or non-numeric key means the probe could not measure, and
+"could not measure" is not "healthy".
+
+### `edge` — the first probe that leaves the machine
+
+Every other entry in the connectivity registry targets `127.0.0.1`,
+which is why it could not tell "the processes are running on this box"
+from "the world can reach us". `edge` probes the public round trip and
+is kept as its own row so those stay separate diagnoses.
+
+### Availability witness on neutral ground
+
+An origin cannot witness its own absence: while unreachable it cannot
+record that it was unreachable, so its availability history contains
+only recoveries. A GitHub Actions workflow probes the public door every
+15 minutes on GitHub's clock, off this host's egress. The receipt is the
+run itself. Its limits are written into the workflow file: scheduled
+runs are best-effort, so a gap in samples is not evidence of an outage.
+
+### Executable self-description — `sovereign_stack.manifest`
+
+Capability counts are no longer hand-maintained. The manifest is built
+from the same `list_tools()` coroutine MCP clients call, and CI fails
+the build when README, `pyproject.toml`, the live registry, and the
+committed `stack_manifest.json` disagree. The rule: **a count without an
+as-of is drift; a count with an as-of is history.** Header badges are
+generated from the manifest; the hand-typed test-count badge is replaced
+by a live CI status badge that cannot rot because nobody types it.
+
+### The unacked-honk counter no longer saturates
+
+The dashboard reported `len(read_recent_honks(..., limit=100))` as its
+unacked total. That caps at 100. The real backlog was 1,884 — a 19x
+understatement rendered as a plain integer with no truncation signal,
+inside the surface meant to catch exactly this. `count_unacked_honks()`
+answers the count; the preview stays capped. A count and a preview are
+different questions.
+
+### `recall_insights` emits `claim_id` by default — the read-side address is reachable again
+
+The `recall_insights` MCP tool now returns `claim_id` (full 64-hex, derived on
+read via `provenance.derive_claim_id`, never stored) on every item. The
+machinery already existed — `with_ids` + `provenance.annotate_claim_ids` — but
+defaulted to false, and BOTH bridge adapters publish `recall_insights` with an
+empty `properties` schema, so no remote seat could opt in. The consequence, on
+the record 2026-08-13: a remote seat could recall its own entry and still not
+correct it, because `supersede_insight` and `inspect_claim` both take a claim
+id and only a seat with local filesystem access could derive one. The whole
+supersession burden fell on that seat.
+
+Scope is deliberately the tool boundary only: `ExperientialMemory.recall_insights`
+keeps `with_ids=False`, so every in-process caller (`get_inheritable_context`,
+the boot surface, `load_entries`) is byte-identical. Envelope keys
+(`items`, `returned`, `total_matched`, `offset`, `scope`, `truncated`,
+`partial_reasons`, `continuation`) are untouched, as is every other item key.
+Explicit `with_ids=false` still suppresses the key. The full 64-hex is emitted
+rather than the 16-hex `display_id` because `inspect_claim` reports integrity
+`verified` only for the full id, and a prefix can raise `AmbiguousClaimError`.
+
+Open threads deliberately get NO `claim_id`: they live under
+`chronicle/open_threads/`, which `provenance.iter_chronicle_entries` does not
+scan, and they carry `question` rather than `content` — so a derived id would
+be unresolvable AND identical across every thread of one auto-split bundle.
+`thread_id` + `resolve_thread_by_id` remains their address.
+
+`src/sovereign_stack/server.py`, `src/sovereign_stack/memory.py`,
+`clients/{grok,openai}_bridge/tool_adapter.py`, `tests/test_recall_claim_id.py`.
 
 ## [1.15.0] - 2026-07-21
 

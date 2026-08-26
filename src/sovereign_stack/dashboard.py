@@ -710,6 +710,76 @@ def _launchctl_service_states(labels: list[str]) -> dict[str, dict]:
 # ── Source readers (pure: take a path, return events) ───────────────────────
 
 
+def _acked_honk_ids(path: Path) -> set:
+    """
+    Build the set of acked honk_ids from the SIBLING acks.jsonl.
+
+    Factored out of read_recent_honks so the preview reader and the
+    counter cannot drift apart in what they consider acknowledged - two
+    implementations of "is this acked?" is how a count and a list start
+    disagreeing.
+    """
+    acks_path = path.parent / "acks.jsonl"
+    acked_ids: set = set()
+    if not acks_path.exists():
+        return acked_ids
+    try:
+        for line in acks_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            hid = rec.get("honk_id")
+            if hid:
+                acked_ids.add(hid)
+    except OSError:
+        pass
+    return acked_ids
+
+
+def count_unacked_honks(path: Path) -> int:
+    """
+    The TRUE number of unacked honks. No limit, no cap, no preview.
+
+    2026-08-26: the dashboard previously reported
+    `len(read_recent_honks(..., limit=100))` as its unacked count, which
+    SATURATES AT 100 and can never say more. The real backlog at that
+    moment was 1,884 - a 19x understatement, presented as a plain integer
+    with no truncation signal. A capped read reported as a total is the
+    same fail-open shape as a partial query dressed as a complete answer;
+    it is the exact class the chronicle's coverage envelopes exist to
+    close, and it had been living in the health surface that was supposed
+    to be watching for it.
+
+    A count and a preview are different questions. This answers the count.
+    """
+    if not path.exists():
+        return 0
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return 0
+    acked_ids = _acked_honk_ids(path)
+    total = 0
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if rec.get("ack_id"):
+            continue
+        if rec.get("honk_id") in acked_ids:
+            continue
+        total += 1
+    return total
+
+
 def read_recent_honks(path: Path, *, limit: int = 5) -> list[dict]:
     """
     Read the last N UNACKED entries from nape honks.jsonl, with cross-file
@@ -730,24 +800,9 @@ def read_recent_honks(path: Path, *, limit: int = 5) -> list[dict]:
     except OSError:
         return []
 
-    # Sibling acks file. Build the set of acked honk_ids once.
-    acks_path = path.parent / "acks.jsonl"
-    acked_ids: set = set()
-    if acks_path.exists():
-        try:
-            for line in acks_path.read_text(encoding="utf-8").splitlines():
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    rec = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                hid = rec.get("honk_id")
-                if hid:
-                    acked_ids.add(hid)
-        except OSError:
-            pass
+    # Sibling acks file, via the shared helper so the preview and the
+    # counter can never disagree about what "acked" means.
+    acked_ids = _acked_honk_ids(path)
 
     out: list[dict] = []
     for line in reversed(lines):
@@ -1112,8 +1167,12 @@ def collect_state(
 
     halts_count = len(_list_paths(root / "daemons" / "halts", "*.md"))
     decisions_count = len(_list_paths(root / "decisions", "metabolize_*.md"))
-    honks = read_recent_honks(root / "nape" / "honks.jsonl", limit=100)
-    unacked = len(honks)
+    # The COUNT is not a capped read. Reporting len() of a limited read as
+    # the total is how this counter said "100" while the real backlog was
+    # 1,884 — and the capped read here served no other purpose, since the
+    # newest-honk PREVIEW is produced by collect_latest_entries() below.
+    # A count and a preview are different questions with different callers.
+    unacked = count_unacked_honks(root / "nape" / "honks.jsonl")
 
     latest = collect_latest_entries(root)
 
