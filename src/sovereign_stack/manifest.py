@@ -24,6 +24,22 @@ Current counts live in exactly one place: the generated block. Anywhere
 else in the document a count may appear only if its own line carries an
 explicit `(as of ...)`, which turns a rotting claim into a dated one.
 
+WHAT THIS CHECK DOES NOT COVER, stated because a silent gap in a drift
+checker is the same disease one layer up:
+
+    It enforces COUNTS, not VERSION LABELS.
+
+`### Breath architecture (v1.5.0 - the fast lung)` means "introduced in
+v1.5.0" and is timeless-true; `## Operations (v1.5.1 - ...)` reads as a
+claim about the CURRENT version and rots. A regex cannot tell those two
+apart, and a rule that flagged both would produce noise that trains
+people to ignore the gate - which is worse than the drift it catches.
+So version labels are a human judgement, and the one rotting instance
+(line 125, found by the Fable seat 2026-08-26) was dated by hand rather
+than by rule. If a later seat finds a second one, that is evidence the
+judgement does not scale and the rule should be revisited - not evidence
+that this note was wrong.
+
 FAILS CLOSED, in three specific ways, because a manifest generator that
 degrades quietly is worse than none - it launders staleness as coverage:
   * An empty tool registry raises. It never emits an empty manifest.
