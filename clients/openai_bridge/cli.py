@@ -176,7 +176,7 @@ def show(proposal_id: str):
 
 @cli.command("approve")
 @click.argument("proposal_id")
-@click.option("--by", default="Anthony", help="Approver name")
+@click.option("--by", required=True, help="Reviewer identity — REQUIRED. Name yourself; automated callers must not inherit a human's name.")
 def approve(proposal_id: str, by: str):
     """Approve a pending proposal. Does not commit — approve and commit are separate."""
     try:
@@ -196,7 +196,7 @@ def approve(proposal_id: str, by: str):
 @cli.command("reject")
 @click.argument("proposal_id")
 @click.option("--reason", required=True, help="Rejection reason")
-@click.option("--by", default="Anthony", help="Reviewer name")
+@click.option("--by", required=True, help="Reviewer identity — REQUIRED. Name yourself; automated callers must not inherit a human's name.")
 def reject(proposal_id: str, reason: str, by: str):
     """Reject a pending proposal."""
     try:
@@ -215,7 +215,7 @@ def reject(proposal_id: str, reason: str, by: str):
 @cli.command("needs-revision")
 @click.argument("proposal_id")
 @click.option("--notes", required=True, help="Revision instructions")
-@click.option("--by", default="Anthony", help="Reviewer name")
+@click.option("--by", required=True, help="Reviewer identity — REQUIRED. Name yourself; automated callers must not inherit a human's name.")
 def needs_revision(proposal_id: str, notes: str, by: str):
     """Send a pending proposal back for revision with notes."""
     try:

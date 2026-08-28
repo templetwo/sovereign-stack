@@ -352,12 +352,42 @@ def _save_proposal(proposal: Proposal, path: Path) -> None:
     path.write_text(json.dumps(d, indent=2, default=str))
 
 
-def approve_pending_write(proposal_id: str, approved_by: str = "Anthony") -> Proposal:
+def _require_reviewer(name: str | None, param: str) -> str:
+    """
+    Reviewer identity is an ASSERTION, never a default.
+
+    This used to be `approved_by: str = "Anthony"`. Any automated caller that
+    omitted the name was stamped with the human's — nine smoke-test fixtures in
+    the live openai queue read `reviewed_by: Anthony`, reviewed under a
+    millisecond after filing, and the console rendered them as a human review
+    with no sign the stamp was synthetic. A default identity is a fail-open:
+    the record reports a human decision that never happened.
+
+    Callers must name the reviewer. Empty and whitespace-only are refused too —
+    a blank string is the same lie with less confidence.
+
+    Deliberately duplicated from bridge_core.pending_writes rather than
+    imported: this legacy module is self-contained by design (its own audit,
+    hash_chain, risk, and PENDING_DIR), and a six-line guard does not justify
+    coupling it to another package.
+    """
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError(
+            f"{param} is required and must be a non-empty reviewer identity — "
+            "reviewer identity is asserted by the caller, never defaulted. "
+            "Automated callers must name themselves (e.g. 'smoke-test', "
+            "'grok-bridge-drain'), not inherit a human's name."
+        )
+    return name.strip()
+
+
+def approve_pending_write(proposal_id: str, *, approved_by: str) -> Proposal:
     """
     Mark a pending proposal as approved.
 
     Approval is not commitment. The underlying Stack tool is not called here.
     """
+    approved_by = _require_reviewer(approved_by, "approved_by")
     proposal, path = _load_proposal(proposal_id)
 
     if proposal.status != "pending":
@@ -666,7 +696,7 @@ def commit_pending_write(proposal_id: str, live: bool = False) -> Proposal:
     return proposal
 
 
-def retry_pending_write(proposal_id: str, actor: str) -> Proposal:
+def retry_pending_write(proposal_id: str, *, actor: str) -> Proposal:
     """Re-arm a commit_failed proposal for one more commit attempt.
 
     status="commit_failed" STAYS (HQ's call, 2026-08-30: audit honesty over
@@ -687,11 +717,7 @@ def retry_pending_write(proposal_id: str, actor: str) -> Proposal:
     displayed beside status="approved" reads as a live failure — the full prior
     result is preserved in the audit event.
     """
-    if not actor or not actor.strip():
-        raise ValueError(
-            "retry requires an actor — name yourself. Automated callers must not "
-            "inherit a human's name."
-        )
+    actor = _require_reviewer(actor, "actor")
     proposal, path = _load_proposal(proposal_id)
     if proposal.status != "commit_failed":
         raise ValueError(
@@ -725,8 +751,9 @@ def retry_pending_write(proposal_id: str, actor: str) -> Proposal:
     return proposal
 
 
-def reject_pending_write(proposal_id: str, reason: str, rejected_by: str = "Anthony") -> Proposal:
+def reject_pending_write(proposal_id: str, reason: str, *, rejected_by: str) -> Proposal:
     """Mark a pending or needs_revision proposal as rejected."""
+    rejected_by = _require_reviewer(rejected_by, "rejected_by")
     proposal, path = _load_proposal(proposal_id)
 
     if proposal.status not in ("pending", "needs_revision"):
@@ -748,8 +775,9 @@ def reject_pending_write(proposal_id: str, reason: str, rejected_by: str = "Anth
     return proposal
 
 
-def needs_revision_pending_write(proposal_id: str, notes: str, actor: str = "Anthony") -> Proposal:
+def needs_revision_pending_write(proposal_id: str, notes: str, *, actor: str) -> Proposal:
     """Send a proposal back for revision with notes."""
+    actor = _require_reviewer(actor, "actor")
     proposal, path = _load_proposal(proposal_id)
 
     if proposal.status != "pending":

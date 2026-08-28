@@ -9,6 +9,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Ring 2 reviewer identity is required, never defaulted
+
+Every review entry point in both bridge libraries defaulted the reviewer name
+to the human's — `approve_pending_write(..., approved_by="Anthony")`,
+`reject_pending_write(..., rejected_by="Anthony")`,
+`needs_revision_pending_write(..., actor="Anthony")`, and
+`@click.option("--by", default="Anthony")` on all six console commands across
+`clients/bridge_core/cli.py` and `clients/openai_bridge/cli.py`. Any automated
+caller that omitted the name was stamped as Anthony, and the record kept no
+trace that the stamp was synthetic: `bridge show` renders "Reviewed: Anthony
+at ..." identically for a human decision and for a test fixture.
+
+This is the fail-open class. The live openai queue holds 37 proposals stamped
+`reviewed_by: "Anthony"`; 27 of them were reviewed less than one second after
+being filed, 24 carrying the smoke test's own fixture strings ("Test: does the
+membrane hold?", "test handoff for rejection") across runs on three dates. The
+field alone cannot separate those from the ~9 that look genuinely human.
+
+The three library functions now take the reviewer as a **keyword-only argument
+with no default**, and raise `ValueError` on an empty or whitespace-only name
+before any status mutation or audit write. `--by` is now `required=True` on all
+six console commands, so click refuses the invocation itself (exit 2) rather
+than letting it run under a borrowed identity. Audit-log and hash-chain
+behaviour is unchanged — `reviewed_by` is a lifecycle mutable and never
+participated in `chain_valid`.
+
+**Breaking for callers that relied on the default**, which is the point:
+`bridge approve <id>` must now be `bridge approve <id> --by <name>`. Automated
+callers must name themselves.
+
+`clients/openai_bridge/_smoke_test.py` no longer files fixtures into the live
+queue. It now runs inside `isolated_queue()`, a context manager that rebinds
+all five module globals resolving to `~/.sovereign` paths — `PENDING_DIR` plus
+`AUDIT_DIR`/`AUDIT_LOG` in **both** `hash_chain` and `audit`, since `audit.py`
+from-imports those two names and so holds its own bindings; patching
+`hash_chain` alone leaves audit writes going live while the run still prints
+PASS. Both smoke tests now assert on the reviewer name they passed instead of
+on `"Anthony"`.
+
+`tests/test_ring2_reviewer_identity.py` covers all of it (32 tests): the
+required-reviewer refusals in both libraries, the console refusals, and the
+isolation contract. 29 of the 32 fail on the unfixed tree; the other 3 are
+reverse-direction regression tests that are deliberately not gates.
+
+Not addressed here: the 37 existing stamps in the live queue are untouched —
+labelling or annotating historical records is a data decision, not a code one.
+
 ### Claude connector — phone-tap authorize swap (connector-side; pending bridge-side companion + deploy)
 
 `clients/claude_bridge`'s resource-owner control is replaced: the 1.12.0

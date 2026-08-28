@@ -276,12 +276,38 @@ def _save_proposal(proposal: Proposal, path: Path) -> None:
     path.write_text(json.dumps(proposal.to_dict(), indent=2, default=str))
 
 
+def _require_reviewer(name: str | None, param: str) -> str:
+    """
+    Reviewer identity is an ASSERTION, never a default.
+
+    This used to be `approved_by: str = "Anthony"`. Any automated caller that
+    omitted the name was stamped with the human's — nine smoke-test fixtures in
+    the live openai queue read `reviewed_by: Anthony`, reviewed under a
+    millisecond after filing, and the console rendered them as a human review
+    with no sign the stamp was synthetic. A default identity is a fail-open:
+    the record reports a human decision that never happened.
+
+    Callers must name the reviewer. Empty and whitespace-only are refused too —
+    a blank string is the same lie with less confidence.
+    """
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError(
+            f"{param} is required and must be a non-empty reviewer identity — "
+            "reviewer identity is asserted by the caller, never defaulted. "
+            "Automated callers must name themselves (e.g. 'smoke-test', "
+            "'grok-bridge-drain'), not inherit a human's name."
+        )
+    return name.strip()
+
+
 def approve_pending_write(
     ctx: BridgeContext,
     proposal_id: str,
-    approved_by: str = "Anthony",
+    *,
+    approved_by: str,
 ) -> Proposal:
     """Mark a pending proposal as approved. Approval is not commitment."""
+    approved_by = _require_reviewer(approved_by, "approved_by")
     proposal, path = _load_proposal(ctx, proposal_id)
     if proposal.status != "pending":
         raise ValueError(
@@ -647,6 +673,7 @@ def commit_pending_write(
 def retry_pending_write(
     ctx: BridgeContext,
     proposal_id: str,
+    *,
     actor: str,
 ) -> Proposal:
     """Re-arm a commit_failed proposal for one more commit attempt.
@@ -669,11 +696,11 @@ def retry_pending_write(
     displayed beside status="approved" reads as a live failure — the full prior
     result is preserved in the audit event.
     """
-    if not actor or not actor.strip():
-        raise ValueError(
-            "retry requires an actor — name yourself. Automated callers must not "
-            "inherit a human's name."
-        )
+    # ca11e4c's shared guard, not a second hand-rolled copy: re-arming a
+    # rejected write is a review action, so it answers to the same rule as
+    # approve/reject/needs_revision — identity asserted, never defaulted,
+    # blank refused before any status mutation or audit write.
+    actor = _require_reviewer(actor, "actor")
     proposal, path = _load_proposal(ctx, proposal_id)
     if proposal.status != "commit_failed":
         raise ValueError(
@@ -713,9 +740,11 @@ def reject_pending_write(
     ctx: BridgeContext,
     proposal_id: str,
     reason: str,
-    rejected_by: str = "Anthony",
+    *,
+    rejected_by: str,
 ) -> Proposal:
     """Mark a pending or needs_revision proposal as rejected."""
+    rejected_by = _require_reviewer(rejected_by, "rejected_by")
     proposal, path = _load_proposal(ctx, proposal_id)
     if proposal.status not in ("pending", "needs_revision"):
         raise ValueError(f"Cannot reject proposal in status '{proposal.status}'")
@@ -739,9 +768,11 @@ def needs_revision_pending_write(
     ctx: BridgeContext,
     proposal_id: str,
     notes: str,
-    actor: str = "Anthony",
+    *,
+    actor: str,
 ) -> Proposal:
     """Send a proposal back for revision with notes."""
+    actor = _require_reviewer(actor, "actor")
     proposal, path = _load_proposal(ctx, proposal_id)
     if proposal.status != "pending":
         raise ValueError(f"Cannot mark needs_revision for proposal in status '{proposal.status}'")

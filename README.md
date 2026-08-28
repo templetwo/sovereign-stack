@@ -323,7 +323,7 @@ Governed membranes for ChatGPT and Grok. Each substrate has Ring 1 (read, proxie
 | `clients/openai_bridge/` | ChatGPT membrane — `/openai/sse` (bearer-gated, permanent). Ring 1 + Ring 2 with 10 governed write tools. |
 | `clients/grok_bridge/` | Grok/xAI membrane — `/grok/sse` (OAuth 2.1 + PKCE). Ring 1 + Ring 2 with `grok_welcome` ceremony and per-session self-attribution. |
 
-**Proposal lifecycle:** external substrate calls Ring 2 tool → `intercept()` creates proposal JSON in `~/.sovereign/<substrate>/pending_writes/` → `bridge list-pending --source=<substrate>` shows it → `bridge approve <id> --source=<substrate> && bridge commit <id> --source=<substrate> --live` writes to Stack chronicle. Hash chain maintained per substrate.
+**Proposal lifecycle:** external substrate calls Ring 2 tool → `intercept()` creates proposal JSON in `~/.sovereign/<substrate>/pending_writes/` → `bridge list-pending --source=<substrate>` shows it → `bridge approve <id> --source=<substrate> --by <reviewer> && bridge commit <id> --source=<substrate> --live` writes to Stack chronicle. Hash chain maintained per substrate.
 
 **1,460+ tests passing (as of v1.4.0).** Persistent across reboots via launchd.
 

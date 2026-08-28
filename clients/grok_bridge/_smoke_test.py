@@ -38,6 +38,10 @@ FAIL = "\033[91mFAIL\033[0m"
 
 SOURCE = "grok-xai-smoke-test"
 
+# The reviewer this test asserts on. NOT "Anthony": a test that names the human
+# as its reviewer cannot tell a real approval from its own fixture.
+REVIEWER = "grok-bridge-smoke-test"
+
 
 def check(name: str, condition: bool, detail: str = "") -> bool:
     tag = PASS if condition else FAIL
@@ -217,9 +221,13 @@ def run() -> bool:
         print("\n── Lifecycle: approve → commit (dry-run, hermetic) ──────────────")
 
         if proposal_id:
-            approved = approve_pending_write(ctx, proposal_id)
+            approved = approve_pending_write(ctx, proposal_id, approved_by=REVIEWER)
             results.append(check("Approve sets status=approved", approved.status == "approved"))
-            results.append(check("reviewed_by set", approved.reviewed_by == "Anthony"))
+            results.append(check(
+                "reviewed_by is the name this test passed (not a default)",
+                approved.reviewed_by == REVIEWER,
+                approved.reviewed_by or "<unset>",
+            ))
 
             # verify_proposal still works after status mutation — chain_valid
             # must remain True because hash covers creation-time snapshot
