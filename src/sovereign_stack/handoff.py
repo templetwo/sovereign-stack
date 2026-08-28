@@ -264,6 +264,25 @@ class HandoffEngine:
         records.sort(key=lambda r: r.get("timestamp", ""), reverse=True)
         return records[:limit]
 
+    def all_count(self, include_consumed: bool = True, thread: str | None = None) -> int:
+        """
+        Total handoffs matching the same filters `all()` applies, uncapped.
+
+        Mirrors unconsumed_count() (2026-08-01), for the same reason and one
+        layer over: `all()` slices to `limit` and returns a bare list, so a
+        caller cannot tell a complete answer from a capped one. Measured
+        2026-08-27: 287 handoffs on disk, 286 of them consumed and therefore
+        unreachable through any wired path — `all()` itself had zero callers.
+        Wiring it without a denominator would have recovered the records and
+        added a new silent truncation in the same commit.
+        """
+        records = self._load_all()
+        if not include_consumed:
+            records = [r for r in records if not r.get("consumed_at")]
+        if thread:
+            records = [r for r in records if r.get("thread") == thread]
+        return len(records)
+
     def mark_acted_on(
         self,
         handoff_path: str,
