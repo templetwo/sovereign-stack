@@ -105,10 +105,27 @@ def validate_pending_write(ctx: BridgeContext, proposal: Proposal) -> list[str]:
             "call compass_check before proposing"
         )
 
-    if proposal.compass_check_result == "PAUSE":
+    # REFERENTIAL VALIDATION — a target that does not exist is a factual defect,
+    # not a risk judgement, so it is refused outright rather than escalated.
+    # e1939a23's message_id matched nothing anywhere and was accepted.
+    try:
+        from bridge_core.target_risk import referential_errors
+
+        errors.extend(referential_errors(proposal.tool, proposal.arguments))
+    except Exception as exc:  # noqa: BLE001
         errors.append(
-            "compass_check returned PAUSE — do not propose until the concern is addressed"
+            f"referential check could not run ({type(exc).__name__}) — refusing rather than assuming the target exists"
         )
+
+    # ONE normalisation function, imported by both substrates, so the enum lives
+    # in exactly one place. Refuses PAUSE, refuses any unrecognised value, and
+    # refuses a canonical meaning in a non-canonical spelling — so anything that
+    # reaches storage is exact and the commit gates cannot be evaded by casing.
+    from bridge_core.target_risk import compass_create_error
+
+    _compass_err = compass_create_error(proposal.compass_check_result)
+    if _compass_err:
+        errors.append(_compass_err)
 
     return errors
 
@@ -132,7 +149,16 @@ def create_pending_write(
     proposed_layer = args.get("layer", "hypothesis")
     has_receipt = bool(receipts or args.get("receipt_url"))
 
-    risk_level, risk_reasons = risk_classify(tool_name, args)
+    # Pass the compass value EXPLICITLY. pop_bridge_metadata has already stripped
+    # it from `args`, so classifying without it stored risk_level="low" for an
+    # exact-spelled WITNESS — commit still blocked (the compass check is
+    # independent of risk_level), but the proposal rendered GREEN/LOW in
+    # `bridge list-pending`: the same visual profile as e1939a23, the write this
+    # whole guard exists to stop. The interceptor computed CRITICAL correctly and
+    # then discarded it, because create_pending_write recomputes independently.
+    risk_level, risk_reasons = risk_classify(
+        tool_name, args, compass_check_result=compass_check_result
+    )
 
     prev_hash = get_last_audit_hash(ctx)
     proposal_id = str(uuid.uuid4())
@@ -180,8 +206,7 @@ def create_pending_write(
 
     if not dry_run:
         filename = (
-            now.replace(":", "-").replace("+", "Z")[:19]
-            + f"_{tool_name}_{proposal_id[:8]}.json"
+            now.replace(":", "-").replace("+", "Z")[:19] + f"_{tool_name}_{proposal_id[:8]}.json"
         )
         proposal_path = ctx.pending_writes_dir / filename
         proposal_path.write_text(json.dumps(d, indent=2, default=str))
@@ -208,7 +233,11 @@ def create_pending_write(
 
         logger.info(
             "Proposal[%s] created: %s | tool=%s risk=%s layer=%s",
-            ctx.substrate, proposal_id, tool_name, risk_level.value, proposed_layer,
+            ctx.substrate,
+            proposal_id,
+            tool_name,
+            risk_level.value,
+            proposed_layer,
         )
 
     return proposal
@@ -237,7 +266,9 @@ def _save_proposal(proposal: Proposal, path: Path) -> None:
 
 
 def approve_pending_write(
-    ctx: BridgeContext, proposal_id: str, approved_by: str = "Anthony",
+    ctx: BridgeContext,
+    proposal_id: str,
+    approved_by: str = "Anthony",
 ) -> Proposal:
     """Mark a pending proposal as approved. Approval is not commitment."""
     proposal, path = _load_proposal(ctx, proposal_id)
@@ -278,9 +309,56 @@ def _precondition_check(ctx: BridgeContext, proposal: Proposal) -> list[str]:
     if proposal.proposed_layer == "ground_truth" and not proposal.has_receipt:
         errors.append("ground_truth layer requires a receipt — cannot commit without one")
 
+    # TARGET-AWARE COMMIT GUARDS. Computed FRESH here and never written back:
+    # risk_level sits outside _MUTABLE and reclassifying a stored proposal in
+    # place would break its audit hash chain. Computing at commit is also what
+    # gates the proposals filed BEFORE target-risk existed — 249 of them, of
+    # which the worst carried risk_level=low.
+    try:
+        from bridge_core.target_risk import (
+            referential_errors as _ref_errors,
+            target_escalation_reasons as _target_reasons,
+        )
+
+        errors.extend(_ref_errors(proposal.tool, proposal.arguments))
+        _esc = _target_reasons(proposal.tool, proposal.arguments)
+        if _esc and proposal.compass_check_result != "PROCEED":
+            errors.append(
+                "target-aware escalation to CRITICAL requires compass_check_result="
+                "'PROCEED' before commit — " + "; ".join(_esc)
+            )
+    except Exception as exc:  # noqa: BLE001
+        errors.append(
+            f"target-aware commit guard could not run ({type(exc).__name__}) — "
+            "refusing rather than committing an unchecked write"
+        )
+
+    # WITNESS is the compass's HARD deny. It was handled nowhere in this codebase
+    # — it appeared once, in a comment on a type annotation — so PAUSE blocked
+    # and the stronger signal passed. A WITNESS proposal may be FILED (blocking
+    # at create would make honest disclosure the expensive path) but must not
+    # LAND until the compass has been re-run and returns PROCEED.
+    # Re-checked at COMMIT against the STORED value, independent of what validate
+    # did at create. Threat model: a proposal file edited on disk in between (the
+    # audit-hash check below catches tampering, this catches the semantics), and
+    # the 249 proposals filed before any of this existed. Before 2026-08-28 PAUSE
+    # was checked ONLY at create, so a mangled-case PAUSE that slipped creation
+    # was never caught again.
+    from bridge_core.target_risk import compass_commit_block_reason
+
+    _compass_block = compass_commit_block_reason(proposal.compass_check_result)
+    if _compass_block:
+        errors.append(_compass_block)
+
     # Verify creation-time fields haven't been tampered with
-    _MUTABLE = {"status", "reviewed_by", "reviewed_at", "revision_notes",
-                "commit_result", "audit_hash"}
+    _MUTABLE = {
+        "status",
+        "reviewed_by",
+        "reviewed_at",
+        "revision_notes",
+        "commit_result",
+        "audit_hash",
+    }
     d = proposal.to_dict()
     creation_snapshot = {k: v for k, v in d.items() if k not in _MUTABLE}
     creation_snapshot["status"] = "pending"
@@ -302,15 +380,27 @@ def _precondition_check(ctx: BridgeContext, proposal: Proposal) -> list[str]:
 #   close_session  — properties: what_i_learned, what_surprised_me,
 #                    what_to_pick_up, thread, source_instance
 #
-# record_insight (and every other commit target) is DELIBERATELY absent.
-# The Stack's tool handlers read only the named args they know; anything
-# else is dropped SILENTLY, not rejected (documented on branch
-# fix/tool-dispatch-unknown-key-rejection). Injecting source_instance into
-# a record_insight body would vanish without an error — the same fail-open
-# shape this module exists to close. For those targets the origin carrier
-# is line-one self-naming in the content body, asserted by tests, never by
-# a kwarg the server discards.
-PROVENANCE_PASSTHROUGH_TARGETS: frozenset[str] = frozenset({"handoff", "close_session"})
+# record_insight JOINED THIS SET 2026-08-28, and the reason it was absent is
+# worth keeping because it was correct at the time: "The Stack's tool handlers
+# read only the named args they know; anything else is dropped SILENTLY, not
+# rejected (documented on branch fix/tool-dispatch-unknown-key-rejection).
+# Injecting source_instance into a record_insight body would vanish without an
+# error — the same fail-open shape this module exists to close. For those targets
+# the origin carrier is line-one self-naming in the content body."
+#
+# Both halves of that blocker are now gone. record_insight DECLARES
+# source_instance and forwards it to storage, and the held branch's unknown-key
+# guard is merged, so an unrecognised kwarg raises instead of vanishing. The
+# line-one self-naming carve-out is retired with it: it was a convention, and
+# conventions are unenforceable — two sessions wrote byte-identical author lines
+# on 2026-08-28 and nothing in the record could tell them apart.
+#
+# What this buys: every Ring-2 proposal that commits — from Grok, from ChatGPT,
+# from any future substrate — now carries the PROPOSING seat's identity into the
+# chronicle instead of landing anonymous under the drain operator's session.
+PROVENANCE_PASSTHROUGH_TARGETS: frozenset[str] = frozenset(
+    {"handoff", "close_session", "record_insight"}
+)
 
 
 def build_commit_arguments(ctx: BridgeContext, proposal: Proposal) -> dict[str, Any]:
@@ -342,9 +432,7 @@ def build_commit_arguments(ctx: BridgeContext, proposal: Proposal) -> dict[str, 
 
     # Bridge → Stack layer translation
     if "layer" in commit_args:
-        commit_args["layer"] = ctx.layer_translation.get(
-            commit_args["layer"], commit_args["layer"]
-        )
+        commit_args["layer"] = ctx.layer_translation.get(commit_args["layer"], commit_args["layer"])
 
     # Provenance passthrough — envelope wins over anything already in the
     # args dict (a proposal file is reviewable state; the envelope's
@@ -356,7 +444,9 @@ def build_commit_arguments(ctx: BridgeContext, proposal: Proposal) -> dict[str, 
 
 
 def commit_pending_write(
-    ctx: BridgeContext, proposal_id: str, live: bool = False,
+    ctx: BridgeContext,
+    proposal_id: str,
+    live: bool = False,
 ) -> Proposal:
     """
     Execute an approved proposal against the Stack.
@@ -389,9 +479,7 @@ def commit_pending_write(
     # Live commit
     token = os.environ.get(ctx.bridge_rest_token_env, "")
     if not token:
-        raise RuntimeError(
-            f"{ctx.bridge_rest_token_env} not set — cannot commit without auth"
-        )
+        raise RuntimeError(f"{ctx.bridge_rest_token_env} not set — cannot commit without auth")
 
     try:
         response = httpx.post(
@@ -431,20 +519,27 @@ def commit_pending_write(
     if not ok:
         logger.error("CHAIN BROKEN after commit: %s", msg)
         append_audit_event(
-            ctx, AuditEvent.CHAIN_BROKEN,
-            proposal_id=proposal.proposal_id, actor="bridge",
+            ctx,
+            AuditEvent.CHAIN_BROKEN,
+            proposal_id=proposal.proposal_id,
+            actor="bridge",
             details={"message": msg},
         )
 
     logger.info(
         "Proposal[%s] committed (LIVE): %s → %s",
-        ctx.substrate, proposal.proposal_id, proposal.commit_target,
+        ctx.substrate,
+        proposal.proposal_id,
+        proposal.commit_target,
     )
     return proposal
 
 
 def reject_pending_write(
-    ctx: BridgeContext, proposal_id: str, reason: str, rejected_by: str = "Anthony",
+    ctx: BridgeContext,
+    proposal_id: str,
+    reason: str,
+    rejected_by: str = "Anthony",
 ) -> Proposal:
     """Mark a pending or needs_revision proposal as rejected."""
     proposal, path = _load_proposal(ctx, proposal_id)
@@ -456,8 +551,10 @@ def reject_pending_write(
     proposal.revision_notes = reason
     _save_proposal(proposal, path)
     append_audit_event(
-        ctx, AuditEvent.REJECTED,
-        proposal_id=proposal.proposal_id, actor=rejected_by,
+        ctx,
+        AuditEvent.REJECTED,
+        proposal_id=proposal.proposal_id,
+        actor=rejected_by,
         details={"reason": reason, "tool": proposal.tool},
     )
     logger.info("Proposal[%s] rejected: %s reason=%s", ctx.substrate, proposal.proposal_id, reason)
@@ -465,7 +562,10 @@ def reject_pending_write(
 
 
 def needs_revision_pending_write(
-    ctx: BridgeContext, proposal_id: str, notes: str, actor: str = "Anthony",
+    ctx: BridgeContext,
+    proposal_id: str,
+    notes: str,
+    actor: str = "Anthony",
 ) -> Proposal:
     """Send a proposal back for revision with notes."""
     proposal, path = _load_proposal(ctx, proposal_id)
@@ -475,8 +575,10 @@ def needs_revision_pending_write(
     proposal.revision_notes = notes
     _save_proposal(proposal, path)
     append_audit_event(
-        ctx, AuditEvent.NEEDS_REVISION,
-        proposal_id=proposal.proposal_id, actor=actor,
+        ctx,
+        AuditEvent.NEEDS_REVISION,
+        proposal_id=proposal.proposal_id,
+        actor=actor,
         details={"notes": notes, "tool": proposal.tool},
     )
     logger.info("Proposal[%s] needs revision: %s", ctx.substrate, proposal.proposal_id)
@@ -508,8 +610,12 @@ def get_proposal_by_id(ctx: BridgeContext, proposal_id: str) -> dict:
     # The hash covers all fields except audit_hash, with lifecycle mutables
     # restored to their creation-time values.
     _MUTABLE = {
-        "status", "reviewed_by", "reviewed_at", "revision_notes",
-        "commit_result", "audit_hash",
+        "status",
+        "reviewed_by",
+        "reviewed_at",
+        "revision_notes",
+        "commit_result",
+        "audit_hash",
     }
     d = proposal.to_dict()
     creation_snapshot = {k: v for k, v in d.items() if k not in _MUTABLE}
@@ -545,17 +651,19 @@ def list_pending_writes(ctx: BridgeContext, status: str | None = None) -> list[d
         try:
             d = json.loads(path.read_text())
             if status is None or d.get("status") == status:
-                results.append({
-                    "proposal_id": d.get("proposal_id"),
-                    "timestamp": d.get("timestamp"),
-                    "tool": d.get("tool"),
-                    "source_instance": d.get("source_instance"),
-                    "substrate": d.get("substrate", ctx.substrate),
-                    "status": d.get("status"),
-                    "risk_level": d.get("risk_level"),
-                    "proposed_layer": d.get("proposed_layer"),
-                    "file": path.name,
-                })
+                results.append(
+                    {
+                        "proposal_id": d.get("proposal_id"),
+                        "timestamp": d.get("timestamp"),
+                        "tool": d.get("tool"),
+                        "source_instance": d.get("source_instance"),
+                        "substrate": d.get("substrate", ctx.substrate),
+                        "status": d.get("status"),
+                        "risk_level": d.get("risk_level"),
+                        "proposed_layer": d.get("proposed_layer"),
+                        "file": path.name,
+                    }
+                )
         except (json.JSONDecodeError, OSError):
             logger.warning("Skipping unreadable proposal file: %s", path.name)
     return results

@@ -120,10 +120,26 @@ def validate_pending_write(proposal: Proposal) -> list[str]:
             "call compass_check before proposing"
         )
 
-    if proposal.compass_check_result == "PAUSE":
-        errors.append(
-            "compass_check returned PAUSE — do not propose until the concern is addressed"
-        )
+
+    # REFERENTIAL VALIDATION — a target that does not exist is a factual defect,
+    # not a risk judgement, so it is refused outright rather than escalated.
+    # e1939a23's message_id matched nothing anywhere and was accepted.
+    try:
+        from bridge_core.target_risk import referential_errors
+
+        errors.extend(referential_errors(proposal.tool, proposal.arguments))
+    except Exception as exc:  # noqa: BLE001
+        errors.append(f"referential check could not run ({type(exc).__name__}) — refusing rather than assuming the target exists")
+
+    # ONE normalisation function, imported by both substrates, so the enum lives
+    # in exactly one place. Refuses PAUSE, refuses any unrecognised value, and
+    # refuses a canonical meaning in a non-canonical spelling — so anything that
+    # reaches storage is exact and the commit gates cannot be evaded by casing.
+    from bridge_core.target_risk import compass_create_error
+
+    _compass_err = compass_create_error(proposal.compass_check_result)
+    if _compass_err:
+        errors.append(_compass_err)
 
     return errors
 
@@ -152,7 +168,16 @@ def create_pending_write(
     proposed_layer = args.get("layer", "hypothesis")
     has_receipt = bool(receipts or args.get("receipt_url"))
 
-    risk_level, risk_reasons = risk_classify(tool_name, args)
+    # Pass the compass value EXPLICITLY. pop_bridge_metadata has already stripped
+    # it from `args`, so classifying without it stored risk_level="low" for an
+    # exact-spelled WITNESS — commit still blocked (the compass check is
+    # independent of risk_level), but the proposal rendered GREEN/LOW in
+    # `bridge list-pending`: the same visual profile as e1939a23, the write this
+    # whole guard exists to stop. The interceptor computed CRITICAL correctly and
+    # then discarded it, because create_pending_write recomputes independently.
+    risk_level, risk_reasons = risk_classify(
+        tool_name, args, compass_check_result=compass_check_result
+    )
 
     prev_hash = get_last_audit_hash()
     proposal_id = str(uuid.uuid4())
@@ -316,6 +341,47 @@ def _precondition_check(proposal: Proposal) -> list[str]:
 
     if proposal.proposed_layer == "ground_truth" and not proposal.has_receipt:
         errors.append("ground_truth layer requires a receipt — cannot commit without one")
+
+    # TARGET-AWARE COMMIT GUARDS. Computed FRESH here and never written back:
+    # risk_level sits outside _MUTABLE and reclassifying a stored proposal in
+    # place would break its audit hash chain. Computing at commit is also what
+    # gates the proposals filed BEFORE target-risk existed — 249 of them, of
+    # which the worst carried risk_level=low.
+    try:
+        from bridge_core.target_risk import (
+            referential_errors as _ref_errors,
+            target_escalation_reasons as _target_reasons,
+        )
+
+        errors.extend(_ref_errors(proposal.tool, proposal.arguments))
+        _esc = _target_reasons(proposal.tool, proposal.arguments)
+        if _esc and proposal.compass_check_result != "PROCEED":
+            errors.append(
+                "target-aware escalation to CRITICAL requires compass_check_result="
+                "'PROCEED' before commit — " + "; ".join(_esc)
+            )
+    except Exception as exc:  # noqa: BLE001
+        errors.append(
+            f"target-aware commit guard could not run ({type(exc).__name__}) — "
+            "refusing rather than committing an unchecked write"
+        )
+
+    # WITNESS is the compass's HARD deny. It was handled nowhere in this codebase
+    # — it appeared once, in a comment on a type annotation — so PAUSE blocked
+    # and the stronger signal passed. A WITNESS proposal may be FILED (blocking
+    # at create would make honest disclosure the expensive path) but must not
+    # LAND until the compass has been re-run and returns PROCEED.
+    # Re-checked at COMMIT against the STORED value, independent of what validate
+    # did at create. Threat model: a proposal file edited on disk in between (the
+    # audit-hash check below catches tampering, this catches the semantics), and
+    # the 249 proposals filed before any of this existed. Before 2026-08-28 PAUSE
+    # was checked ONLY at create, so a mangled-case PAUSE that slipped creation
+    # was never caught again.
+    from bridge_core.target_risk import compass_commit_block_reason
+
+    _compass_block = compass_commit_block_reason(proposal.compass_check_result)
+    if _compass_block:
+        errors.append(_compass_block)
 
     # Verify the immutable creation-time fields have not been tampered with.
     # Lifecycle fields (status, reviewed_by, reviewed_at, revision_notes, commit_result)

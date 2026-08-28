@@ -80,7 +80,9 @@ def _contains_identity_claim(args: dict) -> bool:
     return any(pattern in text for pattern in _IDENTITY_CLAIM_PATTERNS)
 
 
-def risk_classify(tool_name: str, args: dict) -> tuple[RiskLevel, list[str]]:
+def risk_classify(
+    tool_name: str, args: dict, compass_check_result: object = None
+) -> tuple[RiskLevel, list[str]]:
     """Classify a Ring 2 proposal's risk. Returns (level, reasons)."""
     base = _TOOL_BASE_RISK.get(tool_name, RiskLevel.MEDIUM)
     level = base
@@ -112,6 +114,52 @@ def risk_classify(tool_name: str, args: dict) -> tuple[RiskLevel, list[str]]:
         if level.value in ("low", "medium"):
             level = RiskLevel.HIGH
         reasons.append(f"high intensity ({intensity}) on chronicle write")
+
+
+    # TARGET-AWARE ESCALATION — danger is not always a property of the verb.
+    # comms_acknowledge is genuinely cheap unless what it acknowledges is a
+    # consent record for the protected drawer; thread_touch is cheap unless its
+    # thread does not exist, in which case it manufactures a permanent reference
+    # to nothing. Proposal e1939a23 carried risk_level=low / reasons=['baseline
+    # for comms_acknowledge'] / compass=null and sat 55 days: a table keyed on
+    # the tool name cannot see what a write POINTS AT. Escalation lands on
+    # CRITICAL deliberately, because _precondition_check already refuses to
+    # commit a CRITICAL proposal whose compass is not PROCEED.
+    try:
+        from bridge_core.target_risk import target_escalation_reasons
+
+        target_reasons = target_escalation_reasons(tool_name, args)
+    except Exception as exc:  # noqa: BLE001
+        # A classifier that cannot check the target must NOT quietly pass it.
+        target_reasons = [f"target check unavailable ({type(exc).__name__}) — escalated"]
+    if target_reasons:
+        level = RiskLevel.CRITICAL
+        reasons.extend(target_reasons)
+
+    # WITNESS is the compass's HARD deny; PAUSE is the soft one. Before this,
+    # `WITNESS` appeared in this codebase exactly once — as a comment on a type
+    # annotation — and no branch anywhere handled it, so the softer signal
+    # blocked and the stronger one flowed straight through. Escalating (rather
+    # than refusing at create) keeps disclosure cheap: a seat that runs the
+    # compass and reports WITNESS must not fare worse than one that never
+    # called it. The commit guard is what actually stops it landing.
+    # The value must be passed EXPLICITLY: pop_bridge_metadata (dispatch.py:23-36)
+    # removes compass_check_result from `args` BEFORE this runs, so reading it
+    # from args here was dead code on every production path — reachable only by a
+    # unit test handing it a shape the bridge never produces. An adversarial
+    # review demonstrated that in both substrates. args is still consulted as a
+    # fallback so direct callers keep working, but the parameter is the real path.
+    from bridge_core.target_risk import normalize_compass
+
+    _compass = normalize_compass(
+        compass_check_result if compass_check_result is not None
+        else args.get("compass_check_result")
+    )
+    if _compass in ("WITNESS", "PAUSE", "UNRECOGNISED"):
+        level = RiskLevel.CRITICAL
+        reasons.append(
+            f"compass result {_compass} — normalised; any spelling of a deny is a deny"
+        )
 
     if not reasons:
         reasons.append(f"baseline for {tool_name}")

@@ -232,7 +232,9 @@ def _text(s: str, is_error: bool = False) -> dict:
 
 
 def governed_call(dispatch_ring1, name: str, args: dict, source_instance: str,
-                  *, session_id: str | None = None, substrate: str = SUBSTRATE) -> dict:
+                  *, session_id: str | None = None, substrate: str = SUBSTRATE,
+                  compass_check_result: str | None = None,
+                  compass_check_rationale: str | None = None) -> dict:
     """
     Route a tool call through the membrane.
 
@@ -256,7 +258,25 @@ def governed_call(dispatch_ring1, name: str, args: dict, source_instance: str,
         result = list_pending_writes(ctx, status=args.get("status", "pending"))
         return _text(json.dumps(result, indent=2, default=str))
 
-    res = intercept(ctx, name, args, source_instance, session_id=session_id)
+    # The compass fields must be threaded here. Without them this substrate had
+        # NO channel to populate proposal.compass_check_result — it was always
+        # None, so the entire compass-deny mechanism (before AND after the
+        # 2026-08-28 hardening) was structurally inert for antigravity. Not a
+        # regression; a third entry point the fix's stated scope never covered.
+        # Fallback to args mirrors the other substrates for direct callers.
+        res = intercept(
+            ctx, name, args, source_instance, session_id=session_id,
+            compass_check_result=(
+                compass_check_result
+                if compass_check_result is not None
+                else args.get("compass_check_result")
+            ),
+            compass_check_rationale=(
+                compass_check_rationale
+                if compass_check_rationale is not None
+                else args.get("compass_check_rationale")
+            ),
+        )
     if not res.allowed:
         return _text(res.error or f"'{name}' is not callable on the {SUBSTRATE} surface.", is_error=True)
     if res.ring == 1:

@@ -40,6 +40,172 @@ See `docs/implementation/CLAUDE_CONNECTOR.md`.
 
 ---
 
+## [1.21.0] - 2026-08-28
+
+### The record learns who wrote it
+
+`record_insight` accepted `source_instance`, discarded it, and returned
+`ok:true`. Verified by live probe: a write carrying the wholly fabricated
+argument `totally_made_up_argument` succeeded. Every seat following this house's
+own documented convention was attributing nothing while being told it worked.
+`session_id` is no substitute — every entry carries the BRIDGE's spiral session,
+identical for every writer on the machine.
+
+**The storage layer supported it the entire time.** `memory.py` splats
+`**metadata` into the insight dict and reads `metadata.get("source_instance")`
+for the supersession ledger's `by` field, which has therefore been writing empty
+strings. A comment at `memory.py:944` states the cause outright: *"metadata is
+dropped by the server before it reaches here."* The field was built. The wire was
+missing. Nobody could see it because the failure reported success.
+
+**How it surfaced.** Two Claude Code sessions on one machine began writing bodies
+opening with the byte-identical string `"HQ Mac Studio, claude-opus-5 seat"`.
+Nothing in the record could tell them apart — separable only by domain and
+timestamp, and only because their domains happened not to overlap. Caught by seat
+4/2 on a body check, verified from disk by 3/2, confirmed at the schema and by
+probe by HQ.
+
+**THE FIX WAS ALREADY WRITTEN.** Branch `fix/tool-dispatch-unknown-key-rejection`
+@ `af8714b` — *"wip(server): reject unknown tool params at dispatch — HELD FOR
+REVIEW"*, authored 2026-08-02, 101 lines plus a 221-line test file, never merged.
+HQ rediscovered the defect independently and hand-rolled a narrower allowlist
+before finding it: **SOP #12 with HQ as the instance.** The branch's version is
+merged instead of HQ's because it derives valid keys from the LIVE registry
+rather than a second hand-maintained copy, carries a semantic alias map, and
+names the damage this class does — a seat passed `return_claim_id` to
+`recall_insights`, got silence, and wrote a false `ground_truth` conclusion from
+that silence which had to be superseded.
+
+That branch found this same defect, tolerated it to avoid breaking a live
+surface, and wrote: *"the bridge believes it is stamping grant-attribution onto
+the chronicle entry for inspect_claim traceability and it silently isn't … Report
+this forward; do not silently widen it to 'fixed.'"* It was reported forward. It
+is now actually fixed, and `source_instance` has graduated out of that tolerance
+list into a declared property.
+
+**What changed:**
+- `source_instance` is a declared property of `record_insight`, forwarded to
+  storage, stored as a first-class key. Never defaulted to `"unknown"` — that is
+  the 159-consumed-by-nobody shape one layer over; absent stays absent.
+- Unknown arguments RAISE for `record_insight` and `recall_insights`, with
+  nearest-match and cross-tool-owner hints.
+- `record_insight` joins `PROVENANCE_PASSTHROUGH_TARGETS`, so **every Ring-2
+  proposal that commits now carries the PROPOSING seat's identity** — from Grok,
+  from ChatGPT, from any future substrate — instead of landing anonymous under
+  the drain operator's session. The line-one self-naming carve-out is retired
+  with it: a convention is not enforceable, and this one demonstrably failed.
+- Two tripwire tests fired exactly as designed and are re-armed on the inverted
+  invariant. One named its own remedy in its failure message.
+
+**And it is visible at the door.** Anthony, on being shown the fix: *"i agree
+with both but it must be visable at heartbeat."* A fix nobody can see from the
+door is indistinguishable from a fix nobody made — which is how this house
+accumulated its list of written-but-unconnected repairs, one of which this
+release merges. `sovereign_stack/attribution.py` is new and renders as
+`attribution` on the heartbeat: the measured share of the recent record that can
+name its own author, the split between `source_instance` and the pre-existing
+`vantage` field, and the cutover timestamp before which no entry COULD carry a
+writer — so an anonymous entry from before it reads as history, not negligence.
+The scan is bounded and ordered by modification time, because the first version
+walked domains alphabetically and hit its cap before reaching the recent ones: a
+"recent window" whose sample was selected by filename.
+
+Fails closed. An unmeasurable census reports `unmeasured` with NO rate, because a
+0% manufactured by a failed read is the same lie the block exists to expose.
+
+---
+
+## [1.20.0] - 2026-08-28
+
+### Risk learns to look at what a write POINTS AT
+
+Proposal `e1939a23` sat pending for 55 days. A `comms_acknowledge` whose
+`message_id` matched nothing in `~/.sovereign/comms/` or anywhere in the
+chronicle — a message that never existed — asserting that Anthony had granted
+explicit consent to open PROTECTED RECORDS. Committing it would have written a
+durable, unresolvable record of a consent never given, about the most sensitive
+surface in the house.
+
+It carried `risk_level: low`, `risk_reasons: ['baseline for comms_acknowledge']`,
+`compass_check_result: null`.
+
+**Nothing had malfunctioned.** `risk_classify` read the TOOL NAME, found
+`comms_acknowledge` in a baseline table at LOW, and stopped. The compass is
+required only at CRITICAL, so a LOW write never owed one. Measured across all
+249 proposals in all three queues, null compass is **0/9 at critical**, 8/15 at
+high, 70/104 at medium, 120/121 at low: the gate is 100% present exactly where
+the code demands it. The defect was never a gate that failed to run. It was a
+classifier that could not see the target.
+
+**Danger is not always a property of the verb.** `comms_acknowledge` is genuinely
+cheap — unless what it acknowledges is a consent record for the protected drawer.
+`thread_touch` is cheap — unless its thread does not exist, in which case it
+manufactures a permanent reference to nothing. The same blindness appeared three
+separate times in one night: a bookkeeping set inferring SAFETY from tool name, a
+risk table inferring RISK from tool name, and ack tools that never checked their
+target existed at all.
+
+`bridge_core/target_risk.py` is new, and is the ONE implementation both
+substrates call — the openai bridge dispatches through a separate legacy module,
+so a fix landing in `bridge_core` alone would leave half the traffic
+tool-name-classified while the changelog claimed otherwise.
+
+Three escalation triggers, all landing on CRITICAL:
+- **MISSING** — store readable, id definitively absent. Also a hard validation
+  ERROR: a target that does not exist is a factual defect, not a risk judgement.
+- **UNRESOLVABLE** — no resolver, or the store could not be read. We cannot prove
+  the target exists, so a human and the compass decide. "Cannot resolve" must
+  never render as "fine", and equally must never render as "missing".
+- **SENSITIVE** — the target is a designated protected record (by REFERENCE
+  against the designation index, which carries ids and no content-bearing keys —
+  never by reading protected material), or the proposal's own text asserts
+  consent, protected access, or standing law.
+
+CRITICAL is reused deliberately instead of inventing a new blocking mechanism,
+because `_precondition_check` **already** refuses to commit a CRITICAL proposal
+whose compass is not PROCEED. Escalation therefore gates the 249 proposals
+already on disk as well as every future one, through machinery that was there all
+along. Guards are computed FRESH at commit and never written back: `risk_level`
+sits outside `_MUTABLE`, and reclassifying a stored proposal in place would break
+its audit hash chain. Live effect measured over all 249: 14 hard-blocked, 11
+WITNESS-blocked, 2 escalated, and the on-disk risk distribution unchanged.
+
+**`WITNESS` is handled at all now.** It is the compass's HARD deny and `PAUSE`
+the soft one, yet `WITNESS` appeared in this entire codebase exactly once — as a
+comment on a type annotation — so the softer signal blocked and the stronger one
+flowed straight through. It now escalates at create and blocks at commit.
+Escalating rather than refusing at filing time is deliberate: three pending
+proposals had run the compass, received WITNESS, disclosed it, and argued their
+bounded case. **Disclosure must never be the more expensive path** than never
+calling the compass at all.
+
+**BEHAVIOUR CHANGE ON LIVE PROPOSALS, stated plainly.** Three proposals pending
+today carry `compass_check_result: WITNESS` (two openai `propose_insight`, one
+grok `propose_learning`, all classified medium). Under this rule they can no
+longer commit as filed, and three already-committed WITNESS items would not pass
+it either. That is intended — WITNESS is the compass's hard-deny class — but it
+is a change to live state and not merely to new writes. Two of the three are on
+HQ's own recommended-APPROVE list from the same night's backlog review, so the
+rule costs HQ two of its own recommendations. The remedy is cheap and is part of
+why the rule looks right: those seats received WITNESS for the BROADER
+chronicle-sweep action, which carried identity/consciousness wording, not for the
+bounded entry they actually filed. Running `compass_check` against the narrow
+entry is the correct question and would plausibly return PROCEED. Because a filed
+proposal cannot be edited without breaking its audit hash chain, the path is to
+RE-FILE rather than amend.
+
+Resolvers use `os.listdir`, which raises, never `Path.glob`, which swallows
+`PermissionError` and yields nothing — that would make a locked store look empty
+and turn a permissions problem into a factual claim about the record. That exact
+bug shipped in `gate_census.py` hours earlier and was caught by a negative test,
+which is why the negative tests here were written first.
+
+Acceptance criteria for this change were set by the Fable seat (3/2) *before* it
+was built, and one of them caught a real half-fix: the commit guard landed in
+`bridge_core` and silently failed to land in the openai legacy path.
+
+---
+
 ## [1.19.0] - 2026-08-28
 
 ### The write side gets an aperture too

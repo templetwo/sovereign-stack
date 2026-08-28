@@ -106,7 +106,7 @@ def intercept(
         return InterceptResult(allowed=True, ring=1)
 
     # Ring 2 — the membrane
-    risk_level, risk_reasons = risk_classify(tool_name, args)
+    risk_level, risk_reasons = risk_classify(tool_name, args, compass_check_result=compass_check_result)
 
     try:
         proposal = create_pending_write(
@@ -149,7 +149,7 @@ def classify_tool(ctx: BridgeContext, tool_name: str, args: dict | None = None) 
     if tool_name in ctx.ring_1_tools:
         return {"tool": tool_name, "ring": 1}
     if tool_name in ctx.ring_2_tools:
-        risk_level, risk_reasons = risk_classify(tool_name, args)
+        risk_level, risk_reasons = risk_classify(tool_name, args, compass_check_result=compass_check_result)
         return {
             "tool": tool_name,
             "ring": 2,

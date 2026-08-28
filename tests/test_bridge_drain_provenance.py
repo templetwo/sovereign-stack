@@ -166,16 +166,27 @@ def test_envelope_wins_over_stale_source_instance_in_arguments(ctx, captured_pos
     assert "some-other-seat-not-the-proposer" not in str(body)
 
 
-def test_record_insight_commit_body_is_not_injected(ctx, captured_posts):
-    """record_insight is DELIBERATELY outside the passthrough set.
+def test_record_insight_commit_body_carries_the_proposer(ctx, captured_posts):
+    """record_insight JOINED the passthrough set on 2026-08-28.
 
-    Its Stack handler reads only schema-named args and silently drops the
-    rest (documented on branch fix/tool-dispatch-unknown-key-rejection), so
-    an injected source_instance kwarg would vanish without error. The origin
-    carrier there is line-one self-naming in the content body — which this
-    test's payload demonstrates and asserts.
+    This test previously asserted the opposite, and its reasoning was correct
+    at the time: the Stack handler read only schema-named args and silently
+    dropped the rest, so an injected source_instance would vanish without error
+    and the origin carrier had to be line-one self-naming in the body.
+
+    Both halves of that blocker are gone. record_insight declares
+    source_instance and forwards it to storage, and the unknown-key guard from
+    fix/tool-dispatch-unknown-key-rejection is merged, so an unrecognised kwarg
+    now RAISES instead of vanishing. So the drain can carry real provenance, and
+    the convention it replaces was never enforceable: two sessions wrote
+    byte-identical author lines the same day and nothing in the record could
+    separate them.
+
+    What this asserts is the payoff: a proposal from ANY substrate lands in the
+    chronicle attributed to the seat that proposed it, not anonymous under the
+    drain operator.
     """
-    content = f"{PROPOSER}: line-one self-naming is the origin carrier here"
+    content = f"{PROPOSER}: the envelope now carries the author, not the body"
     _drain(
         ctx,
         "propose_insight",
@@ -184,8 +195,11 @@ def test_record_insight_commit_body_is_not_injected(ctx, captured_posts):
 
     body = captured_posts[0]["json"]
     assert body["tool"] == "record_insight"
-    # No silently-dropped kwargs, ever.
-    assert "source_instance" not in body["arguments"]
+    # The PROPOSER's identity travels; the drain operator's never does.
+    assert body["arguments"]["source_instance"] == PROPOSER
+    # session_id still does NOT travel — the Stack stamps its own spiral session
+    # server-side and there is no parameter to inject it into. A made-up kwarg
+    # would now raise rather than vanish, which is the point.
     assert "session_id" not in body["arguments"]
     # Layer translation still applies (bridge "reflection" → Stack "hypothesis").
     assert body["arguments"]["layer"] == "hypothesis"
@@ -241,14 +255,20 @@ def test_passthrough_targets_match_server_input_schemas():
         nxt = text.find('name="', start + len(marker))
         return text[start : nxt if nxt != -1 else len(text)]
 
-    assert {"handoff", "close_session"} == PROVENANCE_PASSTHROUGH_TARGETS
+    assert {"handoff", "close_session", "record_insight"} == PROVENANCE_PASSTHROUGH_TARGETS
     for target in sorted(PROVENANCE_PASSTHROUGH_TARGETS):
         assert '"source_instance"' in schema_block(target), (
             f"{target} no longer declares source_instance in server.py — "
             "the passthrough set is stale"
         )
-    assert '"source_instance"' not in schema_block("record_insight"), (
-        "record_insight now declares source_instance in server.py — "
-        "add it to PROVENANCE_PASSTHROUGH_TARGETS and drop the line-one "
-        "self-naming carve-out"
+    # This assertion used to be inverted — it required record_insight NOT to
+    # declare source_instance, and its failure message named the exact remedy:
+    # "add it to PROVENANCE_PASSTHROUGH_TARGETS and drop the line-one
+    # self-naming carve-out". It fired on 2026-08-28 when the declaration
+    # landed, which is a tripwire doing precisely its job. Now inverted to guard
+    # the new invariant: the declaration must not silently disappear again.
+    assert '"source_instance"' in schema_block("record_insight"), (
+        "record_insight no longer declares source_instance — the chronicle has "
+        "gone back to storing anonymous entries, and PROVENANCE_PASSTHROUGH_TARGETS "
+        "is now injecting a kwarg the server will drop"
     )
