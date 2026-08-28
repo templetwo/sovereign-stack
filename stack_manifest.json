@@ -1,9 +1,9 @@
 {
   "manifest_schema_version": 1,
   "version": "1.16.0",
-  "source_commit": "f6add0777299304d6061e6348130656c2c982bcb",
+  "source_commit": "39b5aedcdb7371eb863bd8f9bdd5656a0b62b248",
   "working_tree_dirty": true,
-  "tools_count": 97,
+  "tools_count": 98,
   "tools": [
     "agent_reflect",
     "archive_exchange",
@@ -46,6 +46,7 @@
     "handoff",
     "handoff_acted_on",
     "handoff_acted_on_records",
+    "handoff_archaeology",
     "heartbeat",
     "inspect_claim",
     "link_threads",
@@ -103,5 +104,5 @@
     "watch_status",
     "where_did_i_leave_off"
   ],
-  "tests_collected": 2274
+  "tests_collected": 2294
 }

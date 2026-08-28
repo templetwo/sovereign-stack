@@ -125,6 +125,14 @@ BASE_TOOLS: frozenset[str] = frozenset(
         "thread_get_touches",
         "handoff_acted_on",
         "handoff_acted_on_records",
+        # 2026-08-27: read-only archaeology over the same store its two
+        # siblings above already reach at BASE. Classified deliberately, per
+        # the drift guard: step-up here would put the WRITE path (`handoff`,
+        # BASE) at a lower bar than the READ path, which is not conservatism,
+        # it is inconsistency. Recovers 286 consumed handoffs that no tool
+        # could return; adds no capability the connector did not already have
+        # over this store.
+        "handoff_archaeology",
         "reflexive_surface",
         "prior_for_turn",
         "triage_threads",

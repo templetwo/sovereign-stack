@@ -1572,6 +1572,36 @@ async def list_tools():
                 },
             ),
             Tool(
+                name="handoff_archaeology",
+                description=(
+                    "Read handoffs that boot has already consumed — the archive, not the queue. "
+                    "where_did_i_leave_off surfaces an unconsumed handoff ONCE and then retires it; "
+                    "everything retired becomes unreachable through every other path. Measured "
+                    "2026-08-27: 287 handoffs on disk, 1 reachable. Returns a coverage envelope "
+                    "(total/returned/truncated/order), never a bare list, so a capped answer cannot "
+                    "read as a complete one."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "limit": {
+                            "type": "integer",
+                            "default": 50,
+                            "description": "Max records returned. `total` always states the true count regardless.",
+                        },
+                        "thread": {
+                            "type": "string",
+                            "description": "Filter to one thread. Narrows `total` as well as the page.",
+                        },
+                        "include_consumed": {
+                            "type": "boolean",
+                            "default": True,
+                            "description": "False restricts to the still-pending queue (what boot would show).",
+                        },
+                    },
+                },
+            ),
+            Tool(
                 name="reflexive_surface",
                 description=(
                     "Surface the most relevant open threads, handoffs, mistakes, and insights for the current context. "
@@ -1963,6 +1993,7 @@ TOOL_CATEGORIES: dict[str, str] = {
     "thread_get_touches": "threads",
     "handoff_acted_on": "witness",
     "handoff_acted_on_records": "witness",
+    "handoff_archaeology": "witness",
     # Reflexive surfacing + triage
     "reflexive_surface": "reflexive",
     "prior_for_turn": "reflexive",
@@ -2126,6 +2157,7 @@ TOOL_INTENTS: dict[str, str] = {
     "comms_get_acks": "read",
     "thread_get_touches": "read",
     "handoff_acted_on_records": "read",
+    "handoff_archaeology": "read",
     "get_growth_summary": "read",
     "get_unresolved_uncertainties": "read",
     "get_pending_experiments": "read",
@@ -3642,6 +3674,32 @@ Phase: {spiral_state.current_phase.value}
         return [
             TextContent(
                 type="text", text=json.dumps({"count": len(records), "records": records}, indent=2)
+            )
+        ]
+
+    if name == "handoff_archaeology":
+        limit = int(arguments.get("limit", 50))
+        thread = arguments.get("thread")
+        include_consumed = arguments.get("include_consumed", True)
+        records = handoff_engine.all(include_consumed=include_consumed, thread=thread, limit=limit)
+        total = handoff_engine.all_count(include_consumed=include_consumed, thread=thread)
+        return [
+            TextContent(
+                type="text",
+                text=json.dumps(
+                    {
+                        # total is the TRUE count under the same filters, never
+                        # len(records). The sibling tool reports len() of an
+                        # already-sliced list as "count"; that is the shape this
+                        # envelope exists to not repeat.
+                        "total": total,
+                        "returned": len(records),
+                        "truncated": len(records) < total,
+                        "order": "newest_first",
+                        "records": records,
+                    },
+                    indent=2,
+                ),
             )
         ]
 
