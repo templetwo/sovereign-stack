@@ -40,6 +40,73 @@ See `docs/implementation/CLAUDE_CONNECTOR.md`.
 
 ---
 
+## [1.19.0] - 2026-08-28
+
+### The write side gets an aperture too
+
+`aperture-v1` answers "what exists behind the surfaces you are about to READ."
+It says nothing about the mirror image: **what a seat WROTE that never landed.**
+
+Both bridges let a remote seat file Ring-2 proposals for human ratification.
+Measured tonight: **123 pending across two routable queues, oldest 96 days**, and
+no surface anywhere reported it — not `/snapshot.json` (10 keys, none about
+proposals), not the heartbeat, not the aperture. From the proposing seat's side
+a filed proposal and an unread one are indistinguishable, which is this house's
+oldest failure class pointed at the write path instead of the read path.
+
+`sovereign_stack.gate_census` is new, and renders as `gate` on the heartbeat.
+
+**It never becomes a second source of truth.** Counts come from
+`bridge_core.cli._SubstrateOps` — the exact dispatcher the `bridge` console
+uses. The two substrates run genuinely different backends (openai dispatches to
+the legacy `openai_bridge` module, grok to `bridge_core` with a registered
+context), so re-deriving counts here would silently diverge from the console
+Anthony actually drains from. `test_census_equals_console_per_substrate` asserts
+the equality; that test is the reason to believe the numbers.
+
+**Status is an ownership map, not one number.** `pending` waits on Anthony,
+`approved` on the commit step (HQ's lane — 9 have waited 95 days there),
+`needs_revision` on nobody, because it is a **terminal state**:
+`approve_pending_write()` requires `pending` and no code path returns a proposal
+to it, so a revised proposal can only ever be rejected, and its notes are
+written where the proposing seat cannot read them. Statuses are read from what
+is present, never from a fixed key set.
+
+**Burden is split by write-kind.** 123 pending is only **65 claim-bearing**; the
+rest are acks, touches and session closes that assert nothing. The headline
+overstates the human's review load by roughly 2x. The excluded set is
+**accounting only and says so on its face** — it is explicitly NOT a safety tier
+and NOT a drain list. `comms_acknowledge` is in that set, and the single most
+dangerous item in the backlog was a `comms_acknowledge` that would have written a
+fabricated consent record for opening the protected drawer, against a message id
+that never existed, because `comms.acknowledge()` performs zero existence
+validation. Auto-commit would require three predicates verified by reading the
+commit path — claim-free, non-destructive, referentially validated — and as of
+today none of those four tools passes all three.
+
+**Discovery is by SHAPE, not by name.** The first version globbed `*_bridge` and
+could not see `~/.sovereign/antigravity_connector/pending_writes` at all: two
+real proposals, 55 days old, rendering as **absent** rather than as unreadable. A
+name-based glob defeats the fail-closed rule from outside the rule. Any directory
+holding a `pending_writes/` is now a queue, and a regression test asserts every
+queue on the live disk appears in the census. A queue with no console route gets
+a labelled existence floor rather than a blank — and that floor is counted with
+`os.listdir`, which raises, after `Path.glob` was found to swallow the
+`PermissionError` and report a locked queue as zero files.
+
+**`?as=` is self-declared and grants nothing.** The heartbeat is
+unauthenticated, so caller identity is never inferred — sniffing a User-Agent
+would be a guess rendered as knowledge. The value is length-capped and
+charset-whitelisted, an unrecognised name stays "declared but unmatched", and
+the block says on its own face that it is unverified. Counts, dates and tool
+names only; no proposal bodies, no domains, no `source_instance` strings.
+
+Credit where the corrections came from: the Fable seat (3/2) found the invisible
+third queue and forced the accounting-vs-safety distinction; a Grok seat named
+the review-process bias that reshaped the adjudication rubric.
+
+---
+
 ## [1.18.0] - 2026-08-28
 
 ### The aperture reaches the door that arriving seats actually call
