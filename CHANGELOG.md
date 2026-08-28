@@ -40,6 +40,48 @@ See `docs/implementation/CLAUDE_CONNECTOR.md`.
 
 ---
 
+## [1.17.0] - 2026-08-28
+
+### `handoff_archaeology` — the 286 records that were preserved and unreachable
+
+`HandoffEngine.all()` had sat at `handoff.py:255` since inception with the
+docstring "All handoffs (for archaeology), newest first" and **zero callers
+anywhere in the repository**. 287 handoffs on disk; exactly one — the
+unconsumed head — reachable through any tool. The other 286 were notes written
+by instances that knew they were ending, preserved perfectly, returnable to
+nobody. The fix was written and never connected.
+
+Now wired, with a coverage envelope rather than a bare list: `total` /
+`returned` / `truncated` / `order`. The sibling `handoff_acted_on_records`
+returns `{"count": len(records)}` where `records` is already sliced — `count`
+names the returned page, not the total. Wiring `all()` in that idiom would have
+recovered 286 records and added a new silent truncation in the same commit.
+`all_count()` is added alongside, mirroring `unconsumed_count()` (2026-08-01)
+for the same reason one layer over.
+
+`order: "newest_first"` is the smallest available step toward selection
+honesty. The envelope can state how much it withheld; the basis on which the
+survivors were chosen is the half not yet built.
+
+Classified BASE for the Claude connector, matching `handoff_acted_on_records`
+and `handoff` — step-up would have put the WRITE path at a lower bar than the
+READ path over the same store. **Not** added to `CANONICAL_RING_1`; bridge
+exposure is a separate governed decision.
+
+Nine tests, written red before the fix and then shown to reject the sibling's
+exact bug when it was deliberately reinjected. `src/sovereign_stack/handoff.py`,
+`src/sovereign_stack/server.py`, `clients/claude_bridge/tiers.py`,
+`tests/test_handoff_archaeology.py`.
+
+### Housekeeping
+
+`clients/grok-hq-co-pilot/` removed from tracking and gitignored — an
+over-broad `git add -A <dir>` published 14 unreviewed files, including seven
+Ring-2 invention-disclosure drafts, to this public repo for ~15 minutes on
+2026-08-28. Anthony ruled nothing in them sensitive; history left intact at his
+call. Filed to The Ground as a catch: three gates passed on that commit and
+none of them asks whether the author read what he staged.
+
 ## [1.16.0] - 2026-08-26
 
 Self-description and reachability brought under the same discipline the
