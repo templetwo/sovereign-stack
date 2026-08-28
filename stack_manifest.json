@@ -1,7 +1,7 @@
 {
   "manifest_schema_version": 1,
-  "version": "1.16.0",
-  "source_commit": "39b5aedcdb7371eb863bd8f9bdd5656a0b62b248",
+  "version": "1.17.0",
+  "source_commit": "613c92a192279036739a9e6d29dd2363eb3709d7",
   "working_tree_dirty": true,
   "tools_count": 98,
   "tools": [
