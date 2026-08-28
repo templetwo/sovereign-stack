@@ -278,6 +278,18 @@ def run_all_doors(root: Path) -> dict[str, str]:
 # is "before == after modulo the intended additions".
 _ASOF_BLOCK = re.compile(r"━━━ AS OF ━━━\n(?:.*\n)*?\n", re.MULTILINE)
 
+# The APERTURE block is an INTENDED ADDITION, stripped exactly as AS OF is.
+#
+# The goldens under tests/goldens/phase4/ are not "expected output" — they are a
+# pristine pre-refactor snapshot, captured from untouched main-HEAD, proving the
+# Phase 4 boot refactor changed nothing. Regenerating them to accommodate a new
+# section would DESTROY THAT PROOF. The contract this suite enforces is
+# "before == after modulo the intended additions", so a deliberate new block
+# joins the strip list rather than rewriting the evidence.
+#
+# Added 2026-08-28 with the aperture (what the door is NOT showing you).
+_APERTURE_BLOCK = re.compile(r"━━━ APERTURE \([^)]*\) ━━━\n(?:.*\n)*?\n", re.MULTILINE)
+
 _SUBS = [
     # Spiral status volatile values (live counters + wall-clock duration + the
     # fresh session id).
@@ -298,7 +310,7 @@ _SUBS = [
 
 
 def normalize(text: str, root: Path | None = None) -> str:
-    """Strip the as-of block and mask run-volatile tokens.
+    """Strip the intended added blocks (as-of, aperture) and mask run-volatile tokens.
 
     Applied identically to the pristine goldens and the refactored output, so
     every stable byte (section headers, ordering, static prose, entry content,
@@ -306,6 +318,7 @@ def normalize(text: str, root: Path | None = None) -> str:
     per-run tmp sovereign path that leaks into the lineage footer.
     """
     text = _ASOF_BLOCK.sub("", text)
+    text = _APERTURE_BLOCK.sub("", text)
     if root is not None:
         text = text.replace(str(root), "<ROOT>")
     for pat, repl in _SUBS:

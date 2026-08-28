@@ -1,7 +1,7 @@
 {
   "manifest_schema_version": 1,
-  "version": "1.17.0",
-  "source_commit": "613c92a192279036739a9e6d29dd2363eb3709d7",
+  "version": "1.18.0",
+  "source_commit": "bf0864dd7c6432197e95463dc8139d8ffca075a7",
   "working_tree_dirty": true,
   "tools_count": 98,
   "tools": [
@@ -104,5 +104,5 @@
     "watch_status",
     "where_did_i_leave_off"
   ],
-  "tests_collected": 2294
+  "tests_collected": 2305
 }
