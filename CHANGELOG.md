@@ -40,6 +40,54 @@ See `docs/implementation/CLAUDE_CONNECTOR.md`.
 
 ---
 
+## [1.18.0] - 2026-08-28
+
+### The aperture reaches the door that arriving seats actually call
+
+`aperture-v1` shipped hours earlier on `GET /api/heartbeat`. Within the hour
+the ChatGPT seat — exercising this stack from the OpenAI bridge, the outside
+door HQ structurally cannot occupy — reported that **no heartbeat tool is
+exposed to it**. Verified: a `heartbeat` tool exists in the registry but is not
+in `CANONICAL_RING_1`, and none of the boot tools a bridge seat *can* call
+carried the aperture. The surface built to stop an arriving seat mistaking a
+projection for the corpus was reachable only by seats that already had a shell
+— which is every seat except the ones whose misattribution earned it.
+
+`sovereign_stack.aperture` is new: one implementation, measuring the stack's
+own store, imported by the bridge and rendered by `where_did_i_leave_off`. Two
+aperture implementations could disagree about what is being withheld, which is
+this house's disease with a second head.
+
+The boot door now carries an `━━━ APERTURE (aperture-v1) ━━━` block beside
+`AS OF` — the same law one axis over. Nothing becomes "current" without an
+as-of receipt; nothing becomes "the corpus" without a coverage receipt. It
+states, per surface, what exists on disk against what this door hands you, what
+no parameter can reach (currently 73 resolved threads), the warning that
+`recall_insights` defaults to recency rather than relevance, and the caution
+that coverage honesty is not selection honesty.
+
+**Fails closed.** An unmeasurable aperture renders `unmeasured` with NO counts.
+Zeros from a failed read would be an absence manufactured by the instrument and
+served as a fact — the exact class the block exists to make impossible. Proven
+by injecting a zeros-emitting failure path and watching the test reject it.
+
+### The golden contract held, and was right to
+
+`test_all_doors_byte_identical_modulo_as_of` failed on this change. The
+goldens under `tests/goldens/phase4/` are **not** expected output — they are a
+pristine pre-refactor snapshot proving the Phase 4 boot refactor changed
+nothing. Regenerating them to accommodate a new section would have destroyed
+that proof. The contract is "before == after modulo the intended additions", so
+`APERTURE` joined the strip list beside `AS OF` and **no golden file was
+touched**.
+
+Open and deliberately not decided here: whether the aperture belongs on the
+foyer (`arrive`) and gentle (`arrive_lineage`) doors too. The gentle door is
+where input-gated seats arrive — arguably the ones the cap hurt most — but it
+is deliberately minimal, and widening it is a design call, not a diff.
+
+8 tests, red before the implementation. Full suite 2292 passed.
+
 ## [1.17.0] - 2026-08-28
 
 ### `handoff_archaeology` — the 286 records that were preserved and unreachable

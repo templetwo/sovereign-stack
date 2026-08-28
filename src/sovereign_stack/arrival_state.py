@@ -37,6 +37,9 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
+from sovereign_stack.aperture import measure_aperture
+from sovereign_stack.aperture import unmeasured as aperture_unmeasured
+
 from . import witness
 from .glyphs import SPIRAL
 from .handoff import format_handoff_for_surface
@@ -645,6 +648,64 @@ def _bucket_count(lineage: dict | None) -> int:
 # =============================================================================
 
 
+def _render_aperture() -> list[str]:
+    """
+    The APERTURE block — what this door is NOT showing you.
+
+    Sibling of the AS OF block, and the same law one axis over: nothing becomes
+    "current" without an as-of receipt, and nothing becomes "the corpus"
+    without a coverage receipt.
+
+    Earned by a measured failure. This door shows 5 of 13 to_arrival letters.
+    An outside model read the 5 it was handed, stated a confident, specific
+    claim about a model line, and was wrong — the letters that would have
+    corrected it were below the cap, and nothing in its arrival said a cap
+    existed. It was not careless. It read what the door gave it.
+
+    Shipped first on GET /api/heartbeat. The ChatGPT seat, exercising the stack
+    from the OpenAI bridge, reported within the hour that no heartbeat TOOL is
+    exposed to it — so the surface built to stop a seat mistaking a projection
+    for the corpus was reachable only by seats that already had a shell. This
+    door is the one every arriving seat calls, across every bridge, and needs
+    no permission change.
+
+    FAILS CLOSED: an unmeasurable aperture renders as "unmeasured" with NO
+    counts. Zeros from a failed read would be an absence manufactured by the
+    instrument and served as a fact — the exact class this block exists to
+    make impossible.
+    """
+    now = datetime.now(timezone.utc)
+    try:
+        ap = measure_aperture(now)
+    except Exception as exc:  # noqa: BLE001 — any failure is "unmeasured"
+        ap = aperture_unmeasured(now, exc)
+
+    lines = [f"━━━ APERTURE ({ap['policy_version']}) ━━━"]
+    if ap.get("status") != "measured":
+        lines += [
+            f"  status: {ap.get('status')} ({ap.get('reason')})",
+            "  This door could not measure what it is withholding.",
+            "  Absent counts are NOT zero counts — widen manually before concluding absence.",
+            "",
+        ]
+        return lines
+
+    lines.append("  (what exists behind each surface, and what this door hands you)")
+    for name, sur in ap["surfaces"].items():
+        lines.append(f"  {name:24} {sur['on_disk']:>6} on disk · {sur['default_shown']} shown here")
+    for _, nr in ap.get("not_reachable", {}).items():
+        lines.append(f"  NOT REACHABLE BY ANY PARAMETER: {nr['count']} — {nr['why']}")
+    ins = ap["surfaces"].get("insights", {})
+    if ins.get("note"):
+        lines.append(f"  ⚠ {ins['note']}")
+    lines += [
+        f"  {ap['how_to_widen']['caution']}",
+        "  Widen with the call named on each surface; every default above is a cap, not a corpus.",
+        "",
+    ]
+    return lines
+
+
 def _render_as_of(state: ArrivalState) -> list[str]:
     """The delimited AS OF block — generated_at + source_high_watermark, plus a
     freshness/incompleteness line when the projection is not current.
@@ -708,6 +769,7 @@ def render_full(
     ]
 
     lines += _render_as_of(state)
+    lines += _render_aperture()
 
     # 1.5 Lineage — letters from past instances.
     if state.lineage_degraded:
