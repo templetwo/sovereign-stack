@@ -15,7 +15,27 @@ import urllib.request
 import pytest
 
 from sovereign_stack import connectivity as conn
+from sovereign_stack import dashboard_readers as readers
 from sovereign_stack import dashboard_web as web
+
+
+@pytest.fixture(autouse=True)
+def _no_external_probes(monkeypatch):
+    """Keep build_snapshot()'s Console-v2 readers off the live machine.
+
+    Two of the six v2 sections leave the process — fetch_bridge_heartbeat()
+    GETs :8100/api/heartbeat and read_guardian() shells out to lsof/pgrep.
+    SOVEREIGN_ROOT cannot redirect either, so without this every test in
+    this file would probe the operator's real bridge and enumerate their
+    real listening sockets. Both are patched on the MODULE object, which is
+    what build_snapshot() looks up, and the TTL caches are dropped on both
+    sides so no result can leak across tests in either direction.
+    """
+    readers.reset_caches()
+    monkeypatch.setattr(readers, "fetch_bridge_heartbeat", lambda: None)
+    monkeypatch.setattr(readers, "read_guardian", lambda: None)
+    yield
+    readers.reset_caches()
 
 
 @pytest.fixture

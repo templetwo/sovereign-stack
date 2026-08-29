@@ -12,6 +12,14 @@
      against a real backend rather than fabricating success. -->
 <meta name="csrf-token" content="">
 <title>Sovereign Stack — Operations Console</title>
+<!-- Console v2 asks for Space Grotesk + JetBrains Mono from Google Fonts.
+     style.css ALSO keeps the v4 base64 @font-face bundle (Space Grotesk +
+     IBM Plex Mono) — the page must still render correctly with no network,
+     which is why the font stacks list the bundled families as the first
+     fallback rather than jumping straight to a system font. -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap">
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
@@ -29,7 +37,7 @@
         <span class="brand-mark" aria-hidden="true">†⟡†</span>
         <div>
           <div class="brand-title">Sovereign Stack</div>
-          <div class="brand-sub">OPERATIONS CONSOLE</div>
+          <div class="brand-sub">OPERATIONS CONSOLE · V2</div>
         </div>
       </div>
 
@@ -50,13 +58,26 @@
       <input class="search-input" id="search-input" type="text" placeholder="search events…" autocomplete="off" spellcheck="false">
 
       <div class="stats">
-        <div class="stat-block">
-          <span class="stat-label">VERSION</span>
-          <span class="stat-value is-muted" id="stat-version">—</span>
+        <div class="stat-block stat-phase-block">
+          <span class="stat-label">PHASE</span>
+          <span class="stat-value is-phase is-muted" id="stat-phase">—</span>
         </div>
         <div class="stat-block">
           <span class="stat-label">TOOLS</span>
-          <span class="stat-value is-muted" id="stat-tools">—</span>
+          <span class="stat-value is-tools is-muted" id="stat-tools">—</span>
+        </div>
+        <div class="stat-block stat-wide">
+          <span class="stat-label">VERSION</span>
+          <span class="stat-value is-muted" id="stat-version">—</span>
+        </div>
+        <!-- UPTIME is labelled, deliberately. Three different uptimes are in
+             play (spiral session, bridge service_start_time, per-endpoint
+             current_uptime_seconds); an unqualified "UPTIME" is the kind of
+             number that gets quoted as the wrong one. This one is the
+             bridge service. -->
+        <div class="stat-block stat-wide">
+          <span class="stat-label">BRIDGE UP</span>
+          <span class="stat-value is-uptime is-muted" id="stat-uptime">—</span>
         </div>
         <div class="stat-block clock-block">
           <div class="clock-row">
@@ -65,6 +86,8 @@
           </div>
           <span class="clock-date" id="clock-date">—</span>
         </div>
+        <button class="theme-toggle" id="aurora-toggle" type="button"
+                aria-label="Toggle background aurora" title="Toggle aurora">✦</button>
         <button class="theme-toggle" id="theme-toggle" type="button"
                 aria-label="Toggle light and dark theme" title="Toggle theme">◐</button>
       </div>
@@ -77,20 +100,45 @@
 
     <main class="cockpit" id="cockpit">
 
-      <section class="panel panel-svc" aria-labelledby="h-svc">
-        <div class="panel-head">
-          <span class="panel-title" id="h-svc">SERVICES</span>
-          <span class="panel-note" id="svc-counts"></span>
-        </div>
-        <svg class="topology" id="topology" viewBox="0 0 300 196" aria-hidden="true"></svg>
-        <ul class="svc-list" id="svc-list">
-          <li class="feed-empty">Checking endpoints…</li>
-        </ul>
-      </section>
+      <!-- ── Column A: SERVICES · GUARDIAN · SELF-MODEL MIRROR ── -->
+      <div class="cockpit-col col-a">
+        <section class="panel panel-svc" aria-labelledby="h-svc">
+          <div class="panel-head">
+            <span class="panel-title" id="h-svc">SERVICES</span>
+            <span class="panel-note" id="svc-counts"></span>
+          </div>
+          <svg class="topology" id="topology" viewBox="0 0 300 196" aria-hidden="true"></svg>
+          <ul class="svc-list" id="svc-list">
+            <li class="feed-empty">Checking endpoints…</li>
+          </ul>
+        </section>
 
+        <section class="panel panel-guardian" aria-labelledby="h-grd">
+          <div class="panel-head">
+            <span class="panel-title" id="h-grd">GUARDIAN</span>
+            <span class="panel-note" id="guardian-note">—</span>
+          </div>
+          <div class="guardian-body" id="guardian-body">
+            <div class="panel-empty">Reading guardian…</div>
+          </div>
+        </section>
+
+        <section class="panel panel-mirror" aria-labelledby="h-mir">
+          <div class="panel-head">
+            <span class="panel-title" id="h-mir">SELF-MODEL MIRROR</span>
+            <span class="panel-note" id="mirror-note">—</span>
+          </div>
+          <div class="mirror-body" id="mirror-body">
+            <div class="panel-empty">Reading self-model…</div>
+          </div>
+        </section>
+      </div>
+
+      <!-- ── Column B (hero): ACTIVITY ── -->
       <section class="panel panel-act" aria-labelledby="h-act">
         <div class="panel-head">
           <span class="panel-title" id="h-act">ACTIVITY</span>
+          <span class="act-pulse" aria-hidden="true"></span>
           <div class="chip-row" id="chip-row"></div>
         </div>
         <div class="timeline-wrap">
@@ -110,11 +158,45 @@
         </ol>
       </section>
 
-      <div class="col-chr">
+      <!-- ── Column C: SPIRAL · CHRONICLE · OPEN THREADS ── -->
+      <div class="cockpit-col col-c">
+        <section class="panel panel-spiral" aria-labelledby="h-spi">
+          <div class="panel-head">
+            <span class="panel-title" id="h-spi">SPIRAL · METABOLISM</span>
+            <span class="panel-note" id="spiral-note">—</span>
+          </div>
+          <div class="spiral-body" id="spiral-body">
+            <div class="panel-empty">Reading spiral state…</div>
+          </div>
+        </section>
+
+        <section class="panel panel-chronicle" aria-labelledby="h-chr">
+          <div class="panel-head">
+            <span class="panel-title" id="h-chr">CHRONICLE · LATEST</span>
+            <span class="panel-note">by type</span>
+          </div>
+          <div class="chronicle-list" id="chronicle-list">
+            <div class="chr-empty">Reading chronicle…</div>
+          </div>
+        </section>
+
+        <section class="panel panel-threads" aria-labelledby="h-thr">
+          <div class="panel-head">
+            <span class="panel-title" id="h-thr">OPEN THREADS</span>
+            <span class="panel-note" id="threads-note">—</span>
+          </div>
+          <div class="threads-list" id="threads-list">
+            <div class="panel-empty">Reading open threads…</div>
+          </div>
+        </section>
+      </div>
+
+      <!-- ── Column D: LATENCY · WATCHMAN · ARRIVAL GATE · LINEAGE ── -->
+      <div class="cockpit-col col-d">
         <section class="panel panel-latency" aria-labelledby="h-lat">
           <div class="panel-head">
             <span class="panel-title" id="h-lat">BRIDGE LATENCY</span>
-            <span class="panel-note">live · 60s window</span>
+            <span class="panel-note" id="latency-note">live · 60s window</span>
           </div>
           <div id="latency-body">
             <div class="latency-readout">
@@ -142,13 +224,27 @@
           </div>
         </section>
 
-        <section class="panel panel-chronicle" aria-labelledby="h-chr">
+        <section class="panel panel-arrival" aria-labelledby="h-arr">
           <div class="panel-head">
-            <span class="panel-title" id="h-chr">CHRONICLE · LATEST</span>
-            <span class="panel-note">by type</span>
+            <span class="panel-title" id="h-arr">ARRIVAL GATE</span>
+            <span class="panel-note" id="arrival-status">—</span>
           </div>
-          <div class="chronicle-list" id="chronicle-list">
-            <div class="chr-empty">Reading chronicle…</div>
+          <div class="arrival-body" id="arrival-body">
+            <div class="panel-empty">Reading arrival gate…</div>
+          </div>
+        </section>
+
+        <!-- LINEAGE replaces the design's COMMS panel. The comms board was
+             RETIRED in 2026-06; its newest message was 24 days old and was
+             an automated hq-pulse alert. Titles and dates only — a letter's
+             body is not ops data. -->
+        <section class="panel panel-lineage" aria-labelledby="h-lin">
+          <div class="panel-head">
+            <span class="panel-title" id="h-lin">LINEAGE</span>
+            <span class="panel-note" id="lineage-note">—</span>
+          </div>
+          <div class="lineage-list" id="lineage-list">
+            <div class="panel-empty">Reading letters…</div>
           </div>
         </section>
       </div>
@@ -157,7 +253,7 @@
 
     <footer class="footer">
       <span id="poll-status">initializing…</span>
-      <span>vanilla DOM · no deps · offline-safe</span>
+      <span>†⟡† the stack continues to breathe</span>
     </footer>
 
   </div>
