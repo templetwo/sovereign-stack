@@ -57,6 +57,78 @@ from unittest.mock import MagicMock
 
 import pytest
 
+# ── AUTOUSE GUARD 1 of 2: the live-audit tripwire ───────────────────────────
+#
+# DELIBERATELY PLACED HERE, ABOVE THE FIXTURES, NOT APPENDED AT THE END.
+# feat/console-v2-reskin adds its own autouse guard (probe containment) at the
+# bottom of this file, and two branches appending different blocks to the same
+# last line is an add/add conflict every time. Keeping this one up here means
+# both guards land, both stay autouse, and the merge is clean. If you add a
+# third, give it its own labelled block somewhere neither of these two ends.
+#
+# WHY THIS EXISTS, in one incident: on 2026-08-30 a fixture in
+# test_ring2_post_v121_regressions.py rebound openai_bridge.pending_writes
+# .PENDING_DIR and hash_chain.AUDIT_DIR, and believed itself sandboxed. It was
+# not. audit.py does `from .hash_chain import AUDIT_DIR, AUDIT_LOG`, and a
+# from-import copies the VALUE at import time — so append_audit_event kept
+# writing through audit.AUDIT_LOG to Anthony's real hash chain. 383 rows across
+# 114 synthetic proposal ids landed in
+# ~/.sovereign/openai_bridge/audit/audit.jsonl, and the whole suite reported
+# green throughout. The test could not see its own blast radius.
+#
+# Every existing defence was aimed one layer too high: tmp_sovereign_root sets
+# an env var these modules never read, and the fixture patched the names it
+# could see rather than the names the writer actually resolves.
+#
+# So this asserts on the ONE thing that cannot be faked — the bytes on disk.
+# Function-scoped deliberately: a session-scoped check would say "something in
+# 2445 tests wrote to the live chain" and leave the bisect to a human, while
+# this names the test in its own failure.
+#
+# Scope note: bridge audit logs are written only by a bridge drain, so a daemon
+# is not expected to move them mid-run. If this ever fires without a test being
+# at fault, that is still worth knowing — something wrote to Anthony's audit
+# chain while the suite was running.
+_LIVE_AUDIT_GLOB = ".sovereign/*/audit/audit.jsonl"
+
+
+def _live_audit_sizes() -> dict[str, int]:
+    home = Path.home()
+    if not (home / ".sovereign").is_dir():
+        return {}
+    sizes: dict[str, int] = {}
+    for p in home.glob(_LIVE_AUDIT_GLOB):
+        try:
+            sizes[str(p)] = p.stat().st_size
+        except OSError:
+            continue
+    return sizes
+
+
+@pytest.fixture(autouse=True)
+def no_live_audit_writes():
+    """Fail any test that changes a live bridge audit log on disk.
+
+    Fail-closed and content-based: it compares real byte sizes, so it holds
+    regardless of which module global a future test forgets to rebind. Skips
+    cleanly when ~/.sovereign does not exist (CI, a fresh clone).
+    """
+    before = _live_audit_sizes()
+    yield
+    after = _live_audit_sizes()
+    grew = {
+        path: (before.get(path), size) for path, size in after.items() if before.get(path) != size
+    }
+    assert not grew, (
+        "THIS TEST WROTE TO A LIVE AUDIT CHAIN under ~/.sovereign — "
+        f"{grew}. Isolate EVERY write path the code can reach, not just the "
+        "obvious one: openai_bridge needs all five of "
+        "pending_writes.PENDING_DIR, hash_chain.AUDIT_DIR, hash_chain.AUDIT_LOG, "
+        "audit.AUDIT_DIR and audit.AUDIT_LOG rebound, because audit.py "
+        "from-imports the last two by value."
+    )
+
+
 # ── Stable reference time used by frozen_now ────────────────────────────────
 _FROZEN_UTC = datetime(2026, 4, 24, 12, 0, 0, tzinfo=timezone.utc)
 
@@ -127,68 +199,3 @@ def frozen_now(monkeypatch: pytest.MonkeyPatch) -> datetime:
 
     monkeypatch.setattr(_dt_module, "datetime", _FrozenDatetime)
     return _FROZEN_UTC
-
-
-# ── The live-audit tripwire ───────────────────────────────────────────────────
-#
-# WHY THIS EXISTS, in one incident: on 2026-08-30 a fixture in
-# test_ring2_post_v121_regressions.py rebound openai_bridge.pending_writes
-# .PENDING_DIR and hash_chain.AUDIT_DIR, and believed itself sandboxed. It was
-# not. audit.py does `from .hash_chain import AUDIT_DIR, AUDIT_LOG`, and a
-# from-import copies the VALUE at import time — so append_audit_event kept
-# writing through audit.AUDIT_LOG to Anthony's real hash chain. 383 rows across
-# 114 synthetic proposal ids landed in
-# ~/.sovereign/openai_bridge/audit/audit.jsonl, and the whole suite reported
-# green throughout. The test could not see its own blast radius.
-#
-# Every existing defence was aimed one layer too high: tmp_sovereign_root sets
-# an env var these modules never read, and the fixture patched the names it
-# could see rather than the names the writer actually resolves.
-#
-# So this asserts on the ONE thing that cannot be faked — the bytes on disk.
-# Function-scoped deliberately: a session-scoped check would say "something in
-# 2445 tests wrote to the live chain" and leave the bisect to a human, while
-# this names the test in its own failure.
-#
-# Scope note: bridge audit logs are written only by a bridge drain, so a daemon
-# is not expected to move them mid-run. If this ever fires without a test being
-# at fault, that is still worth knowing — something wrote to Anthony's audit
-# chain while the suite was running.
-_LIVE_AUDIT_GLOB = ".sovereign/*/audit/audit.jsonl"
-
-
-def _live_audit_sizes() -> dict[str, int]:
-    home = Path.home()
-    if not (home / ".sovereign").is_dir():
-        return {}
-    sizes: dict[str, int] = {}
-    for p in home.glob(_LIVE_AUDIT_GLOB):
-        try:
-            sizes[str(p)] = p.stat().st_size
-        except OSError:
-            continue
-    return sizes
-
-
-@pytest.fixture(autouse=True)
-def no_live_audit_writes():
-    """Fail any test that changes a live bridge audit log on disk.
-
-    Fail-closed and content-based: it compares real byte sizes, so it holds
-    regardless of which module global a future test forgets to rebind. Skips
-    cleanly when ~/.sovereign does not exist (CI, a fresh clone).
-    """
-    before = _live_audit_sizes()
-    yield
-    after = _live_audit_sizes()
-    grew = {
-        path: (before.get(path), size) for path, size in after.items() if before.get(path) != size
-    }
-    assert not grew, (
-        "THIS TEST WROTE TO A LIVE AUDIT CHAIN under ~/.sovereign — "
-        f"{grew}. Isolate EVERY write path the code can reach, not just the "
-        "obvious one: openai_bridge needs all five of "
-        "pending_writes.PENDING_DIR, hash_chain.AUDIT_DIR, hash_chain.AUDIT_LOG, "
-        "audit.AUDIT_DIR and audit.AUDIT_LOG rebound, because audit.py "
-        "from-imports the last two by value."
-    )

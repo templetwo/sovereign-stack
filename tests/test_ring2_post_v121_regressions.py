@@ -1170,16 +1170,30 @@ def _run_guard(monkeypatch, fake_home, mutate):
     conftest = _conftest_module()
 
     monkeypatch.setattr(conftest.Path, "home", classmethod(lambda cls: fake_home))
-    gen = conftest.no_live_audit_writes.__wrapped__()
-    next(gen)  # setup: snapshot sizes
-    mutate()
     try:
-        next(gen)
-    except StopIteration:
+        gen = conftest.no_live_audit_writes.__wrapped__()
+        next(gen)  # setup: snapshot sizes
+        mutate()
+        try:
+            next(gen)
+        except StopIteration:
+            return None
+        except AssertionError as exc:
+            return exc
         return None
-    except AssertionError as exc:
-        return exc
-    return None
+    finally:
+        # UNDO IMMEDIATELY, do not wait for fixture teardown.
+        #
+        # The REAL no_live_audit_writes is autouse, so it is already wrapping
+        # this very test — and it reads Path.home() at ITS teardown. If the
+        # patch is still in place then, the real guard globs the FAKE home,
+        # sees a file that did not exist at its own setup, and fails the test
+        # for the write this test made on purpose. Whether that happens depends
+        # on fixture teardown ORDER, which shifts when anyone adds another
+        # autouse fixture: green on this branch, ERROR on the
+        # feat/console-v2-reskin merge, same code. Undoing here removes the
+        # ordering dependency instead of relying on the current ordering.
+        monkeypatch.undo()
 
 
 @pytest.fixture
