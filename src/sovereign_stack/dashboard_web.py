@@ -346,7 +346,8 @@ def build_snapshot() -> dict:
     additive discipline as `service_telemetry` — the 9 keys above it are
     untouched.
 
-    ── Console v2 keys 11..16 (spiral .. bridge_heartbeat) ──
+    ── Console v2 keys 11..17 (spiral, self_model, guardian, open_threads,
+    arrival_gate, bridge_heartbeat, lineage) ──
     Appended for the Sovereign Console v2 reskin, same additive-only
     discipline again: the 10 keys above are untouched in name, order, and
     value-structure. Sourced from `dashboard_readers`, which is token-free
@@ -366,23 +367,38 @@ def build_snapshot() -> dict:
       guardian          — guardian_tools._evaluate_status, cached ~45s
                           (three subprocesses per uncached call).
       open_threads      — chronicle/open_threads/**/*.jsonl, RECURSIVE,
-                          unresolved only. `resolved` is a STRING in live
-                          records ("False"), so the predicate is explicit.
+                          unresolved only. The `resolved` predicate is
+                          explicit rather than truthy: the field is not
+                          schema-enforced and `aperture.py`'s own predicate
+                          diverges from it on string values. Carries
+                          `malformed_skipped` + `unreadable_files` as the
+                          coverage signal.
       arrival_gate      — read-only sqlite over the bridge's
                           session_tokens.db, with the 900s pending cutoff
                           applied here (the bridge's _expire_stale only
                           runs on its own connection). Session TOKENS are
                           declared unavailable, never rendered as an empty
                           list — that list is master-token-only.
+      lineage           — ~/.sovereign/comms/letters/{to_arrival,
+                          breakthroughs,to_self}: TITLE AND DATE ONLY, from
+                          a frontmatter read that REQUIRES a closing `---`
+                          and caps its scan. Replaces the design's COMMS
+                          panel, whose transport was retired 2026-06.
       bridge_heartbeat  — GET :8100/api/heartbeat, NO AUTH, cached ~20s.
 
-    EVERY ONE OF THE SIX IS INDIVIDUALLY NULLABLE and individually
+    EVERY ONE OF THE SEVEN IS INDIVIDUALLY NULLABLE and individually
     fail-soft: a reader that raises yields null for its own key and cannot
     take /snapshot.json down with it. Each non-null section carries a
     `source` and an `age_seconds` so the page can render staleness rather
     than presenting a dormant instrument's last word as current — three of
     these sources (self_model, the retired comms board, metabolism) were
-    measurably dormant when this shipped."""
+    measurably dormant when this shipped.
+
+    ONE FIELD IS DELIBERATELY WITHHELD: `arrival_gate.pending[].rid`. It is the
+    bridge's 192-bit arrival capability token and the sole input to an
+    unauthenticated poll route; /snapshot.json is served with a CORS
+    wildcard, so publishing it here would hand any origin the mint. See
+    dashboard_readers.read_arrival_gate."""
     restart_counts: dict[str, int | None] = {}
     state = dashboard.collect_state(_GLOBAL_FEED, restart_counts=restart_counts)
 

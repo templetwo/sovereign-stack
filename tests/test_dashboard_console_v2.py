@@ -593,10 +593,16 @@ class TestExternalReaders:
 
 
 _UNSAFE_HTML_SINK = re.compile(
-    r"\.(innerHTML|outerHTML)\s*(=|\+=)|\.insertAdjacentHTML\s*\(|"
-    r"document\.write\s*\(|\bnew\s+Function\s*\("
+    # dot access: el.innerHTML = / +=
+    r"\.(innerHTML|outerHTML)\s*(=|\+=)|"
+    # bracket access: el['innerHTML'] = — the same sink, invisible to a
+    # dot-only matcher, and the obvious way past one.
+    r"\[\s*[\'\"](innerHTML|outerHTML)[\'\"]\s*\]\s*(=|\+=)|"
+    r"\.insertAdjacentHTML\s*\(|"
+    r"document\.write\s*\(|\bnew\s+Function\s*\(|"
+    # eval, the sink the original list forgot entirely.
+    r"(?<![.\w])eval\s*\("
 )
-_JS_LINE_COMMENT = re.compile(r"(?<!:)//.*$")
 
 
 def _strip_js_comments(src: str) -> str:
@@ -607,9 +613,48 @@ def _strip_js_comments(src: str) -> str:
     therefore FAILS on today's clean code and would be debugged as a real
     finding. We match on the SINK SYNTAX (assignment / call), and strip
     comments first so a future comment can't hide a real sink either.
+
+    QUOTE-AWARE, and that is the point. The previous implementation was
+    `re.sub(r"(?<!:)//.*$", "", line)`, which treats a `//` INSIDE A STRING
+    LITERAL as a comment start and deletes the rest of the line — so
+    `const sep = 'a//b'; el.innerHTML = x;` hid a real sink from the gate
+    that exists to find it. A stripper for a security gate must never be
+    able to delete code. (Measured on the shipped file at the time: 282
+    lines had a `//` tail removed and none left an unbalanced quote, so
+    this was a future-regression hole rather than a live miss — which is
+    exactly when it is cheap to close.)
     """
-    src = re.sub(r"/\*.*?\*/", "", src, flags=re.S)
-    return "\n".join(_JS_LINE_COMMENT.sub("", ln) for ln in src.splitlines())
+    out: list[str] = []
+    i, n = 0, len(src)
+    quote = None  # "'", '"', or "`" while inside a string
+    while i < n:
+        ch = src[i]
+        if quote is not None:
+            out.append(ch)
+            if ch == "\\" and i + 1 < n:
+                out.append(src[i + 1])
+                i += 2
+                continue
+            if ch == quote:
+                quote = None
+            i += 1
+            continue
+        if ch in "\"'`":
+            quote = ch
+            out.append(ch)
+            i += 1
+            continue
+        if ch == "/" and i + 1 < n and src[i + 1] == "*":
+            end = src.find("*/", i + 2)
+            i = n if end == -1 else end + 2
+            continue
+        if ch == "/" and i + 1 < n and src[i + 1] == "/":
+            end = src.find("\n", i)
+            i = n if end == -1 else end  # keep the newline; line numbers hold
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
 
 
 class TestStaticAssets:
@@ -854,3 +899,485 @@ class TestSnapshotCarriesReaderOutput:
             assert section is not None, key
             assert "age_seconds" in section, key
             assert "source" in section, key
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# REVIEW ROUND 1 — one test per confirmed finding.
+#
+# Every test below fails on the code as it stood before the fix; several are
+# written as LEAK tests (assert the secret is absent from the serialized
+# payload) rather than key-absence tests, because a key-absence test passes
+# the moment someone renames the field.
+# ════════════════════════════════════════════════════════════════════════════
+
+
+class TestArrivalRidNeverLeaves:
+    """SECURITY #1 — `rid` is a 192-bit capability token, not telemetry.
+
+    `arq_` + secrets.token_urlsafe(24) is the SOLE input to
+    `GET /api/arrival/poll/{rid}`, which takes no bearer, no CSRF and no
+    signature, and hands the first caller the one session-token mint.
+    /snapshot.json is unauthenticated and served with a CORS wildcard, so a
+    published rid is both token theft and — by polling faster than the
+    gate's discipline threshold until it marks the request expired — denial
+    of arrival, from any origin or any local process. Nothing on the page
+    ever read the field.
+    """
+
+    def test_rid_never_reaches_the_snapshot(self, monkeypatch, isolated_snapshot):
+        sentinel = "arq_ZZZ_capability_token_sentinel_ZZZ"
+        fresh = datetime.now(timezone.utc).isoformat()
+        _make_arrival_db(isolated_snapshot, [(sentinel, "fresh", "pending", fresh)])
+        snapshot = web.build_snapshot()
+        # The request is genuinely rendered — this is not passing by
+        # accident of an empty panel.
+        assert snapshot["arrival_gate"]["pending_count"] == 1
+        assert snapshot["arrival_gate"]["pending"][0]["code"] == "fresh"
+        # ...and the token is nowhere in the bytes that reach the browser,
+        # under this key name or any other.
+        assert sentinel not in json.dumps(snapshot)
+
+    def test_reader_itself_withholds_rid(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("SOVEREIGN_ROOT", str(tmp_path))
+        fresh = datetime.now(timezone.utc).isoformat()
+        _make_arrival_db(tmp_path, [("arq_secret", "c", "pending", fresh)])
+        out = readers.read_arrival_gate()
+        assert "rid" not in out["pending"][0]
+
+    def test_no_frontend_file_reads_a_rid(self):
+        """The field had no consumer. Keep it that way — a re-added reader
+        is the tell that the field came back."""
+        for asset in sorted(STATIC_DIR.glob("*.js")):
+            assert not re.search(r"\brid\b", asset.read_text())
+
+
+class TestLetterFrontmatterCannotWalkTheBody:
+    """SECURITY #2 — an unterminated `---` block used to scan the whole file.
+
+    The reader's contract is TITLE AND DATE ONLY; a letter body is
+    correspondence between instances. With no closing delimiter the old
+    loop ran to EOF applying the frontmatter regex to every body line, so a
+    body line reading `from: <something private>` was published onto the
+    unauthenticated snapshot route.
+    """
+
+    def _letters(self, root: Path) -> Path:
+        base = root / "comms" / "letters" / "to_self"
+        base.mkdir(parents=True)
+        return base
+
+    def test_unterminated_block_yields_no_fields(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("SOVEREIGN_ROOT", str(tmp_path))
+        base = self._letters(tmp_path)
+        (base / "2026-01-01-open.md").write_text(
+            "---\ntitle: Opening\n"
+            "# NOTE: no closing delimiter below this line\n"
+            "from: PRIVATE-CORRESPONDENT\n"
+            "written_at: 1999-01-01\n"
+        )
+        out = readers.read_lineage_letters()
+        letter = out["letters"][0]
+        assert letter["from"] is None
+        assert letter["title"] != "Opening"  # falls back to the filename slug
+        assert "PRIVATE-CORRESPONDENT" not in json.dumps(out)
+
+    def test_terminator_beyond_the_cap_yields_no_fields(self, monkeypatch, tmp_path):
+        """The cap is the second half of the fix: without it, a single
+        unterminated 20MB letter is re-walked on every 3s poll of every open
+        tab (measured 0.4ms -> 73.2ms), and this reader has no TTL cache."""
+        monkeypatch.setenv("SOVEREIGN_ROOT", str(tmp_path))
+        base = self._letters(tmp_path)
+        filler = "\n".join(f"line{i}: x" for i in range(readers._MAX_FRONTMATTER_LINES + 5))
+        (base / "2026-01-02-slugname.md").write_text(
+            f"---\ntitle: FarAwayTitle\nfrom: PRIVATE\n{filler}\n---\nbody\n"
+        )
+        out = readers.read_lineage_letters()
+        assert out["letters"][0]["from"] is None
+        assert out["letters"][0]["title"] == "Slugname"  # filename fallback
+        assert "FarAwayTitle" not in json.dumps(out)
+
+    def test_well_formed_letter_still_reads_its_frontmatter(self, monkeypatch, tmp_path):
+        """Positive control — the fix must not have closed the door on the
+        letters it is supposed to read."""
+        monkeypatch.setenv("SOVEREIGN_ROOT", str(tmp_path))
+        base = self._letters(tmp_path)
+        (base / "2026-01-03-good.md").write_text(
+            "---\ntitle: A Real Title\nfrom: claude-opus-5\n---\nprivate body text\n"
+        )
+        out = readers.read_lineage_letters()
+        assert out["letters"][0]["title"] == "A Real Title"
+        assert out["letters"][0]["from"] == "claude-opus-5"
+        assert "private body text" not in json.dumps(out)
+
+
+class TestExternalProbeGuardAtTheSeam:
+    """SECURITY #3 — containment moved from one test file's fixture to the seam.
+
+    SOVEREIGN_ROOT redirects neither probe, so before this the guard lived
+    in `tests/test_dashboard_web.py`'s autouse fixture and ANY other caller
+    of build_snapshot() — a new test file, a script — silently GET'd the
+    operator's real bridge and enumerated their real listening sockets.
+    """
+
+    def test_guard_refuses_the_guardian_probe(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            readers.subprocess,
+            "run",
+            lambda *a, **k: calls.append(a) or (_ for _ in ()).throw(AssertionError),
+        )
+        monkeypatch.setenv(readers.NO_EXTERNAL_PROBES_ENV, "1")
+        with pytest.raises(readers.ExternalProbesDisabled):
+            readers._guardian_probe()
+        assert calls == []
+
+    def test_guard_refuses_the_heartbeat_probe(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(readers.urllib.request, "urlopen", lambda *a, **k: calls.append(a))
+        monkeypatch.setenv(readers.NO_EXTERNAL_PROBES_ENV, "1")
+        with pytest.raises(readers.ExternalProbesDisabled):
+            readers._http_get_json("http://127.0.0.1:1/api/heartbeat", 1.0)
+        assert calls == []
+
+    def test_the_guard_can_fail(self, monkeypatch):
+        """POSITIVE CONTROL. A gate that cannot be shown to fail on the
+        unguarded case is not evidence of anything (experimental law #2).
+        With the env var cleared, both seams DO reach their transport."""
+        monkeypatch.delenv(readers.NO_EXTERNAL_PROBES_ENV, raising=False)
+        seen = []
+        monkeypatch.setattr(readers.subprocess, "run", lambda *a, **k: seen.append("subprocess"))
+        with pytest.raises(AttributeError):  # our stub returns None, not a CompletedProcess
+            readers._guardian_probe()
+        assert seen, (
+            "the unguarded seam did NOT reach subprocess — the guarded assertion above proves nothing"
+        )
+
+    def test_readers_fail_soft_under_the_guard(self, monkeypatch):
+        """A refusal must read as "could not measure", never as a
+        fabricated zero — both readers already catch everything."""
+        monkeypatch.setattr(readers, "read_guardian", _REAL_READ_GUARDIAN)
+        monkeypatch.setattr(readers, "fetch_bridge_heartbeat", _REAL_FETCH_HEARTBEAT)
+        monkeypatch.setenv(readers.NO_EXTERNAL_PROBES_ENV, "1")
+        readers.reset_caches()
+        assert readers.read_guardian() is None
+        assert readers.fetch_bridge_heartbeat() is None
+
+
+class TestCachedAgeIsTheRealAge:
+    """CORRECTNESS #1 — `age_seconds: 0.0` was stamped at fetch time and
+    then re-served verbatim for the whole TTL, so the GUARDIAN panel read
+    "0s old" permanently. Bounded at 45s (guardian) / 20s (heartbeat), and
+    exactly the "green LIVE badge over stale data" shape this module's own
+    docstrings condemn."""
+
+    def test_cache_hit_reports_elapsed_age(self, monkeypatch):
+        readers.reset_caches()
+        readers._cache_put("probe", {"age_seconds": 0.0, "value": 7})
+        # Advance the clock rather than sleeping — the assertion is about
+        # the arithmetic, and a real sleep makes the suite pay for it.
+        base = readers.time.monotonic()
+        monkeypatch.setattr(readers.time, "monotonic", lambda: base + 5.0)
+        hit = readers._cache_get("probe", 45.0)
+        assert hit is not None
+        assert hit[0]["age_seconds"] >= 5.0
+        assert hit[0]["value"] == 7
+
+    def test_cached_object_is_not_mutated(self, monkeypatch):
+        readers.reset_caches()
+        stored = {"age_seconds": 0.0}
+        readers._cache_put("probe", stored)
+        base = readers.time.monotonic()
+        monkeypatch.setattr(readers.time, "monotonic", lambda: base + 3.0)
+        first = readers._cache_get("probe", 45.0)[0]
+        second = readers._cache_get("probe", 45.0)[0]
+        assert stored["age_seconds"] == 0.0  # the cached object is untouched
+        assert first is not stored and second is not stored
+        assert first["age_seconds"] == second["age_seconds"]
+
+    def test_cached_none_is_still_a_hit(self, monkeypatch):
+        """The tuple-wrap is what distinguishes "cached failure" from
+        "cache miss". Rewriting ages must not have broken it."""
+        readers.reset_caches()
+        readers._cache_put("probe", None)
+        assert readers._cache_get("probe", 45.0) == (None,)
+
+    def test_guardian_panel_age_grows_across_the_ttl(self, monkeypatch):
+        monkeypatch.setattr(readers, "read_guardian", _REAL_READ_GUARDIAN)
+        monkeypatch.setattr(readers, "_guardian_probe", lambda: (["l"], {"ollama": True}))
+        readers.reset_caches()
+        first = readers.read_guardian()
+        assert first["age_seconds"] == 0.0
+        base = readers.time.monotonic()
+        monkeypatch.setattr(readers.time, "monotonic", lambda: base + 9.0)
+        second = readers.read_guardian()
+        assert second["age_seconds"] >= 9.0
+        assert second["health_score"] == first["health_score"]
+
+
+class TestSingleFlightAroundCachedProbes:
+    """CORRECTNESS #2 — the server is a ThreadingHTTPServer and every open
+    tab polls every 3s, so on each TTL expiry all in-flight requests used to
+    stampede the probe. 8 concurrent callers measured 8 probes = 24
+    subprocesses, each with a 5s timeout. The trade, stated: a waiter can
+    now block on someone else's probe. That is the right side of it."""
+
+    def test_cold_cache_runs_exactly_one_guardian_probe(self, monkeypatch):
+        import threading
+
+        calls = []
+        gate = threading.Barrier(8, timeout=10)
+
+        def slow_probe():
+            calls.append(1)
+            readers.time.sleep(0.05)
+            return (["l"], {"ollama": True})
+
+        monkeypatch.setattr(readers, "read_guardian", _REAL_READ_GUARDIAN)
+        monkeypatch.setattr(readers, "_guardian_probe", slow_probe)
+        readers.reset_caches()
+
+        results = []
+
+        def worker():
+            gate.wait()
+            results.append(readers.read_guardian())
+
+        threads = [threading.Thread(target=worker) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=15)
+        assert len(results) == 8
+        assert all(r is not None for r in results)
+        assert len(calls) == 1
+
+
+class TestOpenThreadCoverageSignal:
+    """CORRECTNESS #3 — `files_scanned` was incremented BEFORE the read, and
+    an unreadable file `continue`d without touching any counter. A shard
+    contributing zero records read as fully scanned, in the one field the
+    docstring advertises as proof of coverage."""
+
+    def test_unreadable_file_is_counted_not_silent(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("SOVEREIGN_ROOT", str(tmp_path))
+        directory = tmp_path / "chronicle" / "open_threads"
+        (directory / "nested").mkdir(parents=True)
+        (directory / "good.jsonl").write_text(
+            json.dumps({"thread_id": "t1", "question": "q", "resolved": False}) + "\n"
+        )
+        (directory / "nested" / "bad.jsonl").write_bytes(b"\xff\xfe not utf-8 \xff\n")
+        out = readers.read_open_threads()
+        assert out["files_scanned"] == 2
+        assert out["unresolved_count"] == 1
+        assert out["unreadable_files"] == 1
+
+    def test_clean_tree_reports_zero_on_both_counters(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("SOVEREIGN_ROOT", str(tmp_path))
+        directory = tmp_path / "chronicle" / "open_threads"
+        directory.mkdir(parents=True)
+        (directory / "a.jsonl").write_text(json.dumps({"thread_id": "t", "resolved": False}) + "\n")
+        out = readers.read_open_threads()
+        assert out["malformed_skipped"] == 0
+        assert out["unreadable_files"] == 0
+
+
+class TestNaiveTimestampSemantic:
+    """CORRECTNESS #5 — the docstring named the wrong failure direction.
+
+    Reading a naive stamp as LOCAL on a UTC-4 box resolves it four hours
+    into the FUTURE: age goes negative and a 901s-stale arrival request
+    reads PENDING instead of expired. That is an arrival-gate fail-OPEN,
+    not the fail-closed the comment described.
+    """
+
+    def test_naive_stamp_is_read_as_utc_not_local(self):
+        """The direct pin. The integration case below only discriminates on
+        a non-UTC box, so on a UTC CI runner it would go inert — this one
+        asserts the semantic itself and holds everywhere."""
+        parsed = readers._parse_ts("2026-01-01T00:00:00")
+        assert parsed is not None
+        assert parsed.tzinfo is not None
+        assert parsed.utcoffset() == timedelta(0)
+        assert parsed == datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+    def test_stale_naive_request_still_expires(self, monkeypatch, tmp_path):
+        """The integration half: a naive stamp 901s old is past the 900s
+        window and must NOT be rendered as a live pending arrival."""
+        monkeypatch.setenv("SOVEREIGN_ROOT", str(tmp_path))
+        stale = (
+            (datetime.now(timezone.utc) - timedelta(seconds=901)).replace(tzinfo=None).isoformat()
+        )
+        _make_arrival_db(tmp_path, [("r1", "stale", "pending", stale)])
+        out = readers.read_arrival_gate()
+        assert out["pending_count"] == 0
+        assert out["expired_by_cutoff"] == 1
+
+
+class TestInjectionGateItself:
+    """CORRECTNESS #6 — the gate that guards the console had two holes.
+
+    A gate is only evidence if it can be shown to FAIL (experimental law
+    #2). Every sink form below is a positive control: it must fire.
+    """
+
+    @pytest.mark.parametrize(
+        "snippet",
+        [
+            "el.innerHTML = x;",
+            "el.innerHTML += x;",
+            "el.outerHTML = x;",
+            "el.insertAdjacentHTML('beforeend', x);",
+            "document.write(x);",
+            "const f = new Function('return 1');",
+            # The two the original matcher missed entirely:
+            "eval(userInput);",
+            "el['innerHTML'] = userInput;",
+            'el["outerHTML"] = userInput;',
+        ],
+    )
+    def test_every_sink_form_fires(self, snippet):
+        assert _UNSAFE_HTML_SINK.search(_strip_js_comments(snippet)), snippet
+
+    def test_a_string_containing_a_slash_pair_cannot_hide_a_sink(self):
+        """The old stripper was `(?<!:)//.*$` applied per line, which
+        treated a `//` inside a string literal as a comment start and
+        deleted the rest of the line — including a real sink on it."""
+        src = "const sep = 'a//b'; el.innerHTML = userInput;"
+        stripped = _strip_js_comments(src)
+        assert "innerHTML" in stripped
+        assert _UNSAFE_HTML_SINK.search(stripped)
+
+    def test_comments_are_still_stripped(self):
+        """Negative control — the reason the stripper exists at all. app.js's
+        own prose says "never innerHTML, anywhere"; a substring grep fails
+        on clean code and gets debugged as a real finding."""
+        src = "// never innerHTML = anywhere\nconst a = 1;\n/* el.innerHTML = x */\n"
+        assert not _UNSAFE_HTML_SINK.search(_strip_js_comments(src))
+
+    def test_method_named_eval_is_not_a_sink(self):
+        """`.eval(` on an object is not the global eval; a matcher that
+        cannot tell them apart will be disabled by the first false alarm."""
+        assert not _UNSAFE_HTML_SINK.search(_strip_js_comments("parser.eval(expr);"))
+
+    def test_the_live_console_is_still_clean_under_the_stricter_gate(self):
+        offenders = []
+        for js in sorted(STATIC_DIR.glob("*.js")):
+            code = _strip_js_comments(js.read_text())
+            for i, line in enumerate(code.splitlines(), 1):
+                if _UNSAFE_HTML_SINK.search(line):
+                    offenders.append(f"{js.name}:{i}: {line.strip()}")
+        assert not offenders, "\n".join(offenders)
+
+
+class TestFrontendCorrections:
+    """DESIGN F1..F12 — static pins over the shipped assets.
+
+    These assert the MECHANISM each fix turns on, not merely that a string
+    changed, because the console has no in-suite browser and a grep for a
+    rendered value would pass on a page that never renders.
+    """
+
+    def _app_js(self) -> str:
+        return (STATIC_DIR / "app.js").read_text()
+
+    def _index(self) -> str:
+        return (STATIC_DIR / "index.html").read_text()
+
+    def _style(self) -> str:
+        return (STATIC_DIR / "style.css").read_text()
+
+    def test_no_outbound_requests_from_the_page(self):
+        """F6 / SECURITY #5. The v4 parent had zero external references; a
+        render-blocking third-party stylesheet above /static/style.css
+        stalls first paint for the connection timeout on exactly the boxes
+        where you open an ops console."""
+        html = self._index()
+        srcs = re.findall(r'(?:href|src)\s*=\s*["\'](https?://[^"\']+)', html)
+        assert srcs == []
+        # Comments are stripped first: the deviation note explains WHY the
+        # font link is gone and necessarily names the host it named.
+        markup = re.sub(r"<!--.*?-->", "", html, flags=re.S)
+        assert "fonts.googleapis.com" not in markup
+        assert "fonts.gstatic.com" not in markup
+
+    def test_threads_unresolved_reads_one_source(self):
+        """F2. Two producers in this house disagree by exactly one (a flat
+        glob vs rglob over chronicle/open_threads). Two adjacent panels
+        stating 182 and 183 for one fact is worse than either number."""
+        js = self._app_js()
+        assert "pick('open_threads'" not in js
+        assert "threads.unresolved_count" in js
+
+    def test_spiral_foot_names_every_source_in_the_grid(self):
+        """F9. The foot read "counts from bridge aperture" under six cells
+        of which four do not come from the aperture."""
+        js = self._app_js()
+        assert "decisions/halts/honks local" in js
+        assert "threads from chronicle" in js
+
+    def test_synth_lane_cannot_outnumber_the_server_feed(self):
+        """F3. Synth TOOLS rows carry ts = snapshot.timestamp (always now),
+        so they sort above every server event; a lane capped ABOVE the whole
+        server feed converges the hero on one category."""
+        js = self._app_js()
+        match = re.search(r"const SYNTH_FEED_MAX = (\d+)", js)
+        assert match, "SYNTH_FEED_MAX not found"
+        assert int(match.group(1)) < web._FEED_LIMIT_IN_SNAPSHOT
+        assert "TOOLS_COALESCE_MS" in js
+
+    def test_p95_comes_from_the_same_buffer_as_now(self):
+        """F4. The headline was the client's /snapshot.json RTT while p95
+        was the bridge watcher's probe — measured 507/222, 609/226. The
+        gold line was then drawn on the client y-domain, pinned below every
+        sample, asserting that 100% of samples exceed the 95th percentile."""
+        js = self._app_js()
+        assert "const p95v = clientP95;" in js
+        assert "latency-server-p95" in js
+        assert "latency-server-p95" in self._index()
+
+    def test_incident_wash_toggles_off_with_the_incident(self):
+        """F7. The toggle sat after the early return, so a cleared incident
+        left a pulsing amber wash with nothing on screen to explain it."""
+        js = self._app_js()
+        toggle = js.index("'has-incident', segs.length > 0")
+        early = js.index("if (!segs.length) { strip.hidden = true; return; }")
+        assert toggle < early
+        assert "'has-incident', true" not in js
+
+    def test_chart_window_labels_match_the_buffers(self):
+        """F8. `POLL_MS 3000` x 60 latency samples = 180s and x 40
+        throughput samples = 120s; the labels read 60s for both. The chart
+        foot is static and was therefore always wrong."""
+        html = self._index()
+        assert "180s window" in html
+        assert "−120s → now" in html
+        assert "60s window" not in html
+
+    def test_feed_times_carry_a_date_when_not_today(self):
+        """F10. The synthesized WATCHMAN lane replays spool sweeps that can
+        be days old into a feed printing HH:MM only, which reads as
+        out-of-order rather than as another day."""
+        js = self._app_js()
+        assert "function fmtFeedTime(" in js
+        assert "ev.tsMs ? fmtFeedTime(ev.tsMs)" in js
+
+    def test_chronicle_panel_carries_provenance(self):
+        """F12. It was the one v2 panel with a hardcoded note and no age."""
+        assert 'id="chronicle-note"' in self._index()
+        assert "chronicle-note" in self._app_js()
+
+    def test_stacked_band_does_not_collapse_its_columns(self):
+        """F1. Below 1020px `align-items` is unset and `.cockpit-col`'s
+        `min-height: 0` zeroes each column's automatic minimum size, so the
+        four auto rows SHARE the viewport and every panel paints over the
+        one below it (columns are overflow:visible, so nothing clips).
+        `min-height: 0` stays load-bearing at >=1380, so the correction is
+        scoped to the band rather than removed."""
+        css = self._style()
+        assert "@media (max-width: 1019px)" in css
+        band = css[css.index("@media (max-width: 1019px)") :]
+        band = band[: band.index("}\n}") + 3]
+        assert "min-height: auto" in band
+        assert "height: 580px" in band
+        # The >=1380 scroll-container behaviour must be untouched.
+        assert ".cockpit-col { overflow-y: auto; overflow-x: hidden; }" in css

@@ -105,10 +105,14 @@ def _now() -> datetime:
 def _parse_ts(value) -> datetime | None:
     """Parse an ISO-8601 stamp to an AWARE datetime, or None.
 
-    Naive strings are assumed UTC rather than local: the chronicle writes
-    both shapes, and treating a naive stamp as local time on an
-    Eastern-offset box silently ages every record by 4 hours — enough to
-    expire every arrival request against a 900s window.
+    Naive strings are assumed UTC rather than local. The chronicle writes
+    both shapes, and the failure direction is a FAIL-OPEN, not a fail-closed:
+    on a UTC-4 box, reading a naive stamp as local resolves it 4 hours into
+    the FUTURE, so `age` goes negative and a request that is 901s stale
+    reads PENDING instead of expired against the 900s window. The arrival
+    gate would then show a dead request as live. (An earlier draft of this
+    docstring stated the opposite direction — corrected by measurement, see
+    test_naive_stamp_is_read_as_utc_not_local.)
     """
     if value is None:
         return None
@@ -152,13 +156,21 @@ def _read_json(path: Path):
 
 
 def _is_resolved(value) -> bool:
-    """Truthiness is WRONG for this field and the failure is silent.
+    """Truthiness is WRONG for this field and the failure would be silent.
 
-    Live open-thread records carry ``"resolved": "False"`` — the STRING.
-    ``if rec.get("resolved")`` reads that as True and reports 0 open
-    threads on a box with ~180. The inverse mistake (``not`` on the raw
-    value) reads ``"True"`` as unresolved. Only an explicit string-aware
-    comparison gets both directions right.
+    The chronicle's open-thread records are written by several producers
+    and the field is not schema-enforced. A string ``"False"`` read by
+    ``if rec.get("resolved")`` is True — that reads a box with ~180 open
+    threads as 0. The inverse mistake (``not`` on the raw value) reads
+    ``"True"`` as unresolved. Only an explicit string-aware comparison
+    gets both directions right.
+
+    MEASURED SCOPE, so nobody re-derives it: on this machine's live tree on
+    2026-08-30 every record carried a JSON boolean and naive truthiness
+    happened to agree. The predicate still earns its place — ``aperture.py``
+    uses ``not rec.get("resolved", False)``, which DIVERGES from this one on
+    exactly the string case, and this console now renders both counts in
+    adjacent panels. Do not delete it on the strength of one clean corpus.
     """
     if value is None:
         return False
@@ -175,6 +187,37 @@ def _is_resolved(value) -> bool:
 
 _CACHE: dict[str, tuple[float, object]] = {}
 _cache_lock = threading.Lock()
+# One lock PER CACHE KEY, held across the miss path so N concurrent
+# snapshots run ONE probe rather than N. See _single_flight.
+_probe_locks: dict[str, threading.Lock] = {}
+
+# Set to a truthy value to make both external readers return None without
+# probing. The containment for these two seams belongs AT the seam, not in
+# one test file's fixture: SOVEREIGN_ROOT redirects neither probe, so any
+# other caller of build_snapshot() would otherwise GET the operator's real
+# bridge and shell out lsof/pgrep against their real machine.
+NO_EXTERNAL_PROBES_ENV = "SOVEREIGN_DASHBOARD_NO_EXTERNAL_PROBES"
+
+
+class ExternalProbesDisabled(RuntimeError):
+    """Raised at the seam when NO_EXTERNAL_PROBES_ENV is set."""
+
+
+def _refuse_external_probe(what: str) -> None:
+    """Fail CLOSED at the exact function that leaves the process.
+
+    Guarding the two READERS instead would be guarding the wrong line: a
+    test that stubs `_guardian_probe` or `_http_get_json` with an in-process
+    fake is legitimately exercising the real reader, and a reader-level
+    guard would silently turn those into `None` assertions. Guarded here,
+    a stub REPLACES the guard (correct — nothing leaves the process) while
+    an unstubbed caller is refused (also correct).
+
+    Both readers already catch every exception and fail soft to None, so a
+    refusal reads as "could not measure", never as a fabricated zero.
+    """
+    if os.environ.get(NO_EXTERNAL_PROBES_ENV, "").strip():
+        raise ExternalProbesDisabled(f"{NO_EXTERNAL_PROBES_ENV} is set; refusing {what}")
 
 
 def reset_caches() -> None:
@@ -184,14 +227,42 @@ def reset_caches() -> None:
         _CACHE.clear()
 
 
+def _single_flight(key: str) -> threading.Lock:
+    """The per-key lock for `key`, created once.
+
+    Acquired OUTSIDE `_cache_lock` by the caller: `_cache_lock` guards only
+    the dict, and holding it across a 5s subprocess probe would serialize
+    every reader in the process, not just the one that missed.
+    """
+    with _cache_lock:
+        lock = _probe_locks.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _probe_locks[key] = lock
+        return lock
+
+
 def _cache_get(key: str, ttl: float):
+    """Return `(value,)` on a hit, None on a miss.
+
+    A cached dict gets its `age_seconds` REWRITTEN to the real age of the
+    stored value on the way out. Stamping 0.0 at fetch time and then
+    re-serving that object for the whole TTL is the "green LIVE badge over
+    stale data" shape this module exists to refuse: the GUARDIAN panel read
+    "0s old" permanently, because every cache hit re-served the same 0.0.
+    The returned dict is a COPY, so the cached object is never mutated and
+    successive hits do not accumulate edits.
+    """
     with _cache_lock:
         hit = _CACHE.get(key)
     if hit is None:
         return None
     stored_at, value = hit
-    if (time.monotonic() - stored_at) > ttl:
+    age = time.monotonic() - stored_at
+    if age > ttl:
         return None
+    if isinstance(value, dict) and "age_seconds" in value:
+        value = {**value, "age_seconds": round(age, 3)}
     return (value,)  # tuple-wrapped so a cached None is still a hit
 
 
@@ -298,6 +369,12 @@ def read_open_threads(limit: int = 6) -> dict | None:
     and a flat glob silently misses nested shards. Malformed lines are
     counted, not swallowed: ``malformed_skipped`` is the coverage signal
     that keeps a partial read from reading as a complete one.
+
+    ``unreadable_files`` is the second half of that signal. A file that
+    raises on read used to be ``continue``d after ``files_scanned`` had
+    already been incremented — so a shard contributing ZERO records read as
+    fully scanned, in the one field advertised as proof of coverage. Both
+    counters are non-zero-means-partial; neither is decorative.
     """
     directory = _sovereign_root() / "chronicle" / "open_threads"
     if not directory.is_dir():
@@ -305,12 +382,14 @@ def read_open_threads(limit: int = 6) -> dict | None:
 
     unresolved: list[dict] = []
     malformed = 0
+    unreadable = 0
     files = 0
     for path in sorted(directory.rglob("*.jsonl")):
         files += 1
         try:
             lines = path.read_text(encoding="utf-8").splitlines()
         except (OSError, UnicodeDecodeError):
+            unreadable += 1
             continue
         for line in lines:
             line = line.strip()
@@ -348,6 +427,7 @@ def read_open_threads(limit: int = 6) -> dict | None:
         "threads": unresolved[: max(0, limit)],
         "files_scanned": files,
         "malformed_skipped": malformed,
+        "unreadable_files": unreadable,
         "age_seconds": newest_age,
     }
 
@@ -402,7 +482,18 @@ def read_arrival_gate() -> dict | None:
             continue
         pending.append(
             {
-                "rid": row["rid"],
+                # `rid` is DELIBERATELY ABSENT. It is a 192-bit capability
+                # token (`arq_` + secrets.token_urlsafe(24)) and it is the
+                # SOLE input GET /api/arrival/poll/{rid} requires — that
+                # route takes no bearer, no CSRF, no signature, and the
+                # first caller to poll an approved rid consumes the one
+                # session-token mint. /snapshot.json is served
+                # unauthenticated with Access-Control-Allow-Origin: *, so
+                # publishing the rid there hands any origin (or any local
+                # process) both token theft and, by polling faster than the
+                # gate's discipline threshold, denial of arrival. Nothing
+                # on the page ever read it. Do not re-add it, under this
+                # name or another. See test_rid_never_reaches_the_snapshot.
                 "code": row["code"],
                 "source_instance": row["source_instance"],
                 "seat_description": row["seat_description"],
@@ -434,6 +525,9 @@ def read_arrival_gate() -> dict | None:
 
 _FRONTMATTER_KEY = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.*)$")
 _FILENAME_DATE = re.compile(r"^(\d{4}-\d{2}-\d{2})[-_]?(.*)$")
+# A frontmatter block is a handful of lines. Past this, the file is
+# malformed and scanning further is walking the body. See _letter_frontmatter.
+_MAX_FRONTMATTER_LINES = 50
 
 
 def _letter_frontmatter(path: Path) -> dict:
@@ -441,25 +535,42 @@ def _letter_frontmatter(path: Path) -> dict:
 
     The body of a lineage letter is a private thing written by one instance
     to another; it does not belong on an ops dashboard. Enforced
-    structurally by stopping the read at the closing ``---`` rather than
-    slurping the file and slicing, so there is no moment at which the body
-    is in memory next to the returned dict.
+    structurally by REQUIRING the closing ``---`` — not merely by stopping
+    at it. An earlier version read "until the next ``---`` or EOF", which
+    meant a letter with an opening delimiter and no closing one had its
+    entire body scanned with the frontmatter regex; a body line reading
+    ``from: <something private>`` was published onto an unauthenticated
+    route. A malformed letter now degrades to no metadata instead.
+
+    Two bounds, both load-bearing:
+
+    * ``_MAX_FRONTMATTER_LINES`` caps the scan. A frontmatter block is a
+      handful of lines; anything longer is malformed, and without a cap a
+      single unterminated 20MB letter walks in full on every 3s poll of
+      every open tab (measured: 0.4ms -> 73.2ms, and this reader has no
+      TTL cache to absorb it).
+    * Fields are only returned once the terminator is seen. Partial
+      results from a truncated scan are discarded.
     """
     fields: dict[str, str] = {}
     try:
         with path.open("r", encoding="utf-8", errors="replace") as handle:
             first = handle.readline().strip()
             if first != "---":
-                return fields
-            for line in handle:
+                return {}
+            terminated = False
+            for index, line in enumerate(handle):
+                if index >= _MAX_FRONTMATTER_LINES:
+                    break
                 if line.strip() == "---":
+                    terminated = True
                     break
                 match = _FRONTMATTER_KEY.match(line.rstrip("\n"))
                 if match:
                     fields[match.group(1)] = match.group(2).strip()
     except OSError:
         return {}
-    return fields
+    return fields if terminated else {}
 
 
 def read_lineage_letters(limit: int = 6) -> dict | None:
@@ -541,6 +652,7 @@ def _guardian_probe() -> tuple[list[str], dict[str, bool]]:
     worth sharing, and re-implementing it here would let the dashboard's
     idea of "healthy" drift from the guardian's.
     """
+    _refuse_external_probe("lsof/pgrep guardian probe")
     listener = subprocess.run(
         ["lsof", "-iTCP", "-sTCP:LISTEN", "-n", "-P"],
         capture_output=True,
@@ -572,6 +684,18 @@ def read_guardian() -> dict | None:
     if hit is not None:
         return hit[0]
 
+    lock = _single_flight("guardian")
+    with lock:
+        # Re-check under the lock: the thread that held it may have just
+        # filled the cache, and the point of the lock is that its waiters
+        # do NOT then each run their own three subprocesses.
+        hit = _cache_get("guardian", GUARDIAN_TTL_SECONDS)
+        if hit is not None:
+            return hit[0]
+        return _read_guardian_uncached()
+
+
+def _read_guardian_uncached() -> dict | None:
     try:
         listener_lines, services = _guardian_probe()
         status = guardian_tools._evaluate_status(listener_lines, services)
@@ -604,6 +728,7 @@ def read_guardian() -> dict | None:
 
 
 def _http_get_json(url: str, timeout: float):
+    _refuse_external_probe(f"HTTP GET {url}")
     request = urllib.request.Request(url, headers={"Accept": "application/json"})
     with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310
         return json.loads(response.read().decode("utf-8"))
@@ -627,6 +752,15 @@ def fetch_bridge_heartbeat() -> dict | None:
     if hit is not None:
         return hit[0]
 
+    lock = _single_flight("heartbeat")
+    with lock:
+        hit = _cache_get("heartbeat", HEARTBEAT_TTL_SECONDS)
+        if hit is not None:
+            return hit[0]
+        return _fetch_bridge_heartbeat_uncached()
+
+
+def _fetch_bridge_heartbeat_uncached() -> dict | None:
     base = os.environ.get("SOVEREIGN_BRIDGE_URL", DEFAULT_BRIDGE_URL).rstrip("/")
     try:
         payload = _http_get_json(f"{base}/api/heartbeat", HEARTBEAT_TIMEOUT_SECONDS)

@@ -12,14 +12,26 @@
      against a real backend rather than fabricating success. -->
 <meta name="csrf-token" content="">
 <title>Sovereign Stack — Operations Console</title>
-<!-- Console v2 asks for Space Grotesk + JetBrains Mono from Google Fonts.
-     style.css ALSO keeps the v4 base64 @font-face bundle (Space Grotesk +
-     IBM Plex Mono) — the page must still render correctly with no network,
-     which is why the font stacks list the bundled families as the first
-     fallback rather than jumping straight to a system font. -->
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap">
+<!-- DEVIATION FROM THE v2 SPEC, deliberate: the design asks for Space
+     Grotesk + JetBrains Mono from Google Fonts, and this page loads
+     NEITHER from the network. It has zero external references, as its v4
+     parent did.
+
+     Three reasons, in order of weight. (1) A render-blocking third-party
+     <link> above /static/style.css stalls first paint for the whole
+     connection timeout when fonts.googleapis.com cannot be reached — a
+     blackholed DNS, a captive portal, a WARP misconfiguration. Those are
+     exactly the conditions under which someone opens an ops console.
+     (2) style.css:1-10 claims "offline-safe … no hotlinking, no CDN", and
+     it should keep being true rather than being edited to match a
+     regression. (3) The base64 @font-face bundle (Space Grotesk + IBM Plex
+     Mono) is still here and the stacks name the bundled families first, so
+     the link bought nothing but a callout to Google on every load telling
+     it that HQ's console is open.
+
+     The type is therefore Space Grotesk (bundled) with IBM Plex Mono
+     standing in for JetBrains Mono. If the mono face matters, bundle
+     JetBrains Mono as base64 — do not re-add the link. -->
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
@@ -173,7 +185,7 @@
         <section class="panel panel-chronicle" aria-labelledby="h-chr">
           <div class="panel-head">
             <span class="panel-title" id="h-chr">CHRONICLE · LATEST</span>
-            <span class="panel-note">by type</span>
+            <span class="panel-note" id="chronicle-note">by type</span>
           </div>
           <div class="chronicle-list" id="chronicle-list">
             <div class="chr-empty">Reading chronicle…</div>
@@ -196,17 +208,26 @@
         <section class="panel panel-latency" aria-labelledby="h-lat">
           <div class="panel-head">
             <span class="panel-title" id="h-lat">BRIDGE LATENCY</span>
-            <span class="panel-note" id="latency-note">live · 60s window</span>
+            <!-- 60 samples x POLL_MS 3000 = 180s. app.js overwrites this on
+                 the first successful poll; the static value has to be right
+                 too, because it is what stands during a poll error. -->
+            <span class="panel-note" id="latency-note">client RTT · 180s window</span>
           </div>
           <div id="latency-body">
             <div class="latency-readout">
               <span class="latency-now" id="latency-now">—<span class="latency-unit"> ms</span></span>
+              <!-- p95 is the p95 OF THE SAME BUFFER as the headline. The
+                   bridge watcher's own probe p95 is a different series and
+                   gets its own labelled cell rather than being silently
+                   substituted into this one. -->
               <span class="latency-meta">p95 <b id="latency-p95">—</b>ms</span>
+              <span class="latency-meta">bridge probe p95 <b id="latency-server-p95">—</b>ms</span>
               <span class="latency-meta">events/tick <b id="latency-rps">—</b></span>
             </div>
             <svg class="latency-chart" id="latency-chart" viewBox="0 0 280 66" preserveAspectRatio="none" aria-hidden="true"></svg>
             <svg class="throughput-chart" id="throughput-chart" viewBox="0 0 280 22" preserveAspectRatio="none" aria-hidden="true"></svg>
-            <div class="chart-foot"><span>throughput</span><span>−60s → now</span></div>
+            <!-- throughputBuf holds 40 samples x POLL_MS 3000 = 120s. -->
+            <div class="chart-foot"><span>throughput</span><span>−120s → now</span></div>
           </div>
         </section>
 

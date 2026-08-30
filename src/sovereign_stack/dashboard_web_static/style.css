@@ -1214,7 +1214,12 @@ input::placeholder { color: var(--text-faint); }
   --v2-brand-glow:    0 0 14px rgba(232, 194, 104, .45);
   --v2-phase-glow:    0 0 22px rgba(167, 139, 250, .40);
 
-  /* ── Type: JetBrains Mono per the design, with the BUNDLED IBM Plex Mono
+  /* ── Type: JetBrains Mono is NAMED but never fetched — see index.html's
+     font deviation note. The bundled IBM Plex Mono is the face that
+     actually renders unless the viewer happens to have JetBrains Mono
+     installed locally, which is the intended, offline-safe outcome.
+     Original note follows.
+     ── Type: JetBrains Mono per the design, with the BUNDLED IBM Plex Mono
      as first fallback so the page still renders correctly offline (the v4
      base64 @font-face block in §1 is deliberately kept). ── */
   --font-display: 'Space Grotesk', -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -1292,6 +1297,27 @@ input::placeholder { color: var(--text-faint); }
   }
   .panel-act { height: auto; min-height: 0; }
   .cockpit-col { overflow-y: auto; overflow-x: hidden; }
+}
+
+/* ── The single-column band, and the bug that only a browser found ───────
+ * Below 1020px the four grid areas stack, `align-items` is unset (the
+ * >=1020 rule sets `start`, >=1380 sets `stretch`), and `.cockpit-col`'s
+ * `min-height: 0` zeroes each column's automatic minimum size. The four
+ * auto rows therefore SHARE the viewport instead of growing to content:
+ * measured at 960px with real data, col-a got 133px while `.panel-svc`
+ * painted 597px, `#feed` collapsed to 5px, and every panel overprinted the
+ * one below it — columns are `overflow: visible`, so nothing clipped and
+ * nothing scrolled. 102 unit tests were green through all of it.
+ *
+ * `min-height: 0` stays load-bearing at >=1380 (it is what lets each column
+ * become its own scroll container), so the correction is SCOPED to this
+ * band rather than removed. The 580px hero height the README specifies for
+ * the stacked band lived only inside the >=1020 query; it belongs here too.
+ * Both values re-measured in-browser after the change: col-a 176->1290,
+ * .panel-act 1300->1880, no overlap, no horizontal overflow. */
+@media (max-width: 1019px) {
+  .cockpit-col { min-height: auto; }
+  .panel-act { height: 580px; }
 }
 
 .panel { padding: 13px 14px; gap: 9px; }

@@ -153,6 +153,21 @@ function fmtHM(epochMs) {
   return new Date(epochMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
 }
 
+// Feed rows print HH:MM only, which reads as out-of-order the moment a lane
+// carries anything older than today. The server's own short-lived feed never
+// did; the synthesized WATCHMAN lane replays sweeps from the spool and does.
+// Same-day rows keep the compact form; anything else is prefixed with its
+// date, so "20:28 above 19:59" is either sorted or visibly a different day.
+function fmtFeedTime(epochMs) {
+  if (epochMs == null || !isFinite(epochMs)) return '';
+  const d = new Date(epochMs);
+  const now = new Date();
+  const sameDay = d.getFullYear() === now.getFullYear()
+    && d.getMonth() === now.getMonth()
+    && d.getDate() === now.getDate();
+  return sameDay ? fmtHM(epochMs) : `${d.toLocaleDateString('en-CA').slice(5)} ${fmtHM(epochMs)}`;
+}
+
 function fmtISO(epochMs) {
   return `${new Date(epochMs).toLocaleDateString('en-CA')} ${new Date(epochMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })}`;
 }
@@ -301,7 +316,9 @@ const state = {
   synthFeed: [],            // [{time, ts, category, message}]
 };
 
-const SYNTH_FEED_MAX = 40;
+const SYNTH_FEED_MAX = 12;   // well below _FEED_LIMIT_IN_SNAPSHOT (30) —
+// a synthesized lane must never be able to out-number the server's whole feed.
+const TOOLS_COALESCE_MS = 60000;
 
 // ── Per-panel provenance ─────────────────────────────────────────────────
 //
@@ -492,6 +509,11 @@ function renderIncident(snapshot) {
   if (snapshot.listener_stale) segs.push({ strong: null, text: 'listener stale' });
   if (degraded.length) segs.push({ strong: null, text: `${degraded.join(', ')} degraded` });
 
+  // Toggle the page-level wash BEFORE the early return. It used to be set
+  // only on the has-incident path, so once an incident cleared the strip
+  // hid itself and the pulsing amber `.bg-incident-wash` stayed painted
+  // with nothing on screen to explain it — an alarm with no alarm.
+  document.getElementById('app').classList.toggle('has-incident', segs.length > 0);
   if (!segs.length) { strip.hidden = true; return; }
 
   segs.forEach((s, i) => {
@@ -510,7 +532,6 @@ function renderIncident(snapshot) {
 
   strip.classList.toggle('is-critical', critical);
   strip.hidden = false;
-  document.getElementById('app').classList.toggle('has-incident', true);
 }
 
 async function handleAck(honkId, honkSig, btnEl) {
@@ -983,7 +1004,7 @@ function renderActivity(snapshot) {
       const row = el('li', 'feed-row bl-' + slug + (isNew ? ' is-new' : ''));
       const main = el('div', 'feed-main');
       main.append(
-        el('span', 'feed-time', ev.time || fmtHM(ev.tsMs)),
+        el('span', 'feed-time', ev.tsMs ? fmtFeedTime(ev.tsMs) : (ev.time || '')),
         el('span', 'feed-cat cat-' + slug, ev.catU),
         el('span', 'feed-msg', ev.message || ''),
       );
@@ -1048,6 +1069,26 @@ function renderChronicle(snapshot) {
   const container = $('chronicle-list');
   container.replaceChildren();
   const latest = snapshot.latest || {};
+
+  // Every other v2 panel carries "N · age"; this one shipped a hardcoded
+  // "by type" and was the only panel with no provenance at all. The age is
+  // the newest of the entries actually rendered, so a panel of six dormant
+  // rows cannot read as fresh.
+  const note = $('chronicle-note');
+  if (note) {
+    let present = 0;
+    let newestMs = null;
+    for (const [key] of LATEST_ORDER) {
+      const entry = latest[key];
+      if (!entry) continue;
+      present++;
+      const t = Date.parse(entry.timestamp);
+      if (!isNaN(t) && (newestMs === null || t > newestMs)) newestMs = t;
+    }
+    const age = newestMs === null ? null : fmtAge(Math.max(0, (Date.now() - newestMs) / 1000));
+    note.textContent = `${present}/${LATEST_ORDER.length} by type` + (age ? ` · ${age} old` : '');
+    note.className = 'panel-note' + (present ? '' : ' is-missing');
+  }
 
   for (const [key, label, domainFn] of LATEST_ORDER) {
     const entry = latest[key];
@@ -1273,13 +1314,29 @@ function metabolismCells(snapshot) {
     if (!surfaces || !surfaces[group] || surfaces[group][field] == null) return null;
     return surfaces[group][field];
   };
+  // THREADS UNRESOLVED comes from `open_threads`, NOT from the aperture.
+  // Both producers exist in this house and they disagree by exactly one:
+  // aperture.py globs `chronicle/open_threads/*.jsonl` FLAT while
+  // dashboard_readers uses rglob, and there is one nested shard
+  // (tech-debt,compaction,auto-detection/log.jsonl). Two adjacent panels
+  // stating 182 and 183 for one fact is worse than either number, so the
+  // console reads one source. NOTE, and it is not a fix: this RELOCATES
+  // the disagreement — the console now says 183 while every arriving
+  // seat's boot door still reads 182 from the aperture. The durable fix is
+  // the glob in aperture.py, which is main's tree and another lane's call.
+  const threads = snapshot.open_threads || null;
   return [
-    { label: 'INSIGHTS ON DISK', value: pick('insights', 'on_disk'), tone: 'insight' },
-    { label: 'THREADS UNRESOLVED', value: pick('open_threads', 'unresolved'), tone: 'thread' },
-    { label: 'HANDOFFS ARCHIVED', value: pick('handoffs', 'on_disk'), tone: 'service' },
-    { label: 'DECISIONS FILED', value: snapshot.decisions_count, tone: 'decision' },
-    { label: 'HALT NOTES', value: snapshot.halts_count, tone: 'halt', hotIfPositive: true },
-    { label: 'HONKS UNACKED', value: snapshot.unacked_honks, tone: 'honk', hotIfPositive: true },
+    { label: 'INSIGHTS ON DISK', value: pick('insights', 'on_disk'), tone: 'insight', src: 'aperture' },
+    {
+      label: 'THREADS UNRESOLVED',
+      value: threads && threads.unresolved_count != null ? threads.unresolved_count : null,
+      tone: 'thread',
+      src: 'threads',
+    },
+    { label: 'HANDOFFS ARCHIVED', value: pick('handoffs', 'on_disk'), tone: 'service', src: 'aperture' },
+    { label: 'DECISIONS FILED', value: snapshot.decisions_count, tone: 'decision', src: 'local' },
+    { label: 'HALT NOTES', value: snapshot.halts_count, tone: 'halt', hotIfPositive: true, src: 'local' },
+    { label: 'HONKS UNACKED', value: snapshot.unacked_honks, tone: 'honk', hotIfPositive: true, src: 'local' },
   ];
 }
 
@@ -1315,15 +1372,21 @@ function renderSpiral(snapshot) {
   }
   body.appendChild(grid);
 
+  // The foot names EVERY source in the grid, not just one. It previously
+  // read "counts from bridge aperture" under six cells of which three come
+  // from dashboard.collect_state and (now) one from the chronicle reader —
+  // half a provenance line is a false one.
   const foot = el('div', 'spi-foot');
   if (!surfaces) {
-    // Three of the six cells come from the bridge. Say so rather than
+    // Two of the six cells come from the bridge. Say so rather than
     // rendering em-dashes the reader has to interpret.
-    foot.textContent = 'chronicle counts unavailable — bridge heartbeat not reachable';
+    foot.textContent = 'insights/handoffs unavailable — bridge heartbeat not reachable · threads from chronicle · decisions/halts/honks local';
     foot.classList.add('is-missing');
   } else {
     const domains = surfaces.insights && surfaces.insights.domains;
-    foot.textContent = 'counts from bridge aperture' + (domains != null ? ` · ${domains} domains` : '');
+    foot.textContent = 'insights/handoffs from bridge aperture'
+      + (domains != null ? ` · ${domains} domains` : '')
+      + ' · threads from chronicle (recursive) · decisions/halts/honks local';
   }
   body.appendChild(foot);
 }
@@ -1463,16 +1526,30 @@ function synthesizeEvents(snapshot) {
   const nowTs = snapshot.timestamp != null ? snapshot.timestamp : (Date.now() / 1000);
   const added = [];
 
+  // TOOLS is COALESCED, not appended. Every synth TOOLS event carries
+  // ts = snapshot.timestamp (always now), so it sorts above every server
+  // event; during an active session the lane emitted one row per poll and
+  // filled the entire first screenful with rows differing only by a delta.
+  // Within TOOLS_COALESCE_MS the newest row is REPLACED and its delta
+  // accumulated, so a busy minute is one honest rolling row.
   const count = snapshot.spiral && snapshot.spiral.tool_call_count;
   if (typeof count === 'number') {
     if (state.lastToolCallCount != null && count > state.lastToolCallCount) {
       const delta = count - state.lastToolCallCount;
-      added.push({
+      const head = state.synthFeed.length ? state.synthFeed[0] : null;
+      const coalescable = head
+        && head.category === 'TOOLS'
+        && (nowTs - (head.ts || 0)) * 1000 < TOOLS_COALESCE_MS;
+      const total = (coalescable ? (head.delta || 0) : 0) + delta;
+      const row = {
         ts: nowTs,
-        time: fmtHM(nowTs * 1000),
+        time: fmtFeedTime(nowTs * 1000),
         category: 'TOOLS',
-        message: `+${delta} tool call${delta === 1 ? '' : 's'} · ${count} this session`,
-      });
+        delta: total,
+        message: `+${total} tool call${total === 1 ? '' : 's'} · ${count} this session`,
+      };
+      if (coalescable) state.synthFeed[0] = row;
+      else added.push(row);
     }
     state.lastToolCallCount = count;
   }
@@ -1488,7 +1565,7 @@ function synthesizeEvents(snapshot) {
     if (sweep.severity_ceiling) bits.push(String(sweep.severity_ceiling));
     added.push({
       ts: sweep.timestamp != null ? sweep.timestamp : nowTs,
-      time: fmtHM((sweep.timestamp != null ? sweep.timestamp : nowTs) * 1000),
+      time: fmtFeedTime((sweep.timestamp != null ? sweep.timestamp : nowTs) * 1000),
       category: 'WATCHMAN',
       message: bits.join(' · '),
     });
@@ -1522,13 +1599,19 @@ function renderLatencyCard(snapshot) {
   const sorted = [...lat].sort((a, b) => a - b);
   const clientP95 = sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.95))] || 0;
 
-  // p95 prefers the SERVER's measurement. service_telemetry.bridge.p95_probe_ms
-  // is sampled on the watcher's own ~2s cadence, so it is independent of how
-  // fast this page happens to poll; the client buffer only ever measured our
-  // own /snapshot.json round trip.
+  // p95 IS THE SAME SERIES AS "now". It used to prefer the server's
+  // service_telemetry.bridge.p95_probe_ms — a different probe of a
+  // different endpoint on a different cadence — while "now" stayed the
+  // client's /snapshot.json RTT. Observed live: 507/222, 609/226, 464/213,
+  // 370/226. A 95th percentile at half the current value is impossible
+  // within one series and reads as a broken number; worse, the gold p95
+  // line was drawn on the client-RTT y-domain, pinning it at the chart
+  // floor BELOW every sample, so the chart asserted that 100% of samples
+  // exceeded the 95th percentile. The server's figure is still useful and
+  // still shown — as its own labelled row, named for what it measures.
   const tel = (snapshot && snapshot.service_telemetry && snapshot.service_telemetry.bridge) || null;
   const serverP95 = tel && tel.p95_probe_ms != null ? tel.p95_probe_ms : null;
-  const p95v = serverP95 != null ? serverP95 : clientP95;
+  const p95v = clientP95;
 
   // ── The red threshold is MEASURED, not inherited. ──
   // The design specifies "red above 140ms". Measured on this box, the
@@ -1545,11 +1628,17 @@ function renderLatencyCard(snapshot) {
   nowEl.classList.toggle('is-hot', latNow > hotThreshold);
   nowEl.title = `hot above ${Math.round(hotThreshold)}ms (2x rolling median of ${sorted.length} samples)`;
   p95El.textContent = String(Math.round(p95v));
+  p95El.title = `p95 of ${sorted.length} client-timed /snapshot.json round trips`;
+  const srvEl = $('latency-server-p95');
+  if (srvEl) {
+    srvEl.textContent = serverP95 != null ? String(Math.round(serverP95)) : '—';
+    srvEl.title = serverP95 != null
+      ? "the bridge watcher's own p95 health-probe time — a different probe of a different endpoint, sampled on its ~2s cadence"
+      : 'bridge telemetry absent';
+  }
   const noteEl = $('latency-note');
   if (noteEl) {
-    noteEl.textContent = serverP95 != null
-      ? 'p95 server-sampled · 2s cadence'
-      : 'p95 client-timed · bridge telemetry absent';
+    noteEl.textContent = `client RTT · ${Math.round((POLL_MS * 60) / 1000)}s window`;
   }
   const tpBuf = state.throughputBuf;
   rpsEl.textContent = tpBuf.length ? String(tpBuf[tpBuf.length - 1]) : '—';
