@@ -314,6 +314,62 @@ def approve_pending_write(proposal_id: str, approved_by: str = "Anthony") -> Pro
 
 
 _BRIDGE_URL = "http://127.0.0.1:8100/api/call"
+
+# Bridge → Stack layer translation. The bridge schema uses "reflection" as a
+# semantic concept; the Stack's record_insight accepts only
+# ground_truth | hypothesis | open_thread.
+_LAYER_MAP = {"reflection": "hypothesis"}
+
+# Commit targets whose Stack inputSchema declares source_instance, so the
+# PROPOSAL's substrate identity can ride the commit instead of the drain
+# operator's. Mirrors bridge_core.pending_writes.PROVENANCE_PASSTHROUGH_TARGETS
+# — kept as a separate literal because this legacy module imports nothing from
+# bridge_core, and asserted equal to it by test_bridge_drain_provenance.
+PROVENANCE_PASSTHROUGH_TARGETS: frozenset[str] = frozenset(
+    {"handoff", "close_session", "record_insight"}
+)
+
+
+def build_commit_arguments(proposal: Proposal) -> dict[str, Any]:
+    """
+    Build the exact ``arguments`` dict forwarded to the Stack REST call.
+
+    THE PORT, 2026-08-30. bridge_core has carried provenance passthrough since
+    2026-08-03; this module — the one every ChatGPT drain runs through — had
+    neither the target set nor the injection. So v1.21.0's "every Ring-2 commit
+    carries its proposer" was true for grok and FALSE for openai, and a drained
+    ChatGPT proposal landed under whatever identity its args happened to hold,
+    defaulting to "unknown" under the drain operator's session. A guarantee that
+    holds on one substrate and not the other is not a guarantee; it is a
+    guarantee-shaped belief, which is worse, because nobody re-checks it.
+
+    ASSEMBLY LIVES HERE, ABOVE THE DRY RUN, ON PURPOSE. This module used to
+    translate the layer inside the ``live`` block, AFTER the dry-run early
+    return — so ``bridge commit <id>`` previewed ``proposal.arguments`` raw and
+    the wire sent something else. A review surface that differs from the wire is
+    how 'unknown' authorship shipped in the first place: Anthony approved bodies
+    that looked complete. One assembly point, two surfaces, no drift.
+
+    The envelope's source_instance WINS over anything already in the args dict.
+    A proposal file is reviewable state; the envelope's value is what the
+    identity gate established at proposal time.
+
+    session_id deliberately does NOT travel: handoff and close_session expose no
+    session parameter (server.py stamps its own spiral session), so there is
+    nothing to inject it into. It stays in the proposal envelope and the audit
+    trail, which remain the record of the proposer's session identity.
+    """
+    commit_args = dict(proposal.arguments)
+
+    if "layer" in commit_args:
+        commit_args["layer"] = _LAYER_MAP.get(commit_args["layer"], commit_args["layer"])
+
+    if proposal.commit_target in PROVENANCE_PASSTHROUGH_TARGETS:
+        commit_args["source_instance"] = proposal.source_instance
+
+    return commit_args
+
+
 _ALLOWED_COMMIT_TARGETS = frozenset(COMMIT_TARGETS.values())
 
 
@@ -420,13 +476,18 @@ def commit_pending_write(proposal_id: str, live: bool = False) -> Proposal:
             "Pre-commit checks failed:\n" + "\n".join(f"  • {e}" for e in errors)
         )
 
+    # Assembled BEFORE the dry-run branch so the review surface and the wire
+    # cannot diverge — see build_commit_arguments.
+    commit_args = build_commit_arguments(proposal)
+
     if not live:
-        # Dry-run: show what would happen
+        # Dry-run: show the body a live commit would actually send
+        # (layer translated, provenance injected).
         proposal.commit_result = {
             "mocked": False,
             "live": False,
             "would_call": proposal.commit_target,
-            "with_arguments": proposal.arguments,
+            "with_arguments": commit_args,
         }
         return proposal
 
@@ -434,14 +495,6 @@ def commit_pending_write(proposal_id: str, live: bool = False) -> Proposal:
     token = os.environ.get("BRIDGE_TOKEN", "")
     if not token:
         raise RuntimeError("BRIDGE_TOKEN not set — cannot commit without auth")
-
-    # Translate bridge-layer labels to Stack-layer labels.
-    # The bridge schema uses "reflection" as a semantic concept; the Stack
-    # record_insight tool only accepts ground_truth | hypothesis | open_thread.
-    commit_args = dict(proposal.arguments)
-    _LAYER_MAP = {"reflection": "hypothesis"}
-    if "layer" in commit_args:
-        commit_args["layer"] = _LAYER_MAP.get(commit_args["layer"], commit_args["layer"])
 
     try:
         response = httpx.post(

@@ -403,7 +403,10 @@ def _load_all_threads():
     threads_dir = CHRONICLE_DIR / "open_threads"
     if not threads_dir.exists():
         return threads
-    for jsonl_file in threads_dir.glob("*.jsonl"):
+    # rglob: nested shards are part of the store (see memory._thread_domain_for).
+    # dashboard/dashboard_web already walked recursively; this walker and the
+    # two above it did not, so the same store had two sizes.
+    for jsonl_file in sorted(threads_dir.rglob("*.jsonl")):
         for line in jsonl_file.read_text().splitlines():
             if line.strip():
                 try:

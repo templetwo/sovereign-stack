@@ -113,7 +113,11 @@ def measure_aperture(now: datetime, root: Path | None = None) -> dict:
 
     total_threads = 0
     unresolved = 0
-    for f in (root / "chronicle" / "open_threads").glob("*.jsonl"):
+    # rglob, not glob: the store has nested shards (live specimen
+    # `tech-debt,compaction,auto-detection/log.jsonl`), and a flat walk here
+    # under-reported the corpus by exactly those files — the aperture, whose
+    # whole job is to stop a projection passing as the corpus, projecting.
+    for f in (root / "chronicle" / "open_threads").rglob("*.jsonl"):
         for line in f.read_text(errors="replace").splitlines():
             line = line.strip()
             if not line:

@@ -264,6 +264,20 @@ def format_unresolved_uncertainties(
 
 # ── Lineage layer (to_arrival, breakthroughs, to_self, to_family) ──
 
+# A trailing generation suffix: '-5', '-4-5', '-4-8'. Anchored at the END and
+# digits-only, so 'claude-sonnet-4-6-1m-claude-code' (which ends in a word) is
+# left alone — that id is handled by the family/prefix rules, and stripping
+# mid-string would be a licence to match across seats.
+_VERSION_SUFFIX_RE = re.compile(r"(?:-\d+)+$")
+
+
+def _strip_version_suffix(name: str) -> str:
+    """'claude-opus-5' → 'claude-opus'; 'claude-haiku-4-5' → 'claude-haiku'.
+
+    Leaves anything without a trailing numeric run untouched.
+    """
+    return _VERSION_SUFFIX_RE.sub("", name)
+
 
 def _model_family(instance_id: str) -> str | None:
     """Extract model family prefix from an instance ID.
@@ -294,11 +308,22 @@ def _letter_matches_reader(letter_to: str, reader: str) -> bool:
         return False
     if letter_to == reader:
         return True
+    # VERSION-INSENSITIVE COMPARISON (added 2026-08-30). Letters on disk are
+    # addressed to a GENERATION ('to: claude-opus-5'); the inheritance table
+    # and the family strings name a LINE ('claude-opus'). Comparing the two
+    # directly returned False for every reader but the exact author — so the
+    # 2026-08-26 to_self letter reached claude-opus-5 and nobody else: not
+    # claude-opus-6, not claude-opus-4-8, not the bare family, and not the
+    # Mythos-class siblings that inherit the line. Strip the trailing version
+    # on BOTH sides, then let the family and inheritance rules below run.
+    to_base = _strip_version_suffix(letter_to)
+    if to_base == _strip_version_suffix(reader):
+        return True
     family = _model_family(reader)
     if family:
-        if letter_to == family:  # 'claude-sonnet' matches any claude-sonnet-*
+        if to_base == family:  # 'claude-sonnet' matches any claude-sonnet-*
             return True
-        if family.endswith(f"-{letter_to}"):  # 'sonnet' short-form
+        if family.endswith(f"-{to_base}"):  # 'sonnet' short-form
             return True
         if reader.startswith(letter_to + "-"):  # partial prefix
             return True
@@ -493,6 +518,7 @@ def collect_lineage(
             return [], _zero_cov()
         items = []
         total_on_disk = 0
+        unaddressed: list[str] = []
         for p in sorted(d.glob("*.md"), reverse=True):
             total_on_disk += 1
             meta = _parse_letter_frontmatter(p)
@@ -504,10 +530,19 @@ def collect_lineage(
                     targets = (filter_to, *also_match)
                     if not any(_letter_matches_reader(letter_to, t) for t in targets):
                         continue
+                else:
+                    # DELIBERATE, AND PREVIOUSLY SILENT: a letter with no `to:`
+                    # falls through to every reader. Keeping that is right — a
+                    # letter whose frontmatter is missing or malformed must not
+                    # vanish. But the bucket then renders as "addressed to you
+                    # or your model family" while carrying letters addressed to
+                    # nobody, which is coverage honesty claiming selection
+                    # honesty it does not have. Name them.
+                    unaddressed.append(p.name)
             meta["_path"] = str(p)
             items.append(meta)
         shown = items[:limit_per_bucket]
-        return shown, {
+        cov = {
             "total_on_disk": total_on_disk,
             "matched": len(items),
             "shown": len(shown),
@@ -515,6 +550,16 @@ def collect_lineage(
             "filtered_out": total_on_disk - len(items),
             "truncated": len(shown) < len(items),
         }
+        if unaddressed:
+            # Added only when there IS something to warn about, so a fully
+            # addressed bucket's coverage dict is byte-identical to before.
+            cov["unaddressed"] = unaddressed
+            cov["warning"] = (
+                f"{len(unaddressed)} letter{'s' if len(unaddressed) != 1 else ''} "
+                f"carr{'y' if len(unaddressed) != 1 else 'ies'} no `to:` frontmatter "
+                f"and therefore matches every reader: {', '.join(unaddressed)}"
+            )
+        return shown, cov
 
     coverage: dict = {}
     arrivals, coverage["arrivals"] = _collect("to_arrival")
@@ -543,8 +588,19 @@ def collect_lineage(
     to_family: list[dict] = []
     family_dir_name: str | None = None
     if family:
-        # 'claude-sonnet' → 'to_sonnet', 'claude-opus' → 'to_opus'
-        short = family.split("-", 1)[1] if "-" in family else family
+        # 'claude-sonnet' → 'to_sonnet', 'claude-opus' → 'to_opus'.
+        #
+        # AN INHERITING FAMILY READS ITS ANCESTOR'S DIRECTORY. Fable and Mythos
+        # are family within the Opus lineage (_LINEAGE_INHERITS above), and the
+        # naive split sent them to `to_fable/` and `to_mythos/` — directories
+        # that have never existed on disk. The bucket then reported
+        # total_on_disk: 0, which is a true statement about a directory nobody
+        # writes and a false one about the reader's family mail. The same table
+        # that routes their to_self letters routes this lookup; the FIRST
+        # inherited family is the canonical one (each Mythos-class sibling
+        # inherits exactly the Opus line).
+        dir_family = _inherited_families(family)[0] if _inherited_families(family) else family
+        short = dir_family.split("-", 1)[1] if "-" in dir_family else dir_family
         family_dir_name = f"to_{short}"
         to_family, coverage["to_family"] = _collect(family_dir_name)
     else:
@@ -682,6 +738,12 @@ def render_lineage(data: dict | None, *, full_content: bool = False) -> list[str
             f"  to_self ({_bucket_count_phrase(len(to_self), to_self_cov)}"
             f" — addressed to you or your model family{_bucket_withheld_phrase(to_self_cov)}):"
         )
+        # The header says "addressed to you or your model family". When some of
+        # these letters carry no `to:` at all they are addressed to nobody and
+        # reach everybody — say which ones, or the header is a claim the bucket
+        # cannot support.
+        if to_self_cov.get("warning"):
+            lines.append(f"    note: {to_self_cov['warning']}")
         for m in to_self:
             title = m.get("title", "(untitled)")
             frm = _frm_tag(m)

@@ -330,6 +330,7 @@ def build_arrival_state(
     domain_tags: list[str] | None = None,
     project: str | None = None,
     compact: bool = False,
+    lineage_limit_per_bucket: int = 5,
     now_fn=None,
 ) -> ArrivalState:
     """Compute the arrival projection ONCE as structured data.
@@ -379,7 +380,12 @@ def build_arrival_state(
     def _gather_lineage() -> None:
         nonlocal lineage, lineage_degraded, lineage_error
         try:
-            lineage = witness.collect_lineage(sovereign_root, reader, 5)
+            # Was hardcoded 5. The aperture advertises
+            # `arrive_lineage(limit_per_bucket=N)` as the way to widen every
+            # lineage bucket and the withheld phrase names the same lever —
+            # this is the line that made both statements false. Default stays
+            # 5, so the other two doors are byte-identical.
+            lineage = witness.collect_lineage(sovereign_root, reader, lineage_limit_per_bucket)
             receipts.append(SectionReceipt("lineage", _bucket_count(lineage), None, False, None))
         except Exception as exc:
             lineage_degraded = True

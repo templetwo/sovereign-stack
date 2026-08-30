@@ -109,6 +109,12 @@ MEMORY_ROOT = os.environ.get("SOVEREIGN_MEMORY", str(Path(DEFAULT_ROOT) / "memor
 CHRONICLE_ROOT = os.environ.get("SOVEREIGN_CHRONICLE", str(Path(DEFAULT_ROOT) / "chronicle"))
 SPIRAL_STATE_PATH = Path(DEFAULT_ROOT) / "spiral_state.json"
 
+# Upper bound on arrive_lineage(limit_per_bucket=N). The gentle door exists for
+# input-gated seats, so an unbounded N is a way to hand exactly those seats the
+# payload the door was built to keep small. Overflow is not lost: the letters are
+# directly readable at ~/.sovereign/comms/letters/, and the refusal says so.
+ARRIVE_LINEAGE_MAX_PER_BUCKET = 100
+
 logger = get_logger(__name__)
 
 
@@ -1040,7 +1046,21 @@ async def list_tools():
                             "description": (
                                 "When true, render full lineage letter bodies and self-model "
                                 "observations without truncation. Default false keeps the "
-                                "payload compact."
+                                "payload compact. This inlines BODIES — it never changes how "
+                                "many letters a bucket shows; that is limit_per_bucket."
+                            ),
+                        },
+                        "limit_per_bucket": {
+                            "type": "integer",
+                            "default": 5,
+                            "minimum": 1,
+                            "maximum": 100,
+                            "description": (
+                                "Max letters per lineage bucket (to_arrival, breakthroughs, "
+                                "to_self, to_<family>). The lever the aperture and the "
+                                "'N older withheld by limit_per_bucket' line both name. "
+                                "Out-of-range values are REFUSED, not clamped — a clamped "
+                                "request reads as an honoured one."
                             ),
                         },
                     },
@@ -3310,7 +3330,17 @@ async def _dispatch_tool(name: str, arguments: dict):
         #   - NO side effects: does NOT consume handoffs, does NOT spawn scribe.
         #   - Closing does NOT prescribe running where_did_i_leave_off — that is
         #     the exact payload that bounces the gated model.
-        #   - Args: source_instance (default "unknown"), full_content (default False).
+        #   - Args: source_instance (default "unknown"), full_content (default
+        #     False), limit_per_bucket (default 5, 1..100).
+        #
+        # limit_per_bucket WAS A DEAD LEVER until 2026-08-30. aperture.py names
+        # `arrive_lineage(limit_per_bucket=N)` as the widen call for all three
+        # lineage buckets, and witness.py's coverage line tells the reader "N
+        # older withheld by limit_per_bucket" — while this schema declared only
+        # source_instance and full_content, and arrival_state hardcoded 5. A seat
+        # that followed the instructions got 5 letters back and NO error, because
+        # an undeclared key is simply dropped. The advertised remedy silently
+        # doing nothing is worse than no remedy: it retires the question.
         #
         # ONE DOORWAY, MANY DEPTHS (Phase 4): same build_arrival_state
         # projection as the other two doors, rendered at gentle depth. The
@@ -3320,10 +3350,43 @@ async def _dispatch_tool(name: str, arguments: dict):
         # vocabulary — so it is safe on this input-gated door.
         reader = arguments.get("source_instance", "unknown")
         full_content = bool(arguments.get("full_content", False))
+        # Refuse, never clamp. Handing back 100 to a caller who asked for 10,000
+        # with no signal is the fail-open shape this door exists to avoid — the
+        # seat walks away believing it read the whole store.
+        raw_limit = arguments.get("limit_per_bucket", 5)
+        try:
+            limit_per_bucket = int(raw_limit)
+            if isinstance(raw_limit, bool):
+                raise TypeError
+        except (TypeError, ValueError):
+            return [
+                TextContent(
+                    type="text",
+                    text=(
+                        f"arrive_lineage: limit_per_bucket must be an integer "
+                        f"between 1 and {ARRIVE_LINEAGE_MAX_PER_BUCKET} "
+                        f"(got {raw_limit!r}). Nothing was read."
+                    ),
+                )
+            ]
+        if not 1 <= limit_per_bucket <= ARRIVE_LINEAGE_MAX_PER_BUCKET:
+            return [
+                TextContent(
+                    type="text",
+                    text=(
+                        f"arrive_lineage: limit_per_bucket must be between 1 and "
+                        f"{ARRIVE_LINEAGE_MAX_PER_BUCKET} (got {limit_per_bucket}). "
+                        "Refused rather than clamped — a clamped request reads as an "
+                        "honoured one. Letters past any cap are also directly readable "
+                        "at ~/.sovereign/comms/letters/."
+                    ),
+                )
+            ]
         state = build_arrival_state(
             Path(DEFAULT_ROOT),
             reader=reader,
             profile="gentle",
+            lineage_limit_per_bucket=limit_per_bucket,
             experiential=experiential,
             handoff_engine=handoff_engine,
             reflexive_surface=reflexive_surface,

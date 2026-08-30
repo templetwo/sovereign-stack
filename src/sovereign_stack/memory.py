@@ -81,6 +81,31 @@ def _generate_thread_id(question: str, timestamp: datetime) -> str:
     return f"thread_{stamp}_{digest}"
 
 
+def _thread_domain_for(path: Path, threads_dir: Path) -> str:
+    """
+    The domain string an open-threads shard is addressed by.
+
+    Flat shard   ``<threads_dir>/<domain>.jsonl``        → the file stem.
+    Nested shard ``<threads_dir>/<domain>/<name>.jsonl`` → the DIRECTORY path,
+    matching how the insights store already names a compound domain.
+
+    WHY THIS EXISTS AND WHY rglob ALONE IS NOT THE FIX. The live store holds
+    ``open_threads/tech-debt,compaction,auto-detection/log.jsonl``. A flat glob
+    never enumerated it, so no `limit` could widen to it — but a recursive walk
+    that keeps deriving the domain from the file STEM makes it countable and
+    leaves it unaddressable: the shard would answer to ``domain="log"`` and not
+    to ``domain="tech-debt"``. Content reachable at an address nobody would
+    guess is still content nobody can find.
+    """
+    try:
+        rel = path.relative_to(threads_dir)
+    except ValueError:  # not under threads_dir — fall back to the stem
+        return path.stem
+    if len(rel.parts) <= 1:
+        return path.stem
+    return ",".join(rel.parent.parts)
+
+
 def _parse_iso(ts: str | None) -> datetime | None:
     """Parse an ISO8601 timestamp, returning None on failure or missing input."""
     if not ts:
@@ -779,6 +804,11 @@ class ExperientialMemory:
                    entry's `supersedes` breadcrumb.
             carry_forward_summary: REQUIRED when supersedes is present
                    (<= 500 chars) — what the predecessors still teach.
+                   NOTE (2026-08-30): a body whose PROSE states a supersession
+                   of a 64-hex claim id while `supersedes` is absent is REFUSED
+                   (provenance.validate_no_prose_supersession). Saying it is not
+                   doing it — the ledger stays empty and the predecessor keeps
+                   surfacing as live. Nothing is inferred from the prose.
             observed_emotion: Optional list of open felt-register tags
                    (e.g. ["grief", "protective_love"]). Descriptive only.
             emotional_intensity: Optional felt-weight, 0.0-1.0. STORED but
@@ -831,6 +861,14 @@ class ExperientialMemory:
             provenance.validate_carry_forward(supersedes, carry_forward_summary)
         elif carry_forward_summary is not None:
             provenance.validate_carry_forward(None, carry_forward_summary)
+        # A supersession stated in the BODY and not in the FIELDS writes no
+        # ledger record: the predecessor keeps surfacing as live while every
+        # reader sees the word and believes the chain moved. Refused here,
+        # before the timestamp and any filesystem call, so a refused write
+        # leaves nothing behind — and refused rather than inferred, because
+        # auto-filling would have the stack perform a governance act on a
+        # guessed id, with a carry_forward_summary it cannot possibly know.
+        provenance.validate_no_prose_supersession(content, supersedes)
         if verified_by:
             if not isinstance(verified_by, list):
                 raise provenance.ReceiptError("verified_by must be a list of receipt dicts")
@@ -1220,7 +1258,11 @@ class ExperientialMemory:
 
         # Whole-file rewrite — same critical section as resolve_thread.
         with provenance.chronicle_write_lock():
-            for jsonl_file in self.threads_dir.glob("*.jsonl"):
+            # rglob: a thread in a nested shard was never VISITED here, so this
+            # fell through and returned "" — reporting not-found for a thread
+            # that exists and is addressed by a stable id. The read-side miss
+            # undercounts; this one silently refuses to write.
+            for jsonl_file in sorted(self.threads_dir.rglob("*.jsonl")):
                 hit = False
                 lines = []
                 with open(jsonl_file) as f:
@@ -1229,7 +1271,9 @@ class ExperientialMemory:
                             thread = json.loads(line)
                             if thread.get("thread_id") == thread_id and not thread.get("resolved"):
                                 hit = True
-                                resolved_domain = thread.get("domain", jsonl_file.stem)
+                                resolved_domain = thread.get("domain") or _thread_domain_for(
+                                    jsonl_file, self.threads_dir
+                                )
                                 resolved_question = thread.get("question", "")
                                 resolved_timestamp = thread.get("timestamp")
                                 thread["resolved"] = True
@@ -1327,19 +1371,29 @@ class ExperientialMemory:
         threads = []
         corrupt_lines = 0
 
-        all_files = list(self.threads_dir.glob("*.jsonl"))
+        # RECURSIVE, not flat (2026-08-30). The store has nested shards — the
+        # live specimen is `tech-debt,compaction,auto-detection/log.jsonl` —
+        # and a flat glob skipped them at EVERY limit. That is not a cap a
+        # caller can widen; it is a file that was never enumerated, so the
+        # aperture's "widen_with: get_open_threads(limit=N)" pointed at a lever
+        # that could not reach it. Domains come from _thread_domain_for so a
+        # nested shard is addressable by its directory, not by the stem 'log'.
+        all_files = sorted(self.threads_dir.rglob("*.jsonl"))
         domains_total = len(all_files)
+        file_domains = {f: _thread_domain_for(f, self.threads_dir) for f in all_files}
 
         # Match any file whose domain string contains `domain` as a
         # comma-separated element (e.g. domain="openai-bridge" matches
         # both "openai-bridge.jsonl" and
         # "openai-bridge,cross-system-inquiry,...jsonl").
-        files = [f for f in all_files if domain in f.stem.split(",")] if domain else all_files
+        files = (
+            [f for f in all_files if domain in file_domains[f].split(",")] if domain else all_files
+        )
 
         # Apply domain_contains substring filter (case-insensitive) on top.
         if domain_contains:
             needle = domain_contains.lower()
-            files = [f for f in files if needle in f.stem.lower()]
+            files = [f for f in files if needle in file_domains[f].lower()]
 
         # Schema v1 scope.mode (closed 3-value enum, mirroring
         # recall_insights): EITHER domain argument makes this a domain-scoped
