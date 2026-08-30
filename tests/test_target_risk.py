@@ -8,14 +8,25 @@ being completely broken for the case it existed for, because Path.glob swallows
 PermissionError and reported a locked directory as an empty one. Only a negative
 test found it.
 
-Every test uses a tmp root. None reads or writes a live queue.
+Every test uses a tmp root — enforced, not asserted. The docstring here used to
+CLAIM that and it was false: the three risk_classify integration tests below
+passed no root, and risk_classify exposed none, so target_escalation_reasons fell
+through to Path.home()/".sovereign" and read Anthony's live index. Measured
+2026-08-28: exactly 3 reads of the live store per run of this file.
+
+A test suite that reads live human state is the read-side twin of the write-side
+fail-open this repo has fixed twice (b96efb8's protected-drawer tests, and
+sovereign-bridge's 28592c7). `no_live_sovereign_reads` below is the guard that
+makes the docstring's claim enforceable, so it cannot quietly go stale again.
 """
 
 from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 
+import bridge_core.target_risk as target_risk
 import pytest
 from bridge_core.risk import RiskLevel, risk_classify
 from bridge_core.target_risk import (
@@ -25,6 +36,34 @@ from bridge_core.target_risk import (
     resolve_target,
     target_escalation_reasons,
 )
+
+
+@pytest.fixture(autouse=True)
+def no_live_sovereign_reads(monkeypatch):
+    """Fail any test in this file that resolves a store path under ~/.sovereign.
+
+    Autouse and fail-CLOSED: a test that reaches the live root raises here
+    rather than silently passing on Anthony's real data.
+    """
+    live = Path.home() / ".sovereign"
+    original = target_risk._sovereign_root
+    offences: list[str] = []
+
+    def guarded(root):
+        resolved = original(root)
+        try:
+            resolved.relative_to(live)
+        except ValueError:
+            return resolved
+        offences.append(str(resolved))
+        raise AssertionError(
+            f"test resolved a store path inside the LIVE {live} (got {resolved}). "
+            "Root it with the tmp_sovereign_root fixture or an explicit root="
+        )
+
+    monkeypatch.setattr(target_risk, "_sovereign_root", guarded)
+    yield
+    assert not offences, f"live-store reads: {offences}"
 
 
 def _store(root, rel, records):
@@ -182,12 +221,14 @@ def test_ordinary_text_is_not_flagged_sensitive(tmp_path):
 # ── risk_classify integration ────────────────────────────────────────────────
 
 
-def test_witness_escalates_to_critical():
+def test_witness_escalates_to_critical(tmp_path):
     """WITNESS is the compass HARD deny and was handled nowhere: it appeared in
     the codebase exactly once, as a comment on a type annotation, so PAUSE
     blocked and the stronger signal passed straight through."""
     level, reasons = risk_classify(
-        "propose_insight", {"content": "x", "compass_check_result": "WITNESS"}
+        "propose_insight",
+        {"content": "x", "compass_check_result": "WITNESS"},
+        root=tmp_path,
     )
     assert level == RiskLevel.CRITICAL
     assert any("WITNESS" in r for r in reasons)
@@ -196,16 +237,19 @@ def test_witness_escalates_to_critical():
 def test_low_baseline_tool_escalates_when_its_target_is_bad(tmp_path):
     """comms_acknowledge baselines LOW. That is what let e1939a23 sit 55 days
     with zero machine check. Danger is not a property of the verb."""
+    _store(tmp_path, "comms", [{"id": "some-other-message"}])
     level, reasons = risk_classify(
-        "comms_acknowledge", {"message_id": "definitely-not-a-real-message-id-xyz"}
+        "comms_acknowledge",
+        {"message_id": "definitely-not-a-real-message-id-xyz"},
+        root=tmp_path,
     )
     assert level == RiskLevel.CRITICAL, f"got {level} / {reasons}"
     assert not any(r == "baseline for comms_acknowledge" for r in reasons)
 
 
-def test_benign_low_tool_stays_low():
+def test_benign_low_tool_stays_low(tmp_path):
     """Positive control on the classifier: escalation must be selective."""
-    level, _ = risk_classify("record_open_thread", {"question": "what is next?"})
+    level, _ = risk_classify("record_open_thread", {"question": "what is next?"}, root=tmp_path)
     assert level == RiskLevel.LOW
 
 

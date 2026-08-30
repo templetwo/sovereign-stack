@@ -79,6 +79,7 @@ class _SubstrateOps:
                 list_pending_writes,
                 needs_revision_pending_write,
                 reject_pending_write,
+                retry_pending_write,
             )
             self._approve = lambda pid, by: approve_pending_write(pid, approved_by=by)
             self._reject = lambda pid, reason, by: reject_pending_write(pid, reason=reason, rejected_by=by)
@@ -87,6 +88,7 @@ class _SubstrateOps:
             self._list = lambda status: list_pending_writes(status=status)
             self._read_audit = lambda pid: read_audit_trail(proposal_id=pid)
             self._verify = lambda: verify_chain()
+            self._retry = lambda pid, by: retry_pending_write(pid, actor=by)
             self._pending_dir = Path.home() / ".sovereign" / "openai_bridge" / "pending_writes"
 
         elif source == "grok":
@@ -101,6 +103,7 @@ class _SubstrateOps:
                 needs_revision_pending_write,
                 read_audit_trail,
                 reject_pending_write,
+                retry_pending_write,
                 verify_chain,
             )
             ctx = get_context("grok-xai")
@@ -111,6 +114,7 @@ class _SubstrateOps:
             self._list = lambda status: list_pending_writes(ctx, status=status)
             self._read_audit = lambda pid: read_audit_trail(ctx, proposal_id=pid)
             self._verify = lambda: verify_chain(ctx)
+            self._retry = lambda pid, by: retry_pending_write(ctx, pid, actor=by)
             self._pending_dir = ctx.pending_writes_dir
 
         else:
@@ -129,6 +133,7 @@ class _SubstrateOps:
     def commit(self, pid, live):  return self._commit(pid, live)
     def read_audit(self, pid):    return self._read_audit(pid)
     def verify(self):             return self._verify()
+    def retry(self, pid, by):     return self._retry(pid, by)
 
 
 # ── CLI group ─────────────────────────────────────────────────────────────────
@@ -255,7 +260,7 @@ def show(ctx, proposal_id: str):
 
 @cli.command("approve")
 @click.argument("proposal_id")
-@click.option("--by", default="Anthony", help="Approver name")
+@click.option("--by", required=True, help="Reviewer identity — REQUIRED. Name yourself; automated callers must not inherit a human's name.")
 @click.pass_context
 def approve(ctx, proposal_id: str, by: str):
     """Approve a pending proposal. Approval and commit are separate steps."""
@@ -275,7 +280,7 @@ def approve(ctx, proposal_id: str, by: str):
 @cli.command("reject")
 @click.argument("proposal_id")
 @click.option("--reason", required=True, help="Rejection reason")
-@click.option("--by", default="Anthony", help="Reviewer name")
+@click.option("--by", required=True, help="Reviewer identity — REQUIRED. Name yourself; automated callers must not inherit a human's name.")
 @click.pass_context
 def reject(ctx, proposal_id: str, reason: str, by: str):
     """Reject a pending proposal."""
@@ -291,7 +296,7 @@ def reject(ctx, proposal_id: str, reason: str, by: str):
 @cli.command("needs-revision")
 @click.argument("proposal_id")
 @click.option("--notes", required=True, help="Revision instructions")
-@click.option("--by", default="Anthony", help="Reviewer name")
+@click.option("--by", required=True, help="Reviewer identity — REQUIRED. Name yourself; automated callers must not inherit a human's name.")
 @click.pass_context
 def needs_revision(ctx, proposal_id: str, notes: str, by: str):
     """Send a pending proposal back for revision with notes."""
@@ -299,6 +304,37 @@ def needs_revision(ctx, proposal_id: str, notes: str, by: str):
     try:
         p = ops.needs_revision(proposal_id, notes, by)
         click.echo(f"Needs revision: {_short(p.proposal_id)}  [{p.tool}]  notes={notes}")
+    except (FileNotFoundError, ValueError) as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
+
+@cli.command("retry")
+@click.argument("proposal_id")
+@click.option(
+    "--by",
+    required=True,
+    help="Reviewer identity — REQUIRED. Name yourself; automated callers must not inherit a human's name.",
+)
+@click.pass_context
+def retry(ctx, proposal_id: str, by: str):
+    """Re-arm a commit_failed proposal so it can be committed again.
+
+    A proposal the Stack REJECTED keeps status=commit_failed — it must never
+    read as committed. This is the recorded way back to 'approved'. The
+    alternative, hand-editing the JSON, passes the tamper check silently
+    (status and commit_result are both mutable) and leaves no audit event.
+    """
+    ops = ctx.obj["ops"]
+    try:
+        p = ops.retry(proposal_id, by)
+        click.echo(
+            f"Re-armed: {_short(p.proposal_id)}  [{p.tool}]  "
+            f"status={_status_label(p.status)}  by={by}"
+        )
+        click.echo(
+            f"  Run 'bridge --source={ctx.obj['source']} commit <id> --live' to attempt again."
+        )
     except (FileNotFoundError, ValueError) as e:
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)

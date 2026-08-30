@@ -4,11 +4,22 @@ Smoke test: prove the membrane holds.
 Run from sovereign-stack root:
   python -m clients.openai_bridge._smoke_test
 
-Every test should print PASS. No Stack mutations occur.
+Every test should print PASS. No Stack mutations occur, and — since
+2026-08-28 — no ~/.sovereign/openai_bridge/ mutations either: every write goes
+to a temporary directory that is removed when the run ends.
+
+Before that, this file filed its fixtures into the LIVE openai queue. Nine of
+them are still there: "Test: does the membrane hold?" and friends, each
+stamped `reviewed_by: Anthony` because `approve_pending_write` defaulted the
+reviewer name, each reviewed under a millisecond after filing. The console
+rendered them as human reviews. Fixture data was indistinguishable from
+Anthony's own decisions in his own queue.
 """
 
 import sys
+import tempfile
 import traceback
+from contextlib import contextmanager
 from pathlib import Path
 
 # Add project root to path so the package imports work
@@ -26,10 +37,65 @@ from clients.openai_bridge.pending_writes import (
 from clients.openai_bridge.hash_chain import verify_chain
 from clients.openai_bridge.risk import risk_classify, RiskLevel
 
+# Imported as module OBJECTS, not by sys.modules string key, on purpose: this
+# package is reachable under two names ("openai_bridge" from the installed
+# distribution, "clients.openai_bridge" from the repo root) and each name is a
+# SEPARATE module object with its own globals. Rebinding a string key would
+# isolate one of them and leave the other pointed at ~/.sovereign.
+from clients.openai_bridge import audit as _audit_mod
+from clients.openai_bridge import hash_chain as _hash_chain_mod
+from clients.openai_bridge import pending_writes as _pending_writes_mod
+
 PASS = "\033[92mPASS\033[0m"
 FAIL = "\033[91mFAIL\033[0m"
 
 SOURCE = "chatgpt-gpt-5-5-openai-bridge-test"
+
+# The reviewer this test asserts on. NOT "Anthony": a test that names the human
+# as its reviewer cannot tell a real approval from its own fixture, which is
+# precisely how nine fixtures came to sit in the live queue wearing his name.
+REVIEWER = "openai-bridge-smoke-test"
+
+# Every live-~/.sovereign module global that THIS TEST'S CODE PATHS REACH, as
+# (module object, attribute name, path relative to the sandbox root).
+#
+# Scoped deliberately, and not "every global in the package": cli.py defines its
+# own PENDING_DIR and AUDIT_LOG from Path.home() (cli.py:36-37) and globs the
+# former at :125. This file never imports cli.py, so those two are out of reach
+# here and out of this tuple — but they are NOT isolated, and any future test
+# that imports the console must extend this list.
+#
+# ALL FIVE MUST MOVE TOGETHER. audit.py does `from .hash_chain import AUDIT_DIR,
+# AUDIT_LOG`, and a from-import copies the VALUE into the importing module's
+# namespace at import time. Rebind hash_chain only and append_audit_event keeps
+# writing to the live audit log — silently, with the run still printing PASS.
+# tests/test_ring2_reviewer_identity.py asserts against this exact tuple.
+ISOLATED_NAMES = (
+    (_pending_writes_mod, "PENDING_DIR", "pending_writes"),
+    (_hash_chain_mod, "AUDIT_DIR", "audit"),
+    (_hash_chain_mod, "AUDIT_LOG", "audit/audit.jsonl"),
+    (_audit_mod, "AUDIT_DIR", "audit"),
+    (_audit_mod, "AUDIT_LOG", "audit/audit.jsonl"),
+)
+
+
+@contextmanager
+def isolated_queue(sandbox_root: Path):
+    """
+    Point every live-path module global at sandbox_root for the duration.
+
+    Restores the originals on exit, including on exception, so importing this
+    module can never leave the process wired to a temp dir that no longer
+    exists.
+    """
+    saved = [(mod, attr, getattr(mod, attr)) for mod, attr, _ in ISOLATED_NAMES]
+    try:
+        for mod, attr, rel in ISOLATED_NAMES:
+            setattr(mod, attr, sandbox_root / rel)
+        yield sandbox_root
+    finally:
+        for mod, attr, original in saved:
+            setattr(mod, attr, original)
 
 
 def check(name: str, condition: bool, detail: str = "") -> bool:
@@ -39,6 +105,16 @@ def check(name: str, condition: bool, detail: str = "") -> bool:
 
 
 def run():
+    """Run every check against a throwaway queue. Never touches ~/.sovereign."""
+    with (
+        tempfile.TemporaryDirectory(prefix="openai_smoke_") as tmp,
+        isolated_queue(Path(tmp)) as sandbox,
+    ):
+        print(f"\n  sandbox: {sandbox}")
+        return _run_checks()
+
+
+def _run_checks():
     results = []
     print("\n── Ring classification ──────────────────────────────────────────")
 
@@ -123,9 +199,13 @@ def run():
     print("\n── Lifecycle: approve → commit (mocked) ─────────────────────────")
 
     if proposal_id:
-        approved = approve_pending_write(proposal_id)
+        approved = approve_pending_write(proposal_id, approved_by=REVIEWER)
         results.append(check("Approve sets status=approved", approved.status == "approved"))
-        results.append(check("reviewed_by set", approved.reviewed_by == "Anthony"))
+        results.append(check(
+            "reviewed_by is the name this test passed (not a default)",
+            approved.reviewed_by == REVIEWER,
+            approved.reviewed_by or "<unset>",
+        ))
 
         committed = commit_pending_write(proposal_id)
         results.append(check("Commit sets status=committed", committed.status == "committed"))
@@ -140,7 +220,9 @@ def run():
         source_instance=SOURCE,
     )
     if result2.proposal:
-        rejected = reject_pending_write(result2.proposal.proposal_id, reason="smoke test rejection")
+        rejected = reject_pending_write(
+            result2.proposal.proposal_id, reason="smoke test rejection", rejected_by=REVIEWER
+        )
         results.append(check("Reject sets status=rejected", rejected.status == "rejected"))
 
     print("\n── Lifecycle: needs_revision ────────────────────────────────────")
@@ -151,7 +233,9 @@ def run():
         source_instance=SOURCE,
     )
     if result3.proposal:
-        revised = needs_revision_pending_write(result3.proposal.proposal_id, notes="please add context")
+        revised = needs_revision_pending_write(
+            result3.proposal.proposal_id, notes="please add context", actor=REVIEWER
+        )
         results.append(check("needs_revision sets status", revised.status == "needs_revision"))
 
     print("\n── Hash chain integrity ─────────────────────────────────────────")

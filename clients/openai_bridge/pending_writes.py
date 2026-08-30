@@ -56,19 +56,19 @@ class Proposal:
 
     tool: str
     arguments: dict[str, Any]
-    commit_target: str              # underlying Stack tool that would execute
+    commit_target: str  # underlying Stack tool that would execute
 
-    proposed_layer: str             # hypothesis | reflection | ground_truth
+    proposed_layer: str  # hypothesis | reflection | ground_truth
     has_receipt: bool
     receipt_urls: list[str]
 
     risk_level: str
     risk_reasons: list[str]
 
-    compass_check_result: str | None   # PROCEED / PAUSE / WITNESS / None
+    compass_check_result: str | None  # PROCEED / PAUSE / WITNESS / None
     compass_check_rationale: str | None
 
-    status: str = "pending"         # pending | approved | rejected | needs_revision | committed
+    status: str = "pending"  # pending | approved | rejected | needs_revision | committed
     reviewed_by: str | None = None
     reviewed_at: str | None = None
     revision_notes: str | None = None
@@ -114,12 +114,23 @@ def validate_pending_write(proposal: Proposal) -> list[str]:
             "policy: max_confidence_without_receipt = 0.70"
         )
 
-    if proposal.risk_level == RiskLevel.CRITICAL and not proposal.compass_check_result:
+    # ABSENCE IS DECIDED BY normalize_compass, NOT BY RAW TRUTHINESS.
+    # bool("   ") is True, so a whitespace string satisfied this gate while
+    # normalize_compass("   ") returns None (absent) and compass_create_error
+    # returns None (nothing to complain about) — the two halves disagreed and
+    # the write went through. A blank string is the cheapest possible way to
+    # claim you ran the compass without running it, and it was the one spelling
+    # the 2026-08-28 hardening did not cover.
+    from bridge_core.target_risk import normalize_compass
+
+    if (
+        proposal.risk_level == RiskLevel.CRITICAL
+        and normalize_compass(proposal.compass_check_result) is None
+    ):
         errors.append(
             "CRITICAL risk proposals require a compass_check_result — "
             "call compass_check before proposing"
         )
-
 
     # REFERENTIAL VALIDATION — a target that does not exist is a factual defect,
     # not a risk judgement, so it is refused outright rather than escalated.
@@ -129,7 +140,9 @@ def validate_pending_write(proposal: Proposal) -> list[str]:
 
         errors.extend(referential_errors(proposal.tool, proposal.arguments))
     except Exception as exc:  # noqa: BLE001
-        errors.append(f"referential check could not run ({type(exc).__name__}) — refusing rather than assuming the target exists")
+        errors.append(
+            f"referential check could not run ({type(exc).__name__}) — refusing rather than assuming the target exists"
+        )
 
     # ONE normalisation function, imported by both substrates, so the enum lives
     # in exactly one place. Refuses PAUSE, refuses any unrecognised value, and
@@ -142,6 +155,56 @@ def validate_pending_write(proposal: Proposal) -> list[str]:
         errors.append(_compass_err)
 
     return errors
+
+
+# Commit targets whose live Stack inputSchema declares `verified_by` (measured
+# against list_tools() 2026-08-30: record_insight declares it; record_learning,
+# handoff, close_session, record_open_thread and comms_acknowledge do not).
+# Mirrors bridge_core.pending_writes.VERIFIED_BY_TARGETS.
+VERIFIED_BY_TARGETS: frozenset[str] = frozenset({"record_insight"})
+
+
+def translate_receipt_url(args: dict, commit_target: str) -> dict:
+    """Resolve `receipt_url` into `verified_by`, or drop it. Returns a new dict.
+
+    receipt_url is advertised in this bridge's propose_insight schema and is
+    load-bearing bridge-side (has_receipt; the ground_truth gate), but
+    record_insight does not declare it — so since fd73258's
+    _reject_unknown_params every commit carrying one is rejected by the Stack.
+    TRANSLATED where the target accepts verified_by ("url" is a RECEIPT_KIND,
+    stamped "attested" with no live fetch, so the evidence survives as
+    provenance); DROPPED where it does not, because translating into an
+    undeclared parameter would swap one rejection for another.
+
+    APPLIED AT PROPOSAL TIME, not at commit. bridge_core does this inside
+    build_commit_arguments, and doing the same here was the obvious symmetry —
+    but it is not available: fix/arrival-surfaces-reachability introduces this
+    module's build_commit_arguments in the same edit, and adding lines inside a
+    function BOTH branches create is an unresolvable add/add conflict. Measured,
+    not assumed: with these lines removed the merge is 0-conflict; with them
+    present it is 3. Proposal time is upstream of every reader, so the stored
+    proposal, `bridge show`, the dry-run preview and the wire all agree — which
+    is the guarantee the fold was asked to provide.
+
+    KNOWN GAP, stated rather than papered over: proposals ALREADY on disk
+    carrying receipt_url are not rewritten (proposal.arguments is outside
+    _MUTABLE, so normalising them on load would break their audit hash). They
+    now fail LOUDLY as commit_failed instead of being laundered into
+    "committed", which is the safe direction; they need re-proposing.
+    """
+    if "receipt_url" not in args:
+        return args
+    out = dict(args)
+    receipt_url = out.pop("receipt_url", None)
+    if receipt_url and commit_target in VERIFIED_BY_TARGETS:
+        receipts = list(out.get("verified_by") or [])
+        if not any(
+            isinstance(r, dict) and r.get("kind") == "url" and r.get("ref") == receipt_url
+            for r in receipts
+        ):
+            receipts.append({"kind": "url", "ref": receipt_url})
+        out["verified_by"] = receipts
+    return out
 
 
 def create_pending_write(
@@ -178,6 +241,11 @@ def create_pending_write(
     risk_level, risk_reasons = risk_classify(
         tool_name, args, compass_check_result=compass_check_result
     )
+
+    # Applied AFTER has_receipt and risk_classify have read the RAW args — both
+    # key off receipt_url, and translating first would silently drop a
+    # ground_truth proposal's receipt from the risk calculation.
+    args = translate_receipt_url(args, COMMIT_TARGETS.get(tool_name, tool_name))
 
     prev_hash = get_last_audit_hash()
     proposal_id = str(uuid.uuid4())
@@ -226,8 +294,7 @@ def create_pending_write(
 
     if not dry_run:
         filename = (
-            now.replace(":", "-").replace("+", "Z")[:19]
-            + f"_{tool_name}_{proposal_id[:8]}.json"
+            now.replace(":", "-").replace("+", "Z")[:19] + f"_{tool_name}_{proposal_id[:8]}.json"
         )
         proposal_path = PENDING_DIR / filename
         proposal_path.write_text(json.dumps(d, indent=2, default=str))
@@ -285,12 +352,42 @@ def _save_proposal(proposal: Proposal, path: Path) -> None:
     path.write_text(json.dumps(d, indent=2, default=str))
 
 
-def approve_pending_write(proposal_id: str, approved_by: str = "Anthony") -> Proposal:
+def _require_reviewer(name: str | None, param: str) -> str:
+    """
+    Reviewer identity is an ASSERTION, never a default.
+
+    This used to be `approved_by: str = "Anthony"`. Any automated caller that
+    omitted the name was stamped with the human's — nine smoke-test fixtures in
+    the live openai queue read `reviewed_by: Anthony`, reviewed under a
+    millisecond after filing, and the console rendered them as a human review
+    with no sign the stamp was synthetic. A default identity is a fail-open:
+    the record reports a human decision that never happened.
+
+    Callers must name the reviewer. Empty and whitespace-only are refused too —
+    a blank string is the same lie with less confidence.
+
+    Deliberately duplicated from bridge_core.pending_writes rather than
+    imported: this legacy module is self-contained by design (its own audit,
+    hash_chain, risk, and PENDING_DIR), and a six-line guard does not justify
+    coupling it to another package.
+    """
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError(
+            f"{param} is required and must be a non-empty reviewer identity — "
+            "reviewer identity is asserted by the caller, never defaulted. "
+            "Automated callers must name themselves (e.g. 'smoke-test', "
+            "'grok-bridge-drain'), not inherit a human's name."
+        )
+    return name.strip()
+
+
+def approve_pending_write(proposal_id: str, *, approved_by: str) -> Proposal:
     """
     Mark a pending proposal as approved.
 
     Approval is not commitment. The underlying Stack tool is not called here.
     """
+    approved_by = _require_reviewer(approved_by, "approved_by")
     proposal, path = _load_proposal(proposal_id)
 
     if proposal.status != "pending":
@@ -442,7 +539,14 @@ def _precondition_check(proposal: Proposal) -> list[str]:
     # Verify the immutable creation-time fields have not been tampered with.
     # Lifecycle fields (status, reviewed_by, reviewed_at, revision_notes, commit_result)
     # are intentionally mutable — exclude them from hash verification.
-    _MUTABLE = {"status", "reviewed_by", "reviewed_at", "revision_notes", "commit_result", "audit_hash"}
+    _MUTABLE = {
+        "status",
+        "reviewed_by",
+        "reviewed_at",
+        "revision_notes",
+        "commit_result",
+        "audit_hash",
+    }
     d = proposal.to_dict()
     creation_snapshot = {k: v for k, v in d.items() if k not in _MUTABLE}
     # Restore the creation-time values for fields that change during approval
@@ -472,9 +576,11 @@ def commit_pending_write(proposal_id: str, live: bool = False) -> Proposal:
     # Pre-commit validation (always runs)
     errors = _precondition_check(proposal)
     if errors:
-        raise ValueError(
-            "Pre-commit checks failed:\n" + "\n".join(f"  • {e}" for e in errors)
-        )
+        raise ValueError("Pre-commit checks failed:\n" + "\n".join(f"  • {e}" for e in errors))
+
+    # Assembled BEFORE the dry-run branch so the review surface and the wire
+    # cannot diverge — see build_commit_arguments.
+    commit_args = build_commit_arguments(proposal)
 
     # Assembled BEFORE the dry-run branch so the review surface and the wire
     # cannot diverge — see build_commit_arguments.
@@ -509,6 +615,52 @@ def commit_pending_write(proposal_id: str, live: bool = False) -> Proposal:
         raise RuntimeError(f"Stack returned {e.response.status_code}: {e.response.text}") from e
     except httpx.RequestError as e:
         raise RuntimeError(f"Could not reach bridge at {_BRIDGE_URL}: {e}") from e
+
+    # FAIL CLOSED ON A WRITE THE STACK REJECTED. The bridge answers HTTP 200 with
+    # {"ok": false, "error": ...} when the Stack handler raises, so
+    # raise_for_status() sees success and the old code stamped "committed" on a
+    # write that never landed. `ok` must be EXPLICITLY present and falsy —
+    # absence is not failure. Twin of the guard in bridge_core.pending_writes.
+    if isinstance(stack_result, dict) and "ok" in stack_result and not stack_result["ok"]:
+        stack_error = stack_result.get("error") or "Stack rejected the write (ok=false)"
+        proposal.status = "commit_failed"
+        proposal.commit_result = {
+            "live": True,
+            "committed": False,
+            "commit_target": proposal.commit_target,
+            "error": stack_error,
+            "stack_response": stack_result,
+            "failed_at": datetime.now(timezone.utc).isoformat(),
+        }
+        _save_proposal(proposal, path)
+        append_audit_event(
+            AuditEvent.COMMIT_FAILED,
+            proposal_id=proposal_id,
+            actor="bridge",
+            details={
+                "tool": proposal.tool,
+                "commit_target": proposal.commit_target,
+                "live": True,
+                "error": stack_error,
+            },
+        )
+        # Verify the chain on THIS branch too — see the bridge_core twin.
+        ok, msg = verify_chain()
+        if not ok:
+            logger.error("CHAIN BROKEN after failed commit: %s", msg)
+            append_audit_event(
+                AuditEvent.CHAIN_BROKEN,
+                proposal_id=proposal_id,
+                actor="bridge",
+                details={"message": msg, "after": "commit_failed"},
+            )
+
+        logger.error(
+            "Proposal REJECTED by Stack: %s → %s — NOT committed",
+            proposal_id,
+            stack_error,
+        )
+        return proposal
 
     proposal.status = "committed"
     proposal.commit_result = {
@@ -548,14 +700,68 @@ def commit_pending_write(proposal_id: str, live: bool = False) -> Proposal:
     return proposal
 
 
-def reject_pending_write(proposal_id: str, reason: str, rejected_by: str = "Anthony") -> Proposal:
+def retry_pending_write(proposal_id: str, *, actor: str) -> Proposal:
+    """Re-arm a commit_failed proposal for one more commit attempt.
+
+    status="commit_failed" STAYS (HQ's call, 2026-08-30: audit honesty over
+    retryability) — a write the Stack rejected must never read as committed.
+    But _precondition_check requires status == "approved", so without this
+    command the only route back was hand-editing the proposal JSON.
+
+    THAT EDIT IS THE HAZARD THIS FUNCTION EXISTS TO REMOVE, and not for the
+    reason it first appears: `status` and `commit_result` are both in _MUTABLE,
+    so a hand-edit does NOT break the proposal's audit_hash — it passes every
+    check silently and leaves NO audit event. A retried write would be
+    indistinguishable from one that was never rejected. The transition is
+    recorded here instead, with the prior error attached.
+
+    reviewed_by is deliberately NOT overwritten. The original approver's
+    identity is provenance; who re-armed it is a different fact and rides on the
+    audit event's actor. commit_result IS cleared, because a stale failure
+    displayed beside status="approved" reads as a live failure — the full prior
+    result is preserved in the audit event.
+    """
+    actor = _require_reviewer(actor, "actor")
+    proposal, path = _load_proposal(proposal_id)
+    if proposal.status != "commit_failed":
+        raise ValueError(
+            f"Cannot retry proposal in status '{proposal.status}' — only "
+            "'commit_failed' proposals can be re-armed"
+        )
+
+    prior = dict(proposal.commit_result or {})
+    prior_error = prior.get("error", "(no error recorded)")
+
+    proposal.status = "approved"
+    proposal.commit_result = None
+    _save_proposal(proposal, path)
+    append_audit_event(
+        AuditEvent.RETRY_ARMED,
+        proposal_id=proposal_id,
+        actor=actor,
+        details={
+            "tool": proposal.tool,
+            "commit_target": proposal.commit_target,
+            "prior_error": prior_error,
+            "prior_commit_result": prior,
+        },
+    )
+    logger.info(
+        "Proposal re-armed after failed commit: %s by %s (prior error: %s)",
+        proposal_id,
+        actor,
+        prior_error,
+    )
+    return proposal
+
+
+def reject_pending_write(proposal_id: str, reason: str, *, rejected_by: str) -> Proposal:
     """Mark a pending or needs_revision proposal as rejected."""
+    rejected_by = _require_reviewer(rejected_by, "rejected_by")
     proposal, path = _load_proposal(proposal_id)
 
     if proposal.status not in ("pending", "needs_revision"):
-        raise ValueError(
-            f"Cannot reject proposal in status '{proposal.status}'"
-        )
+        raise ValueError(f"Cannot reject proposal in status '{proposal.status}'")
 
     proposal.status = "rejected"
     proposal.reviewed_by = rejected_by
@@ -573,14 +779,13 @@ def reject_pending_write(proposal_id: str, reason: str, rejected_by: str = "Anth
     return proposal
 
 
-def needs_revision_pending_write(proposal_id: str, notes: str, actor: str = "Anthony") -> Proposal:
+def needs_revision_pending_write(proposal_id: str, notes: str, *, actor: str) -> Proposal:
     """Send a proposal back for revision with notes."""
+    actor = _require_reviewer(actor, "actor")
     proposal, path = _load_proposal(proposal_id)
 
     if proposal.status != "pending":
-        raise ValueError(
-            f"Cannot mark needs_revision for proposal in status '{proposal.status}'"
-        )
+        raise ValueError(f"Cannot mark needs_revision for proposal in status '{proposal.status}'")
 
     proposal.status = "needs_revision"
     proposal.revision_notes = notes
@@ -607,16 +812,18 @@ def list_pending_writes(status: str | None = None) -> list[dict]:
         try:
             d = json.loads(path.read_text())
             if status is None or d.get("status") == status:
-                results.append({
-                    "proposal_id": d.get("proposal_id"),
-                    "timestamp": d.get("timestamp"),
-                    "tool": d.get("tool"),
-                    "source_instance": d.get("source_instance"),
-                    "status": d.get("status"),
-                    "risk_level": d.get("risk_level"),
-                    "proposed_layer": d.get("proposed_layer"),
-                    "file": path.name,
-                })
+                results.append(
+                    {
+                        "proposal_id": d.get("proposal_id"),
+                        "timestamp": d.get("timestamp"),
+                        "tool": d.get("tool"),
+                        "source_instance": d.get("source_instance"),
+                        "status": d.get("status"),
+                        "risk_level": d.get("risk_level"),
+                        "proposed_layer": d.get("proposed_layer"),
+                        "file": path.name,
+                    }
+                )
         except (json.JSONDecodeError, OSError):
             logger.warning("Skipping unreadable proposal file: %s", path.name)
     return results

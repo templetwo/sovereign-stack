@@ -49,6 +49,7 @@ from .pending_writes import (
     list_pending_writes,
     needs_revision_pending_write,
     reject_pending_write,
+    retry_pending_write,
     validate_pending_write,
 )
 from .probe import (
@@ -82,6 +83,7 @@ __all__ = [
     # Pending writes
     "PROVENANCE_PASSTHROUGH_TARGETS", "Proposal", "ValidationError",
     "approve_pending_write", "build_commit_arguments", "commit_pending_write",
+    "retry_pending_write",
     "create_pending_write", "list_pending_writes", "needs_revision_pending_write",
     "reject_pending_write", "validate_pending_write",
     # Canonical ring system + Claude exemption

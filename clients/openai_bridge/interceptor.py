@@ -154,10 +154,23 @@ def intercept(
     )
 
 
-def classify_tool(tool_name: str, args: dict | None = None) -> dict:
+def classify_tool(
+    tool_name: str,
+    args: dict | None = None,
+    compass_check_result: str | None = None,
+) -> dict:
     """
     Classify a tool without intercepting. Useful for the /openai/sse server
     to build its filtered tool registry.
+
+    No caller passes a compass today, so this defaults to None and behaves
+    exactly as the pre-fd73258 version did. fd73258 added the kwarg to the
+    risk_classify call below WITHOUT adding it to this signature — an unbound
+    name, i.e. a NameError on every Ring 2 tool. It went unnoticed because the
+    only harness that reaches this path is a *_smoke_test.py, and pytest is
+    configured testpaths=["tests"] / python_files=["test_*.py"], so it is never
+    collected. Threaded rather than dropped: the parameter is what the caller
+    needs to classify a call whose compass is already known.
     """
     args = args or {}
     if tool_name == "self_model":

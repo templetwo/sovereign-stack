@@ -99,7 +99,18 @@ def validate_pending_write(ctx: BridgeContext, proposal: Proposal) -> list[str]:
             "policy: max_confidence_without_receipt = 0.70"
         )
 
-    if proposal.risk_level == RiskLevel.CRITICAL and not proposal.compass_check_result:
+    # ABSENCE IS DECIDED BY normalize_compass, NOT BY RAW TRUTHINESS.
+    # bool("   ") is True, so a whitespace string satisfied this gate while
+    # normalize_compass("   ") returns None (absent) and compass_create_error
+    # returns None (nothing to complain about) — the two halves disagreed and
+    # the write went through. A blank string is the cheapest possible way to
+    # claim you ran the compass without running it, and it was the one spelling
+    # the 2026-08-28 hardening did not cover.
+    from bridge_core.target_risk import normalize_compass
+
+    if proposal.risk_level == RiskLevel.CRITICAL and normalize_compass(
+        proposal.compass_check_result
+    ) is None:
         errors.append(
             "CRITICAL risk proposals require a compass_check_result — "
             "call compass_check before proposing"
@@ -265,12 +276,38 @@ def _save_proposal(proposal: Proposal, path: Path) -> None:
     path.write_text(json.dumps(proposal.to_dict(), indent=2, default=str))
 
 
+def _require_reviewer(name: str | None, param: str) -> str:
+    """
+    Reviewer identity is an ASSERTION, never a default.
+
+    This used to be `approved_by: str = "Anthony"`. Any automated caller that
+    omitted the name was stamped with the human's — nine smoke-test fixtures in
+    the live openai queue read `reviewed_by: Anthony`, reviewed under a
+    millisecond after filing, and the console rendered them as a human review
+    with no sign the stamp was synthetic. A default identity is a fail-open:
+    the record reports a human decision that never happened.
+
+    Callers must name the reviewer. Empty and whitespace-only are refused too —
+    a blank string is the same lie with less confidence.
+    """
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError(
+            f"{param} is required and must be a non-empty reviewer identity — "
+            "reviewer identity is asserted by the caller, never defaulted. "
+            "Automated callers must name themselves (e.g. 'smoke-test', "
+            "'grok-bridge-drain'), not inherit a human's name."
+        )
+    return name.strip()
+
+
 def approve_pending_write(
     ctx: BridgeContext,
     proposal_id: str,
-    approved_by: str = "Anthony",
+    *,
+    approved_by: str,
 ) -> Proposal:
     """Mark a pending proposal as approved. Approval is not commitment."""
+    approved_by = _require_reviewer(approved_by, "approved_by")
     proposal, path = _load_proposal(ctx, proposal_id)
     if proposal.status != "pending":
         raise ValueError(
@@ -402,6 +439,18 @@ PROVENANCE_PASSTHROUGH_TARGETS: frozenset[str] = frozenset(
     {"handoff", "close_session", "record_insight"}
 )
 
+# Commit targets whose LIVE Stack inputSchema declares `verified_by`.
+#
+# Measured against list_tools() on 2026-08-30: record_insight declares it;
+# record_learning, handoff, close_session, record_open_thread and
+# comms_acknowledge do NOT. The distinction is load-bearing — translating
+# receipt_url into verified_by for a target that does not declare it would
+# swap one _reject_unknown_params rejection for another and look like a fix
+# while changing nothing. Where verified_by is not accepted, receipt_url is
+# dropped instead (it has already done its bridge-side job by then: has_receipt
+# and the ground_truth gate are evaluated at proposal time, not at commit).
+VERIFIED_BY_TARGETS: frozenset[str] = frozenset({"record_insight"})
+
 
 def build_commit_arguments(ctx: BridgeContext, proposal: Proposal) -> dict[str, Any]:
     """
@@ -439,6 +488,32 @@ def build_commit_arguments(ctx: BridgeContext, proposal: Proposal) -> dict[str, 
     # source_instance is what the identity gate established at proposal time).
     if proposal.commit_target in PROVENANCE_PASSTHROUGH_TARGETS:
         commit_args["source_instance"] = proposal.source_instance
+
+    # receipt_url → verified_by (or dropped).
+    #
+    # receipt_url is advertised in all three bridges' propose_insight schemas and
+    # is load-bearing bridge-side (has_receipt; the ground_truth-requires-receipt
+    # gate). It is NOT a declared record_insight parameter — so since fd73258's
+    # _reject_unknown_params (server.py) EVERY commit carrying one raises on the
+    # Stack, the bridge answers HTTP 200 with {"ok": false}, and before the guard
+    # in commit_pending_write the proposal was stamped "committed" regardless.
+    # A schema advertising a parameter its commit target rejects is a fail-open
+    # by construction: the caller is invited to supply it and told it worked.
+    #
+    # TRANSLATED, not merely stripped, where the target accepts verified_by:
+    # "url" is a RECEIPT_KIND and provenance.py stamps url receipts "attested"
+    # (no live fetch at write), so the evidence survives as provenance instead of
+    # being dropped on the floor — a ground_truth claim landing WITHOUT the
+    # receipt that justified it is the outcome this whole gate exists to prevent.
+    receipt_url = commit_args.pop("receipt_url", None)
+    if receipt_url and proposal.commit_target in VERIFIED_BY_TARGETS:
+        receipts = list(commit_args.get("verified_by") or [])
+        if not any(
+            isinstance(r, dict) and r.get("kind") == "url" and r.get("ref") == receipt_url
+            for r in receipts
+        ):
+            receipts.append({"kind": "url", "ref": receipt_url})
+        commit_args["verified_by"] = receipts
 
     return commit_args
 
@@ -495,6 +570,66 @@ def commit_pending_write(
     except httpx.RequestError as e:
         raise RuntimeError(f"Could not reach bridge at {ctx.bridge_rest_url}: {e}") from e
 
+    # FAIL CLOSED ON A WRITE THE STACK REJECTED.
+    #
+    # The bridge answers HTTP 200 with {"ok": false, "error": ...} when the Stack
+    # handler raises (sovereign-bridge/bridge.py:355-357). raise_for_status()
+    # reads only the status line, sees 200, and is satisfied — so the old code
+    # went straight to status="committed" on a write that never landed. That is
+    # the write-side fail-open closed in 41e2045, reopened one layer up in the
+    # drain path: a proposal file, an audit event and a CLI report all saying
+    # "committed" about nothing.
+    #
+    # `ok` must be EXPLICITLY PRESENT AND FALSY. Absence is not failure — tool
+    # envelopes that omit the key would otherwise become permanently
+    # uncommittable, which would be a fail-CLOSED bug of our own making.
+    if isinstance(stack_result, dict) and "ok" in stack_result and not stack_result["ok"]:
+        stack_error = stack_result.get("error") or "Stack rejected the write (ok=false)"
+        proposal.status = "commit_failed"
+        proposal.commit_result = {
+            "live": True,
+            "committed": False,
+            "commit_target": proposal.commit_target,
+            "error": stack_error,
+            "stack_response": stack_result,
+            "failed_at": datetime.now(timezone.utc).isoformat(),
+        }
+        _save_proposal(proposal, path)
+        append_audit_event(
+            ctx,
+            AuditEvent.COMMIT_FAILED,
+            proposal_id=proposal.proposal_id,
+            actor="bridge",
+            details={
+                "tool": proposal.tool,
+                "commit_target": proposal.commit_target,
+                "live": True,
+                "error": stack_error,
+            },
+        )
+        # The chain must be verified on THIS branch too. A failed commit still
+        # appended an audit event, so it can still break the chain — and an
+        # early return that skips verification is how a break goes unnoticed
+        # precisely in the run where something already went wrong.
+        ok, msg = verify_chain(ctx)
+        if not ok:
+            logger.error("CHAIN BROKEN after failed commit: %s", msg)
+            append_audit_event(
+                ctx,
+                AuditEvent.CHAIN_BROKEN,
+                proposal_id=proposal.proposal_id,
+                actor="bridge",
+                details={"message": msg, "after": "commit_failed"},
+            )
+
+        logger.error(
+            "Proposal[%s] REJECTED by Stack: %s → %s — NOT committed",
+            ctx.substrate,
+            proposal.proposal_id,
+            stack_error,
+        )
+        return proposal
+
     proposal.status = "committed"
     proposal.commit_result = {
         "live": True,
@@ -535,13 +670,81 @@ def commit_pending_write(
     return proposal
 
 
+def retry_pending_write(
+    ctx: BridgeContext,
+    proposal_id: str,
+    *,
+    actor: str,
+) -> Proposal:
+    """Re-arm a commit_failed proposal for one more commit attempt.
+
+    status="commit_failed" STAYS (HQ's call, 2026-08-30: audit honesty over
+    retryability) — a write the Stack rejected must never read as committed.
+    But _precondition_check requires status == "approved", so without this
+    command the only route back was hand-editing the proposal JSON.
+
+    THAT EDIT IS THE HAZARD THIS FUNCTION EXISTS TO REMOVE, and not for the
+    reason it first appears: `status` and `commit_result` are both in _MUTABLE,
+    so a hand-edit does NOT break the proposal's audit_hash — it passes every
+    check silently and leaves NO audit event. A retried write would be
+    indistinguishable from one that was never rejected. The transition is
+    recorded here instead, with the prior error attached.
+
+    reviewed_by is deliberately NOT overwritten. The original approver's
+    identity is provenance; who re-armed it is a different fact and rides on the
+    audit event's actor. commit_result IS cleared, because a stale failure
+    displayed beside status="approved" reads as a live failure — the full prior
+    result is preserved in the audit event.
+    """
+    # ca11e4c's shared guard, not a second hand-rolled copy: re-arming a
+    # rejected write is a review action, so it answers to the same rule as
+    # approve/reject/needs_revision — identity asserted, never defaulted,
+    # blank refused before any status mutation or audit write.
+    actor = _require_reviewer(actor, "actor")
+    proposal, path = _load_proposal(ctx, proposal_id)
+    if proposal.status != "commit_failed":
+        raise ValueError(
+            f"Cannot retry proposal in status '{proposal.status}' — only "
+            "'commit_failed' proposals can be re-armed"
+        )
+
+    prior = dict(proposal.commit_result or {})
+    prior_error = prior.get("error", "(no error recorded)")
+
+    proposal.status = "approved"
+    proposal.commit_result = None
+    _save_proposal(proposal, path)
+    append_audit_event(
+        ctx,
+        AuditEvent.RETRY_ARMED,
+        proposal_id=proposal.proposal_id,
+        actor=actor,
+        details={
+            "tool": proposal.tool,
+            "commit_target": proposal.commit_target,
+            "prior_error": prior_error,
+            "prior_commit_result": prior,
+        },
+    )
+    logger.info(
+        "Proposal[%s] re-armed after failed commit: %s by %s (prior error: %s)",
+        ctx.substrate,
+        proposal.proposal_id,
+        actor,
+        prior_error,
+    )
+    return proposal
+
+
 def reject_pending_write(
     ctx: BridgeContext,
     proposal_id: str,
     reason: str,
-    rejected_by: str = "Anthony",
+    *,
+    rejected_by: str,
 ) -> Proposal:
     """Mark a pending or needs_revision proposal as rejected."""
+    rejected_by = _require_reviewer(rejected_by, "rejected_by")
     proposal, path = _load_proposal(ctx, proposal_id)
     if proposal.status not in ("pending", "needs_revision"):
         raise ValueError(f"Cannot reject proposal in status '{proposal.status}'")
@@ -565,9 +768,11 @@ def needs_revision_pending_write(
     ctx: BridgeContext,
     proposal_id: str,
     notes: str,
-    actor: str = "Anthony",
+    *,
+    actor: str,
 ) -> Proposal:
     """Send a proposal back for revision with notes."""
+    actor = _require_reviewer(actor, "actor")
     proposal, path = _load_proposal(ctx, proposal_id)
     if proposal.status != "pending":
         raise ValueError(f"Cannot mark needs_revision for proposal in status '{proposal.status}'")
