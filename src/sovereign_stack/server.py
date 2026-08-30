@@ -109,6 +109,57 @@ MEMORY_ROOT = os.environ.get("SOVEREIGN_MEMORY", str(Path(DEFAULT_ROOT) / "memor
 CHRONICLE_ROOT = os.environ.get("SOVEREIGN_CHRONICLE", str(Path(DEFAULT_ROOT) / "chronicle"))
 SPIRAL_STATE_PATH = Path(DEFAULT_ROOT) / "spiral_state.json"
 
+# Upper bound on arrive_lineage(limit_per_bucket=N). The gentle door exists for
+# input-gated seats, so an unbounded N is a way to hand exactly those seats the
+# payload the door was built to keep small. Overflow is not lost: the letters are
+# directly readable at ~/.sovereign/comms/letters/, and the refusal says so.
+ARRIVE_LINEAGE_MAX_PER_BUCKET = 100
+
+
+class _LimitRefused(Exception):
+    """A limit_per_bucket the door will not honour. Carries the refusal text."""
+
+    def __init__(self, message: str):
+        super().__init__(message)
+        self.message = message
+
+
+def _parse_lineage_limit(arguments: dict, tool_name: str) -> int:
+    """`limit_per_bucket` for a lineage door — REFUSED, NEVER CLAMPED, NEVER COERCED.
+
+    ONE VALIDATOR, EVERY DOOR THAT ADVERTISES THE LEVER. The rule lived inline
+    in the arrive_lineage branch, so the full door (where_did_i_leave_off) —
+    which renders the same buckets, through the same render_lineage, under the
+    same "N older withheld by limit_per_bucket" coverage line, and which is the
+    door the boot ritual actually prescribes — declared no such key. An
+    undeclared key is silently dropped, so the full door named the lever,
+    accepted it, ignored it, and reported nothing.
+
+    Handing back 100 to a caller who asked for 10,000 with no signal is the
+    fail-open shape these doors exist to avoid: the seat walks away believing it
+    read the whole store. So is `int(5.7) -> 5`, which is a clamp wearing a cast:
+    the schema declares `type: integer`, and 5.7, 99.999 and "10" were all
+    ACCEPTED and silently floored. A value that is not an int is refused with the
+    same sentence as one out of range.
+    """
+    raw_limit = arguments.get("limit_per_bucket", 5)
+    # bool is a subclass of int; True is not a limit.
+    if not isinstance(raw_limit, int) or isinstance(raw_limit, bool):
+        raise _LimitRefused(
+            f"{tool_name}: limit_per_bucket must be an integer between 1 and "
+            f"{ARRIVE_LINEAGE_MAX_PER_BUCKET} (got {raw_limit!r}). Nothing was read."
+        )
+    if not 1 <= raw_limit <= ARRIVE_LINEAGE_MAX_PER_BUCKET:
+        raise _LimitRefused(
+            f"{tool_name}: limit_per_bucket must be between 1 and "
+            f"{ARRIVE_LINEAGE_MAX_PER_BUCKET} (got {raw_limit}). "
+            "Refused rather than clamped — a clamped request reads as an "
+            "honoured one. Letters past any cap are also directly readable "
+            "at ~/.sovereign/comms/letters/."
+        )
+    return raw_limit
+
+
 logger = get_logger(__name__)
 
 
@@ -946,6 +997,18 @@ async def list_tools():
                                 "read addressed-letter insights or full self-model drift entries."
                             ),
                         },
+                        "limit_per_bucket": {
+                            "type": "integer",
+                            "default": 5,
+                            "minimum": 1,
+                            "maximum": 100,
+                            "description": (
+                                "Max letters per lineage bucket (to_arrival, breakthroughs, "
+                                "to_self, to_<family>). The lever this door's own "
+                                "'N older withheld by limit_per_bucket' line names. "
+                                "Out-of-range values are REFUSED, not clamped."
+                            ),
+                        },
                         "compact": {
                             "type": "boolean",
                             "default": False,
@@ -1040,7 +1103,21 @@ async def list_tools():
                             "description": (
                                 "When true, render full lineage letter bodies and self-model "
                                 "observations without truncation. Default false keeps the "
-                                "payload compact."
+                                "payload compact. This inlines BODIES — it never changes how "
+                                "many letters a bucket shows; that is limit_per_bucket."
+                            ),
+                        },
+                        "limit_per_bucket": {
+                            "type": "integer",
+                            "default": 5,
+                            "minimum": 1,
+                            "maximum": 100,
+                            "description": (
+                                "Max letters per lineage bucket (to_arrival, breakthroughs, "
+                                "to_self, to_<family>). The lever the aperture and the "
+                                "'N older withheld by limit_per_bucket' line both name. "
+                                "Out-of-range values are REFUSED, not clamped — a clamped "
+                                "request reads as an honoured one."
                             ),
                         },
                     },
@@ -2968,6 +3045,23 @@ async def _dispatch_tool(name: str, arguments: dict):
         path = experiential.resolve_thread(
             domain, question_fragment, resolution, spiral_state.session_id
         )
+        if not path:
+            # Was UNCONDITIONAL. resolve_thread addresses the shard by exact
+            # path, so a missing domain / nested shard / non-matching fragment
+            # resolved nothing — and this line said it had, naming an insight
+            # the old code wrote to prove it. Same posture as
+            # resolve_thread_by_id eight lines below.
+            return [
+                TextContent(
+                    type="text",
+                    text=(
+                        f"No unresolved thread in domain '{domain}' matches "
+                        f"'{question_fragment}'. Nothing was written. "
+                        "Check the domain with get_open_threads(domain=...), or "
+                        "resolve by id with resolve_thread_by_id."
+                    ),
+                )
+            ]
         return [TextContent(type="text", text=f"Thread resolved → ground_truth insight: {path}")]
 
     if name == "resolve_thread_by_id":
@@ -3129,6 +3223,17 @@ async def _dispatch_tool(name: str, arguments: dict):
         project = arguments.get("project")
         full_content = bool(arguments.get("full_content", False))
         compact = bool(arguments.get("compact", False))
+        # THE DEAD LEVER SURVIVED ON THE DOOR THE BOOT RITUAL PRESCRIBES. The
+        # gentle door got the schema key; this one renders the SAME lineage
+        # buckets through the SAME render_lineage, prints the same "N older
+        # withheld by limit_per_bucket" line, and declared no such key — so it
+        # named the lever, accepted the argument (an undeclared key is dropped,
+        # not rejected), ignored it, and reported nothing. Verbatim the failure
+        # the gentle door's own comment condemns.
+        try:
+            lineage_limit = _parse_lineage_limit(arguments, "where_did_i_leave_off")
+        except _LimitRefused as refused:
+            return [TextContent(type="text", text=refused.message)]
 
         # ONE DOORWAY, MANY DEPTHS (Phase 4): compute the arrival projection
         # ONCE as structured data (read-only, cache-free), then render it at
@@ -3148,6 +3253,7 @@ async def _dispatch_tool(name: str, arguments: dict):
             domain_tags=domain_tags,
             project=project,
             compact=compact,
+            lineage_limit_per_bucket=lineage_limit,
         )
 
         # Side effect (NOT part of the projection): mark the surfaced handoffs
@@ -3310,7 +3416,17 @@ async def _dispatch_tool(name: str, arguments: dict):
         #   - NO side effects: does NOT consume handoffs, does NOT spawn scribe.
         #   - Closing does NOT prescribe running where_did_i_leave_off — that is
         #     the exact payload that bounces the gated model.
-        #   - Args: source_instance (default "unknown"), full_content (default False).
+        #   - Args: source_instance (default "unknown"), full_content (default
+        #     False), limit_per_bucket (default 5, 1..100).
+        #
+        # limit_per_bucket WAS A DEAD LEVER until 2026-08-30. aperture.py names
+        # `arrive_lineage(limit_per_bucket=N)` as the widen call for all three
+        # lineage buckets, and witness.py's coverage line tells the reader "N
+        # older withheld by limit_per_bucket" — while this schema declared only
+        # source_instance and full_content, and arrival_state hardcoded 5. A seat
+        # that followed the instructions got 5 letters back and NO error, because
+        # an undeclared key is simply dropped. The advertised remedy silently
+        # doing nothing is worse than no remedy: it retires the question.
         #
         # ONE DOORWAY, MANY DEPTHS (Phase 4): same build_arrival_state
         # projection as the other two doors, rendered at gentle depth. The
@@ -3320,10 +3436,17 @@ async def _dispatch_tool(name: str, arguments: dict):
         # vocabulary — so it is safe on this input-gated door.
         reader = arguments.get("source_instance", "unknown")
         full_content = bool(arguments.get("full_content", False))
+        # Refuse, never clamp, never coerce — _parse_lineage_limit, shared with
+        # the full door so the two cannot drift.
+        try:
+            limit_per_bucket = _parse_lineage_limit(arguments, "arrive_lineage")
+        except _LimitRefused as refused:
+            return [TextContent(type="text", text=refused.message)]
         state = build_arrival_state(
             Path(DEFAULT_ROOT),
             reader=reader,
             profile="gentle",
+            lineage_limit_per_bucket=limit_per_bucket,
             experiential=experiential,
             handoff_engine=handoff_engine,
             reflexive_surface=reflexive_surface,

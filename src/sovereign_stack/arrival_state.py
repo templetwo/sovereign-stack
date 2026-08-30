@@ -330,6 +330,7 @@ def build_arrival_state(
     domain_tags: list[str] | None = None,
     project: str | None = None,
     compact: bool = False,
+    lineage_limit_per_bucket: int = 5,
     now_fn=None,
 ) -> ArrivalState:
     """Compute the arrival projection ONCE as structured data.
@@ -379,7 +380,12 @@ def build_arrival_state(
     def _gather_lineage() -> None:
         nonlocal lineage, lineage_degraded, lineage_error
         try:
-            lineage = witness.collect_lineage(sovereign_root, reader, 5)
+            # Was hardcoded 5. The aperture advertises
+            # `arrive_lineage(limit_per_bucket=N)` as the way to widen every
+            # lineage bucket and the withheld phrase names the same lever —
+            # this is the line that made both statements false. Default stays
+            # 5, so the other two doors are byte-identical.
+            lineage = witness.collect_lineage(sovereign_root, reader, lineage_limit_per_bucket)
             receipts.append(SectionReceipt("lineage", _bucket_count(lineage), None, False, None))
         except Exception as exc:
             lineage_degraded = True
@@ -548,9 +554,16 @@ def build_arrival_state(
             reflections = []
         _gather_self_model()
         try:
-            letters_dir = sovereign_root / "comms" / "letters"
-            lineage_letter_count = (
-                sum(1 for _ in letters_dir.rglob("*.md")) if letters_dir.exists() else 0
+            # witness.count_lineage_letters, not a bare rglob: rglob descends
+            # into dotted directories, and ~/.sovereign/comms/letters/ holds
+            # `.pre-md-backup-20260609/` and `.pre-md-backup-20260610/` from a
+            # past in-place migration. The bare walk counted 42 where the three
+            # rendered buckets hold 38. This is the FOYER door (`arrive`), and
+            # the number is the one line it prints about lineage — "Deferred to
+            # the full boot: N lineage letters" — i.e. the figure a seat uses to
+            # decide whether the full boot is worth paying for.
+            lineage_letter_count = witness.count_lineage_letters(
+                sovereign_root / "comms" / "letters"
             )
         except Exception:
             lineage_letter_count = 0

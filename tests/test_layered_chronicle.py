@@ -216,14 +216,64 @@ class TestLayeredChronicle:
     # ── Edge Cases ──
 
     def test_resolve_nonexistent_thread(self):
-        """Resolving a thread that doesn't exist should not crash."""
+        """Resolving a thread that doesn't exist must not crash — AND must not
+        report success.
+
+        THIS TEST USED TO ASSERT `Path(path).exists()` AND IT PASSED BOTH WAYS.
+        `Path("")` is `Path(".")`, which exists — so the assertion was true for
+        the honest empty return AND for the fail-open path it was written to
+        describe. An instrument that cannot fail, certifying the behaviour it
+        cannot see. Assert the contract instead: nothing resolved, nothing
+        written, nothing claimed.
+        """
+        before = sorted((self.chronicle.insights_dir).rglob("*.jsonl"))
         path = self.chronicle.resolve_thread(
             domain="missing",
             question_fragment="nothing",
             resolution="Found it anyway",
             session_id="t",
         )
-        assert Path(path).exists()
+        assert path == "", (
+            "resolve_thread returned an insight path for a resolution that never "
+            "happened — the caller reads a path as done"
+        )
+        assert not (self.chronicle.threads_dir / "missing.jsonl").exists()
+        assert sorted((self.chronicle.insights_dir).rglob("*.jsonl")) == before, (
+            "a ground_truth insight was written asserting a resolution the store does not carry"
+        )
+
+    def test_resolve_thread_with_a_non_matching_fragment_writes_nothing(self):
+        """The domain exists and holds an open thread; the fragment matches no
+        question. Same fail-open, one step further in."""
+        self.chronicle.record_open_thread(
+            question="What port does SSE use?", domain="fragmiss", session_id="s1"
+        )
+        before = sorted((self.chronicle.insights_dir).rglob("*.jsonl"))
+
+        path = self.chronicle.resolve_thread(
+            domain="fragmiss",
+            question_fragment="a fragment matching nothing",
+            resolution="answered anyway",
+            session_id="s2",
+        )
+
+        assert path == ""
+        assert sorted((self.chronicle.insights_dir).rglob("*.jsonl")) == before
+        still_open = self.chronicle.get_open_threads(domain="fragmiss")
+        assert len(still_open) == 1 and still_open[0]["resolved"] is False
+
+    def test_resolve_thread_does_not_resolve_an_already_resolved_thread_twice(self):
+        self.chronicle.record_open_thread(
+            question="What port does SSE use?", domain="twice", session_id="s1"
+        )
+        first = self.chronicle.resolve_thread(
+            domain="twice", question_fragment="port", resolution="3434", session_id="s2"
+        )
+        assert first != ""
+        second = self.chronicle.resolve_thread(
+            domain="twice", question_fragment="port", resolution="3434 again", session_id="s3"
+        )
+        assert second == "", "a second resolve of the same thread reported success"
 
     def test_multiple_threads_same_domain(self):
         for i in range(5):

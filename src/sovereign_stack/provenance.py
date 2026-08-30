@@ -757,6 +757,118 @@ def validate_carry_forward(supersedes: list[str] | None, carry_forward_summary: 
         )
 
 
+# A supersession stated in PROSE: the word, then a claim id AS ITS OBJECT.
+#
+# TWO GUARDS, both earned by measuring the live corpus rather than by taste
+# (3,445 entries, 2026-08-30):
+#
+# 1. `(?<![0-9a-fA-F])...(?![0-9a-fA-F])` — without it a 64-char window inside a
+#    longer hex blob matches, and any base16 dump near the word is refused.
+#
+# 2. ADJACENCY, not a character window. The first draft allowed 120 characters
+#    of anything between the word and the id, and against the real corpus that
+#    matched 4 entries of which only ONE was the defect. The other three were
+#    entropy-program entries of the shape "supersedes the ~19:31 void run.
+#    DRIVER (hash-locked): crn_calib_v2.py sha256 <64-hex>" — the word governs a
+#    RUN and the hex is an unrelated artifact digest a hundred characters
+#    downstream. A guard with 25% precision on the store it protects is not a
+#    guard, it is a tax; it would have refused legitimate registration writes in
+#    the entropy lane and taught its author to route around it.
+#
+#    So the id must be the word's grammatical OBJECT: at most a few connector
+#    tokens ("the", "claim", "in", "entry", punctuation) may sit between them.
+#    This is exactly the two forms the requirement names — "supersedes <64-hex>"
+#    and "supersedes claim <64-hex>" — and nothing looser.
+_PROSE_SUPERSEDES_CONNECTORS = r"(?:the|this|that|a|an|in|of|claim|entry|record|id|ids)"
+_PROSE_SUPERSEDES_RE = re.compile(
+    r"supersed(?:es|ing|ed)\b"
+    r"[\s:,;\-–—]*"
+    rf"(?:{_PROSE_SUPERSEDES_CONNECTORS}\b[\s:,;\-–—]*){{0,4}}"
+    r"(?<![0-9a-fA-F])([0-9a-fA-F]{64})(?![0-9a-fA-F])",
+    re.IGNORECASE,
+)
+
+
+def find_prose_supersession(content: str) -> str | None:
+    """The claim id a body claims to supersede in one of TWO NARROW FORMS, or None.
+
+    NOT A DETECTOR FOR "does this body state a supersession". It matches
+    ``supersed(es|ing|ed)`` followed, across at most a few whitelisted connector
+    tokens, by a bare 64-hex id — i.e. "supersedes <id>" and "supersedes claim
+    <id>", and nothing looser. Detection only; never used to fill the field in.
+    See validate_no_prose_supersession for why, and for what it cannot see.
+    """
+    if not content:
+        return None
+    match = _PROSE_SUPERSEDES_RE.search(content)
+    return match.group(1).lower() if match else None
+
+
+def validate_no_prose_supersession(content: str, supersedes: list[str] | None) -> None:
+    """
+    Refuse a write whose BODY states a supersession the FIELDS do not perform.
+
+    THE DEFECT THIS CLOSES (two entries in the 2026-08-27 window): an entry
+    whose prose reads "supersedes claim <id>" and whose `supersedes` field is
+    absent. Nothing is written to the supersession ledger, the predecessor keeps
+    surfacing as live, and `inspect_claim` on either id reports an unbroken
+    chain — while every human reading the chronicle sees the word and believes
+    the chain moved. A governance act that exists only as a sentence.
+
+    WHY REFUSE AND NOT AUTOFILL. Deriving the field from the prose means the
+    stack performing a governance act nobody authored, on an id it guessed at,
+    writing a ledger record that is then indistinguishable from a deliberate
+    one. And `carry_forward_summary` — what the predecessor still teaches —
+    cannot be inferred from anything: requiring a human sentence there IS the
+    mechanism. So this raises, names the id, and says which two arguments to
+    pass. Same posture as validate_carry_forward.
+
+    A present `supersedes` field ends the check: the governance act happened,
+    and the prose is then narration of it.
+
+    THIS IS NOT FAIL-CLOSED, AND MUST NOT BE READ AS "THE PROSE AND THE FIELDS
+    CANNOT DISAGREE". It is a NARROW, DELIBERATELY UNDER-INCLUSIVE filter on two
+    phrasings, and the under-inclusion is the design, not an oversight — the
+    first draft allowed 120 chars of anything between the word and the id and
+    scored 25% precision against the live corpus, which is a tax rather than a
+    guard, and taxes teach authors to route around them. What it therefore does
+    NOT catch, measured over 3,445 chronicle entries on 2026-08-30 (220 bodies
+    say ``supersed*`` with no ``supersedes`` field; this guard refuses 2):
+
+      * one adjective, or emphasis, defeats the connector whitelist —
+        "supersedes prior claim <id>", "supersedes the earlier claim <id>",
+        "**supersedes** <id>" are all ACCEPTED;
+      * a predecessor named by SHORT id (the 16-hex ``display_id`` form, or a
+        12-hex archive id) is not matched at all — the pattern requires exactly
+        64 hex, while ``resolve_supersedes`` accepts a unique prefix;
+      * a predecessor named in words and no id at all ("SUPERSEDES the earlier
+        count in this domain") is invisible by construction.
+
+    And it fires on an explicit DENIAL: "not superseding claim <id>" is refused,
+    because the regex reads the word and its object, not the sentence.
+
+    Widening it is a precision decision against the corpus, not a taste call —
+    take the measurement before touching the pattern.
+
+    Raises:
+        ProvenanceError: naming the id found in the body.
+    """
+    if supersedes:
+        return
+    claim_id = find_prose_supersession(content)
+    if claim_id is None:
+        return
+    raise ProvenanceError(
+        f"this entry's body states a supersession of claim {claim_id} but the "
+        "supersedes FIELD is absent — nothing would be written to the "
+        "supersession ledger and the predecessor would keep surfacing as live. "
+        f"Pass supersedes=['{claim_id}'] and carry_forward_summary='<what the "
+        "predecessor still teaches>'. Refused rather than inferred: the stack "
+        "does not perform a supersession its caller did not ask for. If the "
+        "body only MENTIONS the id and supersedes nothing, reword it."
+    )
+
+
 def resolve_supersedes(supersedes: list[str], chronicle_root: Path) -> list[tuple[str, dict]]:
     """
     Resolve each supersedes ref (full id or unique prefix) to

@@ -272,3 +272,189 @@ def test_passthrough_targets_match_server_input_schemas():
         "gone back to storing anonymous entries, and PROVENANCE_PASSTHROUGH_TARGETS "
         "is now injecting a kwarg the server will drop"
     )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# THE OPENAI SUBSTRATE — the half this file did not cover
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# Everything above exercises bridge_core, which is the GROK path. Every
+# ChatGPT drain runs through clients/openai_bridge/pending_writes.py, a
+# separate legacy module that imports nothing from bridge_core — and until
+# 2026-08-30 it had neither PROVENANCE_PASSTHROUGH_TARGETS nor any injection
+# at commit. v1.21.0's "every Ring-2 commit carries its proposer" was
+# therefore true for one substrate and false for the other, and this file's
+# own zero occurrences of the string "openai" are why nobody noticed.
+#
+# The lesson is the file's, not just the module's: a suite that certifies one
+# of two substrates reads as certifying the behaviour. Same shape as the
+# compass-deny gate, which had to be proven sensitive on BOTH sides for the
+# same reason.
+
+OAI_PROPOSER = "chatgpt-gpt-5-6-openai-bridge"
+OAI_SESSION = "proposer-session-openai-c0ffee"
+
+
+@pytest.fixture
+def oai(tmp_path, monkeypatch):
+    """The openai queue, fully scoped under tmp_path. Never ~/.sovereign.
+
+    This module addresses its stores through module-level constants rather
+    than a context object, and `audit.py` imported AUDIT_DIR/AUDIT_LOG BY NAME
+    — so all four bindings must be redirected or the test writes into
+    Anthony's live queue. Isolate every write path a test can reach, not just
+    the obvious one.
+    """
+    import openai_bridge.audit as oai_audit
+    import openai_bridge.hash_chain as oai_hash
+    import openai_bridge.pending_writes as oai_pw
+
+    audit_dir = tmp_path / "audit"
+    monkeypatch.setattr(oai_pw, "PENDING_DIR", tmp_path / "pending_writes")
+    monkeypatch.setattr(oai_hash, "AUDIT_DIR", audit_dir)
+    monkeypatch.setattr(oai_hash, "AUDIT_LOG", audit_dir / "audit.jsonl")
+    monkeypatch.setattr(oai_audit, "AUDIT_DIR", audit_dir)
+    monkeypatch.setattr(oai_audit, "AUDIT_LOG", audit_dir / "audit.jsonl")
+    # Unroutable on purpose: if the capture stub is ever bypassed, the commit
+    # errors instead of reaching the live bridge.
+    monkeypatch.setattr(oai_pw, "_BRIDGE_URL", "http://127.0.0.1:1/api/call")
+    monkeypatch.setenv("BRIDGE_TOKEN", "test-token-not-real")
+    return oai_pw
+
+
+@pytest.fixture
+def oai_captured_posts(monkeypatch):
+    calls: list[dict] = []
+
+    class _FakeResponse:
+        status_code = 200
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"ok": True, "result": "stubbed"}
+
+    def _fake_post(url, json=None, headers=None, timeout=None):
+        calls.append({"url": url, "json": json, "headers": headers})
+        return _FakeResponse()
+
+    import openai_bridge.pending_writes as oai_pw
+
+    monkeypatch.setattr(oai_pw.httpx, "post", _fake_post)
+    return calls
+
+
+def _oai_drain(oai, tool, args, *, live=True):
+    """Propose → approve → commit, exactly the cli --source=openai drain shape."""
+    proposal = oai.create_pending_write(
+        tool,
+        args,
+        source_instance=OAI_PROPOSER,
+        session_id=OAI_SESSION,
+    )
+    oai.approve_pending_write(proposal.proposal_id, approved_by="Anthony")
+    return oai.commit_pending_write(proposal.proposal_id, live=live)
+
+
+def test_openai_handoff_commit_body_carries_proposer_source_instance(oai, oai_captured_posts):
+    _oai_drain(oai, "handoff", {"note": "chatgpt lane report", "thread": "mesh-20260830"})
+
+    assert len(oai_captured_posts) == 1
+    body = oai_captured_posts[0]["json"]
+    assert body["tool"] == "handoff"
+    assert body["arguments"]["source_instance"] == OAI_PROPOSER
+    assert body["arguments"]["note"] == "chatgpt lane report"
+    assert "session_id" not in body["arguments"]
+
+
+def test_openai_close_session_commit_body_carries_proposer_source_instance(oai, oai_captured_posts):
+    _oai_drain(oai, "end_bridge_session", {"what_i_learned": "the drain shape holds here too"})
+
+    body = oai_captured_posts[0]["json"]
+    assert body["tool"] == "close_session"
+    assert body["arguments"]["source_instance"] == OAI_PROPOSER
+    assert "session_id" not in body["arguments"]
+
+
+def test_openai_record_insight_commit_body_carries_the_proposer(oai, oai_captured_posts):
+    _oai_drain(
+        oai,
+        "propose_insight",
+        {"domain": "mesh-20260830", "content": "a finding", "layer": "reflection"},
+    )
+
+    body = oai_captured_posts[0]["json"]
+    assert body["tool"] == "record_insight"
+    assert body["arguments"]["source_instance"] == OAI_PROPOSER
+    # Layer translation still applies, and now happens in ONE place.
+    assert body["arguments"]["layer"] == "hypothesis"
+
+
+def test_openai_envelope_wins_over_stale_source_instance_in_arguments(oai, oai_captured_posts):
+    _oai_drain(
+        oai,
+        "handoff",
+        {
+            "note": "identity precedence check",
+            "thread": "mesh-20260830",
+            "source_instance": "some-other-seat-not-the-proposer",
+        },
+    )
+
+    body = oai_captured_posts[0]["json"]
+    assert body["arguments"]["source_instance"] == OAI_PROPOSER
+    assert "some-other-seat-not-the-proposer" not in str(body)
+
+
+def test_openai_non_passthrough_target_is_left_alone(oai, oai_captured_posts):
+    """Injection is target-scoped, not blanket.
+
+    record_open_thread's Stack inputSchema declares no source_instance, and the
+    dispatcher now REJECTS unknown keys — so injecting one here would turn a
+    good write into a hard failure.
+    """
+    _oai_drain(
+        oai,
+        "record_open_thread",
+        {"question": "does the port hold?", "context": "c", "domain": "mesh-20260830"},
+    )
+
+    body = oai_captured_posts[0]["json"]
+    assert body["tool"] == "record_open_thread"
+    assert "source_instance" not in body["arguments"]
+
+
+def test_openai_dry_run_review_surface_matches_wire(oai, oai_captured_posts):
+    """The review surface previewed proposal.arguments RAW — untranslated and
+    unattributed — while the wire sent something else. Same defect
+    bridge_core's docstring names by name."""
+    proposal = _oai_drain(
+        oai,
+        "propose_insight",
+        {"domain": "mesh-20260830", "content": "dry run truth", "layer": "reflection"},
+        live=False,
+    )
+
+    assert oai_captured_posts == []  # dry run: nothing on the wire
+    result = proposal.commit_result
+    assert result["live"] is False
+    assert result["would_call"] == "record_insight"
+    assert result["with_arguments"]["source_instance"] == OAI_PROPOSER
+    assert result["with_arguments"]["layer"] == "hypothesis"
+
+
+def test_both_substrates_declare_the_same_passthrough_set():
+    """The two modules keep separate literals; they must not drift apart.
+
+    A set that is correct in one substrate and stale in the other is the same
+    half-covered shape as the missing port itself.
+    """
+    from bridge_core.pending_writes import (
+        PROVENANCE_PASSTHROUGH_TARGETS as CORE_TARGETS,
+    )
+    from openai_bridge.pending_writes import (
+        PROVENANCE_PASSTHROUGH_TARGETS as OAI_TARGETS,
+    )
+
+    assert OAI_TARGETS == CORE_TARGETS

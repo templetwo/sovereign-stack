@@ -38,6 +38,8 @@ import os
 from datetime import datetime
 from pathlib import Path
 
+from .memory import iter_thread_shards
+
 APERTURE_POLICY_VERSION = "aperture-v1"
 
 _DEFAULT_ROOT = Path(os.path.expanduser("~/.sovereign"))
@@ -61,7 +63,15 @@ def measure_aperture(now: datetime, root: Path | None = None) -> dict:
         entry = {
             "on_disk": len(list((letters / bucket).glob("*.md"))),
             "default_shown": 5,
-            "widen_with": "arrive_lineage(limit_per_bucket=N) or full_content=true",
+            # ONE LEVER, NAMED ONCE. This used to read
+            # "... or full_content=true", and full_content does NOT widen a
+            # bucket — it inlines BODIES; the count is identical with it on and
+            # off (measured through the dispatch on the live letter tree:
+            # 5/5/5 either way, 13/7/17 at limit_per_bucket=20). The same commit
+            # that corrected arrive_lineage's schema to say so left the aperture
+            # advertising it as the alternative. An arriving seat that follows
+            # the second clause widens nothing and has no way to tell.
+            "widen_with": "arrive_lineage(limit_per_bucket=N)",
         }
         if bucket == "to_self":
             entry["note"] = (
@@ -113,7 +123,14 @@ def measure_aperture(now: datetime, root: Path | None = None) -> dict:
 
     total_threads = 0
     unresolved = 0
-    for f in (root / "chronicle" / "open_threads").glob("*.jsonl"):
+    # iter_thread_shards, not glob: the store has nested shards (live specimen
+    # `tech-debt,compaction,auto-detection/log.jsonl`), and a flat walk here
+    # under-reported the corpus by exactly those files — the aperture, whose
+    # whole job is to stop a projection passing as the corpus, projecting. The
+    # ONE walk is memory's, per this module's own thesis (one implementation,
+    # two surfaces, no drift): an aperture that counted a hidden backup dir the
+    # readers skip would report a corpus no reader can reach.
+    for f in iter_thread_shards(root / "chronicle" / "open_threads"):
         for line in f.read_text(errors="replace").splitlines():
             line = line.strip()
             if not line:
