@@ -306,7 +306,9 @@ def test_commit_does_not_mark_committed_when_stack_returns_ok_false(core_ctx, mo
         source_instance="seat",
     )
     pw.approve_pending_write(core_ctx, p.proposal_id, approved_by="Anthony")
-    committed = pw.commit_pending_write(core_ctx, p.proposal_id, live=True)
+    committed = pw.commit_pending_write(
+        core_ctx, p.proposal_id, live=True, committed_by="ring2-regression-harness"
+    )
 
     assert committed.status != "committed", (
         "a rejected write was laundered into 'committed' — the exact fail-open "
@@ -334,7 +336,12 @@ def test_commit_still_marks_committed_on_a_genuine_ok(core_ctx, monkeypatch):
         source_instance="seat",
     )
     pw.approve_pending_write(core_ctx, p.proposal_id, approved_by="Anthony")
-    assert pw.commit_pending_write(core_ctx, p.proposal_id, live=True).status == "committed"
+    assert (
+        pw.commit_pending_write(
+            core_ctx, p.proposal_id, live=True, committed_by="ring2-regression-harness"
+        ).status
+        == "committed"
+    )
 
 
 def test_commit_marks_committed_when_response_omits_ok(core_ctx, monkeypatch):
@@ -352,7 +359,12 @@ def test_commit_marks_committed_when_response_omits_ok(core_ctx, monkeypatch):
         core_ctx, "handoff", {"note": "n", "thread": "t"}, source_instance="seat"
     )
     pw.approve_pending_write(core_ctx, p.proposal_id, approved_by="Anthony")
-    assert pw.commit_pending_write(core_ctx, p.proposal_id, live=True).status == "committed"
+    assert (
+        pw.commit_pending_write(
+            core_ctx, p.proposal_id, live=True, committed_by="ring2-regression-harness"
+        ).status
+        == "committed"
+    )
 
 
 def test_receipt_url_is_translated_to_verified_by_on_the_wire(core_ctx):
@@ -432,7 +444,9 @@ def test_openai_commit_does_not_launder_ok_false_into_committed(openai_tmp, monk
         source_instance="seat",
     )
     opw.approve_pending_write(p.proposal_id, approved_by="Anthony")
-    committed = opw.commit_pending_write(p.proposal_id, live=True)
+    committed = opw.commit_pending_write(
+        p.proposal_id, live=True, committed_by="ring2-regression-harness"
+    )
 
     assert committed.status != "committed"
     assert "unknown parameter" in json.dumps(committed.commit_result or {})
@@ -464,7 +478,7 @@ def test_openai_receipt_url_is_translated_to_verified_by(openai_tmp, monkeypatch
         source_instance="seat",
     )
     opw.approve_pending_write(p.proposal_id, approved_by="Anthony")
-    opw.commit_pending_write(p.proposal_id, live=True)
+    opw.commit_pending_write(p.proposal_id, live=True, committed_by="ring2-regression-harness")
 
     args = sent[0]["arguments"]
     assert "receipt_url" not in args
@@ -540,7 +554,9 @@ def test_production_path_mixed_case_deny_is_refused_at_create_and_at_commit(core
     monkeypatch.setattr(pw.httpx, "post", _must_not_post)
 
     with pytest.raises(Exception) as committed:
-        pw.commit_pending_write(core_ctx, p.proposal_id, live=True)
+        pw.commit_pending_write(
+            core_ctx, p.proposal_id, live=True, committed_by="ring2-regression-harness"
+        )
     assert "WITNESS" in str(committed.value).upper()
 
 
@@ -910,7 +926,9 @@ def test_failed_commit_verifies_the_chain(core_ctx, monkeypatch):
         core_ctx, "handoff", {"note": "n", "thread": "t"}, source_instance="seat"
     )
     pw.approve_pending_write(core_ctx, p.proposal_id, approved_by="Anthony")
-    out = pw.commit_pending_write(core_ctx, p.proposal_id, live=True)
+    out = pw.commit_pending_write(
+        core_ctx, p.proposal_id, live=True, committed_by="ring2-regression-harness"
+    )
 
     assert out.status == "commit_failed"
     assert calls, "verify_chain was never called on the commit_failed branch"
@@ -942,7 +960,9 @@ def test_failed_commit_detects_a_broken_chain(core_ctx, monkeypatch):
     assert not pw.verify_chain(core_ctx)[0], "the corruption did not break the chain"
 
     _fail_the_commit(monkeypatch, pw)
-    out = pw.commit_pending_write(core_ctx, p.proposal_id, live=True)
+    out = pw.commit_pending_write(
+        core_ctx, p.proposal_id, live=True, committed_by="ring2-regression-harness"
+    )
 
     assert out.status == "commit_failed"
     events = [e.get("event_type") or e.get("event") for e in read_audit_trail(core_ctx)]
@@ -964,7 +984,9 @@ def test_openai_failed_commit_verifies_the_chain(openai_tmp, monkeypatch):
 
     p = opw.create_pending_write("handoff", {"note": "n", "thread": "t"}, source_instance="seat")
     opw.approve_pending_write(p.proposal_id, approved_by="Anthony")
-    out = opw.commit_pending_write(p.proposal_id, live=True)
+    out = opw.commit_pending_write(
+        p.proposal_id, live=True, committed_by="ring2-regression-harness"
+    )
 
     assert out.status == "commit_failed"
     assert calls, "verify_chain was never called on the openai commit_failed branch"
@@ -982,7 +1004,9 @@ def _fail_one(ctx, monkeypatch, module, tool="handoff", args=None):
         ctx, tool, args or {"note": "n", "thread": "t"}, source_instance="seat"
     )
     module.approve_pending_write(ctx, p.proposal_id, approved_by="Anthony")
-    return module.commit_pending_write(ctx, p.proposal_id, live=True)
+    return module.commit_pending_write(
+        ctx, p.proposal_id, live=True, committed_by="ring2-regression-harness"
+    )
 
 
 def test_hand_editing_status_is_the_hazard_retry_removes(core_ctx, monkeypatch):
@@ -1059,7 +1083,9 @@ def test_a_retried_proposal_can_actually_commit(core_ctx, monkeypatch):
     monkeypatch.setattr(
         pw.httpx, "post", lambda *a, **kw: _stack_response({"ok": True, "result": "ok"})
     )
-    out = pw.commit_pending_write(core_ctx, failed.proposal_id, live=True)
+    out = pw.commit_pending_write(
+        core_ctx, failed.proposal_id, live=True, committed_by="ring2-regression-harness"
+    )
     assert out.status == "committed"
 
 
@@ -1100,7 +1126,9 @@ def test_openai_retry_moves_commit_failed_back_to_approved(openai_tmp, monkeypat
     _fail_the_commit(monkeypatch, opw)
     p = opw.create_pending_write("handoff", {"note": "n", "thread": "t"}, source_instance="seat")
     opw.approve_pending_write(p.proposal_id, approved_by="Anthony")
-    failed = opw.commit_pending_write(p.proposal_id, live=True)
+    failed = opw.commit_pending_write(
+        p.proposal_id, live=True, committed_by="ring2-regression-harness"
+    )
     assert failed.status == "commit_failed"
 
     out = opw.retry_pending_write(failed.proposal_id, actor="HQ-review-seat")
@@ -1278,7 +1306,9 @@ def test_openai_dry_run_preview_matches_the_wire(openai_tmp, monkeypatch):
     p = opw.create_pending_write("propose_insight", dict(args), source_instance="seat")
     opw.approve_pending_write(p.proposal_id, approved_by="Anthony")
 
-    previewed = opw.commit_pending_write(p.proposal_id, live=False).commit_result["with_arguments"]
+    previewed = opw.commit_pending_write(
+        p.proposal_id, live=False, committed_by="ring2-regression-harness"
+    ).commit_result["with_arguments"]
 
     sent: list[dict] = []
 
@@ -1288,7 +1318,7 @@ def test_openai_dry_run_preview_matches_the_wire(openai_tmp, monkeypatch):
 
     monkeypatch.setenv("BRIDGE_TOKEN", "t")
     monkeypatch.setattr(opw.httpx, "post", _capture)
-    opw.commit_pending_write(p.proposal_id, live=True)
+    opw.commit_pending_write(p.proposal_id, live=True, committed_by="ring2-regression-harness")
 
     assert "receipt_url" not in previewed, (
         "the dry-run preview still shows receipt_url — Anthony would approve a "
@@ -1316,9 +1346,9 @@ def test_bridge_core_dry_run_preview_matches_the_wire(core_ctx, monkeypatch):
     )
     pw.approve_pending_write(core_ctx, p.proposal_id, approved_by="Anthony")
 
-    previewed = pw.commit_pending_write(core_ctx, p.proposal_id, live=False).commit_result[
-        "with_arguments"
-    ]
+    previewed = pw.commit_pending_write(
+        core_ctx, p.proposal_id, live=False, committed_by="ring2-regression-harness"
+    ).commit_result["with_arguments"]
 
     sent: list[dict] = []
 
@@ -1328,7 +1358,9 @@ def test_bridge_core_dry_run_preview_matches_the_wire(core_ctx, monkeypatch):
 
     monkeypatch.setenv("TEST_R2_TOKEN", "t")
     monkeypatch.setattr(pw.httpx, "post", _capture)
-    pw.commit_pending_write(core_ctx, p.proposal_id, live=True)
+    pw.commit_pending_write(
+        core_ctx, p.proposal_id, live=True, committed_by="ring2-regression-harness"
+    )
 
     assert "receipt_url" not in previewed
     assert previewed == sent[0]["arguments"]

@@ -51,6 +51,7 @@ from .pending_writes import (
     reject_pending_write,
     retry_pending_write,
     validate_pending_write,
+    withdraw_pending_write,
 )
 from .probe import (
     ProbeOutcome,
@@ -86,6 +87,7 @@ __all__ = [
     "retry_pending_write",
     "create_pending_write", "list_pending_writes", "needs_revision_pending_write",
     "reject_pending_write", "validate_pending_write",
+    "withdraw_pending_write",
     # Canonical ring system + Claude exemption
     "CANONICAL_RING_1", "CANONICAL_RING_2", "CANONICAL_COMMIT_TARGETS",
     "canonical_is_ring_3", "is_full_trust",

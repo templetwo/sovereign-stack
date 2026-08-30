@@ -207,7 +207,7 @@ def _run_checks():
             approved.reviewed_by or "<unset>",
         ))
 
-        committed = commit_pending_write(proposal_id)
+        committed = commit_pending_write(proposal_id, committed_by=REVIEWER)
         results.append(check("Commit sets status=committed", committed.status == "committed"))
         results.append(check("Commit result is mocked", committed.commit_result and committed.commit_result.get("mocked")))
         results.append(check("No Stack mutation (mocked=True)", committed.commit_result.get("mocked") is True))

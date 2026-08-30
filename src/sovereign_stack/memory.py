@@ -198,6 +198,55 @@ def _validate_domain_label(domain: str) -> None:
         raise ValueError(f"invalid domain {domain!r}: a domain is a label, not a path")
 
 
+# Bytes that may never reach a path component, whatever the caller wrote:
+# both separators, NUL, and the C0/DEL control range.
+_FILENAME_UNSAFE = re.compile(r"[/\\\x00-\x1f\x7f]")
+
+# APFS, ext4 and HFS+ all cap a single path COMPONENT at 255 bytes. 200 leaves
+# room for the ".jsonl" suffix and for the multi-byte codepoint a truncation
+# may land inside. Measured 2026-08-30 against the 28 live learnings shards:
+# the longest is 177 bytes, so every existing shard keeps its exact filename.
+_SHARD_NAME_MAX_BYTES = 200
+
+
+def _safe_shard_name(label: str, fallback: str = "_unfiled") -> str:
+    """
+    A caller-supplied string reduced to ONE safe filename component.
+
+    WHY THIS EXISTS AND WHY IT IS NOT _validate_domain_label. The two live one
+    measurement apart, and using the wrong one is a data-loss bug either way:
+
+      * The filename IS the retrieval key -> REJECT (_validate_domain_label).
+        record_insight's domain directory and record_open_thread's shard are
+        addressed by exact name on the way back out, so silently renaming the
+        key files the entry where no query looks. Loud refusal is the only
+        non-lossy answer.
+
+      * The filename is only a shard LABEL -> SANITIZE, raw value in the body.
+        record_learning is read by check_mistakes, which globs *.jsonl and
+        matches the RAW `applies_to` inside each record. Nothing resolves the
+        filename, so a sanitized name loses nothing and a refusal would reject
+        a write that has no way to go wrong.
+
+    Deliberately minimal — NOT ExperientialMemory._slugify. That one lowercases,
+    collapses runs to hyphens and truncates at 48 chars; run the 28 live
+    learnings shards through it and all 28 are renamed, splitting every existing
+    shard in two for no gain. This maps ordinary labels to themselves and only
+    rewrites what a filesystem genuinely cannot hold.
+    """
+    text = _FILENAME_UNSAFE.sub("_", str(label)).strip()
+    # Truncate on BYTES — the unit the filesystem enforces — never mid-codepoint.
+    text = text.encode("utf-8")[:_SHARD_NAME_MAX_BYTES].decode("utf-8", "ignore").strip()
+    # A leading dot hides the shard from readers that skip dotfiles, and "."
+    # and ".." are not names at all. Map each leading dot to an underscore —
+    # the same substitution the unsafe-byte pass uses, so the rule reads
+    # uniformly and "..." lands on "___" rather than something half-eaten.
+    text = re.sub(r"^\.+", lambda m: "_" * len(m.group()), text)
+    # Empty in, empty out is a write to "<dir>/.jsonl" — a hidden shard nobody
+    # will ever look in. Name it instead; "_unfiled" mirrors archive_exchange.
+    return text or fallback
+
+
 def _last_jsonl_entry(path: Path) -> dict | None:
     """Return the last parseable JSON entry of a JSONL file, or None."""
     if not path.exists():
@@ -1127,7 +1176,16 @@ class ExperientialMemory:
             "session_id": session_id,
         }
 
-        jsonl_path = self.learnings_dir / f"{applies_to}.jsonl"
+        # `applies_to` is caller prose that becomes a FILENAME. A '/' in it —
+        # live specimen 2026-08-30, "... any remote/schema-constrained seat" —
+        # made this an [Errno 2] against a directory that never existed, and
+        # the Ring-2 drain surfaced it as a failed commit of proposal 4de1d36f.
+        #
+        # Sanitize the NAME ONLY. The record body below keeps `applies_to`
+        # verbatim, and that raw value is what check_mistakes actually searches
+        # (it globs *.jsonl and matches the field, never the filename), so the
+        # entry stays exactly as findable as it was.
+        jsonl_path = self.learnings_dir / f"{_safe_shard_name(applies_to)}.jsonl"
         with open(jsonl_path, "a") as f:
             f.write(json.dumps(learning) + "\n")
 
@@ -1191,6 +1249,15 @@ class ExperientialMemory:
         session_id = session_id or f"session_{timestamp.strftime('%Y%m%d_%H%M%S')}"
 
         questions = _split_bundled_question(question)
+
+        # Same hole record_insight closed at :961, one function down and never
+        # swept: this filename IS the retrieval key. resolve_thread re-derives
+        # `threads_dir / f"{domain}.jsonl"` verbatim, and _thread_domain_for
+        # maps a NESTED shard back to its DIRECTORY path — so a domain like
+        # "a/b" whose parent happens to exist would file the thread under
+        # domain "a", silently, and every exact-domain query for "a/b" would
+        # come back empty. Where the name is the key, reject; do not escape.
+        _validate_domain_label(domain)
 
         jsonl_path = self.threads_dir / f"{domain}.jsonl"
         # Thread files are rewritten whole by resolve_thread / resolve_thread_by_id;

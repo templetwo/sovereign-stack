@@ -31,6 +31,7 @@ from .pending_writes import (
     list_pending_writes,
     needs_revision_pending_write,
     reject_pending_write,
+    withdraw_pending_write,
 )
 
 PENDING_DIR = Path.home() / ".sovereign" / "openai_bridge" / "pending_writes"
@@ -210,6 +211,29 @@ def reject(proposal_id: str, reason: str, by: str):
         sys.exit(1)
 
 
+@cli.command("withdraw")
+@click.argument("proposal_id")
+@click.option("--reason", required=True, help="Why this approved proposal is being withdrawn")
+@click.option("--by", required=True, help="Reviewer identity — REQUIRED. Name yourself; automated callers must not inherit a human's name.")
+def withdraw(proposal_id: str, reason: str, by: str):
+    """Adjudicate an approved (or commit_failed) proposal away, to rejected.
+
+    'reject' only accepts pending/needs_revision, so once a proposal was
+    approved there was NO route to rejected at all — the nine smoke-test
+    fixtures sitting approved in this queue could not be cleared without
+    hand-editing their JSON. This is that route, on the record.
+    """
+    try:
+        p = withdraw_pending_write(proposal_id, reason=reason, withdrawn_by=by)
+        click.echo(
+            f"Withdrawn: {_short(p.proposal_id)}  [{p.tool}]  "
+            f"status={_status_label(p.status)}  by={by}  reason={reason}"
+        )
+    except (FileNotFoundError, ValueError) as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
+
 # ── needs-revision ────────────────────────────────────────────────────────────
 
 @cli.command("needs-revision")
@@ -239,7 +263,12 @@ def needs_revision(proposal_id: str, notes: str, by: str):
     default=False,
     help="Write to the Stack for real. Without this flag, shows what would happen.",
 )
-def commit(proposal_id: str, live: bool):
+@click.option(
+    "--by",
+    required=True,
+    help="Reviewer identity — REQUIRED. Name yourself; automated callers must not inherit a human's name.",
+)
+def commit(proposal_id: str, live: bool, by: str):
     """
     Commit an approved proposal.
 
@@ -249,7 +278,7 @@ def commit(proposal_id: str, live: bool):
     ChatGPT cannot trigger --live. This terminal is the commit boundary.
     """
     try:
-        p = commit_pending_write(proposal_id, live=live)
+        p = commit_pending_write(proposal_id, live=live, committed_by=by)
         result = p.commit_result or {}
 
         if not live:
@@ -260,8 +289,45 @@ def commit(proposal_id: str, live: bool):
             click.echo()
             return
 
-        # Live commit succeeded
         stack_response = result.get("stack_response", {})
+
+        # THE BANNER FOLLOWS THE OUTCOME, NOT THE CODE PATH.
+        #
+        # commit_pending_write fails CLOSED on a write the Stack refused — it
+        # sets status="commit_failed" and RETURNS the proposal rather than
+        # raising, because the failure is a recorded state, not an exception.
+        # This console then fell straight through to the green banner (the
+        # comment here even read "Live commit succeeded"). Live specimen
+        # 2026-08-30: the Ring-2 drain logged "Proposal REJECTED by Stack ...
+        # NOT committed" and printed "COMMITTED (LIVE)" for that same proposal,
+        # one line apart. The library was honest; the console was not, and the
+        # console is what the human reads.
+        #
+        # Fail closed on ANY status that is not a recorded commit, including one
+        # this console does not know about.
+        if p.status != "committed":
+            click.echo(
+                click.style(
+                    f"COMMIT FAILED: {_short(p.proposal_id)}  [{p.tool}] → {p.commit_target}"
+                    f"  status={_status_label(p.status)}  — NOT committed",
+                    fg="red",
+                    bold=True,
+                ),
+                err=True,
+            )
+            click.echo(f"  error: {result.get('error', '(no error recorded)')}", err=True)
+            if stack_response:
+                click.echo("  Stack response:", err=True)
+                click.echo(f"    {json.dumps(stack_response, indent=4)}", err=True)
+            if p.status == "commit_failed":
+                click.echo(
+                    f"  Fix the cause, then re-arm with "
+                    f"'bridge retry {_short(p.proposal_id)} --by <you>'.",
+                    err=True,
+                )
+            sys.exit(1)
+
+        # Live commit succeeded
         click.echo(
             click.style(
                 f"COMMITTED (LIVE): {_short(p.proposal_id)}  [{p.tool}] → {p.commit_target}",
@@ -270,6 +336,7 @@ def commit(proposal_id: str, live: bool):
             )
         )
         click.echo(f"  committed_at: {result.get('committed_at','?')}")
+        click.echo(f"  by: {by}")
         click.echo(f"  Stack response:")
         click.echo(f"    {json.dumps(stack_response, indent=4)}")
 

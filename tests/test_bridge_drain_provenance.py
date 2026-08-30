@@ -101,7 +101,9 @@ def _drain(ctx, tool, args, *, live=True):
         session_id=PROPOSER_SESSION,
     )
     approve_pending_write(ctx, proposal.proposal_id, approved_by="Anthony")
-    return commit_pending_write(ctx, proposal.proposal_id, live=live)
+    return commit_pending_write(
+        ctx, proposal.proposal_id, live=live, committed_by="drain-provenance-harness"
+    )
 
 
 # ── Forward direction: the proposer's identity travels ───────────────────────
@@ -354,7 +356,9 @@ def _oai_drain(oai, tool, args, *, live=True):
         session_id=OAI_SESSION,
     )
     oai.approve_pending_write(proposal.proposal_id, approved_by="Anthony")
-    return oai.commit_pending_write(proposal.proposal_id, live=live)
+    return oai.commit_pending_write(
+        proposal.proposal_id, live=live, committed_by="drain-provenance-harness"
+    )
 
 
 def test_openai_handoff_commit_body_carries_proposer_source_instance(oai, oai_captured_posts):

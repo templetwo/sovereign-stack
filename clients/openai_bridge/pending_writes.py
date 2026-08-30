@@ -562,7 +562,7 @@ def _precondition_check(proposal: Proposal) -> list[str]:
     return errors
 
 
-def commit_pending_write(proposal_id: str, live: bool = False) -> Proposal:
+def commit_pending_write(proposal_id: str, live: bool = False, *, committed_by: str) -> Proposal:
     """
     Execute an approved proposal against the Stack.
 
@@ -570,7 +570,15 @@ def commit_pending_write(proposal_id: str, live: bool = False) -> Proposal:
     live=True: runs precondition checks, calls the bridge REST API, writes result back.
 
     ChatGPT cannot trigger live=True — only Anthony's terminal has that authority.
+
+    `committed_by` is REQUIRED and keyword-only, on the same rule as
+    approve/reject/needs_revision/retry (ca11e4c): identity is asserted by the
+    caller, never defaulted. Every commit event used to land actor="bridge",
+    so the audit chain recorded THAT a write executed and never WHO ran it.
+    "bridge" is still recorded, as details.executed_by: the substrate that
+    carried the call is a different fact from the reviewer who ordered it.
     """
+    committed_by = _require_reviewer(committed_by, "committed_by")
     proposal, path = _load_proposal(proposal_id)
 
     # Pre-commit validation (always runs)
@@ -631,17 +639,19 @@ def commit_pending_write(proposal_id: str, live: bool = False) -> Proposal:
             "error": stack_error,
             "stack_response": stack_result,
             "failed_at": datetime.now(timezone.utc).isoformat(),
+            "attempted_by": committed_by,
         }
         _save_proposal(proposal, path)
         append_audit_event(
             AuditEvent.COMMIT_FAILED,
             proposal_id=proposal_id,
-            actor="bridge",
+            actor=committed_by,
             details={
                 "tool": proposal.tool,
                 "commit_target": proposal.commit_target,
                 "live": True,
                 "error": stack_error,
+                "executed_by": "bridge",
             },
         )
         # Verify the chain on THIS branch too — see the bridge_core twin.
@@ -668,18 +678,20 @@ def commit_pending_write(proposal_id: str, live: bool = False) -> Proposal:
         "commit_target": proposal.commit_target,
         "stack_response": stack_result,
         "committed_at": datetime.now(timezone.utc).isoformat(),
+        "committed_by": committed_by,
     }
 
     _save_proposal(proposal, path)
     append_audit_event(
         AuditEvent.COMMITTED,
         proposal_id=proposal_id,
-        actor="bridge",
+        actor=committed_by,
         details={
             "tool": proposal.tool,
             "commit_target": proposal.commit_target,
             "live": True,
             "mocked": False,
+            "executed_by": "bridge",
         },
     )
 
@@ -696,7 +708,12 @@ def commit_pending_write(proposal_id: str, live: bool = False) -> Proposal:
     else:
         logger.info("Chain verified after commit: %s", msg)
 
-    logger.info("Proposal committed (LIVE): %s → %s", proposal_id, proposal.commit_target)
+    logger.info(
+        "Proposal committed (LIVE): %s → %s by %s",
+        proposal_id,
+        proposal.commit_target,
+        committed_by,
+    )
     return proposal
 
 
@@ -776,6 +793,56 @@ def reject_pending_write(proposal_id: str, reason: str, *, rejected_by: str) -> 
         details={"reason": reason, "tool": proposal.tool},
     )
     logger.info("Proposal rejected: %s reason=%s", proposal_id, reason)
+    return proposal
+
+
+#: States `withdraw` can adjudicate away. Both are post-approval states with no
+#: other route to "rejected": reject_pending_write takes pending/needs_revision
+#: only, and retry takes commit_failed back to approved — a loop, not an exit.
+WITHDRAWABLE_STATUSES = ("approved", "commit_failed")
+
+
+def withdraw_pending_write(proposal_id: str, *, reason: str, withdrawn_by: str) -> Proposal:
+    """Adjudicate an approved / commit_failed proposal away, to "rejected".
+
+    Twin of bridge_core.pending_writes.withdraw_pending_write — see that
+    docstring for the full rationale. In short: reject_pending_write refuses
+    anything not in (pending, needs_revision), so once approved a proposal had
+    NO route to rejected at all. The nine smoke-test fixtures approved by a
+    machine in under a millisecond, sitting in THIS queue, are the live
+    specimen. A distinct verb and a distinct WITHDRAWN event, rather than a
+    wider `reject`, so one audit event never covers two transitions.
+    """
+    withdrawn_by = _require_reviewer(withdrawn_by, "withdrawn_by")
+    if not isinstance(reason, str) or not reason.strip():
+        raise ValueError("reason is required — a withdrawal with no stated cause is not a record")
+    proposal, path = _load_proposal(proposal_id)
+    prior_status = proposal.status
+    if prior_status not in WITHDRAWABLE_STATUSES:
+        raise ValueError(
+            f"Cannot withdraw proposal in status '{prior_status}' — only "
+            f"{', '.join(WITHDRAWABLE_STATUSES)} can be withdrawn "
+            "(use 'reject' for pending/needs_revision; 'committed' is final)"
+        )
+
+    proposal.status = "rejected"
+    proposal.reviewed_by = withdrawn_by
+    proposal.reviewed_at = datetime.now(timezone.utc).isoformat()
+    proposal.revision_notes = reason
+    _save_proposal(proposal, path)
+    append_audit_event(
+        AuditEvent.WITHDRAWN,
+        proposal_id=proposal.proposal_id,
+        actor=withdrawn_by,
+        details={"reason": reason, "tool": proposal.tool, "prior_status": prior_status},
+    )
+    logger.info(
+        "Proposal withdrawn from %s: %s by %s reason=%s",
+        prior_status,
+        proposal.proposal_id,
+        withdrawn_by,
+        reason,
+    )
     return proposal
 
 

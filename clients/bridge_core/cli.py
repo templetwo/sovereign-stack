@@ -80,15 +80,17 @@ class _SubstrateOps:
                 needs_revision_pending_write,
                 reject_pending_write,
                 retry_pending_write,
+                withdraw_pending_write,
             )
             self._approve = lambda pid, by: approve_pending_write(pid, approved_by=by)
             self._reject = lambda pid, reason, by: reject_pending_write(pid, reason=reason, rejected_by=by)
             self._needs_revision = lambda pid, notes, by: needs_revision_pending_write(pid, notes=notes, actor=by)
-            self._commit = lambda pid, live: commit_pending_write(pid, live=live)
+            self._commit = lambda pid, live, by: commit_pending_write(pid, live=live, committed_by=by)
             self._list = lambda status: list_pending_writes(status=status)
             self._read_audit = lambda pid: read_audit_trail(proposal_id=pid)
             self._verify = lambda: verify_chain()
             self._retry = lambda pid, by: retry_pending_write(pid, actor=by)
+            self._withdraw = lambda pid, reason, by: withdraw_pending_write(pid, reason=reason, withdrawn_by=by)
             self._pending_dir = Path.home() / ".sovereign" / "openai_bridge" / "pending_writes"
 
         elif source == "grok":
@@ -105,16 +107,20 @@ class _SubstrateOps:
                 reject_pending_write,
                 retry_pending_write,
                 verify_chain,
+                withdraw_pending_write,
             )
             ctx = get_context("grok-xai")
             self._approve = lambda pid, by: approve_pending_write(ctx, pid, approved_by=by)
             self._reject = lambda pid, reason, by: reject_pending_write(ctx, pid, reason=reason, rejected_by=by)
             self._needs_revision = lambda pid, notes, by: needs_revision_pending_write(ctx, pid, notes=notes, actor=by)
-            self._commit = lambda pid, live: commit_pending_write(ctx, pid, live=live)
+            self._commit = lambda pid, live, by: commit_pending_write(ctx, pid, live=live, committed_by=by)
             self._list = lambda status: list_pending_writes(ctx, status=status)
             self._read_audit = lambda pid: read_audit_trail(ctx, proposal_id=pid)
             self._verify = lambda: verify_chain(ctx)
             self._retry = lambda pid, by: retry_pending_write(ctx, pid, actor=by)
+            self._withdraw = lambda pid, reason, by: withdraw_pending_write(
+                ctx, pid, reason=reason, withdrawn_by=by
+            )
             self._pending_dir = ctx.pending_writes_dir
 
         else:
@@ -130,10 +136,11 @@ class _SubstrateOps:
     def approve(self, pid, by):   return self._approve(pid, by)
     def reject(self, pid, r, by): return self._reject(pid, r, by)
     def needs_revision(self, pid, n, by): return self._needs_revision(pid, n, by)
-    def commit(self, pid, live):  return self._commit(pid, live)
+    def commit(self, pid, live, by): return self._commit(pid, live, by)
     def read_audit(self, pid):    return self._read_audit(pid)
     def verify(self):             return self._verify()
     def retry(self, pid, by):     return self._retry(pid, by)
+    def withdraw(self, pid, r, by): return self._withdraw(pid, r, by)
 
 
 # ── CLI group ─────────────────────────────────────────────────────────────────
@@ -340,6 +347,35 @@ def retry(ctx, proposal_id: str, by: str):
         sys.exit(1)
 
 
+@cli.command("withdraw")
+@click.argument("proposal_id")
+@click.option("--reason", required=True, help="Why this approved proposal is being withdrawn")
+@click.option(
+    "--by",
+    required=True,
+    help="Reviewer identity — REQUIRED. Name yourself; automated callers must not inherit a human's name.",
+)
+@click.pass_context
+def withdraw(ctx, proposal_id: str, reason: str, by: str):
+    """Adjudicate an approved (or commit_failed) proposal away, to rejected.
+
+    'reject' only accepts pending/needs_revision, so once a proposal was
+    approved there was NO route to rejected at all — the nine smoke-test
+    fixtures sitting approved in the live openai queue could not be cleared
+    without hand-editing their JSON. This is that route, on the record.
+    """
+    ops = ctx.obj["ops"]
+    try:
+        p = ops.withdraw(proposal_id, reason, by)
+        click.echo(
+            f"Withdrawn: {_short(p.proposal_id)}  [{p.tool}]  "
+            f"status={_status_label(p.status)}  by={by}  reason={reason}"
+        )
+    except (FileNotFoundError, ValueError) as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
+
 @cli.command("commit")
 @click.argument("proposal_id")
 @click.option(
@@ -348,12 +384,17 @@ def retry(ctx, proposal_id: str, by: str):
     default=False,
     help="Write to the Stack for real. Without --live, shows what would happen.",
 )
+@click.option(
+    "--by",
+    required=True,
+    help="Reviewer identity — REQUIRED. Name yourself; automated callers must not inherit a human's name.",
+)
 @click.pass_context
-def commit(ctx, proposal_id: str, live: bool):
+def commit(ctx, proposal_id: str, live: bool, by: str):
     """Commit an approved proposal. --live required for real Stack write."""
     ops = ctx.obj["ops"]
     try:
-        p = ops.commit(proposal_id, live=live)
+        p = ops.commit(proposal_id, live=live, by=by)
         result = p.commit_result or {}
 
         if not live:
@@ -365,6 +406,43 @@ def commit(ctx, proposal_id: str, live: bool):
             return
 
         stack_response = result.get("stack_response", {})
+
+        # THE BANNER FOLLOWS THE OUTCOME, NOT THE CODE PATH.
+        #
+        # commit_pending_write fails CLOSED on a write the Stack refused — it
+        # sets status="commit_failed" and RETURNS the proposal rather than
+        # raising, because the failure is a recorded state, not an exception.
+        # This console then fell straight through to the green banner. Live
+        # specimen 2026-08-30: the Ring-2 drain logged "Proposal REJECTED by
+        # Stack ... NOT committed" and printed "COMMITTED (LIVE)" for that same
+        # proposal, one line apart. The library was honest; the console was not,
+        # and the console is what the human reads.
+        #
+        # Fail closed on ANY status that is not a recorded commit, including one
+        # this console does not know about — an unrecognised status must never
+        # be rendered as success.
+        if p.status != "committed":
+            click.echo(
+                click.style(
+                    f"COMMIT FAILED: {_short(p.proposal_id)}  [{p.tool}] → {p.commit_target}"
+                    f"  status={_status_label(p.status)}  — NOT committed",
+                    fg="red",
+                    bold=True,
+                ),
+                err=True,
+            )
+            click.echo(f"  error: {result.get('error', '(no error recorded)')}", err=True)
+            if stack_response:
+                click.echo("  Stack response:", err=True)
+                click.echo(f"    {json.dumps(stack_response, indent=4)}", err=True)
+            if p.status == "commit_failed":
+                click.echo(
+                    f"  Fix the cause, then 're-arm' with "
+                    f"'bridge --source={ctx.obj['source']} retry {_short(p.proposal_id)} --by <you>'.",
+                    err=True,
+                )
+            sys.exit(1)
+
         click.echo(
             click.style(
                 f"COMMITTED (LIVE): {_short(p.proposal_id)}  [{p.tool}] → {p.commit_target}",
@@ -373,6 +451,7 @@ def commit(ctx, proposal_id: str, live: bool):
             )
         )
         click.echo(f"  committed_at: {result.get('committed_at','?')}")
+        click.echo(f"  by: {by}")
         click.echo(f"  Stack response:")
         click.echo(f"    {json.dumps(stack_response, indent=4)}")
 

@@ -33,6 +33,14 @@ class AuditEvent(str, Enum):
     # tamper check and leaves no trace at all.
     RETRY_ARMED = "retry_armed"
     REJECTED = "rejected"
+    # An APPROVED (or commit_failed) proposal adjudicated away to rejected.
+    # Distinct from REJECTED for the same reason COMMIT_FAILED is distinct from
+    # COMMITTED: the trail must be able to say WHICH transition happened.
+    # `reject` only ever accepts pending/needs_revision, so a REJECTED event
+    # always means "refused before it was ever approved" — reusing it here
+    # would quietly redefine every one of those already on the chain.
+    # details.prior_status names the state it came from.
+    WITHDRAWN = "withdrawn"
     NEEDS_REVISION = "needs_revision"
     CHAIN_VERIFIED = "chain_verified"
     CHAIN_BROKEN = "chain_broken"

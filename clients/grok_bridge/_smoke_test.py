@@ -238,7 +238,7 @@ def run() -> bool:
                 f"status={vr_after_approve.get('status')} chain_valid={vr_after_approve.get('chain_valid')}",
             ))
 
-            committed = commit_pending_write(ctx, proposal_id)
+            committed = commit_pending_write(ctx, proposal_id, committed_by=REVIEWER)
             results.append(check(
                 "Commit (dry-run) returns would_call info",
                 committed.commit_result is not None and "would_call" in committed.commit_result,
