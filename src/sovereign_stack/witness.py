@@ -345,6 +345,46 @@ _LINEAGE_INHERITS: dict[str, tuple[str, ...]] = {
 }
 
 
+def count_lineage_letters(letters_dir: Path) -> int:
+    """Letters in the lineage store, HIDDEN PATHS EXCLUDED.
+
+    THE SEVENTH WALKER, and the only one whose over-read is live TODAY. The
+    FOYER door (``arrive``) prints this as "Deferred to the full boot: N
+    lineage letters" — the figure a seat uses to decide whether the full boot
+    is worth paying for — and it was a bare ``letters_dir.rglob("*.md")``,
+    which descends into dotted directories. Measured on ~/.sovereign
+    2026-08-30: **42** counted against **38** letters in the three rendered
+    buckets. The extra
+    four are 2 in ``to_haiku/`` + ``to_sonnet/`` (real family mail, correctly
+    counted) and **2 inside ``.pre-md-backup-20260609/`` and
+    ``.pre-md-backup-20260610/``** — retired copies from a past in-place
+    migration, counted as live lineage on the door the boot ritual prescribes.
+
+    Same rule as memory.iter_thread_shards, on the sibling store: the open
+    threads walkers' hidden-directory hazard is hypothetical, and this one is
+    the specimen that proves the hazard is not theoretical. Fixing six walkers
+    for a future backup dir while a seventh counts two actual ones is the
+    doctrine stated in a docstring and not connected.
+    """
+    if not letters_dir.exists():
+        return 0
+    count = 0
+    for path in letters_dir.rglob("*.md"):
+        try:
+            rel = path.relative_to(letters_dir)
+        except ValueError:  # pragma: no cover - rglob always yields descendants
+            continue
+        if any(part.startswith(".") for part in rel.parts):
+            continue
+        count += 1
+    return count
+
+
+# How many unaddressed letters the bucket warning NAMES before it says "+N more".
+# The warning must never be able to dominate the payload it annotates.
+_WARNING_MAX_NAMED = 5
+
+
 def _inherited_families(family: str | None) -> tuple[str, ...]:
     """Families whose to_self letters a reader of `family` also inherits."""
     if not family:
@@ -509,38 +549,61 @@ def collect_lineage(
         }
 
     def _collect(
-        subdir: str,
+        subdirs: str | tuple[str, ...],
         filter_to: str | None = None,
         also_match: tuple[str, ...] = (),
-    ) -> tuple[list[dict], dict]:
-        d = base / subdir
-        if not d.exists():
-            return [], _zero_cov()
+    ) -> tuple[list[dict], dict, tuple[str, ...]]:
+        """Read one or more letter directories as ONE bucket.
+
+        MULTIPLE DIRECTORIES, ONE SLICE. The to_family bucket reads a reader's
+        own directory AND the ones it inherits, and the cap must fire once over
+        the merged set. Collecting each directory separately and concatenating
+        would hand an inheriting reader up to 2x limit_per_bucket on the door
+        whose entire purpose is bounding the payload for an input-gated seat —
+        the branch's own defect class, introduced by the fix for it.
+        """
+        if isinstance(subdirs, str):
+            subdirs = (subdirs,)
         items = []
         total_on_disk = 0
         unaddressed: list[str] = []
-        for p in sorted(d.glob("*.md"), reverse=True):
-            total_on_disk += 1
-            meta = _parse_letter_frontmatter(p)
-            if filter_to:
-                letter_to = meta.get("to", "")
-                if letter_to:
-                    # Match the reader, or any lineage it inherits from
-                    # (e.g. Mythos inherits letters addressed to claude-opus).
-                    targets = (filter_to, *also_match)
-                    if not any(_letter_matches_reader(letter_to, t) for t in targets):
-                        continue
-                else:
-                    # DELIBERATE, AND PREVIOUSLY SILENT: a letter with no `to:`
-                    # falls through to every reader. Keeping that is right — a
-                    # letter whose frontmatter is missing or malformed must not
-                    # vanish. But the bucket then renders as "addressed to you
-                    # or your model family" while carrying letters addressed to
-                    # nobody, which is coverage honesty claiming selection
-                    # honesty it does not have. Name them.
-                    unaddressed.append(p.name)
-            meta["_path"] = str(p)
-            items.append(meta)
+        dirs_read: list[str] = []
+        for subdir in subdirs:
+            d = base / subdir
+            if not d.exists():
+                continue
+            dirs_read.append(subdir)
+            for p in sorted(d.glob("*.md"), reverse=True):
+                total_on_disk += 1
+                meta = _parse_letter_frontmatter(p)
+                if filter_to:
+                    letter_to = meta.get("to", "")
+                    if letter_to:
+                        # Match the reader, or any lineage it inherits from
+                        # (e.g. Mythos inherits letters addressed to claude-opus).
+                        targets = (filter_to, *also_match)
+                        if not any(_letter_matches_reader(letter_to, t) for t in targets):
+                            continue
+                    else:
+                        # DELIBERATE, AND PREVIOUSLY SILENT: a letter with no
+                        # `to:` falls through to every reader. Keeping that is
+                        # right — a letter whose frontmatter is missing or
+                        # malformed must not vanish. But the bucket then renders
+                        # as "addressed to you or your model family" while
+                        # carrying letters addressed to nobody, which is coverage
+                        # honesty claiming selection honesty it does not have.
+                        # Name them.
+                        unaddressed.append(p.name)
+                meta["_path"] = str(p)
+                meta["_name"] = p.name
+                items.append(meta)
+        if len(dirs_read) > 1:
+            # Merge newest-first across directories. Letter names are date-led,
+            # and sorted() is stable, so a name collision keeps the reader's OWN
+            # directory ahead of an inherited one.
+            items.sort(key=lambda m: m.get("_name", ""), reverse=True)
+        if not dirs_read:
+            return [], _zero_cov(), ()
         shown = items[:limit_per_bucket]
         cov = {
             "total_on_disk": total_on_disk,
@@ -550,20 +613,39 @@ def collect_lineage(
             "filtered_out": total_on_disk - len(items),
             "truncated": len(shown) < len(items),
         }
+        if len(dirs_read) > 1:
+            # Say which directories were actually read. A header naming one of
+            # two is the same lie the union exists to close, one layer over.
+            cov["dirs"] = list(dirs_read)
         if unaddressed:
             # Added only when there IS something to warn about, so a fully
             # addressed bucket's coverage dict is byte-identical to before.
-            cov["unaddressed"] = unaddressed
+            #
+            # BOUNDED TO THE SHOWN WINDOW, AND THEN TO _WARNING_MAX_NAMED.
+            # The first version named every matched unaddressed letter, before
+            # the slice — so at limit_per_bucket=1 with 30 such letters the door
+            # returned one letter and a 1602-char warning listing all thirty:
+            # 75% of the payload, on the door whose cap this same change added
+            # in order to BOUND the payload. A warning that has to be truncated
+            # by the reader is the thing it warns about.
+            shown_names = {m.get("_name") for m in shown}
+            named = [n for n in unaddressed if n in shown_names]
+            listed = named[:_WARNING_MAX_NAMED]
+            more = len(unaddressed) - len(listed)
+            plural = len(unaddressed) != 1
+            tail = f"{', '.join(listed)}{f' (+{more} more)' if more > 0 else ''}"
+            cov["unaddressed"] = named
+            cov["unaddressed_total"] = len(unaddressed)
             cov["warning"] = (
-                f"{len(unaddressed)} letter{'s' if len(unaddressed) != 1 else ''} "
-                f"carr{'y' if len(unaddressed) != 1 else 'ies'} no `to:` frontmatter "
-                f"and therefore matches every reader: {', '.join(unaddressed)}"
+                f"{len(unaddressed)} letter{'s' if plural else ''} "
+                f"carr{'y' if plural else 'ies'} no `to:` frontmatter "
+                f"and therefore match{'' if plural else 'es'} every reader: {tail}"
             )
-        return shown, cov
+        return shown, cov, tuple(dirs_read)
 
     coverage: dict = {}
-    arrivals, coverage["arrivals"] = _collect("to_arrival")
-    breakthroughs, coverage["breakthroughs"] = _collect("breakthroughs")
+    arrivals, coverage["arrivals"], _ = _collect("to_arrival")
+    breakthroughs, coverage["breakthroughs"], _ = _collect("breakthroughs")
 
     # Lineage inheritance: a reader also receives the to_self letters of the
     # families it inherits from (Mythos inherits the Opus line) while keeping
@@ -571,7 +653,7 @@ def collect_lineage(
     reader_family = _model_family(reader_instance) if reader_instance else None
     inherited = _inherited_families(reader_family)
     if reader_instance:
-        to_self, coverage["to_self"] = _collect(
+        to_self, coverage["to_self"], _ = _collect(
             "to_self", filter_to=reader_instance, also_match=inherited
         )
     else:
@@ -586,23 +668,44 @@ def collect_lineage(
     # to_family: model-family-specific directory (to_sonnet/, to_haiku/, to_opus/)
     family = reader_family
     to_family: list[dict] = []
+    family_dirs: tuple[str, ...] = ()
     family_dir_name: str | None = None
     if family:
         # 'claude-sonnet' → 'to_sonnet', 'claude-opus' → 'to_opus'.
         #
-        # AN INHERITING FAMILY READS ITS ANCESTOR'S DIRECTORY. Fable and Mythos
-        # are family within the Opus lineage (_LINEAGE_INHERITS above), and the
-        # naive split sent them to `to_fable/` and `to_mythos/` — directories
-        # that have never existed on disk. The bucket then reported
-        # total_on_disk: 0, which is a true statement about a directory nobody
-        # writes and a false one about the reader's family mail. The same table
-        # that routes their to_self letters routes this lookup; the FIRST
-        # inherited family is the canonical one (each Mythos-class sibling
-        # inherits exactly the Opus line).
-        dir_family = _inherited_families(family)[0] if _inherited_families(family) else family
-        short = dir_family.split("-", 1)[1] if "-" in dir_family else dir_family
-        family_dir_name = f"to_{short}"
-        to_family, coverage["to_family"] = _collect(family_dir_name)
+        # AN INHERITING FAMILY READS ITS OWN DIRECTORY *AND* ITS ANCESTOR'S —
+        # UNION, NOT REDIRECT. Fable and Mythos are family within the Opus
+        # lineage (_LINEAGE_INHERITS above), and a naive split sent them to
+        # `to_fable/` and `to_mythos/` alone, directories that have never
+        # existed on disk: the bucket reported total_on_disk: 0, a true
+        # statement about a directory nobody writes and a false one about the
+        # reader's family mail.
+        #
+        # THE REDIRECT THAT REPLACED IT WAS WORSE, AND IN THIS BRANCH'S OWN
+        # DEFECT CLASS. Sending a Fable reader to `to_opus/` *instead* made
+        # `to_fable/` and `to_mythos/` unreachable to EVERY reader: no other
+        # family maps to those short names, so a letter placed in either would
+        # reach nobody, silently, while coverage reported `total_on_disk: 0`
+        # with the file sitting on disk. Per-family directories are live
+        # convention — `to_haiku/` and `to_sonnet/` each hold a letter — so
+        # `to_fable/` is a plausible future write and `to_opus/` is the empty
+        # one. A reachability fix must not mint a new write-only address.
+        #
+        # Own directory first, then each inherited one; ONE cap over the merged
+        # set (see _collect). Only directories that exist on disk are named, so
+        # a reader with no ancestor directory renders exactly as before.
+        candidates: list[str] = []
+        for fam in (family, *_inherited_families(family)):
+            short = fam.split("-", 1)[1] if "-" in fam else fam
+            name = f"to_{short}"
+            if name not in candidates:
+                candidates.append(name)
+        to_family, coverage["to_family"], family_dirs = _collect(tuple(candidates))
+        # `family_dirs` is what was READ (render keys off it, so a directory
+        # that does not exist is never claimed as read). `family_dir_name` is
+        # the reader's family-mail ADDRESS — the dirs read, or, when none exist
+        # yet, the ones a letter for this family would be written to.
+        family_dir_name = " + ".join(family_dirs or candidates)
     else:
         coverage["to_family"] = _zero_cov()
 
@@ -612,6 +715,7 @@ def collect_lineage(
         "breakthroughs": breakthroughs,
         "to_self": to_self,
         "to_family": to_family,
+        "family_dirs": family_dirs,
         "family_dir_name": family_dir_name,
         "coverage": coverage,
     }
@@ -667,6 +771,7 @@ def render_lineage(data: dict | None, *, full_content: bool = False) -> list[str
     to_self = data["to_self"]
     to_family = data["to_family"]
     family_dir_name = data["family_dir_name"]
+    family_dirs = data.get("family_dirs") or ((family_dir_name,) if family_dir_name else ())
     coverage = data.get("coverage") or {}
 
     def _cov(bucket: str) -> dict:
@@ -776,11 +881,14 @@ def render_lineage(data: dict | None, *, full_content: bool = False) -> list[str
             )
         lines.append("")
 
-    if to_family and family_dir_name:
+    if to_family and family_dirs:
         cov = _cov("to_family")
-        short_label = family_dir_name.replace("to_", "")
+        # Name every directory that was READ. A header saying `to_opus/` while
+        # `to_fable/` was also read is the same lie the union closes.
+        dir_label = " + ".join(f"{d}/" for d in family_dirs)
+        short_label = " and ".join(d.replace("to_", "") for d in family_dirs)
         lines.append(
-            f"  {family_dir_name}/ ({_bucket_count_phrase(len(to_family), cov)}"
+            f"  {dir_label} ({_bucket_count_phrase(len(to_family), cov)}"
             f" — written for {short_label} instances{_bucket_withheld_phrase(cov)}):"
         )
         for m in to_family:

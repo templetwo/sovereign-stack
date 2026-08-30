@@ -790,10 +790,13 @@ _PROSE_SUPERSEDES_RE = re.compile(
 
 
 def find_prose_supersession(content: str) -> str | None:
-    """The claim id a body CLAIMS to supersede, or None.
+    """The claim id a body claims to supersede in one of TWO NARROW FORMS, or None.
 
-    Detection only — never used to fill the field in. See
-    validate_no_prose_supersession for why.
+    NOT A DETECTOR FOR "does this body state a supersession". It matches
+    ``supersed(es|ing|ed)`` followed, across at most a few whitelisted connector
+    tokens, by a bare 64-hex id — i.e. "supersedes <id>" and "supersedes claim
+    <id>", and nothing looser. Detection only; never used to fill the field in.
+    See validate_no_prose_supersession for why, and for what it cannot see.
     """
     if not content:
         return None
@@ -822,6 +825,30 @@ def validate_no_prose_supersession(content: str, supersedes: list[str] | None) -
 
     A present `supersedes` field ends the check: the governance act happened,
     and the prose is then narration of it.
+
+    THIS IS NOT FAIL-CLOSED, AND MUST NOT BE READ AS "THE PROSE AND THE FIELDS
+    CANNOT DISAGREE". It is a NARROW, DELIBERATELY UNDER-INCLUSIVE filter on two
+    phrasings, and the under-inclusion is the design, not an oversight — the
+    first draft allowed 120 chars of anything between the word and the id and
+    scored 25% precision against the live corpus, which is a tax rather than a
+    guard, and taxes teach authors to route around them. What it therefore does
+    NOT catch, measured over 3,445 chronicle entries on 2026-08-30 (220 bodies
+    say ``supersed*`` with no ``supersedes`` field; this guard refuses 2):
+
+      * one adjective, or emphasis, defeats the connector whitelist —
+        "supersedes prior claim <id>", "supersedes the earlier claim <id>",
+        "**supersedes** <id>" are all ACCEPTED;
+      * a predecessor named by SHORT id (the 16-hex ``display_id`` form, or a
+        12-hex archive id) is not matched at all — the pattern requires exactly
+        64 hex, while ``resolve_supersedes`` accepts a unique prefix;
+      * a predecessor named in words and no id at all ("SUPERSEDES the earlier
+        count in this domain") is invisible by construction.
+
+    And it fires on an explicit DENIAL: "not superseding claim <id>" is refused,
+    because the regex reads the word and its object, not the sentence.
+
+    Widening it is a precision decision against the corpus, not a taste call —
+    take the measurement before touching the pattern.
 
     Raises:
         ProvenanceError: naming the id found in the body.

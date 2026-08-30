@@ -106,6 +106,47 @@ def _thread_domain_for(path: Path, threads_dir: Path) -> str:
     return ",".join(rel.parent.parts)
 
 
+def iter_thread_shards(threads_dir: Path) -> list[Path]:
+    """Every open-threads shard under `threads_dir`, sorted, HIDDEN PATHS EXCLUDED.
+
+    THE ONE WALK. Six readers and two writers enumerate this store; when they
+    each spelled the walk themselves the same store had two sizes depending on
+    who asked. This is the single definition they all call, so a change to what
+    counts as a shard cannot land on five of six walkers.
+
+    RECURSIVE, because the store has nested shards — the live specimen is
+    ``tech-debt,compaction,auto-detection/log.jsonl`` — and a flat glob skipped
+    them at EVERY limit.
+
+    NOT A BARE ``rglob``, because ``rglob`` descends into DOTTED directories.
+    This house migrates in place and leaves the old copy beside the new one
+    under a dot name: ``~/.sovereign/comms/letters/`` holds
+    ``.pre-md-backup-20260609/`` and ``.pre-md-backup-20260610/`` today, made by
+    exactly that convention, and ``open_threads/`` already carries a
+    ``…jsonl.bak.20260502`` file that only the ``*.jsonl`` pattern keeps out.
+    The day someone backs a shard up as ``open_threads/.bak-20260502/`` a bare
+    recursive walk folds a RETIRED file into the live corpus — served to readers
+    under the invented domain ``.bak-20260502``, and, through
+    ``resolve_thread_by_id``, WRITTEN BACK TO: a retired record stamped
+    ``resolved: true`` in a file nobody meant to keep live. Going recursive
+    without this filter trades an under-read for a corrupting over-read.
+
+    A dotted FILE (``.hidden.jsonl``) is excluded on the same rule.
+    """
+    if not threads_dir.exists():
+        return []
+    shards: list[Path] = []
+    for path in threads_dir.rglob("*.jsonl"):
+        try:
+            rel = path.relative_to(threads_dir)
+        except ValueError:  # pragma: no cover - rglob always yields descendants
+            continue
+        if any(part.startswith(".") for part in rel.parts):
+            continue
+        shards.append(path)
+    return sorted(shards)
+
+
 def _parse_iso(ts: str | None) -> datetime | None:
     """Parse an ISO8601 timestamp, returning None on failure or missing input."""
     if not ts:
@@ -1181,6 +1222,24 @@ class ExperientialMemory:
         thread by thread_id, so handoff surfacing can verify a thread has been
         answered even across sessions.
 
+        RETURNS "" WHEN NOTHING WAS RESOLVED, and this is the half that used to
+        be a fail-open. The shard is addressed by exact path
+        (``threads_dir/{domain}.jsonl``), so an absent domain, a nested shard,
+        or a fragment that matches nothing all fall through the rewrite having
+        marked NOTHING — and the old code then recorded a ground_truth insight
+        carrying ``resolved_thread_id: None`` and returned its path, which is
+        the success shape. The chronicle gained a resolution for a thread that
+        stays open forever, and the caller was told it landed. Its sibling
+        ``resolve_thread_by_id`` has always returned "" on a miss; this is the
+        same posture, on the same file.
+
+        NOT WIDENED TO A RECURSIVE WALK, deliberately. The defect is "reports
+        success on a resolution that did not happen", not "cannot reach nested
+        shards" — and making this exact-path lookup walk would move resolution
+        semantics (which of several matching shards wins) under a bug fix. A
+        nested thread is resolvable today by its stable id through
+        ``resolve_thread_by_id``, which does walk.
+
         Args:
             domain: Domain of the thread
             question_fragment: Partial match for the original question
@@ -1188,7 +1247,8 @@ class ExperientialMemory:
             session_id: Current session identifier
 
         Returns:
-            Path to the new ground_truth insight
+            Path to the new ground_truth insight, or "" when no unresolved
+            thread in `domain` matched `question_fragment`.
         """
         resolved_thread_id: str | None = None
         resolved_timestamp: str | None = None
@@ -1229,6 +1289,13 @@ class ExperientialMemory:
                 with open(jsonl_path, "w") as f:
                     f.write("\n".join(lines) + "\n")
 
+        if resolved_thread_id is None:
+            # Nothing was marked. Writing the insight anyway would file a
+            # ground_truth record asserting a resolution the store does not
+            # carry, under a domain that may not even exist — and hand the
+            # caller a path, which reads as done.
+            return ""
+
         # Record the resolution as ground truth with back-reference.
         return self.record_insight(
             domain=domain,
@@ -1258,11 +1325,12 @@ class ExperientialMemory:
 
         # Whole-file rewrite — same critical section as resolve_thread.
         with provenance.chronicle_write_lock():
-            # rglob: a thread in a nested shard was never VISITED here, so this
+            # iter_thread_shards (recursive, dot-paths excluded): a thread in a
+            # nested shard was never VISITED here, so this
             # fell through and returned "" — reporting not-found for a thread
             # that exists and is addressed by a stable id. The read-side miss
             # undercounts; this one silently refuses to write.
-            for jsonl_file in sorted(self.threads_dir.rglob("*.jsonl")):
+            for jsonl_file in iter_thread_shards(self.threads_dir):
                 hit = False
                 lines = []
                 with open(jsonl_file) as f:
@@ -1371,14 +1439,15 @@ class ExperientialMemory:
         threads = []
         corrupt_lines = 0
 
-        # RECURSIVE, not flat (2026-08-30). The store has nested shards — the
+        # iter_thread_shards: RECURSIVE, not flat (2026-08-30), and hidden
+        # paths excluded. The store has nested shards — the
         # live specimen is `tech-debt,compaction,auto-detection/log.jsonl` —
         # and a flat glob skipped them at EVERY limit. That is not a cap a
         # caller can widen; it is a file that was never enumerated, so the
         # aperture's "widen_with: get_open_threads(limit=N)" pointed at a lever
         # that could not reach it. Domains come from _thread_domain_for so a
         # nested shard is addressable by its directory, not by the stem 'log'.
-        all_files = sorted(self.threads_dir.rglob("*.jsonl"))
+        all_files = iter_thread_shards(self.threads_dir)
         domains_total = len(all_files)
         file_domains = {f: _thread_domain_for(f, self.threads_dir) for f in all_files}
 

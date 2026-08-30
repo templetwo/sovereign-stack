@@ -34,7 +34,11 @@ from pathlib import Path
 import pytest
 
 from sovereign_stack.memory import ExperientialMemory
-from sovereign_stack.provenance import ProvenanceError
+from sovereign_stack.provenance import (
+    ProvenanceError,
+    find_prose_supersession,
+    validate_no_prose_supersession,
+)
 
 CLAIM_ID = "a3f19c47b2e85d06f1c4a9e37b0d5628ff4a1c93e7b26d80a5f3c19e4b7d0286"
 OTHER_ID = "0b1c2d3e4f5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0"
@@ -206,3 +210,42 @@ def test_the_retraction_shape_is_refused(memory: ExperientialMemory):
             ),
         )
     assert CLAIM_ID in str(exc.value).lower()
+
+
+# ── The guard's own bounds, stated as executable fact ────────────────────────
+#
+# Not a request to widen it — 2 hits in 3,445 entries, and the 120-char first
+# draft scored 25% precision. These pin the DOCSTRING's claims so no seat reads
+# the guard as fail-closed, and so anyone who does widen it starts from a
+# measurement rather than from a sentence.
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "supersedes prior claim {id}",
+        "supersedes the earlier claim {id}",
+        "**supersedes** {id}",
+        "Supersedes the opus-only draft at archive_id 8b1a6e29c380",
+        "SUPERSEDES the earlier count in this domain",
+    ],
+)
+def test_the_guard_is_under_inclusive_by_design(body: str):
+    """Each of these states a supersession and is ACCEPTED. That is the
+    documented cost of a narrow filter, not a defect to patch in place."""
+    content = body.format(id=CLAIM_ID)
+    assert find_prose_supersession(content) is None
+    validate_no_prose_supersession(content, None)  # must not raise
+
+
+def test_the_guard_fires_on_an_explicit_denial():
+    """It reads the word and its object, not the sentence."""
+    content = f"not superseding claim {CLAIM_ID} — the chain is unchanged"
+    with pytest.raises(ProvenanceError):
+        validate_no_prose_supersession(content, None)
+
+
+def test_a_short_display_id_is_not_matched():
+    """`resolve_supersedes` accepts a unique prefix and `display_id()` is 16 hex;
+    the pattern requires exactly 64."""
+    assert find_prose_supersession(f"supersedes claim {CLAIM_ID[:16]}") is None

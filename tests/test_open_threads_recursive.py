@@ -297,3 +297,229 @@ def test_seasons_load_threads_readonly_sees_the_nested_shard(
     questions = {t.get("question") for t in threads}
     assert "the nested question nobody could reach" in questions
     assert len(questions) == 3
+
+
+# ── The other half of "recursive": a hidden backup dir is NOT the store ──────
+#
+# Going recursive without a filter trades an under-read for a corrupting
+# over-read. `pathlib.rglob` descends into DOTTED directories, and this house
+# migrates in place and leaves the old copy beside the new one under a dot name
+# — ~/.sovereign/comms/letters/ carries `.pre-md-backup-20260609/` and
+# `.pre-md-backup-20260610/` today, made by exactly that convention, and
+# open_threads/ already holds a `…jsonl.bak.20260502` file that only the
+# `*.jsonl` pattern keeps out. The day someone backs a shard up as
+# `open_threads/.bak-20260502/`, a bare rglob serves a RETIRED thread as live
+# under the invented domain `.bak-20260502` — and resolve_thread_by_id WRITES
+# INTO it, stamping `resolved: true` into a file nobody meant to keep live.
+
+
+@pytest.fixture
+def chronicle_with_hidden_backup(tmp_sovereign_root: Path) -> Path:
+    """A chronicle whose open_threads store has a live shard, a live NESTED
+    shard, and a hidden `.bak-…/` directory holding a retired copy."""
+    threads = tmp_sovereign_root / "chronicle" / "open_threads"
+    threads.mkdir(parents=True, exist_ok=True)
+
+    (threads / "architecture.jsonl").write_text(
+        _thread_record("flat question one", "architecture") + "\n"
+    )
+    nested = threads / NESTED_DOMAIN
+    nested.mkdir(parents=True, exist_ok=True)
+    (nested / "log.jsonl").write_text(
+        _thread_record("the nested question nobody could reach", NESTED_DOMAIN) + "\n"
+    )
+
+    retired = threads / ".bak-20260502"
+    retired.mkdir(parents=True, exist_ok=True)
+    (retired / "old.jsonl").write_text(
+        json.dumps(
+            {
+                "timestamp": "2026-05-02T00:00:00+00:00",
+                "thread_id": "t_retired",
+                "question": "a retired thread from a pre-migration backup",
+                "context": "fixture",
+                "domain": "temple-wars,next-move",
+                "session_id": "session_old",
+                "layer": "open_thread",
+                "resolved": False,
+            }
+        )
+        + "\n"
+    )
+    return tmp_sovereign_root
+
+
+def test_get_open_threads_skips_a_hidden_backup_directory(
+    chronicle_with_hidden_backup: Path,
+):
+    from sovereign_stack.memory import ExperientialMemory
+
+    memory = ExperientialMemory(root=str(chronicle_with_hidden_backup / "chronicle"))
+    threads = memory.get_open_threads(limit=9999)
+    questions = {t["question"] for t in threads}
+
+    assert "a retired thread from a pre-migration backup" not in questions, (
+        "a hidden backup directory was folded into the live corpus — rglob descends into dot-dirs"
+    )
+    assert questions == {"flat question one", "the nested question nobody could reach"}
+    assert ".bak-20260502" not in {t.get("domain") for t in threads}
+
+
+def test_resolve_thread_by_id_does_not_write_into_a_hidden_backup_directory(
+    chronicle_with_hidden_backup: Path,
+):
+    """The write half, and the reason this is not cosmetic: the walk that
+    ENUMERATES the store is the same walk that RESOLVES into it. A retired file
+    reachable by the reader is a retired file the writer will stamp."""
+    from sovereign_stack.memory import ExperientialMemory
+
+    shard = (
+        chronicle_with_hidden_backup / "chronicle" / "open_threads" / ".bak-20260502" / "old.jsonl"
+    )
+    before = shard.read_text()
+
+    memory = ExperientialMemory(root=str(chronicle_with_hidden_backup / "chronicle"))
+    result = memory.resolve_thread_by_id("t_retired", "resolved from the backup")
+
+    assert result == "", "a thread inside a hidden backup dir must read as not-found"
+    assert shard.read_text() == before, "a retired backup file was rewritten in place"
+    assert json.loads(before)["resolved"] is False
+
+
+def test_a_dotted_shard_FILE_is_excluded_on_the_same_rule(tmp_sovereign_root: Path):
+    from sovereign_stack.memory import ExperientialMemory
+
+    threads = tmp_sovereign_root / "chronicle" / "open_threads"
+    threads.mkdir(parents=True, exist_ok=True)
+    (threads / "live.jsonl").write_text(_thread_record("live question", "live") + "\n")
+    (threads / ".hidden.jsonl").write_text(_thread_record("hidden question", "hidden") + "\n")
+
+    memory = ExperientialMemory(root=str(tmp_sovereign_root / "chronicle"))
+    questions = {t["question"] for t in memory.get_open_threads(limit=9999)}
+    assert questions == {"live question"}
+
+
+def test_every_walker_agrees_that_the_hidden_backup_is_not_the_store(
+    chronicle_with_hidden_backup: Path,
+):
+    """All six walkers share ONE definition (memory.iter_thread_shards). A rule
+    spelled six times is a rule that lands on five of six walkers — which is how
+    the same store came to have two sizes in the first place."""
+    from sovereign_stack import metabolism
+    from sovereign_stack.aperture import measure_aperture
+    from sovereign_stack.memory import ExperientialMemory, iter_thread_shards
+    from sovereign_stack.seasons import _all_threads, _load_threads_readonly
+
+    root = chronicle_with_hidden_backup
+    chronicle = root / "chronicle"
+    (chronicle / "insights").mkdir(parents=True, exist_ok=True)
+    (root / "handoffs").mkdir(parents=True, exist_ok=True)
+    (root / "comms" / "letters").mkdir(parents=True, exist_ok=True)
+
+    memory = ExperientialMemory(root=str(chronicle))
+    retired = "a retired thread from a pre-migration backup"
+
+    assert len(iter_thread_shards(chronicle / "open_threads")) == 2
+    assert retired not in {t["question"] for t in memory.get_open_threads(limit=9999)}
+    assert retired not in {t.get("question") for t in _all_threads(memory).values()}
+    assert retired not in {t.get("question") for t in _load_threads_readonly(chronicle)}
+
+    ap = measure_aperture(datetime.now(timezone.utc), root=root)
+    assert ap["surfaces"]["open_threads"]["on_disk"] == 2
+
+    original = metabolism.CHRONICLE_DIR
+    try:
+        metabolism.CHRONICLE_DIR = chronicle
+        assert retired not in {t.get("question") for t in metabolism._load_all_threads()}
+    finally:
+        metabolism.CHRONICLE_DIR = original
+
+
+# ── resolve_thread: reporting success on a resolution that did not happen ────
+#
+# `resolve_thread(domain, fragment)` addresses the shard by EXACT PATH
+# (`threads_dir/{domain}.jsonl`), guarded by `if jsonl_path.exists():`. When
+# that misses — an absent domain, a nested shard, a fragment matching nothing —
+# control fell straight through to `record_insight(...)` with
+# `resolved_thread_id=None`, and the dispatch printed "Thread resolved →
+# ground_truth insight: <path>" UNCONDITIONALLY. The chronicle gained a
+# ground_truth record asserting a resolution the store does not carry, filed
+# under a domain that need not exist, and the caller was handed a path.
+#
+# NOT fixed by making it recursive: the defect is the false success, not the
+# reach. A nested thread is resolvable today through resolve_thread_by_id,
+# which does walk. Widening this lookup would move resolution semantics under
+# a bug fix.
+
+
+def _dispatch(tool: str, args: dict) -> str:
+    import asyncio
+
+    from sovereign_stack import server
+
+    return asyncio.run(server._dispatch_tool(tool, args))[0].text
+
+
+def test_resolve_thread_does_not_claim_a_resolution_it_did_not_perform(
+    chronicle_with_nested_shard: Path, monkeypatch
+):
+    from sovereign_stack import server
+    from sovereign_stack.memory import ExperientialMemory
+
+    chronicle = chronicle_with_nested_shard / "chronicle"
+    memory = ExperientialMemory(root=str(chronicle))
+    monkeypatch.setattr(server, "experiential", memory)
+
+    insights_before = sorted((chronicle / "insights").rglob("*.jsonl"))
+
+    text = _dispatch(
+        "resolve_thread",
+        {
+            "domain": "no-such-domain-anywhere",
+            "question_fragment": "anything",
+            "resolution": "found it anyway",
+        },
+    )
+
+    assert "Thread resolved" not in text, (
+        "the dispatch announced a resolution for a domain that does not exist"
+    )
+    assert "No unresolved thread" in text
+    assert sorted((chronicle / "insights").rglob("*.jsonl")) == insights_before, (
+        "a ground_truth insight was written for a resolution that never happened"
+    )
+    assert not (chronicle / "insights" / "no-such-domain-anywhere").exists()
+
+
+def test_resolve_thread_on_a_nested_shard_says_so_instead_of_inventing_a_record(
+    chronicle_with_nested_shard: Path, monkeypatch
+):
+    """The nested shard is the live specimen. resolve_thread cannot reach it by
+    exact path — that is a known, NAMED limit. What it must not do is answer as
+    if it had."""
+    from sovereign_stack import server
+    from sovereign_stack.memory import ExperientialMemory
+
+    chronicle = chronicle_with_nested_shard / "chronicle"
+    memory = ExperientialMemory(root=str(chronicle))
+    monkeypatch.setattr(server, "experiential", memory)
+
+    text = _dispatch(
+        "resolve_thread",
+        {
+            "domain": NESTED_DOMAIN,
+            "question_fragment": "nested question",
+            "resolution": "answered",
+        },
+    )
+
+    assert "Thread resolved" not in text
+    assert "resolve_thread_by_id" in text, "the refusal must name the door that DOES reach it"
+
+    nested = memory.get_open_threads(domain="tech-debt", limit=9999)
+    assert [t["resolved"] for t in nested] == [False]
+
+    # And the door it names does reach it.
+    thread_id = nested[0]["thread_id"]
+    assert memory.resolve_thread_by_id(thread_id, "answered") != ""
+    assert memory.get_open_threads(domain="tech-debt", limit=9999) == []

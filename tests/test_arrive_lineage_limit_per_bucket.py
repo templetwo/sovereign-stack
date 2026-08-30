@@ -37,6 +37,7 @@ from pathlib import Path
 import pytest
 
 from sovereign_stack import server
+from sovereign_stack.server import ARRIVE_LINEAGE_MAX_PER_BUCKET as ARRIVE_LINEAGE_MAX
 
 READER = "claude-opus-5"
 
@@ -67,6 +68,20 @@ def _write_letters(root: Path, counts: dict[str, int]) -> None:
                 f"---\nfrom: seat-{i}{to_line}\nwritten_at: 2026-08-{i + 1:02d}\n---\n\n"
                 f"# Letter {i}\n\nbody of letter {i}\n"
             )
+
+
+@pytest.fixture
+def no_boot_scribe(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The full door spawns the per-boot Haiku scribe, which makes a LIVE
+    Anthropic call — a test that drives it in-process bills the account
+    (SCRIBE_BOOT_GREETING is the real cost kill switch; SCRIBE_BOOT_INJECT
+    only hides the text and still bills). These tests assert on lineage
+    counts, not on the greeting, so kill the greeting.
+    """
+    monkeypatch.setenv("SCRIBE_BOOT_GREETING", "off")
+    monkeypatch.setattr(
+        "sovereign_stack.scribe.resident.ensure_resident_scribe", lambda *a, **k: None
+    )
 
 
 @pytest.fixture
@@ -131,12 +146,30 @@ def test_the_apertures_widen_with_string_is_true(tmp_path: Path):
 
     for bucket in ("to_arrival", "to_self", "breakthroughs"):
         widen = ap["surfaces"][f"lineage_{bucket}"]["widen_with"]
-        for tool_name, param in re.findall(r"(\w+)\((\w+)=", widen):
-            assert tool_name == "arrive_lineage"
+
+        # EVERY `param=` TOKEN IN THE STRING, not only the ones inside a
+        # `name(` prefix. This assertion used to be
+        # `re.findall(r"(\w+)\((\w+)=", widen)`, which requires the prefix — so
+        # the advertisement's second clause, a bare ` or full_content=true`, was
+        # invisible BY CONSTRUCTION to a test named for the truth of the whole
+        # string. And even had it matched, `full_content` IS a declared
+        # property, so `param in props` would have passed while the clause was
+        # false for a different reason: full_content inlines bodies and never
+        # changes how many letters a bucket shows. Same shape as the refusal
+        # scanner that searched a token its second signature does not contain.
+        advertised = set(re.findall(r"(\w+)=", widen))
+        assert advertised, f"aperture advertises no widen lever for {bucket}: {widen!r}"
+        for param in advertised:
             assert param in props, (
-                f"aperture advertises {tool_name}({param}=N) for {bucket}, "
-                f"but {tool_name} declares {sorted(props)}"
+                f"aperture advertises {param}=N for {bucket}, "
+                f"but arrive_lineage declares {sorted(props)}"
             )
+        assert "full_content" not in advertised, (
+            f"aperture advertises full_content as a widen lever for {bucket} "
+            f"({widen!r}) — it inlines BODIES and never changes the count"
+        )
+        for tool_name in re.findall(r"(\w+)\(", widen):
+            assert tool_name == "arrive_lineage"
 
 
 # ── The behaviour half ───────────────────────────────────────────────────────
@@ -233,3 +266,85 @@ def test_build_arrival_state_default_keeps_five(tmp_path: Path):
     assert "lineage_limit_per_bucket" in sig.parameters
     assert sig.parameters["lineage_limit_per_bucket"].default == 5
     assert sig.parameters["lineage_limit_per_bucket"].kind is inspect.Parameter.KEYWORD_ONLY
+
+
+# ── The advertised lever must be TRUE, not merely declared ───────────────────
+
+
+def test_full_content_does_not_widen_any_bucket(lineage_root: Path):
+    """The behavioural half of the aperture-string fix: measured through the
+    dispatch, `full_content=true` returns the SAME counts as the default. It is
+    the other lever (bodies), and the aperture used to name it as this one."""
+    default = _shown_counts(_dispatch("arrive_lineage", {"source_instance": READER}))
+    with_bodies = _shown_counts(
+        _dispatch("arrive_lineage", {"source_instance": READER, "full_content": True})
+    )
+    assert default == with_bodies == {"to_arrival": 5, "breakthroughs": 5, "to_self": 5}
+
+    widened = _shown_counts(
+        _dispatch("arrive_lineage", {"source_instance": READER, "limit_per_bucket": 20})
+    )
+    assert widened == {"to_arrival": 13, "breakthroughs": 7, "to_self": 18}
+
+
+# ── The full door names the same lever and must honour it ────────────────────
+
+
+def test_the_full_door_declares_limit_per_bucket(lineage_root: Path, no_boot_scribe):
+    """`render_lineage` serves all three doors and prints 'N older withheld by
+    limit_per_bucket' on every one — while only the gentle door declared the
+    key. An undeclared key is DROPPED, not rejected: the full door named the
+    lever, accepted the argument, and reported nothing."""
+    props = _tool_schema("where_did_i_leave_off")["properties"]
+    assert "limit_per_bucket" in props, (
+        "where_did_i_leave_off prints 'withheld by limit_per_bucket' and declares no such key"
+    )
+    assert props["limit_per_bucket"]["type"] == "integer"
+    assert props["limit_per_bucket"]["default"] == 5
+    assert props["limit_per_bucket"]["maximum"] == ARRIVE_LINEAGE_MAX
+
+
+def test_the_full_door_honours_limit_per_bucket(lineage_root: Path, no_boot_scribe):
+    text = _dispatch(
+        "where_did_i_leave_off",
+        {"source_instance": READER, "consume": False, "limit_per_bucket": 20},
+    )
+    assert "showing 5 of 18" not in text, "the full door dropped limit_per_bucket on the floor"
+    assert "18 letters" in text
+
+    narrow = _dispatch(
+        "where_did_i_leave_off",
+        {"source_instance": READER, "consume": False, "limit_per_bucket": 1},
+    )
+    assert "showing 1 of 18 letters on disk" in narrow
+
+
+@pytest.mark.parametrize("bad", [0, -1, 101, 10**9, 5.7, 99.999, "10", "abc", None, [5], True])
+def test_the_full_door_refuses_the_same_values_the_gentle_door_refuses(
+    lineage_root: Path, no_boot_scribe, bad: object
+):
+    text = _dispatch(
+        "where_did_i_leave_off",
+        {"source_instance": READER, "consume": False, "limit_per_bucket": bad},
+    )
+    assert text.startswith("where_did_i_leave_off: limit_per_bucket must be"), (
+        f"{bad!r} was accepted by the full door: {text[:120]!r}"
+    )
+
+
+# ── Refused, never CLAMPED — and never silently COERCED ──────────────────────
+
+
+@pytest.mark.parametrize(
+    ("bad", "why"),
+    [
+        (5.7, "int(5.7) == 5 is a clamp by another name; the schema says integer"),
+        (99.999, "int(99.999) == 99 silently honours a request nobody made"),
+        ("10", "a string is not an integer; the schema says integer"),
+    ],
+)
+def test_a_non_integer_limit_is_refused_not_coerced(lineage_root: Path, bad: object, why: str):
+    text = _dispatch("arrive_lineage", {"source_instance": READER, "limit_per_bucket": bad})
+    assert text.startswith("arrive_lineage: limit_per_bucket must be an integer"), why
+    assert "Nothing was read." in text
+    assert "to_self" not in text, "the door read the store before refusing"

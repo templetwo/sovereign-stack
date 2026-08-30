@@ -554,9 +554,16 @@ def build_arrival_state(
             reflections = []
         _gather_self_model()
         try:
-            letters_dir = sovereign_root / "comms" / "letters"
-            lineage_letter_count = (
-                sum(1 for _ in letters_dir.rglob("*.md")) if letters_dir.exists() else 0
+            # witness.count_lineage_letters, not a bare rglob: rglob descends
+            # into dotted directories, and ~/.sovereign/comms/letters/ holds
+            # `.pre-md-backup-20260609/` and `.pre-md-backup-20260610/` from a
+            # past in-place migration. The bare walk counted 42 where the three
+            # rendered buckets hold 38. This is the FOYER door (`arrive`), and
+            # the number is the one line it prints about lineage — "Deferred to
+            # the full boot: N lineage letters" — i.e. the figure a seat uses to
+            # decide whether the full boot is worth paying for.
+            lineage_letter_count = witness.count_lineage_letters(
+                sovereign_root / "comms" / "letters"
             )
         except Exception:
             lineage_letter_count = 0

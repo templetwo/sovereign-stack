@@ -48,7 +48,7 @@ from pathlib import Path
 
 from mcp.types import Tool
 
-from .memory import ExperientialMemory
+from .memory import ExperientialMemory, iter_thread_shards
 from .policies import PolicyRegistry
 from .protected import load_protected_fold
 from .provenance import (
@@ -437,10 +437,11 @@ def _all_threads(memory: ExperientialMemory) -> dict[str, dict]:
     outside memory.threads_dir.
     """
     threads: dict[str, dict] = {}
-    # rglob: nested shards are part of the store. A thread the walk never
-    # visited could not be linked into a family — link_threads would report the
-    # id as unknown while the record sat one directory down.
-    for jsonl_file in sorted(memory.threads_dir.rglob("*.jsonl")):
+    # iter_thread_shards: nested shards are part of the store. A thread the walk
+    # never visited could not be linked into a family — link_threads would report
+    # the id as unknown while the record sat one directory down. Hidden backup
+    # dirs are excluded: linking a family to a retired copy is worse than a miss.
+    for jsonl_file in iter_thread_shards(memory.threads_dir):
         for record in _iter_jsonl(jsonl_file):
             tid = record.get("thread_id")
             if isinstance(tid, str) and tid and tid not in threads:
@@ -603,13 +604,14 @@ def _load_threads_readonly(chronicle_root: Path) -> list[dict]:
     """
     Unresolved threads, newest first — WITHOUT ExperientialMemory
     (whose constructor mkdirs; season_review must not change the
-    filesystem hash). Mirrors get_open_threads' walk — RECURSIVE since
-    2026-08-30, because that walk is. A mirror that stops mirroring makes
+    filesystem hash). Mirrors get_open_threads' walk by CALLING it
+    (memory.iter_thread_shards) rather than re-spelling it — recursive,
+    hidden paths excluded. A mirror that stops mirroring makes
     season_review digest a smaller store than the boot door reports, with no
     signal from either that it was partial.
     """
     threads: list[dict] = []
-    for jsonl_file in sorted((chronicle_root / "open_threads").rglob("*.jsonl")):
+    for jsonl_file in iter_thread_shards(chronicle_root / "open_threads"):
         for record in _iter_jsonl(jsonl_file):
             if not record.get("resolved", False):
                 threads.append(record)

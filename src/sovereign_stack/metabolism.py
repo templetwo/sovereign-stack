@@ -18,7 +18,7 @@ from pathlib import Path
 
 from mcp.types import TextContent, Tool
 
-from .memory import load_entries
+from .memory import iter_thread_shards, load_entries
 from .provenance import (
     append_supersession,
     build_supersession_record,
@@ -403,10 +403,11 @@ def _load_all_threads():
     threads_dir = CHRONICLE_DIR / "open_threads"
     if not threads_dir.exists():
         return threads
-    # rglob: nested shards are part of the store (see memory._thread_domain_for).
+    # iter_thread_shards: nested shards are part of the store (see
+    # memory._thread_domain_for); hidden backup dirs are not.
     # dashboard/dashboard_web already walked recursively; this walker and the
     # two above it did not, so the same store had two sizes.
-    for jsonl_file in sorted(threads_dir.rglob("*.jsonl")):
+    for jsonl_file in iter_thread_shards(threads_dir):
         for line in jsonl_file.read_text().splitlines():
             if line.strip():
                 try:
