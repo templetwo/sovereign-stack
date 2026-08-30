@@ -183,6 +183,12 @@ sovereign-connectivity restart sse
 sovereign-connectivity restart all
 ```
 
+**Sovereign Console v2** — the operations cockpit as of 2026-08-30, served from `:3435` against live data (no simulated data anywhere: every panel reads the real store or says "no data" with its age). Screenshots taken headless at 1600×900 and 1600×1400 on the day it was built:
+
+![Sovereign Console v2 — cockpit, 1600×900](docs/images/console-v2-cockpit-1600x900.jpg)
+
+![Sovereign Console v2 — tall view showing the lower panels, 1600×1400](docs/images/console-v2-tall-1600x1400.jpg)
+
 **Web dashboard** at `http://127.0.0.1:3435/` shows:
 - Live service status (overall + per-endpoint pills with PID, HTTP, age)
 - Indicators (unacked honks, halt notes, metabolize decisions, listener stale)

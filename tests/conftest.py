@@ -127,3 +127,20 @@ def frozen_now(monkeypatch: pytest.MonkeyPatch) -> datetime:
 
     monkeypatch.setattr(_dt_module, "datetime", _FrozenDatetime)
     return _FROZEN_UTC
+
+
+# ── The dashboard's two external probes never leave the test process ────────
+#
+# `SOVEREIGN_ROOT` redirects neither of them: `dashboard_readers.read_guardian`
+# shells out to `lsof -iTCP` + two `pgrep`s, and `fetch_bridge_heartbeat` GETs
+# the operator's live bridge on :8100. Containment used to live in ONE test
+# file's autouse fixture, which meant any other test file that touched
+# `build_snapshot()` silently probed the real machine. This puts the guard on
+# the seam instead, for the whole suite.
+#
+# A test that stubs `_guardian_probe` / `_http_get_json` with an in-process
+# fake REPLACES the guarded function and keeps exercising the real reader —
+# that is why the guard sits at those two functions and not at the readers.
+@pytest.fixture(autouse=True)
+def _no_live_dashboard_probes(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SOVEREIGN_DASHBOARD_NO_EXTERNAL_PROBES", "1")

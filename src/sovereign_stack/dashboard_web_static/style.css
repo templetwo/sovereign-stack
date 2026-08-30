@@ -1065,3 +1065,484 @@ input::placeholder { color: var(--text-faint); }
   .feed-cat { grid-column: 2; }
   .feed-msg { grid-column: 1 / -1; }
 }
+
+/* ══════════════════════════════════════════════════════════════════════════
+   14. SOVEREIGN CONSOLE v2 — reskin layer
+   ──────────────────────────────────────────────────────────────────────────
+   ADDITIVE, and deliberately at the END of the file. Everything above is
+   the v4 cockpit and is untouched; this section re-points the design tokens
+   at the v2 palette (near-black violet/gold instead of near-black cyan),
+   lays the four-column grid, and styles the six new panels.
+
+   Two things this arrangement buys, both load-bearing:
+
+   * Cascade order does the reskin. A later `:root` of equal specificity
+     wins, so redefining a token value here recolors every v4 rule that
+     already consumes it — the services list, the feed, the topology, the
+     latency chart — without editing any of them. That is why this is a
+     RESKIN and not a rewrite.
+
+   * The light theme keeps working. `:root[data-theme="light"]` in §2 has
+     higher specificity (0,1,1) than a bare `:root`, so light deliberately
+     keeps the v4 light palette rather than a half-translated v2 one. The
+     v2 design is dark-only by intent; the toggle is must-survive, so the
+     block at the end of this section defines light values for the tokens
+     §2 has never heard of. NOTHING BELOW HARDCODES A HEX IN A PANEL RULE —
+     every color goes through a token, or the new panels would render
+     dark-on-light the moment someone hits the toggle.
+
+   Palette source: the v2 design handoff (README + prototype inline styles).
+   ══════════════════════════════════════════════════════════════════════════ */
+
+:root {
+  /* ── Surfaces ── */
+  --bg:          #08080f;
+  --bg-grad:     radial-gradient(1200px 560px at 78% -14%, #0e0d1a 0%, #08080f 60%);
+  --bg-card:     rgba(18, 18, 29, .85);
+  --bg-raised:   #14141f;
+  --bg-inset:    rgba(255, 255, 255, .015);
+  --bg-feed-row: rgba(255, 255, 255, .012);
+  --bg-hover:    rgba(255, 255, 255, .045);
+
+  /* ── Borders ── */
+  --border-hair:   #16162a;
+  --border:        #1e1e30;
+  --border-strong: #26263c;
+  --border-tl:     #1a1a2c;
+
+  /* ── Text (the design's eight-step ramp) ── */
+  --text-primary: #efeaff;
+  --text-body:    #d6d3e1;
+  --text-dim:     #8f8ca8;
+  --text-faint:   #6d6a85;
+  --text-ghost:   #4a4762;
+  --text-unknown: #59566f;
+
+  /* ── Accent: violet replaces v4's cyan ── */
+  --accent:        #a78bfa;
+  --accent-hover:  #c4b5fd;
+  --accent-a04:    rgba(167, 139, 250, .04);
+  --accent-a05:    rgba(167, 139, 250, .05);
+  --accent-a09:    rgba(167, 139, 250, .09);
+  --accent-a10:    rgba(167, 139, 250, .10);
+  --accent-a12:    rgba(167, 139, 250, .12);
+  --accent-a20:    rgba(167, 139, 250, .20);
+  --accent-a30:    rgba(167, 139, 250, .30);
+  --accent-a35:    rgba(167, 139, 250, .35);
+  --accent-a40:    rgba(167, 139, 250, .40);
+  --accent-a45:    rgba(167, 139, 250, .45);
+  --accent-a60:    rgba(167, 139, 250, .60);
+  --accent-a65:    rgba(167, 139, 250, .65);
+  --accent-a70:    rgba(167, 139, 250, .70);
+
+  /* ── Status ── */
+  --up:        #34d399;
+  --up-a14:    rgba(52, 211, 153, .14);
+  --up-a16:    rgba(52, 211, 153, .16);
+  --up-a40:    rgba(52, 211, 153, .40);
+  --up-a45:    rgba(52, 211, 153, .45);
+
+  --degraded:       #fbbf24;
+  --degraded-hover: #fcd34d;
+  --degraded-a07:   rgba(251, 191, 36, .07);
+  --degraded-a08:   rgba(251, 191, 36, .08);
+  --degraded-a14:   rgba(251, 191, 36, .14);
+  --degraded-a16:   rgba(251, 191, 36, .16);
+  --degraded-a18:   rgba(251, 191, 36, .18);
+  --degraded-a28:   rgba(251, 191, 36, .28);
+  --degraded-a45:   rgba(251, 191, 36, .45);
+  --degraded-a50:   rgba(251, 191, 36, .50);
+  --degraded-a60:   rgba(251, 191, 36, .60);
+
+  --down:      #f87171;
+  --down-a06:  rgba(248, 113, 113, .06);
+  --down-a14:  rgba(248, 113, 113, .14);
+  --down-a45:  rgba(248, 113, 113, .45);
+  --down-a50:  rgba(248, 113, 113, .50);
+
+  --unknown: #59566f;
+
+  /* ── Category hues (the design's "Category colors" list) ── */
+  --c-commit:     #e8c268;
+  --c-service:    #5eead4;
+  --c-insight:    #60a5fa;
+  --c-thread:     #a78bfa;
+  --c-decision:   #60a5fa;
+  --c-halt:       #f87171;
+  --c-honk:       #fbbf24;
+  --c-comms:      #e8c268;
+  --c-tools:      #34d399;
+  --c-learning:   #5eead4;
+  --c-error:      #f87171;
+  --c-unknown:    #59566f;
+  --c-arrival:    #f0abfc;
+  --c-metabolism: #7dd3fc;
+
+  /* Watchman moves from v4's amethyst to the design's amber. Its severity
+     pills still read green/amber/red, which is where the meaning lives. */
+  --watchman:       #fbbf24;
+  --watchman-hover: #fcd34d;
+  --watchman-a06:   rgba(251, 191, 36, .06);
+  --watchman-a10:   rgba(251, 191, 36, .10);
+  --watchman-a14:   rgba(251, 191, 36, .14);
+  --watchman-a20:   rgba(251, 191, 36, .20);
+  --watchman-a30:   rgba(251, 191, 36, .30);
+  --watchman-a45:   rgba(251, 191, 36, .45);
+  --watchman-a60:   rgba(251, 191, 36, .60);
+
+  /* ── Aurora: violet top-left, gold bottom-right ── */
+  --aurora-cyan:   rgba(124, 92, 255, .14);
+  --aurora-violet: rgba(232, 194, 104, .07);
+
+  /* ── v2-only tokens (no §2 counterpart — light values at the end) ── */
+  --v2-gold:          #e8c268;
+  --v2-violet-bright: #c4b5fd;
+  --v2-violet-deep:   #7c5cff;
+  --v2-teal:          #5eead4;
+  --v2-pink:          #f0abfc;
+  --v2-blue:          #60a5fa;
+  --v2-slate:         #94a3b8;
+  --v2-inner:         rgba(255, 255, 255, .025);
+  --v2-inner-soft:    rgba(255, 255, 255, .02);
+  --v2-hairline:      rgba(255, 255, 255, .03);
+  --v2-ring-track:    rgba(255, 255, 255, .06);
+  --v2-thread-bg:     rgba(96, 165, 250, .05);
+  --v2-arrival-bg:    rgba(240, 171, 252, .05);
+  --v2-arrival-brd:   rgba(240, 171, 252, .16);
+  --v2-spiral-grad:   linear-gradient(160deg, rgba(124, 92, 255, .10), rgba(18, 18, 29, .90) 55%);
+  --v2-spiral-border: #2a2347;
+  --v2-brand-glow:    0 0 14px rgba(232, 194, 104, .45);
+  --v2-phase-glow:    0 0 22px rgba(167, 139, 250, .40);
+
+  /* ── Type: JetBrains Mono is NAMED but never fetched — see index.html's
+     font deviation note. The bundled IBM Plex Mono is the face that
+     actually renders unless the viewer happens to have JetBrains Mono
+     installed locally, which is the intended, offline-safe outcome.
+     Original note follows.
+     ── Type: JetBrains Mono per the design, with the BUNDLED IBM Plex Mono
+     as first fallback so the page still renders correctly offline (the v4
+     base64 @font-face block in §1 is deliberately kept). ── */
+  --font-display: 'Space Grotesk', -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-mono: 'JetBrains Mono', 'IBM Plex Mono', ui-monospace, "SF Mono",
+               "SFMono-Regular", Menlo, Consolas, "Liberation Mono", monospace;
+
+  /* ── Radii: cards 12, inner 8, controls 6-7, pills 999 ── */
+  --r-sm:   6px;
+  --r:      8px;
+  --r-lg:   8px;
+  --r-xl:   12px;
+
+  --card-shadow: 0 0 30px rgba(124, 92, 255, .05), inset 0 0 0 1px rgba(167, 139, 250, .04);
+}
+
+/* ── 14.1 Aurora: two blurred radials, drifting, toggleable ─────────────── */
+/* prefers-reduced-motion is already handled globally in §13 (it kills every
+   animation). The toggle is the explicit control on top of that, and it
+   removes the auroras entirely rather than merely stopping them. */
+:root[data-aurora="off"] .bg-aurora,
+:root[data-aurora="off"] .bg-grid { display: none; }
+
+.bg-aurora-1 { top: -180px; left: 20%; width: 560px; height: 420px; filter: blur(40px); }
+.bg-aurora-2 { top: auto; bottom: -200px; right: 8%; left: auto; width: 520px; height: 400px; filter: blur(50px); }
+
+/* ── 14.2 Header ────────────────────────────────────────────────────────── */
+.brand-mark { color: var(--v2-gold); text-shadow: var(--v2-brand-glow); }
+.brand-sub  { letter-spacing: .26em; }
+.stat-value.is-phase  { color: var(--accent); white-space: nowrap; }
+.stat-value.is-tools  { color: var(--v2-teal); }
+.stat-value.is-uptime { color: var(--v2-gold); }
+.stat-value.is-muted  { color: var(--text-dim); }
+/* The design hides VERSION + UPTIME below 1240px so the phase name keeps
+   its room rather than truncating. */
+@media (max-width: 1239px) { .stat-wide { display: none; } }
+
+.act-pulse {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--accent); box-shadow: 0 0 8px var(--accent);
+  animation: blink-slow 1.8s ease-in-out infinite;
+  flex: 0 0 auto;
+}
+
+/* ── 14.3 The four-column cockpit ───────────────────────────────────────── */
+.cockpit {
+  gap: 10px;
+  padding: 10px 12px 8px;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-areas: "cola" "act" "colc" "cold";
+}
+.cockpit-col {
+  display: flex; flex-direction: column; gap: 10px;
+  min-width: 0; min-height: 0;
+}
+.col-a { grid-area: cola; }
+.col-c { grid-area: colc; }
+.col-d { grid-area: cold; }
+.panel-act { grid-area: act; }
+
+@media (min-width: 1020px) {
+  .cockpit {
+    grid-template-columns: minmax(260px, 1fr) minmax(400px, 1.4fr);
+    grid-template-areas: "cola act" "colc cold";
+    align-items: start;
+  }
+  .panel-act { height: 580px; }
+}
+
+@media (min-width: 1380px) {
+  .cockpit {
+    grid-template-columns: 300px minmax(460px, 1fr) 306px 306px;
+    grid-template-areas: "cola act colc cold";
+    align-items: stretch;
+    overflow: hidden;          /* page locked; each column scrolls itself */
+  }
+  .panel-act { height: auto; min-height: 0; }
+  .cockpit-col { overflow-y: auto; overflow-x: hidden; }
+}
+
+/* ── The single-column band, and the bug that only a browser found ───────
+ * Below 1020px the four grid areas stack, `align-items` is unset (the
+ * >=1020 rule sets `start`, >=1380 sets `stretch`), and `.cockpit-col`'s
+ * `min-height: 0` zeroes each column's automatic minimum size. The four
+ * auto rows therefore SHARE the viewport instead of growing to content:
+ * measured at 960px with real data, col-a got 133px while `.panel-svc`
+ * painted 597px, `#feed` collapsed to 5px, and every panel overprinted the
+ * one below it — columns are `overflow: visible`, so nothing clipped and
+ * nothing scrolled. 102 unit tests were green through all of it.
+ *
+ * `min-height: 0` stays load-bearing at >=1380 (it is what lets each column
+ * become its own scroll container), so the correction is SCOPED to this
+ * band rather than removed. The 580px hero height the README specifies for
+ * the stacked band lived only inside the >=1020 query; it belongs here too.
+ * Both values re-measured in-browser after the change: col-a 176->1290,
+ * .panel-act 1300->1880, no overlap, no horizontal overflow. */
+@media (max-width: 1019px) {
+  .cockpit-col { min-height: auto; }
+  .panel-act { height: 580px; }
+}
+
+.panel { padding: 13px 14px; gap: 9px; }
+.panel-act, .panel-latency, .panel-chronicle, .panel-watchman { padding: 13px 14px; }
+.panel-title { font-size: 10.5px; font-weight: 700; letter-spacing: .24em; }
+.panel-note  { font-size: 9.5px; color: var(--text-unknown); }
+
+/* Per-panel provenance states. A panel whose source is gone says so —
+   it never keeps a previous value and never shows a plausible zero. */
+.panel-note.is-missing { color: var(--down); }
+.panel-note.is-stale   { color: var(--degraded); }
+.panel-missing {
+  font-size: 10px; color: var(--down);
+  background: var(--down-a06); border-radius: var(--r);
+  padding: 8px 10px;
+}
+.panel-empty { font-size: 10.5px; color: var(--text-unknown); padding: 10px 2px; }
+
+/* ── 14.4 GUARDIAN ──────────────────────────────────────────────────────── */
+.guardian-body { display: flex; flex-direction: column; gap: 7px; }
+.grd-top { display: flex; align-items: center; gap: 16px; }
+.grd-ring { flex: 0 0 auto; }
+.grd-ring-bg { fill: none; stroke: var(--v2-ring-track); stroke-width: 5; }
+.grd-ring-fg { fill: none; stroke-width: 5; stroke-linecap: round; }
+.grd-ring-fg.is-ok       { stroke: var(--up); }
+.grd-ring-fg.is-degraded { stroke: var(--degraded); }
+.grd-ring-fg.is-down     { stroke: var(--down); }
+.grd-ring-fg.is-unknown  { stroke: var(--unknown); }
+.grd-ring-text {
+  font-family: var(--font-mono); font-size: 15px; font-weight: 700;
+  fill: var(--text-primary);
+}
+.grd-ring-text.is-ok { fill: var(--up); }
+.grd-ring-text.is-degraded { fill: var(--degraded); }
+.grd-ring-text.is-down { fill: var(--down); }
+.grd-stats { display: flex; flex-direction: column; gap: 5px; }
+.grd-stat { display: flex; align-items: baseline; gap: 6px; }
+.grd-stat-label { font-size: 9px; letter-spacing: .15em; color: var(--text-unknown); }
+.grd-stat-val { font-size: 12px; font-weight: 700; }
+.grd-stat-val.is-gold { color: var(--v2-gold); }
+.grd-stat-val.is-ok   { color: var(--up); }
+.grd-stat-val.is-down { color: var(--down); }
+.grd-issue {
+  display: flex; gap: 6px; align-items: baseline;
+  font-size: 10px; color: var(--down);
+  background: var(--down-a06); border-radius: var(--r-sm);
+  padding: 5px 8px;
+}
+.grd-issue-icon { flex: 0 0 auto; }
+
+/* ── 14.5 SELF-MODEL MIRROR ─────────────────────────────────────────────── */
+.mirror-body { display: flex; flex-direction: column; gap: 9px; }
+/* Degrades VISUALLY past the staleness threshold and keeps its text: the
+   live file was last written 2026-05-25, so this is the state that renders
+   on the real machine. A blank card would hide a true-but-old thing. */
+.mirror-body.is-stale { opacity: .62; filter: saturate(.55); }
+.mir-entry { border-left: 2px solid var(--unknown); padding-left: 8px; }
+.mir-entry.m-strength   { border-left-color: var(--up); }
+.mir-entry.m-drift      { border-left-color: var(--degraded); }
+.mir-entry.m-blind_spot { border-left-color: var(--down); }
+.mir-entry.m-tendency   { border-left-color: var(--accent); }
+.mir-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.mir-cat { font-size: 8.5px; letter-spacing: .2em; font-weight: 700; }
+.m-strength   .mir-cat { color: var(--up); }
+.m-drift      .mir-cat { color: var(--degraded); }
+.m-blind_spot .mir-cat { color: var(--down); }
+.m-tendency   .mir-cat { color: var(--accent); }
+.mir-when { font-size: 9px; color: var(--text-ghost); }
+.mir-text {
+  font-size: 10.5px; line-height: 1.45; color: var(--text-body);
+  margin-top: 2px;
+  display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* ── 14.6 SPIRAL · METABOLISM ───────────────────────────────────────────── */
+.panel-spiral {
+  background: var(--v2-spiral-grad);
+  border-color: var(--v2-spiral-border);
+}
+.spiral-body { display: flex; flex-direction: column; }
+.spi-phase {
+  font-family: var(--font-display);
+  font-size: 27px; font-weight: 700; line-height: 1.1;
+  color: var(--v2-violet-bright);
+  text-shadow: var(--v2-phase-glow);
+}
+.spi-sub { font-size: 9.5px; color: var(--text-faint); margin: 3px 0 11px; }
+.spi-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.spi-cell {
+  background: var(--v2-inner); border-radius: var(--r);
+  padding: 8px 6px; text-align: center; min-width: 0;
+}
+.spi-cell-val { font-size: 16px; font-weight: 700; }
+.c-insight  .spi-cell-val { color: var(--c-insight); }
+.c-thread   .spi-cell-val { color: var(--c-thread); }
+.c-service  .spi-cell-val { color: var(--c-service); }
+.c-decision .spi-cell-val { color: var(--c-decision); }
+.c-halt     .spi-cell-val { color: var(--up); }
+.c-honk     .spi-cell-val { color: var(--up); }
+/* Halt notes and unacked honks are green at zero and red/amber when not —
+   the number's color carries the same meaning the incident strip does. */
+.c-halt .spi-cell-val.is-hot { color: var(--down); }
+.c-honk .spi-cell-val.is-hot { color: var(--degraded); }
+.spi-cell-label {
+  font-size: 7.5px; letter-spacing: .09em; color: var(--text-unknown);
+  margin-top: 3px; line-height: 1.25;
+}
+.spi-foot { font-size: 8.5px; color: var(--text-ghost); margin-top: 9px; }
+.spi-foot.is-missing { color: var(--down); }
+
+/* ── 14.7 OPEN THREADS ──────────────────────────────────────────────────── */
+.threads-list { display: flex; flex-direction: column; gap: 6px; }
+.thr-row { padding: 7px 9px; background: var(--v2-thread-bg); border-radius: var(--r); }
+.thr-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.thr-domain {
+  font-size: 8.5px; letter-spacing: .16em; color: var(--v2-blue);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.thr-when { font-size: 9px; color: var(--text-ghost); flex: 0 0 auto; }
+.thr-q {
+  font-size: 10.5px; line-height: 1.4; color: var(--text-body); margin-top: 2px;
+  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* ── 14.8 ARRIVAL GATE ──────────────────────────────────────────────────── */
+.arrival-body { display: flex; flex-direction: column; gap: 6px; }
+.arrival-status { font-size: 9.5px; font-weight: 700; letter-spacing: .14em; }
+.arrival-status.is-asked { color: var(--v2-pink); }
+.arrival-status.is-quiet { color: var(--text-unknown); }
+.arr-card {
+  padding: 8px 10px;
+  background: var(--v2-arrival-bg);
+  border: 1px solid var(--v2-arrival-brd);
+  border-radius: var(--r);
+}
+.arr-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.arr-code { font-size: 11px; font-weight: 700; color: var(--v2-pink); }
+.arr-state { font-size: 8.5px; font-weight: 700; letter-spacing: .13em; color: var(--degraded); }
+.arr-desc { font-size: 9.5px; color: var(--text-dim); margin-top: 3px; line-height: 1.4; }
+.arr-meta { font-size: 9px; color: var(--text-ghost); margin-top: 3px; }
+.arr-quiet { font-size: 10.5px; color: var(--text-unknown); padding: 4px 2px; }
+.arr-foot { font-size: 8.5px; color: var(--text-ghost); }
+/* Not an empty list — a stated absence. The token list behind it is
+   master-token-only and this console holds no credential. */
+.arr-tokens-note {
+  font-size: 8.5px; color: var(--text-faint); line-height: 1.4;
+  border-top: 1px solid var(--v2-hairline); padding-top: 6px; margin-top: 2px;
+}
+
+/* ── 14.9 LINEAGE ───────────────────────────────────────────────────────── */
+.lineage-list { display: flex; flex-direction: column; gap: 6px; }
+.lin-row {
+  padding: 7px 9px; background: var(--v2-inner-soft); border-radius: var(--r);
+  border-left: 2px solid var(--unknown);
+}
+.lin-row.b-to_arrival    { border-left-color: var(--v2-teal); }
+.lin-row.b-breakthroughs { border-left-color: var(--v2-gold); }
+.lin-row.b-to_self       { border-left-color: var(--accent); }
+.lin-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.lin-bucket { font-size: 8px; font-weight: 700; letter-spacing: .16em; color: var(--text-dim); }
+.b-to_arrival    .lin-bucket { color: var(--v2-teal); }
+.b-breakthroughs .lin-bucket { color: var(--v2-gold); }
+.b-to_self       .lin-bucket { color: var(--accent); }
+.lin-when { font-size: 9px; color: var(--text-ghost); flex: 0 0 auto; }
+.lin-title { font-size: 10.5px; line-height: 1.35; color: var(--text-body); margin-top: 2px; }
+.lin-from { font-size: 8.5px; color: var(--text-ghost); margin-top: 2px; }
+
+/* ── 14.10 New category slugs for the feed + timeline ───────────────────── */
+.cat-arrival,    .dot-arrival    { color: var(--c-arrival); }
+.cat-metabolism, .dot-metabolism { color: var(--c-metabolism); }
+.cat-watchman,   .dot-watchman   { color: var(--watchman); }
+.dot-arrival    { background: var(--c-arrival); }
+.dot-metabolism { background: var(--c-metabolism); }
+.dot-watchman   { background: var(--watchman); }
+.bl-arrival    { border-left-color: var(--c-arrival); }
+.bl-metabolism { border-left-color: var(--c-metabolism); }
+.bl-watchman   { border-left-color: var(--watchman); }
+
+/* ── 14.12 Column flex correction (found by looking at the rendered page) ──
+   §7 gives `.panel-chronicle` and `.panel-watchman` `flex: 1` — correct for
+   v4's two-panel right rail, wrong inside a v2 column of three or four
+   panels, where they fight over the same height and the losers collapse
+   under their own headers. Caught visually, not by a test: every unit test
+   passed while CHRONICLE's title sat on top of the SPIRAL cells.
+
+   The rule for v2 columns is the opposite one: panels size to their
+   CONTENT and the COLUMN does the scrolling. `.svc-list`'s inner scroll is
+   released for the same reason — it was showing 2 of 5 endpoints inside a
+   panel that had been squeezed to nothing. */
+.cockpit-col > .panel { flex: 0 0 auto; }
+.col-a .svc-list { flex: 0 0 auto; overflow-y: visible; min-height: 0; }
+.panel-chronicle, .panel-watchman { min-height: 0; }
+
+/* The hero is the one panel that SHOULD fill its row and scroll inside. */
+@media (min-width: 1380px) {
+  .panel-act { align-self: stretch; }
+}
+
+/* ── 14.11 Light theme: ONLY the tokens §2 has never heard of ───────────────
+   §2's own `:root[data-theme="light"]` still supplies every v4 token, so
+   light stays the v4 light palette by design (v2 is a dark-only spec and
+   the theme toggle is must-survive — it must not break, it need not be a
+   second full design). Without this block the new panels would inherit the
+   dark v2-only values above and render dark-on-light. */
+:root[data-theme="light"] {
+  --c-arrival:    #a21caf;
+  --c-metabolism: #0369a1;
+  --v2-gold:          #92610a;
+  --v2-violet-bright: #6d28d9;
+  --v2-violet-deep:   #5b21b6;
+  --v2-teal:          #0f766e;
+  --v2-pink:          #a21caf;
+  --v2-blue:          #1d4ed8;
+  --v2-slate:         #475569;
+  --v2-inner:         rgba(15, 23, 42, .045);
+  --v2-inner-soft:    rgba(15, 23, 42, .035);
+  --v2-hairline:      rgba(15, 23, 42, .08);
+  --v2-ring-track:    rgba(15, 23, 42, .10);
+  --v2-thread-bg:     rgba(29, 78, 216, .06);
+  --v2-arrival-bg:    rgba(162, 28, 175, .06);
+  --v2-arrival-brd:   rgba(162, 28, 175, .22);
+  --v2-spiral-grad:   linear-gradient(160deg, rgba(109, 40, 217, .08), rgba(255, 255, 255, .92) 55%);
+  --v2-spiral-border: #d6ccf2;
+  --v2-brand-glow:    none;
+  --v2-phase-glow:    none;
+}

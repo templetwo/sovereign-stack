@@ -41,7 +41,7 @@ from collections import deque
 from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from pathlib import Path
 
-from . import connectivity, dashboard, nape_daemon
+from . import connectivity, dashboard, dashboard_readers, nape_daemon
 
 # ── Shared activity feed + background watcher ──────────────────────────────
 #
@@ -310,6 +310,21 @@ def _read_static(name: str) -> bytes | None:
 # ── Snapshot builder ────────────────────────────────────────────────────────
 
 
+def _safe_section(reader):
+    """Call a Console-v2 reader, returning None if it fails in any way.
+
+    Per-key fail-soft is the whole contract for keys 11..N: one broken
+    reader must degrade its own panel to "source unavailable" and must not
+    take /snapshot.json down with it. Returning None (rather than an empty
+    dict) is deliberate — an empty structure is indistinguishable at the
+    panel from a real empty result, which is the fail-open shape.
+    """
+    try:
+        return reader()
+    except Exception:
+        return None
+
+
 def build_snapshot() -> dict:
     """Build a DashboardState snapshot as a serializable dict.
     Pulls the live activity feed from the shared _GLOBAL_FEED that the
@@ -329,7 +344,61 @@ def build_snapshot() -> dict:
     already-sanitized sweep envelopes from watchman's spool.jsonl, reduced,
     plus a summary line derived from spool.jsonl + watchman.log alone. Same
     additive discipline as `service_telemetry` — the 9 keys above it are
-    untouched."""
+    untouched.
+
+    ── Console v2 keys 11..17 (spiral, self_model, guardian, open_threads,
+    arrival_gate, bridge_heartbeat, lineage) ──
+    Appended for the Sovereign Console v2 reskin, same additive-only
+    discipline again: the 10 keys above are untouched in name, order, and
+    value-structure. Sourced from `dashboard_readers`, which is token-free
+    by construction — nothing below reads a bridge credential, and nothing
+    below calls `metabolize` (it WRITES to metabolism_log.jsonl on every
+    call, and two of the six cells it was meant to feed do not exist in
+    its output; `bridge_heartbeat.aperture_surfaces` carries the same
+    counts already computed).
+
+      spiral            — ~/.sovereign/spiral_state.json: current_phase,
+                          reflection_depth, tool_call_count (the ACTIVITY
+                          panel's synthesized TOOLS lane differences this),
+                          session age. null when the file is absent.
+      self_model        — ~/.sovereign/self_model.json: newest entry per
+                          category + `stale`/`stale_after_days`. Age comes
+                          from the newest RECORD timestamp, never mtime.
+      guardian          — guardian_tools._evaluate_status, cached ~45s
+                          (three subprocesses per uncached call).
+      open_threads      — chronicle/open_threads/**/*.jsonl, RECURSIVE,
+                          unresolved only. The `resolved` predicate is
+                          explicit rather than truthy: the field is not
+                          schema-enforced and `aperture.py`'s own predicate
+                          diverges from it on string values. Carries
+                          `malformed_skipped` + `unreadable_files` as the
+                          coverage signal.
+      arrival_gate      — read-only sqlite over the bridge's
+                          session_tokens.db, with the 900s pending cutoff
+                          applied here (the bridge's _expire_stale only
+                          runs on its own connection). Session TOKENS are
+                          declared unavailable, never rendered as an empty
+                          list — that list is master-token-only.
+      lineage           — ~/.sovereign/comms/letters/{to_arrival,
+                          breakthroughs,to_self}: TITLE AND DATE ONLY, from
+                          a frontmatter read that REQUIRES a closing `---`
+                          and caps its scan. Replaces the design's COMMS
+                          panel, whose transport was retired 2026-06.
+      bridge_heartbeat  — GET :8100/api/heartbeat, NO AUTH, cached ~20s.
+
+    EVERY ONE OF THE SEVEN IS INDIVIDUALLY NULLABLE and individually
+    fail-soft: a reader that raises yields null for its own key and cannot
+    take /snapshot.json down with it. Each non-null section carries a
+    `source` and an `age_seconds` so the page can render staleness rather
+    than presenting a dormant instrument's last word as current — three of
+    these sources (self_model, the retired comms board, metabolism) were
+    measurably dormant when this shipped.
+
+    ONE FIELD IS DELIBERATELY WITHHELD: `arrival_gate.pending[].rid`. It is the
+    bridge's 192-bit arrival capability token and the sole input to an
+    unauthenticated poll route; /snapshot.json is served with a CORS
+    wildcard, so publishing it here would hand any origin the mint. See
+    dashboard_readers.read_arrival_gate."""
     restart_counts: dict[str, int | None] = {}
     state = dashboard.collect_state(_GLOBAL_FEED, restart_counts=restart_counts)
 
@@ -365,6 +434,20 @@ def build_snapshot() -> dict:
         "feed": _GLOBAL_FEED.to_list(limit=_FEED_LIMIT_IN_SNAPSHOT),
         "service_telemetry": service_telemetry,
         "watchman": dashboard.build_watchman_summary(),
+        # ── Console v2, keys 11..16 — see the docstring above ──
+        # Called through the MODULE (dashboard_readers.x), never through a
+        # `from ... import x` binding: the module attribute is what a test's
+        # monkeypatch can replace, and the two external readers must be
+        # stubbable or the suite quietly probes the live bridge.
+        "spiral": _safe_section(dashboard_readers.read_spiral_state),
+        "self_model": _safe_section(dashboard_readers.read_self_model),
+        "guardian": _safe_section(dashboard_readers.read_guardian),
+        "open_threads": _safe_section(dashboard_readers.read_open_threads),
+        "arrival_gate": _safe_section(dashboard_readers.read_arrival_gate),
+        "bridge_heartbeat": _safe_section(dashboard_readers.fetch_bridge_heartbeat),
+        # 17th: the LINEAGE panel that replaces the design's COMMS panel.
+        # Titles and dates only — a letter's body never leaves the disk.
+        "lineage": _safe_section(dashboard_readers.read_lineage_letters),
     }
 
 
