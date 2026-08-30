@@ -820,3 +820,262 @@ def test_the_untranslated_args_are_still_rejected_by_the_real_record_insight(
             },
         )
     assert "receipt_url" in str(exc.value)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# HQ FOLLOW-UP 1 — THE FAILED-COMMIT BRANCH MUST VERIFY THE CHAIN TOO
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# The commit_failed branch added above returned early, skipping the
+# verify_chain(ctx) the success path runs. A failed commit still APPENDS an
+# audit event, so it can still break the chain — and skipping verification on
+# the failure path means a break goes undetected in exactly the run where
+# something has already gone wrong.
+
+
+def _fail_the_commit(monkeypatch, module):
+    """Point the substrate's httpx at a Stack that rejects the write."""
+    monkeypatch.setattr(
+        module.httpx,
+        "post",
+        lambda *a, **kw: _stack_response({"ok": False, "error": "rejected for the test"}),
+    )
+
+
+def test_failed_commit_verifies_the_chain(core_ctx, monkeypatch):
+    """Invocation: verify_chain runs on the failure path, not only on success."""
+    import bridge_core.pending_writes as pw
+
+    monkeypatch.setenv("TEST_R2_TOKEN", "t")
+    _fail_the_commit(monkeypatch, pw)
+
+    calls: list[str] = []
+    real = pw.verify_chain
+    monkeypatch.setattr(pw, "verify_chain", lambda ctx: (calls.append("called"), real(ctx))[1])
+
+    p = pw.create_pending_write(
+        core_ctx, "handoff", {"note": "n", "thread": "t"}, source_instance="seat"
+    )
+    pw.approve_pending_write(core_ctx, p.proposal_id, approved_by="Anthony")
+    out = pw.commit_pending_write(core_ctx, p.proposal_id, live=True)
+
+    assert out.status == "commit_failed"
+    assert calls, "verify_chain was never called on the commit_failed branch"
+
+
+def test_failed_commit_detects_a_broken_chain(core_ctx, monkeypatch):
+    """Detection, not just invocation: corrupt a prior audit event, fail the
+    commit, and assert the break is caught AND recorded as CHAIN_BROKEN.
+
+    A spy proves the call happens; only this proves the call does anything.
+    """
+    import bridge_core.pending_writes as pw
+    from bridge_core.audit import read_audit_trail
+
+    monkeypatch.setenv("TEST_R2_TOKEN", "t")
+
+    p = pw.create_pending_write(
+        core_ctx, "handoff", {"note": "n", "thread": "t"}, source_instance="seat"
+    )
+    pw.approve_pending_write(core_ctx, p.proposal_id, approved_by="Anthony")
+
+    # Tamper with an already-written audit entry so the chain no longer verifies.
+    log = core_ctx.audit_log_path
+    lines = log.read_text().splitlines()
+    first = json.loads(lines[0])
+    first["actor"] = "someone-who-was-never-here"
+    lines[0] = json.dumps(first)
+    log.write_text("\n".join(lines) + "\n")
+    assert not pw.verify_chain(core_ctx)[0], "the corruption did not break the chain"
+
+    _fail_the_commit(monkeypatch, pw)
+    out = pw.commit_pending_write(core_ctx, p.proposal_id, live=True)
+
+    assert out.status == "commit_failed"
+    events = [e.get("event_type") or e.get("event") for e in read_audit_trail(core_ctx)]
+    assert "chain_broken" in events, (
+        f"a broken chain went unrecorded on the failed-commit path: {events}"
+    )
+
+
+def test_openai_failed_commit_verifies_the_chain(openai_tmp, monkeypatch):
+    """The same guarantee on the second substrate."""
+    import openai_bridge.pending_writes as opw
+
+    monkeypatch.setenv("BRIDGE_TOKEN", "t")
+    _fail_the_commit(monkeypatch, opw)
+
+    calls: list[str] = []
+    real = opw.verify_chain
+    monkeypatch.setattr(opw, "verify_chain", lambda: (calls.append("called"), real())[1])
+
+    p = opw.create_pending_write("handoff", {"note": "n", "thread": "t"}, source_instance="seat")
+    opw.approve_pending_write(p.proposal_id, approved_by="Anthony")
+    out = opw.commit_pending_write(p.proposal_id, live=True)
+
+    assert out.status == "commit_failed"
+    assert calls, "verify_chain was never called on the openai commit_failed branch"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# HQ FOLLOW-UP 2 — `bridge retry <id>`: THE RECORDED WAY BACK FROM commit_failed
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def _fail_one(ctx, monkeypatch, module, tool="handoff", args=None):
+    monkeypatch.setenv("TEST_R2_TOKEN", "t")
+    _fail_the_commit(monkeypatch, module)
+    p = module.create_pending_write(
+        ctx, tool, args or {"note": "n", "thread": "t"}, source_instance="seat"
+    )
+    module.approve_pending_write(ctx, p.proposal_id, approved_by="Anthony")
+    return module.commit_pending_write(ctx, p.proposal_id, live=True)
+
+
+def test_hand_editing_status_is_the_hazard_retry_removes(core_ctx, monkeypatch):
+    """THE JUSTIFICATION, stated as a test.
+
+    The danger of the manual route is NOT that it breaks the audit hash — it
+    does not. `status` and `commit_result` are both in _MUTABLE, so the tamper
+    check normalises them away and a hand-edit passes every guard SILENTLY,
+    leaving no audit event. A retried write becomes indistinguishable from one
+    that was never rejected. That is what `bridge retry` exists to prevent.
+    """
+    import bridge_core.pending_writes as pw
+    from bridge_core.audit import read_audit_trail
+
+    failed = _fail_one(core_ctx, monkeypatch, pw)
+    (path,) = core_ctx.pending_writes_dir.glob(f"*{failed.proposal_id[:8]}*.json")
+
+    raw = json.loads(path.read_text())
+    raw["status"] = "approved"
+    raw["commit_result"] = None
+    path.write_text(json.dumps(raw))
+
+    reloaded, _ = pw._load_proposal(core_ctx, failed.proposal_id)
+    errors = pw._precondition_check(core_ctx, reloaded)
+    assert not any("audit_hash mismatch" in e for e in errors), (
+        "expected the hand-edit to pass the tamper check — if this now fails, "
+        "the hazard has changed shape and this rationale needs rewriting"
+    )
+    events = [e.get("event_type") or e.get("event") for e in read_audit_trail(core_ctx)]
+    assert "retry_armed" not in events, "a hand-edit must leave no retry record"
+
+
+def test_retry_moves_commit_failed_back_to_approved_with_an_audit_event(core_ctx, monkeypatch):
+    import bridge_core.pending_writes as pw
+    from bridge_core.audit import read_audit_trail
+
+    failed = _fail_one(core_ctx, monkeypatch, pw)
+    assert failed.status == "commit_failed"
+
+    out = pw.retry_pending_write(core_ctx, failed.proposal_id, actor="HQ-review-seat")
+
+    assert out.status == "approved"
+    assert out.commit_result is None, "a stale failure must not sit beside 'approved'"
+
+    trail = read_audit_trail(core_ctx, proposal_id=failed.proposal_id)
+    armed = [e for e in trail if (e.get("event_type") or e.get("event")) == "retry_armed"]
+    assert len(armed) == 1, f"no retry_armed event: {trail}"
+    ev = armed[0]
+    assert ev["actor"] == "HQ-review-seat"
+    assert "rejected for the test" in json.dumps(ev.get("details", {})), (
+        f"the prior error did not travel into the audit event: {ev}"
+    )
+    # The chain must still verify after the transition.
+    assert pw.verify_chain(core_ctx)[0]
+
+
+def test_retry_preserves_the_original_approver(core_ctx, monkeypatch):
+    """reviewed_by is provenance — who re-armed it is a different fact and
+    belongs on the audit event, not on top of the approver's name."""
+    import bridge_core.pending_writes as pw
+
+    failed = _fail_one(core_ctx, monkeypatch, pw)
+    out = pw.retry_pending_write(core_ctx, failed.proposal_id, actor="HQ-review-seat")
+    assert out.reviewed_by == "Anthony"
+
+
+def test_a_retried_proposal_can_actually_commit(core_ctx, monkeypatch):
+    """The point of the command: the retry path really is re-committable."""
+    import bridge_core.pending_writes as pw
+
+    failed = _fail_one(core_ctx, monkeypatch, pw)
+    pw.retry_pending_write(core_ctx, failed.proposal_id, actor="HQ-review-seat")
+
+    monkeypatch.setattr(
+        pw.httpx, "post", lambda *a, **kw: _stack_response({"ok": True, "result": "ok"})
+    )
+    out = pw.commit_pending_write(core_ctx, failed.proposal_id, live=True)
+    assert out.status == "committed"
+
+
+@pytest.mark.parametrize("status", ["pending", "approved", "committed", "rejected"])
+def test_retry_refuses_any_status_but_commit_failed(core_ctx, monkeypatch, status):
+    import bridge_core.pending_writes as pw
+
+    p = pw.create_pending_write(
+        core_ctx, "handoff", {"note": "n", "thread": "t"}, source_instance="seat"
+    )
+    (path,) = core_ctx.pending_writes_dir.glob(f"*{p.proposal_id[:8]}*.json")
+    raw = json.loads(path.read_text())
+    raw["status"] = status
+    path.write_text(json.dumps(raw))
+
+    with pytest.raises(ValueError) as exc:
+        pw.retry_pending_write(core_ctx, p.proposal_id, actor="HQ-review-seat")
+    assert "commit_failed" in str(exc.value)
+
+
+@pytest.mark.parametrize("actor", ["", "   ", None])
+def test_retry_refuses_an_unnamed_actor(core_ctx, monkeypatch, actor):
+    """No anonymous re-arming, and no inherited human name."""
+    import bridge_core.pending_writes as pw
+
+    failed = _fail_one(core_ctx, monkeypatch, pw)
+    with pytest.raises(ValueError) as exc:
+        pw.retry_pending_write(core_ctx, failed.proposal_id, actor=actor)
+    assert "actor" in str(exc.value).lower()
+
+
+def test_openai_retry_moves_commit_failed_back_to_approved(openai_tmp, monkeypatch):
+    """The same command on the second substrate bridge_core/cli.py routes to."""
+    import openai_bridge.pending_writes as opw
+    from openai_bridge.audit import read_audit_trail
+
+    monkeypatch.setenv("BRIDGE_TOKEN", "t")
+    _fail_the_commit(monkeypatch, opw)
+    p = opw.create_pending_write("handoff", {"note": "n", "thread": "t"}, source_instance="seat")
+    opw.approve_pending_write(p.proposal_id, approved_by="Anthony")
+    failed = opw.commit_pending_write(p.proposal_id, live=True)
+    assert failed.status == "commit_failed"
+
+    out = opw.retry_pending_write(failed.proposal_id, actor="HQ-review-seat")
+    assert out.status == "approved"
+    trail = read_audit_trail(proposal_id=failed.proposal_id)
+    armed = [e for e in trail if (e.get("event_type") or e.get("event")) == "retry_armed"]
+    assert len(armed) == 1 and armed[0]["actor"] == "HQ-review-seat"
+
+
+def test_retry_cli_requires_by_and_never_defaults_to_a_human():
+    """--by is REQUIRED. The reviewer-identity convention (ca11e4c) exists
+    because an automated caller inheriting "Anthony" forges a human's approval.
+    """
+    from bridge_core.cli import cli
+    from click.testing import CliRunner
+
+    res = CliRunner().invoke(cli, ["--source=grok", "retry", "abc123"])
+    assert res.exit_code != 0
+    assert "Missing option" in res.output and "--by" in res.output
+
+    help_out = CliRunner().invoke(cli, ["--source=grok", "retry", "--help"]).output
+    assert "Anthony" not in help_out, "the retry help must not name a human default"
+
+
+def test_retry_cli_is_wired_for_both_substrates():
+    """bridge_core/cli.py routes --source=openai and --source=grok; the retry
+    op must exist on both, or the command is half-built."""
+    from bridge_core.cli import _SubstrateOps
+
+    for source in ("openai", "grok"):
+        assert callable(getattr(_SubstrateOps(source), "_retry", None)), source

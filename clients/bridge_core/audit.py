@@ -27,6 +27,11 @@ class AuditEvent(str, Enum):
     # trail must be able to say "this was attempted and refused", which it could
     # not before — a rejected write recorded a COMMITTED event.
     COMMIT_FAILED = "commit_failed"
+    # A commit_failed proposal deliberately re-armed for another attempt. The
+    # transition itself must be on the record: `status` and `commit_result` are
+    # both in _MUTABLE, so hand-editing the JSON back to "approved" passes the
+    # tamper check and leaves no trace at all.
+    RETRY_ARMED = "retry_armed"
     REJECTED = "rejected"
     NEEDS_REVISION = "needs_revision"
     CHAIN_VERIFIED = "chain_verified"

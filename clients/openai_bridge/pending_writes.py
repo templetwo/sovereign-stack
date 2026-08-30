@@ -523,6 +523,17 @@ def commit_pending_write(proposal_id: str, live: bool = False) -> Proposal:
                 "error": stack_error,
             },
         )
+        # Verify the chain on THIS branch too — see the bridge_core twin.
+        ok, msg = verify_chain()
+        if not ok:
+            logger.error("CHAIN BROKEN after failed commit: %s", msg)
+            append_audit_event(
+                AuditEvent.CHAIN_BROKEN,
+                proposal_id=proposal_id,
+                actor="bridge",
+                details={"message": msg, "after": "commit_failed"},
+            )
+
         logger.error(
             "Proposal REJECTED by Stack: %s → %s — NOT committed",
             proposal_id,
@@ -565,6 +576,65 @@ def commit_pending_write(proposal_id: str, live: bool = False) -> Proposal:
         logger.info("Chain verified after commit: %s", msg)
 
     logger.info("Proposal committed (LIVE): %s → %s", proposal_id, proposal.commit_target)
+    return proposal
+
+
+def retry_pending_write(proposal_id: str, actor: str) -> Proposal:
+    """Re-arm a commit_failed proposal for one more commit attempt.
+
+    status="commit_failed" STAYS (HQ's call, 2026-08-30: audit honesty over
+    retryability) — a write the Stack rejected must never read as committed.
+    But _precondition_check requires status == "approved", so without this
+    command the only route back was hand-editing the proposal JSON.
+
+    THAT EDIT IS THE HAZARD THIS FUNCTION EXISTS TO REMOVE, and not for the
+    reason it first appears: `status` and `commit_result` are both in _MUTABLE,
+    so a hand-edit does NOT break the proposal's audit_hash — it passes every
+    check silently and leaves NO audit event. A retried write would be
+    indistinguishable from one that was never rejected. The transition is
+    recorded here instead, with the prior error attached.
+
+    reviewed_by is deliberately NOT overwritten. The original approver's
+    identity is provenance; who re-armed it is a different fact and rides on the
+    audit event's actor. commit_result IS cleared, because a stale failure
+    displayed beside status="approved" reads as a live failure — the full prior
+    result is preserved in the audit event.
+    """
+    if not actor or not actor.strip():
+        raise ValueError(
+            "retry requires an actor — name yourself. Automated callers must not "
+            "inherit a human's name."
+        )
+    proposal, path = _load_proposal(proposal_id)
+    if proposal.status != "commit_failed":
+        raise ValueError(
+            f"Cannot retry proposal in status '{proposal.status}' — only "
+            "'commit_failed' proposals can be re-armed"
+        )
+
+    prior = dict(proposal.commit_result or {})
+    prior_error = prior.get("error", "(no error recorded)")
+
+    proposal.status = "approved"
+    proposal.commit_result = None
+    _save_proposal(proposal, path)
+    append_audit_event(
+        AuditEvent.RETRY_ARMED,
+        proposal_id=proposal_id,
+        actor=actor,
+        details={
+            "tool": proposal.tool,
+            "commit_target": proposal.commit_target,
+            "prior_error": prior_error,
+            "prior_commit_result": prior,
+        },
+    )
+    logger.info(
+        "Proposal re-armed after failed commit: %s by %s (prior error: %s)",
+        proposal_id,
+        actor,
+        prior_error,
+    )
     return proposal
 
 
