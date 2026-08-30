@@ -26,6 +26,10 @@ class AuditEvent(str, Enum):
     VALIDATION_FAILED = "validation_failed"
     APPROVED = "approved"
     COMMITTED = "committed"
+    # A commit the Stack REJECTED. Distinct from COMMITTED on purpose: the audit
+    # trail must be able to say "this was attempted and refused", which it could
+    # not before — a rejected write recorded a COMMITTED event.
+    COMMIT_FAILED = "commit_failed"
     REJECTED = "rejected"
     NEEDS_REVISION = "needs_revision"
     CHAIN_VERIFIED = "chain_verified"

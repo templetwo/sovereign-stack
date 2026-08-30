@@ -31,6 +31,12 @@ logger = logging.getLogger(__name__)
 
 PENDING_DIR = Path.home() / ".sovereign" / "openai_bridge" / "pending_writes"
 
+# Commit targets whose live Stack inputSchema declares `verified_by` (measured
+# against list_tools() 2026-08-30). Mirrors bridge_core's VERIFIED_BY_TARGETS;
+# see the note there for why translating into an undeclared parameter would be
+# a fix in appearance only.
+_VERIFIED_BY_TARGETS: frozenset[str] = frozenset({"record_insight"})
+
 # Tools whose Ring 2 calls map to a specific underlying Stack tool.
 # Used by commit (mocked in Phase 2) to record what would execute.
 COMMIT_TARGETS: dict[str, str] = {
@@ -114,7 +120,18 @@ def validate_pending_write(proposal: Proposal) -> list[str]:
             "policy: max_confidence_without_receipt = 0.70"
         )
 
-    if proposal.risk_level == RiskLevel.CRITICAL and not proposal.compass_check_result:
+    # ABSENCE IS DECIDED BY normalize_compass, NOT BY RAW TRUTHINESS.
+    # bool("   ") is True, so a whitespace string satisfied this gate while
+    # normalize_compass("   ") returns None (absent) and compass_create_error
+    # returns None (nothing to complain about) — the two halves disagreed and
+    # the write went through. A blank string is the cheapest possible way to
+    # claim you ran the compass without running it, and it was the one spelling
+    # the 2026-08-28 hardening did not cover.
+    from bridge_core.target_risk import normalize_compass
+
+    if proposal.risk_level == RiskLevel.CRITICAL and normalize_compass(
+        proposal.compass_check_result
+    ) is None:
         errors.append(
             "CRITICAL risk proposals require a compass_check_result — "
             "call compass_check before proposing"
@@ -443,6 +460,27 @@ def commit_pending_write(proposal_id: str, live: bool = False) -> Proposal:
     if "layer" in commit_args:
         commit_args["layer"] = _LAYER_MAP.get(commit_args["layer"], commit_args["layer"])
 
+    # receipt_url → verified_by (or dropped). See the long note on
+    # bridge_core.pending_writes.build_commit_arguments — this substrate has no
+    # equivalent assembly point, so the translation lands beside the layer map.
+    #
+    # Short version: receipt_url is advertised in this bridge's propose_insight
+    # schema but record_insight does not declare it, so since fd73258's
+    # _reject_unknown_params every commit carrying one is rejected by the Stack
+    # and (before the ok-guard below) was stamped "committed" anyway. Only
+    # record_insight declares verified_by, so only there can it be translated;
+    # elsewhere it is dropped, having already done its bridge-side job at
+    # proposal time.
+    receipt_url = commit_args.pop("receipt_url", None)
+    if receipt_url and proposal.commit_target in _VERIFIED_BY_TARGETS:
+        receipts = list(commit_args.get("verified_by") or [])
+        if not any(
+            isinstance(r, dict) and r.get("kind") == "url" and r.get("ref") == receipt_url
+            for r in receipts
+        ):
+            receipts.append({"kind": "url", "ref": receipt_url})
+        commit_args["verified_by"] = receipts
+
     try:
         response = httpx.post(
             _BRIDGE_URL,
@@ -456,6 +494,41 @@ def commit_pending_write(proposal_id: str, live: bool = False) -> Proposal:
         raise RuntimeError(f"Stack returned {e.response.status_code}: {e.response.text}") from e
     except httpx.RequestError as e:
         raise RuntimeError(f"Could not reach bridge at {_BRIDGE_URL}: {e}") from e
+
+    # FAIL CLOSED ON A WRITE THE STACK REJECTED. The bridge answers HTTP 200 with
+    # {"ok": false, "error": ...} when the Stack handler raises, so
+    # raise_for_status() sees success and the old code stamped "committed" on a
+    # write that never landed. `ok` must be EXPLICITLY present and falsy —
+    # absence is not failure. Twin of the guard in bridge_core.pending_writes.
+    if isinstance(stack_result, dict) and "ok" in stack_result and not stack_result["ok"]:
+        stack_error = stack_result.get("error") or "Stack rejected the write (ok=false)"
+        proposal.status = "commit_failed"
+        proposal.commit_result = {
+            "live": True,
+            "committed": False,
+            "commit_target": proposal.commit_target,
+            "error": stack_error,
+            "stack_response": stack_result,
+            "failed_at": datetime.now(timezone.utc).isoformat(),
+        }
+        _save_proposal(proposal, path)
+        append_audit_event(
+            AuditEvent.COMMIT_FAILED,
+            proposal_id=proposal_id,
+            actor="bridge",
+            details={
+                "tool": proposal.tool,
+                "commit_target": proposal.commit_target,
+                "live": True,
+                "error": stack_error,
+            },
+        )
+        logger.error(
+            "Proposal REJECTED by Stack: %s → %s — NOT committed",
+            proposal_id,
+            stack_error,
+        )
+        return proposal
 
     proposal.status = "committed"
     proposal.commit_result = {

@@ -99,7 +99,18 @@ def validate_pending_write(ctx: BridgeContext, proposal: Proposal) -> list[str]:
             "policy: max_confidence_without_receipt = 0.70"
         )
 
-    if proposal.risk_level == RiskLevel.CRITICAL and not proposal.compass_check_result:
+    # ABSENCE IS DECIDED BY normalize_compass, NOT BY RAW TRUTHINESS.
+    # bool("   ") is True, so a whitespace string satisfied this gate while
+    # normalize_compass("   ") returns None (absent) and compass_create_error
+    # returns None (nothing to complain about) — the two halves disagreed and
+    # the write went through. A blank string is the cheapest possible way to
+    # claim you ran the compass without running it, and it was the one spelling
+    # the 2026-08-28 hardening did not cover.
+    from bridge_core.target_risk import normalize_compass
+
+    if proposal.risk_level == RiskLevel.CRITICAL and normalize_compass(
+        proposal.compass_check_result
+    ) is None:
         errors.append(
             "CRITICAL risk proposals require a compass_check_result — "
             "call compass_check before proposing"
@@ -402,6 +413,18 @@ PROVENANCE_PASSTHROUGH_TARGETS: frozenset[str] = frozenset(
     {"handoff", "close_session", "record_insight"}
 )
 
+# Commit targets whose LIVE Stack inputSchema declares `verified_by`.
+#
+# Measured against list_tools() on 2026-08-30: record_insight declares it;
+# record_learning, handoff, close_session, record_open_thread and
+# comms_acknowledge do NOT. The distinction is load-bearing — translating
+# receipt_url into verified_by for a target that does not declare it would
+# swap one _reject_unknown_params rejection for another and look like a fix
+# while changing nothing. Where verified_by is not accepted, receipt_url is
+# dropped instead (it has already done its bridge-side job by then: has_receipt
+# and the ground_truth gate are evaluated at proposal time, not at commit).
+VERIFIED_BY_TARGETS: frozenset[str] = frozenset({"record_insight"})
+
 
 def build_commit_arguments(ctx: BridgeContext, proposal: Proposal) -> dict[str, Any]:
     """
@@ -439,6 +462,32 @@ def build_commit_arguments(ctx: BridgeContext, proposal: Proposal) -> dict[str, 
     # source_instance is what the identity gate established at proposal time).
     if proposal.commit_target in PROVENANCE_PASSTHROUGH_TARGETS:
         commit_args["source_instance"] = proposal.source_instance
+
+    # receipt_url → verified_by (or dropped).
+    #
+    # receipt_url is advertised in all three bridges' propose_insight schemas and
+    # is load-bearing bridge-side (has_receipt; the ground_truth-requires-receipt
+    # gate). It is NOT a declared record_insight parameter — so since fd73258's
+    # _reject_unknown_params (server.py) EVERY commit carrying one raises on the
+    # Stack, the bridge answers HTTP 200 with {"ok": false}, and before the guard
+    # in commit_pending_write the proposal was stamped "committed" regardless.
+    # A schema advertising a parameter its commit target rejects is a fail-open
+    # by construction: the caller is invited to supply it and told it worked.
+    #
+    # TRANSLATED, not merely stripped, where the target accepts verified_by:
+    # "url" is a RECEIPT_KIND and provenance.py stamps url receipts "attested"
+    # (no live fetch at write), so the evidence survives as provenance instead of
+    # being dropped on the floor — a ground_truth claim landing WITHOUT the
+    # receipt that justified it is the outcome this whole gate exists to prevent.
+    receipt_url = commit_args.pop("receipt_url", None)
+    if receipt_url and proposal.commit_target in VERIFIED_BY_TARGETS:
+        receipts = list(commit_args.get("verified_by") or [])
+        if not any(
+            isinstance(r, dict) and r.get("kind") == "url" and r.get("ref") == receipt_url
+            for r in receipts
+        ):
+            receipts.append({"kind": "url", "ref": receipt_url})
+        commit_args["verified_by"] = receipts
 
     return commit_args
 
@@ -494,6 +543,51 @@ def commit_pending_write(
         raise RuntimeError(f"Stack returned {e.response.status_code}: {e.response.text}") from e
     except httpx.RequestError as e:
         raise RuntimeError(f"Could not reach bridge at {ctx.bridge_rest_url}: {e}") from e
+
+    # FAIL CLOSED ON A WRITE THE STACK REJECTED.
+    #
+    # The bridge answers HTTP 200 with {"ok": false, "error": ...} when the Stack
+    # handler raises (sovereign-bridge/bridge.py:355-357). raise_for_status()
+    # reads only the status line, sees 200, and is satisfied — so the old code
+    # went straight to status="committed" on a write that never landed. That is
+    # the write-side fail-open closed in 41e2045, reopened one layer up in the
+    # drain path: a proposal file, an audit event and a CLI report all saying
+    # "committed" about nothing.
+    #
+    # `ok` must be EXPLICITLY PRESENT AND FALSY. Absence is not failure — tool
+    # envelopes that omit the key would otherwise become permanently
+    # uncommittable, which would be a fail-CLOSED bug of our own making.
+    if isinstance(stack_result, dict) and "ok" in stack_result and not stack_result["ok"]:
+        stack_error = stack_result.get("error") or "Stack rejected the write (ok=false)"
+        proposal.status = "commit_failed"
+        proposal.commit_result = {
+            "live": True,
+            "committed": False,
+            "commit_target": proposal.commit_target,
+            "error": stack_error,
+            "stack_response": stack_result,
+            "failed_at": datetime.now(timezone.utc).isoformat(),
+        }
+        _save_proposal(proposal, path)
+        append_audit_event(
+            ctx,
+            AuditEvent.COMMIT_FAILED,
+            proposal_id=proposal.proposal_id,
+            actor="bridge",
+            details={
+                "tool": proposal.tool,
+                "commit_target": proposal.commit_target,
+                "live": True,
+                "error": stack_error,
+            },
+        )
+        logger.error(
+            "Proposal[%s] REJECTED by Stack: %s → %s — NOT committed",
+            ctx.substrate,
+            proposal.proposal_id,
+            stack_error,
+        )
+        return proposal
 
     proposal.status = "committed"
     proposal.commit_result = {

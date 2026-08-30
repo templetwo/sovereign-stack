@@ -79,7 +79,10 @@ def _flatten_values(obj: object) -> list:
 
 
 def risk_classify(
-    tool_name: str, args: dict, compass_check_result: object = None
+    tool_name: str,
+    args: dict,
+    compass_check_result: object = None,
+    root: object = None,
 ) -> tuple[RiskLevel, list[str]]:
     """
     Classify the risk of a Ring 2 write proposal.
@@ -133,7 +136,7 @@ def risk_classify(
     try:
         from bridge_core.target_risk import target_escalation_reasons
 
-        target_reasons = target_escalation_reasons(tool_name, args)
+        target_reasons = target_escalation_reasons(tool_name, args, root)
     except Exception as exc:  # noqa: BLE001
         # A classifier that cannot check the target must NOT quietly pass it.
         target_reasons = [f"target check unavailable ({type(exc).__name__}) — escalated"]
@@ -154,13 +157,16 @@ def risk_classify(
     # unit test handing it a shape the bridge never produces. An adversarial
     # review demonstrated that in both substrates. args is still consulted as a
     # fallback so direct callers keep working, but the parameter is the real path.
-    from bridge_core.target_risk import normalize_compass
+    # Imported as a MODULE, and inside the function, so the deny enum is read
+    # from its single source at call time rather than frozen into a local copy
+    # at import — the literal that used to sit here was copy #2 of #3.
+    from bridge_core import target_risk as _target_risk
 
-    _compass = normalize_compass(
+    _compass = _target_risk.normalize_compass(
         compass_check_result if compass_check_result is not None
         else args.get("compass_check_result")
     )
-    if _compass in ("WITNESS", "PAUSE", "UNRECOGNISED"):
+    if _compass in _target_risk.DENY_OR_UNRECOGNISED:
         level = RiskLevel.CRITICAL
         reasons.append(
             f"compass result {_compass} — normalised; any spelling of a deny is a deny"

@@ -274,7 +274,38 @@ class SovereignConnector:
                                         sys.stdout.flush()
                                     continue
                                 except Ring1ForwardException:
+                                    # The ONLY sanctioned fall-through: Ring 1 is
+                                    # proxied to the spawned sovereign by design.
                                     pass
+                                except Exception as gov_exc:
+                                    # FAIL CLOSED. Previously any governance error
+                                    # fell through to the raw forward at the bottom
+                                    # of this loop, sending the tools/call to the
+                                    # sovereign UNGOVERNED — the membrane skipped
+                                    # precisely when it was malfunctioning, which is
+                                    # when it matters most. A governance failure is
+                                    # a refusal, never a pass-through.
+                                    err = {
+                                        "jsonrpc": "2.0",
+                                        "id": msg_id,
+                                        "error": {
+                                            "code": -32603,
+                                            "message": (
+                                                f"governance failed for '{name}' "
+                                                f"({type(gov_exc).__name__}: {gov_exc}) "
+                                                "— refusing. The call was NOT forwarded "
+                                                "and nothing was written."
+                                            ),
+                                        },
+                                    }
+                                    print(
+                                        f"Governance failure, refusing '{name}': {gov_exc}",
+                                        file=sys.stderr,
+                                    )
+                                    with stdout_lock:
+                                        sys.stdout.write(json.dumps(err) + "\n")
+                                        sys.stdout.flush()
+                                    continue
 
                 except Exception as e:
                     print(f"Error handling parent message: {e}", file=sys.stderr)

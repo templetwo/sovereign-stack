@@ -100,19 +100,40 @@ class TargetResolution:
 
 
 def _sovereign_root(root: Path | str | None) -> Path:
-    return Path(root) if root is not None else Path.home() / ".sovereign"
+    """Resolve the store root: explicit argument, then $SOVEREIGN_ROOT, then home.
+
+    The env read is what makes this module testable. Without it the only way to
+    avoid the live store was to thread `root` through every caller, and
+    risk_classify exposed no root at all — so three tests in test_target_risk.py
+    read Anthony's real ~/.sovereign index on every run while the file's own
+    docstring claimed "Every test uses a tmp root." conftest's tmp_sovereign_root
+    fixture already sets SOVEREIGN_ROOT; this makes that fixture actually reach
+    here. Explicit argument still wins, so nothing that passes a root changes.
+    """
+    if root is not None:
+        return Path(root)
+    env_root = os.environ.get("SOVEREIGN_ROOT")
+    if env_root:
+        return Path(env_root)
+    return Path.home() / ".sovereign"
 
 
-def _ids_from_jsonl_dir(directory: Path, keys: tuple[str, ...]) -> set[str]:
+def _ids_from_jsonl_dir(
+    directory: Path, keys: tuple[str, ...], exclude: frozenset[str] = frozenset()
+) -> set[str]:
     """Collect id values from every *.jsonl under a directory.
 
     Uses os.listdir, which RAISES on an unreadable directory. Path.glob does not
     — it swallows the PermissionError and yields nothing, which would make a
     locked store look like an empty one and turn every target into MISSING.
+
+    `exclude` names files that must not count as evidence. It exists because a
+    resolver must never read the output of the tool it gates: see
+    _resolve_comms_message.
     """
     found: set[str] = set()
     for name in os.listdir(directory):  # raises on unreadable dir — intended
-        if not name.endswith(".jsonl"):
+        if not name.endswith(".jsonl") or name in exclude:
             continue
         p = directory / name
         with open(p, errors="replace") as fh:  # raises on unreadable file
@@ -133,8 +154,19 @@ def _ids_from_jsonl_dir(directory: Path, keys: tuple[str, ...]) -> set[str]:
     return found
 
 
+# comms_acknowledge WRITES acks.jsonl. Counting it as evidence that a message
+# exists makes the gate cite its own output: acknowledge a phantom id once and
+# every later ack of that id resolves clean, forever. Live specimen on this
+# machine: 'the-spiral-hums'. The circularity is invisible from inside — the
+# resolver sees a matching id in a file under comms/ and cannot tell that the
+# tool it is gating is what put it there.
+_COMMS_SELF_WRITTEN = frozenset({"acks.jsonl"})
+
+
 def _resolve_comms_message(value: str, root: Path) -> bool:
-    return value in _ids_from_jsonl_dir(root / "comms", ("id", "message_id"))
+    return value in _ids_from_jsonl_dir(
+        root / "comms", ("id", "message_id"), exclude=_COMMS_SELF_WRITTEN
+    )
 
 
 def _resolve_reflection(value: str, root: Path) -> bool:
@@ -388,6 +420,18 @@ def referential_errors(
 
 CANONICAL_COMPASS_VALUES = ("PROCEED", "PAUSE", "WITNESS")
 _DENY_COMPASS_VALUES = frozenset({"PAUSE", "WITNESS"})
+
+# THE single source of truth for "this normalised compass value blocks".
+#
+# Before this existed the enum had THREE copies: this frozenset (one consumer,
+# compass_create_error) and a bare literal ("WITNESS", "PAUSE", "UNRECOGNISED")
+# hand-written into bridge_core/risk.py AND openai_bridge/risk.py. Three copies
+# of a deny list is three chances to add a fourth deny value in two places — the
+# same shape as the `== "WITNESS"` bug this module was written to close, one
+# level up. The union is what every consumer actually wants: both denies plus
+# the UNRECOGNISED sentinel, which blocks because a value nobody can interpret
+# is either a typo or an attempt and neither is safe to commit on.
+DENY_OR_UNRECOGNISED = _DENY_COMPASS_VALUES | {"UNRECOGNISED"}
 
 # Unicode invisibles that survive .strip() and would smuggle a deny past a
 # comparison: NBSP, zero-width space/non-joiner/joiner, BOM, word joiner.
