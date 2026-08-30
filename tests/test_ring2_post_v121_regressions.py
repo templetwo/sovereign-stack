@@ -15,6 +15,7 @@ so target_risk's referential checks resolve against the sandbox too.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -73,15 +74,67 @@ def core_ctx(tmp_path, tmp_sovereign_root):
     )
 
 
+# ALL FIVE OF THESE MUST MOVE TOGETHER, and the reason is not obvious from any
+# one file. openai_bridge addresses its stores through module-level constants
+# rather than a context object, and audit.py does
+#     from .hash_chain import AUDIT_DIR, AUDIT_LOG
+# — a from-import copies the VALUE into audit's namespace at import time. Rebind
+# hash_chain alone and append_audit_event keeps writing to the LIVE chain
+# through audit.AUDIT_LOG, silently, with the suite still green.
+#
+# That is not hypothetical: the first version of this fixture rebound only
+# PENDING_DIR and hash_chain.AUDIT_DIR and put 383 rows across 114 synthetic
+# proposal ids into ~/.sovereign/openai_bridge/audit/audit.jsonl on 2026-08-30,
+# terminating Anthony's real hash chain on a fake retry_armed event. The
+# no_live_audit_writes tripwire in conftest.py now fails loudly on this class;
+# this tuple is the fix. Mirrors ISOLATED_NAMES in
+# clients/openai_bridge/_smoke_test.py and the oai fixture in
+# tests/test_bridge_drain_provenance.py — both document the same trap.
+_OPENAI_ISOLATED = (
+    ("pending_writes", "PENDING_DIR", "pending_writes"),
+    ("hash_chain", "AUDIT_DIR", "audit"),
+    ("hash_chain", "AUDIT_LOG", "audit/audit.jsonl"),
+    ("audit", "AUDIT_DIR", "audit"),
+    ("audit", "AUDIT_LOG", "audit/audit.jsonl"),
+)
+
+
 @pytest.fixture
 def openai_tmp(tmp_path, monkeypatch, tmp_sovereign_root):
-    """Root the openai substrate's module-level path constants in tmp."""
-    import openai_bridge.hash_chain as hc
+    """Point every openai_bridge write path at tmp. Never ~/.sovereign.
+
+    Rebinds on BOTH import identities of the package. The same source is
+    reachable as `openai_bridge.x` and `clients.openai_bridge.x`, and Python
+    caches those as SEPARATE module objects — patching one leaves the other
+    aimed at the live store, so whichever identity the code under test happens
+    to have imported decides whether the isolation holds.
+    """
+    import importlib
+    import sys
+
+    root = tmp_path / "oai"
+    seen = 0
+    for pkg in ("openai_bridge", "clients.openai_bridge"):
+        for mod_name, attr, rel in _OPENAI_ISOLATED:
+            full = f"{pkg}.{mod_name}"
+            mod = sys.modules.get(full)
+            if mod is None and pkg == "openai_bridge":
+                mod = importlib.import_module(full)  # the identity our tests use
+            if mod is None:
+                continue  # that identity was never imported; nothing to redirect
+            monkeypatch.setattr(mod, attr, root / rel)
+            seen += 1
+
+    assert seen >= len(_OPENAI_ISOLATED), (
+        f"expected to rebind at least {len(_OPENAI_ISOLATED)} names, rebound {seen}"
+    )
+
+    # Unroutable on purpose: if a capture stub is ever bypassed, the commit
+    # errors instead of reaching the real bridge on :8100.
     import openai_bridge.pending_writes as opw
 
-    monkeypatch.setattr(opw, "PENDING_DIR", tmp_path / "oai" / "pending_writes")
-    monkeypatch.setattr(hc, "AUDIT_DIR", tmp_path / "oai" / "audit")
-    return tmp_path / "oai"
+    monkeypatch.setattr(opw, "_BRIDGE_URL", "http://127.0.0.1:1/api/call")
+    return root
 
 
 def _stack_response(payload: dict, status: int = 200):
@@ -1079,3 +1132,197 @@ def test_retry_cli_is_wired_for_both_substrates():
 
     for source in ("openai", "grok"):
         assert callable(getattr(_SubstrateOps(source), "_retry", None)), source
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# THE TRIPWIRE'S OWN SELFTEST — a guard that has never failed is not a guard
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# conftest.no_live_audit_writes exists because this file put 383 rows into
+# Anthony's live openai audit chain on 2026-08-30 while reporting green. A guard
+# written in response to that must itself be shown to FAIL on the case it was
+# built for (experimental law #2) — otherwise the next seat inherits a second
+# reassuring green.
+#
+# Driven against a FAKE home. Proving the guard by letting something write to
+# the real chain would be committing the original offence to test the alarm.
+
+
+def _conftest_module():
+    """The LIVE conftest module object pytest already loaded.
+
+    Not `import conftest` (the tests dir is not on sys.path) and not a fresh
+    importlib load either — a re-import would give a DIFFERENT module object,
+    and the selftest would then exercise a copy while the real guard went
+    unchecked. Found by the attribute it defines.
+    """
+    import sys
+
+    for mod in list(sys.modules.values()):
+        if getattr(mod, "__name__", "").endswith("conftest") and hasattr(mod, "_live_audit_sizes"):
+            return mod
+    raise AssertionError("could not locate the loaded conftest defining the tripwire")
+
+
+def _run_guard(monkeypatch, fake_home, mutate):
+    """Drive the real conftest fixture body around `mutate`, rooted at a fake
+    home. Returns the AssertionError it raised, or None if it stayed silent."""
+    conftest = _conftest_module()
+
+    monkeypatch.setattr(conftest.Path, "home", classmethod(lambda cls: fake_home))
+    gen = conftest.no_live_audit_writes.__wrapped__()
+    next(gen)  # setup: snapshot sizes
+    mutate()
+    try:
+        next(gen)
+    except StopIteration:
+        return None
+    except AssertionError as exc:
+        return exc
+    return None
+
+
+@pytest.fixture
+def fake_home(tmp_path):
+    log = tmp_path / ".sovereign" / "openai_bridge" / "audit" / "audit.jsonl"
+    log.parent.mkdir(parents=True)
+    log.write_text('{"event_type": "approved"}\n')
+    return tmp_path
+
+
+def test_the_tripwire_catches_a_write_to_a_live_audit_log(monkeypatch, fake_home):
+    """NEGATIVE: the exact 2026-08-30 shape — an audit log grows during a test."""
+    log = fake_home / ".sovereign" / "openai_bridge" / "audit" / "audit.jsonl"
+
+    exc = _run_guard(
+        monkeypatch,
+        fake_home,
+        lambda: log.open("a").write('{"event_type": "retry_armed"}\n'),
+    )
+
+    assert exc is not None, "the tripwire did not fire on a live audit write"
+    assert "LIVE AUDIT CHAIN" in str(exc)
+
+
+def test_the_tripwire_stays_quiet_when_nothing_writes(monkeypatch, fake_home):
+    """POSITIVE control: it must not fire on every test in the suite."""
+    assert _run_guard(monkeypatch, fake_home, lambda: None) is None
+
+
+def test_the_tripwire_skips_cleanly_without_a_sovereign_dir(monkeypatch, tmp_path):
+    """CI and fresh clones have no ~/.sovereign — that is not a failure."""
+    assert _run_guard(monkeypatch, tmp_path, lambda: None) is None
+
+
+def test_the_openai_fixture_rebinds_every_write_path(openai_tmp):
+    """The fix, asserted directly: all five names point into the sandbox.
+
+    Checking behaviour (bytes on disk) is what the tripwire does; this checks
+    the MECHANISM, so a future edit that drops one name fails here with a
+    message naming the binding rather than only as a mysterious live write.
+    """
+    import openai_bridge.audit as oai_audit
+    import openai_bridge.hash_chain as oai_hash
+    import openai_bridge.pending_writes as oai_pw
+
+    bindings = {
+        "pending_writes.PENDING_DIR": oai_pw.PENDING_DIR,
+        "hash_chain.AUDIT_DIR": oai_hash.AUDIT_DIR,
+        "hash_chain.AUDIT_LOG": oai_hash.AUDIT_LOG,
+        "audit.AUDIT_DIR": oai_audit.AUDIT_DIR,
+        "audit.AUDIT_LOG": oai_audit.AUDIT_LOG,
+    }
+    live = Path.home() / ".sovereign"
+    for name, value in bindings.items():
+        assert str(value).startswith(str(openai_tmp)), f"{name} escaped the sandbox: {value}"
+        assert live not in Path(value).parents, f"{name} still points into {live}"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# THE PREVIEW MUST SHOW WHAT THE WIRE SENDS (HQ follow-up, both substrates)
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# The receipt_url translation originally sat inline in openai's
+# commit_pending_write, BELOW the `if not live:` early return — so
+# `bridge commit <id>` previewed proposal.arguments raw (receipt_url still on
+# it) while the live wire sent something else. Anthony approves from that
+# preview. A review surface that differs from the wire is how a body that looks
+# complete gets approved and lands wrong; it is the same defect class as the
+# 'unknown' authorship the arrival branch fixed one field over.
+
+
+def test_openai_dry_run_preview_matches_the_wire(openai_tmp, monkeypatch):
+    """The preview and the live body must be the SAME dict, receipt included."""
+    import openai_bridge.pending_writes as opw
+
+    args = {
+        "content": "c",
+        "domain": "d",
+        "layer": "ground_truth",
+        "receipt_url": "https://example.com/p",
+    }
+    p = opw.create_pending_write("propose_insight", dict(args), source_instance="seat")
+    opw.approve_pending_write(p.proposal_id, approved_by="Anthony")
+
+    previewed = opw.commit_pending_write(p.proposal_id, live=False).commit_result["with_arguments"]
+
+    sent: list[dict] = []
+
+    def _capture(url, json=None, headers=None, timeout=None):
+        sent.append(json)
+        return _stack_response({"ok": True})
+
+    monkeypatch.setenv("BRIDGE_TOKEN", "t")
+    monkeypatch.setattr(opw.httpx, "post", _capture)
+    opw.commit_pending_write(p.proposal_id, live=True)
+
+    assert "receipt_url" not in previewed, (
+        "the dry-run preview still shows receipt_url — Anthony would approve a "
+        "body the wire does not send"
+    )
+    assert previewed == sent[0]["arguments"], (
+        f"preview and wire diverged:\n  preview={previewed}\n  wire={sent[0]['arguments']}"
+    )
+
+
+def test_bridge_core_dry_run_preview_matches_the_wire(core_ctx, monkeypatch):
+    """bridge_core already assembled above the dry-run return; this pins it."""
+    import bridge_core.pending_writes as pw
+
+    p = pw.create_pending_write(
+        core_ctx,
+        "propose_insight",
+        {
+            "content": "c",
+            "domain": "d",
+            "layer": "ground_truth",
+            "receipt_url": "https://example.com/p",
+        },
+        source_instance="seat",
+    )
+    pw.approve_pending_write(core_ctx, p.proposal_id, approved_by="Anthony")
+
+    previewed = pw.commit_pending_write(core_ctx, p.proposal_id, live=False).commit_result[
+        "with_arguments"
+    ]
+
+    sent: list[dict] = []
+
+    def _capture(url, json=None, headers=None, timeout=None):
+        sent.append(json)
+        return _stack_response({"ok": True})
+
+    monkeypatch.setenv("TEST_R2_TOKEN", "t")
+    monkeypatch.setattr(pw.httpx, "post", _capture)
+    pw.commit_pending_write(core_ctx, p.proposal_id, live=True)
+
+    assert "receipt_url" not in previewed
+    assert previewed == sent[0]["arguments"]
+
+
+def test_both_substrates_agree_on_the_verified_by_targets():
+    """The two literals must not drift; only record_insight declares it."""
+    from bridge_core.pending_writes import VERIFIED_BY_TARGETS as core_targets
+    from openai_bridge.pending_writes import VERIFIED_BY_TARGETS as oai_targets
+
+    assert core_targets == oai_targets == frozenset({"record_insight"})

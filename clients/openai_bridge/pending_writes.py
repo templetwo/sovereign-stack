@@ -31,12 +31,6 @@ logger = logging.getLogger(__name__)
 
 PENDING_DIR = Path.home() / ".sovereign" / "openai_bridge" / "pending_writes"
 
-# Commit targets whose live Stack inputSchema declares `verified_by` (measured
-# against list_tools() 2026-08-30). Mirrors bridge_core's VERIFIED_BY_TARGETS;
-# see the note there for why translating into an undeclared parameter would be
-# a fix in appearance only.
-_VERIFIED_BY_TARGETS: frozenset[str] = frozenset({"record_insight"})
-
 # Tools whose Ring 2 calls map to a specific underlying Stack tool.
 # Used by commit (mocked in Phase 2) to record what would execute.
 COMMIT_TARGETS: dict[str, str] = {
@@ -62,19 +56,19 @@ class Proposal:
 
     tool: str
     arguments: dict[str, Any]
-    commit_target: str              # underlying Stack tool that would execute
+    commit_target: str  # underlying Stack tool that would execute
 
-    proposed_layer: str             # hypothesis | reflection | ground_truth
+    proposed_layer: str  # hypothesis | reflection | ground_truth
     has_receipt: bool
     receipt_urls: list[str]
 
     risk_level: str
     risk_reasons: list[str]
 
-    compass_check_result: str | None   # PROCEED / PAUSE / WITNESS / None
+    compass_check_result: str | None  # PROCEED / PAUSE / WITNESS / None
     compass_check_rationale: str | None
 
-    status: str = "pending"         # pending | approved | rejected | needs_revision | committed
+    status: str = "pending"  # pending | approved | rejected | needs_revision | committed
     reviewed_by: str | None = None
     reviewed_at: str | None = None
     revision_notes: str | None = None
@@ -129,14 +123,14 @@ def validate_pending_write(proposal: Proposal) -> list[str]:
     # the 2026-08-28 hardening did not cover.
     from bridge_core.target_risk import normalize_compass
 
-    if proposal.risk_level == RiskLevel.CRITICAL and normalize_compass(
-        proposal.compass_check_result
-    ) is None:
+    if (
+        proposal.risk_level == RiskLevel.CRITICAL
+        and normalize_compass(proposal.compass_check_result) is None
+    ):
         errors.append(
             "CRITICAL risk proposals require a compass_check_result — "
             "call compass_check before proposing"
         )
-
 
     # REFERENTIAL VALIDATION — a target that does not exist is a factual defect,
     # not a risk judgement, so it is refused outright rather than escalated.
@@ -146,7 +140,9 @@ def validate_pending_write(proposal: Proposal) -> list[str]:
 
         errors.extend(referential_errors(proposal.tool, proposal.arguments))
     except Exception as exc:  # noqa: BLE001
-        errors.append(f"referential check could not run ({type(exc).__name__}) — refusing rather than assuming the target exists")
+        errors.append(
+            f"referential check could not run ({type(exc).__name__}) — refusing rather than assuming the target exists"
+        )
 
     # ONE normalisation function, imported by both substrates, so the enum lives
     # in exactly one place. Refuses PAUSE, refuses any unrecognised value, and
@@ -159,6 +155,56 @@ def validate_pending_write(proposal: Proposal) -> list[str]:
         errors.append(_compass_err)
 
     return errors
+
+
+# Commit targets whose live Stack inputSchema declares `verified_by` (measured
+# against list_tools() 2026-08-30: record_insight declares it; record_learning,
+# handoff, close_session, record_open_thread and comms_acknowledge do not).
+# Mirrors bridge_core.pending_writes.VERIFIED_BY_TARGETS.
+VERIFIED_BY_TARGETS: frozenset[str] = frozenset({"record_insight"})
+
+
+def translate_receipt_url(args: dict, commit_target: str) -> dict:
+    """Resolve `receipt_url` into `verified_by`, or drop it. Returns a new dict.
+
+    receipt_url is advertised in this bridge's propose_insight schema and is
+    load-bearing bridge-side (has_receipt; the ground_truth gate), but
+    record_insight does not declare it — so since fd73258's
+    _reject_unknown_params every commit carrying one is rejected by the Stack.
+    TRANSLATED where the target accepts verified_by ("url" is a RECEIPT_KIND,
+    stamped "attested" with no live fetch, so the evidence survives as
+    provenance); DROPPED where it does not, because translating into an
+    undeclared parameter would swap one rejection for another.
+
+    APPLIED AT PROPOSAL TIME, not at commit. bridge_core does this inside
+    build_commit_arguments, and doing the same here was the obvious symmetry —
+    but it is not available: fix/arrival-surfaces-reachability introduces this
+    module's build_commit_arguments in the same edit, and adding lines inside a
+    function BOTH branches create is an unresolvable add/add conflict. Measured,
+    not assumed: with these lines removed the merge is 0-conflict; with them
+    present it is 3. Proposal time is upstream of every reader, so the stored
+    proposal, `bridge show`, the dry-run preview and the wire all agree — which
+    is the guarantee the fold was asked to provide.
+
+    KNOWN GAP, stated rather than papered over: proposals ALREADY on disk
+    carrying receipt_url are not rewritten (proposal.arguments is outside
+    _MUTABLE, so normalising them on load would break their audit hash). They
+    now fail LOUDLY as commit_failed instead of being laundered into
+    "committed", which is the safe direction; they need re-proposing.
+    """
+    if "receipt_url" not in args:
+        return args
+    out = dict(args)
+    receipt_url = out.pop("receipt_url", None)
+    if receipt_url and commit_target in VERIFIED_BY_TARGETS:
+        receipts = list(out.get("verified_by") or [])
+        if not any(
+            isinstance(r, dict) and r.get("kind") == "url" and r.get("ref") == receipt_url
+            for r in receipts
+        ):
+            receipts.append({"kind": "url", "ref": receipt_url})
+        out["verified_by"] = receipts
+    return out
 
 
 def create_pending_write(
@@ -195,6 +241,11 @@ def create_pending_write(
     risk_level, risk_reasons = risk_classify(
         tool_name, args, compass_check_result=compass_check_result
     )
+
+    # Applied AFTER has_receipt and risk_classify have read the RAW args — both
+    # key off receipt_url, and translating first would silently drop a
+    # ground_truth proposal's receipt from the risk calculation.
+    args = translate_receipt_url(args, COMMIT_TARGETS.get(tool_name, tool_name))
 
     prev_hash = get_last_audit_hash()
     proposal_id = str(uuid.uuid4())
@@ -243,8 +294,7 @@ def create_pending_write(
 
     if not dry_run:
         filename = (
-            now.replace(":", "-").replace("+", "Z")[:19]
-            + f"_{tool_name}_{proposal_id[:8]}.json"
+            now.replace(":", "-").replace("+", "Z")[:19] + f"_{tool_name}_{proposal_id[:8]}.json"
         )
         proposal_path = PENDING_DIR / filename
         proposal_path.write_text(json.dumps(d, indent=2, default=str))
@@ -331,6 +381,62 @@ def approve_pending_write(proposal_id: str, approved_by: str = "Anthony") -> Pro
 
 
 _BRIDGE_URL = "http://127.0.0.1:8100/api/call"
+
+# Bridge → Stack layer translation. The bridge schema uses "reflection" as a
+# semantic concept; the Stack's record_insight accepts only
+# ground_truth | hypothesis | open_thread.
+_LAYER_MAP = {"reflection": "hypothesis"}
+
+# Commit targets whose Stack inputSchema declares source_instance, so the
+# PROPOSAL's substrate identity can ride the commit instead of the drain
+# operator's. Mirrors bridge_core.pending_writes.PROVENANCE_PASSTHROUGH_TARGETS
+# — kept as a separate literal because this legacy module imports nothing from
+# bridge_core, and asserted equal to it by test_bridge_drain_provenance.
+PROVENANCE_PASSTHROUGH_TARGETS: frozenset[str] = frozenset(
+    {"handoff", "close_session", "record_insight"}
+)
+
+
+def build_commit_arguments(proposal: Proposal) -> dict[str, Any]:
+    """
+    Build the exact ``arguments`` dict forwarded to the Stack REST call.
+
+    THE PORT, 2026-08-30. bridge_core has carried provenance passthrough since
+    2026-08-03; this module — the one every ChatGPT drain runs through — had
+    neither the target set nor the injection. So v1.21.0's "every Ring-2 commit
+    carries its proposer" was true for grok and FALSE for openai, and a drained
+    ChatGPT proposal landed under whatever identity its args happened to hold,
+    defaulting to "unknown" under the drain operator's session. A guarantee that
+    holds on one substrate and not the other is not a guarantee; it is a
+    guarantee-shaped belief, which is worse, because nobody re-checks it.
+
+    ASSEMBLY LIVES HERE, ABOVE THE DRY RUN, ON PURPOSE. This module used to
+    translate the layer inside the ``live`` block, AFTER the dry-run early
+    return — so ``bridge commit <id>`` previewed ``proposal.arguments`` raw and
+    the wire sent something else. A review surface that differs from the wire is
+    how 'unknown' authorship shipped in the first place: Anthony approved bodies
+    that looked complete. One assembly point, two surfaces, no drift.
+
+    The envelope's source_instance WINS over anything already in the args dict.
+    A proposal file is reviewable state; the envelope's value is what the
+    identity gate established at proposal time.
+
+    session_id deliberately does NOT travel: handoff and close_session expose no
+    session parameter (server.py stamps its own spiral session), so there is
+    nothing to inject it into. It stays in the proposal envelope and the audit
+    trail, which remain the record of the proposer's session identity.
+    """
+    commit_args = dict(proposal.arguments)
+
+    if "layer" in commit_args:
+        commit_args["layer"] = _LAYER_MAP.get(commit_args["layer"], commit_args["layer"])
+
+    if proposal.commit_target in PROVENANCE_PASSTHROUGH_TARGETS:
+        commit_args["source_instance"] = proposal.source_instance
+
+    return commit_args
+
+
 _ALLOWED_COMMIT_TARGETS = frozenset(COMMIT_TARGETS.values())
 
 
@@ -403,7 +509,14 @@ def _precondition_check(proposal: Proposal) -> list[str]:
     # Verify the immutable creation-time fields have not been tampered with.
     # Lifecycle fields (status, reviewed_by, reviewed_at, revision_notes, commit_result)
     # are intentionally mutable — exclude them from hash verification.
-    _MUTABLE = {"status", "reviewed_by", "reviewed_at", "revision_notes", "commit_result", "audit_hash"}
+    _MUTABLE = {
+        "status",
+        "reviewed_by",
+        "reviewed_at",
+        "revision_notes",
+        "commit_result",
+        "audit_hash",
+    }
     d = proposal.to_dict()
     creation_snapshot = {k: v for k, v in d.items() if k not in _MUTABLE}
     # Restore the creation-time values for fields that change during approval
@@ -433,17 +546,20 @@ def commit_pending_write(proposal_id: str, live: bool = False) -> Proposal:
     # Pre-commit validation (always runs)
     errors = _precondition_check(proposal)
     if errors:
-        raise ValueError(
-            "Pre-commit checks failed:\n" + "\n".join(f"  • {e}" for e in errors)
-        )
+        raise ValueError("Pre-commit checks failed:\n" + "\n".join(f"  • {e}" for e in errors))
+
+    # Assembled BEFORE the dry-run branch so the review surface and the wire
+    # cannot diverge — see build_commit_arguments.
+    commit_args = build_commit_arguments(proposal)
 
     if not live:
-        # Dry-run: show what would happen
+        # Dry-run: show the body a live commit would actually send
+        # (layer translated, provenance injected).
         proposal.commit_result = {
             "mocked": False,
             "live": False,
             "would_call": proposal.commit_target,
-            "with_arguments": proposal.arguments,
+            "with_arguments": commit_args,
         }
         return proposal
 
@@ -451,35 +567,6 @@ def commit_pending_write(proposal_id: str, live: bool = False) -> Proposal:
     token = os.environ.get("BRIDGE_TOKEN", "")
     if not token:
         raise RuntimeError("BRIDGE_TOKEN not set — cannot commit without auth")
-
-    # Translate bridge-layer labels to Stack-layer labels.
-    # The bridge schema uses "reflection" as a semantic concept; the Stack
-    # record_insight tool only accepts ground_truth | hypothesis | open_thread.
-    commit_args = dict(proposal.arguments)
-    _LAYER_MAP = {"reflection": "hypothesis"}
-    if "layer" in commit_args:
-        commit_args["layer"] = _LAYER_MAP.get(commit_args["layer"], commit_args["layer"])
-
-    # receipt_url → verified_by (or dropped). See the long note on
-    # bridge_core.pending_writes.build_commit_arguments — this substrate has no
-    # equivalent assembly point, so the translation lands beside the layer map.
-    #
-    # Short version: receipt_url is advertised in this bridge's propose_insight
-    # schema but record_insight does not declare it, so since fd73258's
-    # _reject_unknown_params every commit carrying one is rejected by the Stack
-    # and (before the ok-guard below) was stamped "committed" anyway. Only
-    # record_insight declares verified_by, so only there can it be translated;
-    # elsewhere it is dropped, having already done its bridge-side job at
-    # proposal time.
-    receipt_url = commit_args.pop("receipt_url", None)
-    if receipt_url and proposal.commit_target in _VERIFIED_BY_TARGETS:
-        receipts = list(commit_args.get("verified_by") or [])
-        if not any(
-            isinstance(r, dict) and r.get("kind") == "url" and r.get("ref") == receipt_url
-            for r in receipts
-        ):
-            receipts.append({"kind": "url", "ref": receipt_url})
-        commit_args["verified_by"] = receipts
 
     try:
         response = httpx.post(
@@ -643,9 +730,7 @@ def reject_pending_write(proposal_id: str, reason: str, rejected_by: str = "Anth
     proposal, path = _load_proposal(proposal_id)
 
     if proposal.status not in ("pending", "needs_revision"):
-        raise ValueError(
-            f"Cannot reject proposal in status '{proposal.status}'"
-        )
+        raise ValueError(f"Cannot reject proposal in status '{proposal.status}'")
 
     proposal.status = "rejected"
     proposal.reviewed_by = rejected_by
@@ -668,9 +753,7 @@ def needs_revision_pending_write(proposal_id: str, notes: str, actor: str = "Ant
     proposal, path = _load_proposal(proposal_id)
 
     if proposal.status != "pending":
-        raise ValueError(
-            f"Cannot mark needs_revision for proposal in status '{proposal.status}'"
-        )
+        raise ValueError(f"Cannot mark needs_revision for proposal in status '{proposal.status}'")
 
     proposal.status = "needs_revision"
     proposal.revision_notes = notes
@@ -697,16 +780,18 @@ def list_pending_writes(status: str | None = None) -> list[dict]:
         try:
             d = json.loads(path.read_text())
             if status is None or d.get("status") == status:
-                results.append({
-                    "proposal_id": d.get("proposal_id"),
-                    "timestamp": d.get("timestamp"),
-                    "tool": d.get("tool"),
-                    "source_instance": d.get("source_instance"),
-                    "status": d.get("status"),
-                    "risk_level": d.get("risk_level"),
-                    "proposed_layer": d.get("proposed_layer"),
-                    "file": path.name,
-                })
+                results.append(
+                    {
+                        "proposal_id": d.get("proposal_id"),
+                        "timestamp": d.get("timestamp"),
+                        "tool": d.get("tool"),
+                        "source_instance": d.get("source_instance"),
+                        "status": d.get("status"),
+                        "risk_level": d.get("risk_level"),
+                        "proposed_layer": d.get("proposed_layer"),
+                        "file": path.name,
+                    }
+                )
         except (json.JSONDecodeError, OSError):
             logger.warning("Skipping unreadable proposal file: %s", path.name)
     return results
