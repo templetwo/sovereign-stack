@@ -52,6 +52,7 @@ import contextlib
 import json
 import os
 import re
+import shutil
 import sqlite3
 import subprocess
 import threading
@@ -641,6 +642,34 @@ def read_lineage_letters(limit: int = 6) -> dict | None:
 # ── GUARDIAN ────────────────────────────────────────────────────────────────
 
 
+# System binaries the guardian probe shells out to. Resolved by ABSOLUTE PATH,
+# never by bare name: `lsof` lives in /usr/sbin, which launchd's plist PATH for
+# this daemon does not contain (venv/bin:/opt/homebrew/bin:/usr/local/bin:
+# /usr/bin:/bin). A bare ["lsof", ...] therefore raises FileNotFoundError inside
+# the daemon while working perfectly from an interactive shell whose PATH has
+# /usr/sbin -- the panel went dark for exactly this reason on 2026-08-30 and the
+# fail-soft None hid the cause. Same class as the /usr/bin/log-vs-zsh-builtin
+# trap this house already carries: for a system tool, resolve the path, do not
+# inherit it.
+_PROBE_SEARCH_DIRS = ("/usr/sbin", "/usr/bin", "/bin", "/sbin", "/opt/homebrew/bin")
+
+
+def _resolve_tool(name: str) -> str:
+    """Absolute path for a system binary, PATH first then known sbin dirs.
+
+    Returns the bare name if nothing resolves, so the caller still raises the
+    same FileNotFoundError it always did rather than silently doing nothing.
+    """
+    found = shutil.which(name)
+    if found:
+        return found
+    for d in _PROBE_SEARCH_DIRS:
+        cand = os.path.join(d, name)
+        if os.path.isfile(cand) and os.access(cand, os.X_OK):
+            return cand
+    return name
+
+
 def _guardian_probe() -> tuple[list[str], dict[str, bool]]:
     """Collect guardian's inputs synchronously.
 
@@ -654,7 +683,7 @@ def _guardian_probe() -> tuple[list[str], dict[str, bool]]:
     """
     _refuse_external_probe("lsof/pgrep guardian probe")
     listener = subprocess.run(
-        ["lsof", "-iTCP", "-sTCP:LISTEN", "-n", "-P"],
+        [_resolve_tool("lsof"), "-iTCP", "-sTCP:LISTEN", "-n", "-P"],
         capture_output=True,
         text=True,
         timeout=GUARDIAN_TIMEOUT_SECONDS,
@@ -663,7 +692,7 @@ def _guardian_probe() -> tuple[list[str], dict[str, bool]]:
     services: dict[str, bool] = {}
     for name in ("ollama", "sovereign"):
         found = subprocess.run(
-            ["pgrep", "-x", name],
+            [_resolve_tool("pgrep"), "-x", name],
             capture_output=True,
             text=True,
             timeout=GUARDIAN_TIMEOUT_SECONDS,
