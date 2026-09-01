@@ -3256,14 +3256,25 @@ async def _dispatch_tool(name: str, arguments: dict):
             lineage_limit_per_bucket=lineage_limit,
         )
 
-        # Side effect (NOT part of the projection): mark the surfaced handoffs
-        # consumed. Done before render so render_full can print the honest
-        # "N marked consumed" line; consumed_count=None means not consumed.
+        # Side effect (NOT part of the projection): SIGN the surfaced handoffs.
+        #
+        # This used to call mark_consumed(), which flipped consumed_at on the
+        # file and retired the handoff for EVERY future reader — one seat's boot
+        # permanently hid it from all the others, and 197 real handoffs were
+        # lost that way. Signing is additive: it records that THIS reader
+        # received it and hides it from nobody. Another seat's boot is
+        # unaffected, so `consume=true` is no longer a destructive default and
+        # is safe for ringed (non-Claude) seats, which reach this same door.
+        #
+        # Retiring a handoff for everyone is now a separate, deliberate act
+        # (HandoffEngine.retire, reason required) and is never a side effect of
+        # reading. The variable name is kept so render_full's existing line
+        # keeps working; it now counts signatures.
         consumed_count = None
         if consume and state.handoffs:
             try:
-                consumed_count = handoff_engine.mark_consumed(
-                    [r["_path"] for r in state.handoffs], consumed_by=reader
+                consumed_count = sum(
+                    1 for r in state.handoffs if handoff_engine.sign(r["_path"], signer=reader)
                 )
             except ValueError as e:
                 # reader didn't identify itself (missing/placeholder

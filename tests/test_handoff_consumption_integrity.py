@@ -229,7 +229,10 @@ class TestConsumedCountReporting:
         (root / "chronicle").mkdir(parents=True)
         engine = HandoffEngine(root=str(root))
         r = engine.write("old intent", "predecessor", "s1", "general")
-        engine.mark_consumed([r["_path"]], consumed_by="a-real-reader")
+        # Signature ledger (2026-08-31): receipt is PER-READER, so the scenario
+        # "this reader has already seen everything" means consumed/signed by
+        # the booting reader. Legacy consumed_by counts as that signature.
+        engine.mark_consumed([r["_path"]], consumed_by="test-reader")
         assert engine.unconsumed() == []
 
         experiential = ExperientialMemory(root=str(root / "chronicle"))
@@ -373,7 +376,9 @@ class TestConsumedCountReporting:
         (root / "chronicle").mkdir(parents=True)
         engine = HandoffEngine(root=str(root))
         old = engine.write("archived note", "predecessor", "s0", "general")
-        engine.mark_consumed([old["_path"]], consumed_by="a-real-reader")
+        # Same per-reader correction as above: the archive is what THIS reader
+        # has already signed for; the pending handoff below is what it has not.
+        engine.mark_consumed([old["_path"]], consumed_by="test-reader")
         engine.write("still pending", "predecessor", "s1", "general")
 
         experiential = ExperientialMemory(root=str(root / "chronicle"))
@@ -444,9 +449,18 @@ class TestAnonymousReaderDoesNotConsume:
                 )
             )
 
-            assert len(srv_mod.handoff_engine.unconsumed()) == 0
-            consumed = srv_mod.handoff_engine.all(include_consumed=True)
-            assert consumed[0]["consumed_by"] == "claude-sonnet-4-6-integrity-test"
+            # CONTRACT CHANGED 2026-08-31 (signature ledger): boot no longer
+            # flips consumed_at, which retired the handoff for EVERY future
+            # reader and lost 197 of them. It appends a SIGNATURE instead.
+            reader = "claude-sonnet-4-6-integrity-test"
+            # Gone from THIS reader's queue...
+            assert srv_mod.handoff_engine.unsigned_by(reader) == []
+            # ...and still visible to everyone else. This is the whole fix.
+            assert len(srv_mod.handoff_engine.unsigned_by("some-other-seat")) == 1
+            # The handoff file itself was never mutated.
+            assert len(srv_mod.handoff_engine.unconsumed()) == 1
+            sigs = srv_mod.handoff_engine.signatures()
+            assert [x["signer"] for x in sigs] == [reader]
 
 
 class TestHandoffActedOnToolSurfaceChange:

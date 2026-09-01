@@ -317,6 +317,27 @@ class ArrivalState:
 # =============================================================================
 
 
+def _pending_for_reader(handoff_engine, reader: str, thread: str | None, limit: int):
+    """Handoffs this reader has not signed — with the pre-ledger path as fallback.
+
+    The signature ledger (2026-08-31) made receipt per-reader and additive, so a
+    boot shows what YOU have not seen rather than what nobody has consumed. An
+    unnamed/placeholder reader cannot be filtered per-reader, so it falls back to
+    the legacy global filter rather than raising a boot.
+
+    Returns (records, total_uncapped).
+    """
+    try:
+        records = handoff_engine.unsigned_by(reader, thread=thread, limit=limit)
+        total = handoff_engine.unsigned_by_count(reader, thread=thread)
+        return records, total
+    except (ValueError, AttributeError):
+        return (
+            handoff_engine.unconsumed(thread=thread, limit=limit),
+            handoff_engine.unconsumed_count(thread=thread),
+        )
+
+
 def build_arrival_state(
     sovereign_root: Path,
     *,
@@ -428,7 +449,9 @@ def build_arrival_state(
     if profile == "full":
         _gather_lineage()
         try:
-            handoffs = handoff_engine.unconsumed(thread=thread_filter, limit=20)
+            handoffs, _total_pending = _pending_for_reader(
+                handoff_engine, reader, thread_filter, 20
+            )
             receipts.append(
                 SectionReceipt("handoffs", len(handoffs), _newest(handoffs), False, None)
             )
@@ -450,7 +473,9 @@ def build_arrival_state(
         # list would otherwise look like the complete list. Get the true
         # total so render_full can say "showing 20 of N" instead.
         try:
-            total_unconsumed_count = handoff_engine.unconsumed_count(thread=thread_filter)
+            _, total_unconsumed_count = _pending_for_reader(
+                handoff_engine, reader, thread_filter, 1
+            )
         except Exception:
             total_unconsumed_count = None
         if domain_tags:
@@ -520,7 +545,7 @@ def build_arrival_state(
         except Exception as exc:
             _degrade("open_threads", exc)
         try:
-            handoffs = handoff_engine.unconsumed(limit=20)
+            handoffs, _ = _pending_for_reader(handoff_engine, reader, None, 20)
             receipts.append(
                 SectionReceipt("handoffs", len(handoffs), _newest(handoffs), False, None)
             )
