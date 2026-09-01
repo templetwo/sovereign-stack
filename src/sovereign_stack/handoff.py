@@ -362,6 +362,210 @@ class HandoffEngine:
         records.sort(key=lambda r: r.get("timestamp", ""), reverse=True)
         return records
 
+    # ------------------------------------------------------------------
+    # SIGNATURE LEDGER (2026-08-31, Anthony's design)
+    #
+    # `consumed_at` is destructive: the first reader to call the boot door
+    # retires a handoff for EVERY future reader, and 197 real handoffs became
+    # unreachable that way. It is also the one place this store contradicts
+    # the Stack's own append-only rule, where corrections supersede and
+    # nothing is erased.
+    #
+    # The replacement separates two facts that `consumed_at` conflated:
+    #
+    #   SIGNATURE  — "this seat received it."  Additive. Many per handoff.
+    #                Never removes anything from anyone else's queue.
+    #   RETIREMENT — "this is done."  A deliberate act by the author or HQ.
+    #                Removes it from every queue.
+    #
+    # Conflating those two is what caused the bug. Keeping them apart also
+    # dissolves the dilemma `unconsumed_count` documents above: there is no
+    # global pending queue to grow past a limit, because each reader is
+    # filtered against their OWN signatures.
+    #
+    # Both logs mirror `acted_on.jsonl` in this same class — append-only
+    # JSONL beside the store. Nothing here mutates a handoff file, so the
+    # whole feature rolls back by deleting the two .jsonl files.
+    # ------------------------------------------------------------------
+
+    SIGNATURES_LOG = "signatures.jsonl"
+    RETIREMENTS_LOG = "retirements.jsonl"
+
+    @staticmethod
+    def _handoff_id(handoff_path: str) -> str:
+        """Canonical id for a handoff: its FILENAME, not its full path.
+
+        Deliberate. Full paths embed the machine's home directory, and a
+        `~`-rooted path recorded on one machine resolves nowhere on another
+        (the house has three). `acted_on.jsonl` keys on full path and
+        inherits that fragility; this ledger does not.
+        """
+        return Path(str(handoff_path).strip()).name
+
+    def sign(self, handoff_path: str, signer: str, note: str | None = None) -> dict:
+        """Record that `signer` received this handoff. Additive and idempotent.
+
+        Signing NEVER hides the handoff from another reader. Re-signing by the
+        same signer returns the existing signature rather than appending a
+        duplicate, so a seat that boots twice does not inflate the ledger.
+
+        Raises ValueError on an empty or placeholder signer — same standard as
+        mark_consumed. A signature naming nobody looks like an audit trail
+        while carrying no information, which is how 159 handoffs came to be
+        stamped "unknown".
+        """
+        _refuse_live_store_during_tests(self.root)
+        if not handoff_path or not str(handoff_path).strip():
+            raise ValueError("handoff_path is required")
+        signer = _validate_reader_identity(signer, field="signer")
+        hid = self._handoff_id(handoff_path)
+
+        for existing in self.signatures(handoff_path):
+            if existing.get("signer") == signer:
+                return existing
+
+        record: dict = {
+            "handoff_id": hid,
+            "signer": signer,
+            "note": (note or "").strip() or None,
+            "timestamp": datetime.now().isoformat(),
+        }
+        with open(self.root / self.SIGNATURES_LOG, "a") as fh:
+            fh.write(json.dumps(record) + "\n")
+        return record
+
+    def _read_log(self, name: str) -> list[dict]:
+        log = self.root / name
+        if not log.exists():
+            return []
+        out: list[dict] = []
+        for line in log.read_text().splitlines():
+            if not line.strip():
+                continue
+            try:
+                out.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+        return out
+
+    def signatures(self, handoff_path: str | None = None, signer: str | None = None) -> list[dict]:
+        """Signatures, newest first. Filter by handoff and/or signer."""
+        hid = self._handoff_id(handoff_path) if handoff_path else None
+        recs = [
+            r
+            for r in self._read_log(self.SIGNATURES_LOG)
+            if (hid is None or r.get("handoff_id") == hid)
+            and (signer is None or r.get("signer") == signer)
+        ]
+        recs.sort(key=lambda r: r.get("timestamp", ""), reverse=True)
+        return recs
+
+    def signers_of(self, handoff_path: str) -> set[str]:
+        """Every seat that has signed this handoff, legacy consumers included.
+
+        A pre-ledger `consumed_by` counts as that seat's signature, so the
+        ledger reads correctly with or without the migration having run.
+        """
+        signers = {r["signer"] for r in self.signatures(handoff_path) if r.get("signer")}
+        hid = self._handoff_id(handoff_path)
+        for rec in self._load_all():
+            if Path(rec.get("_path", "")).name == hid and rec.get("consumed_by"):
+                signers.add(rec["consumed_by"])
+        return signers
+
+    def retire(self, handoff_path: str, retired_by: str, reason: str) -> dict:
+        """Mark a handoff DONE for everyone. Distinct from signing.
+
+        This is the only operation that removes a handoff from queues, and it
+        is deliberate rather than a side effect of reading. Append-only: the
+        handoff file is untouched, so retirement is reversible by editing the
+        log.
+        """
+        _refuse_live_store_during_tests(self.root)
+        if not handoff_path or not str(handoff_path).strip():
+            raise ValueError("handoff_path is required")
+        retired_by = _validate_reader_identity(retired_by, field="retired_by")
+        if not reason or not reason.strip():
+            raise ValueError(
+                "reason is required — a retirement with no stated reason is the "
+                "silent erasure this ledger exists to prevent"
+            )
+        record: dict = {
+            "handoff_id": self._handoff_id(handoff_path),
+            "retired_by": retired_by,
+            "reason": reason.strip(),
+            "timestamp": datetime.now().isoformat(),
+        }
+        with open(self.root / self.RETIREMENTS_LOG, "a") as fh:
+            fh.write(json.dumps(record) + "\n")
+        return record
+
+    def retired_ids(self) -> set[str]:
+        return {
+            r["handoff_id"] for r in self._read_log(self.RETIREMENTS_LOG) if r.get("handoff_id")
+        }
+
+    def unsigned_by(self, reader: str, thread: str | None = None, limit: int = 20) -> list[dict]:
+        """Handoffs this READER has not signed and nobody has retired.
+
+        The per-reader replacement for unconsumed(). Another seat's signature
+        is invisible here: it cannot hide a handoff from you.
+        """
+        reader = _validate_reader_identity(reader, field="reader")
+        retired = self.retired_ids()
+        signed = {r["handoff_id"] for r in self.signatures(signer=reader) if r.get("handoff_id")}
+        out = []
+        for rec in self._load_all():
+            hid = Path(rec.get("_path", "")).name
+            if hid in retired or hid in signed:
+                continue
+            if rec.get("consumed_by") == reader:  # legacy consumption by this reader
+                continue
+            if thread and rec.get("thread") != thread:
+                continue
+            out.append(rec)
+        out.sort(key=lambda r: r.get("timestamp", ""), reverse=True)
+        return out[:limit]
+
+    def unsigned_by_count(self, reader: str, thread: str | None = None) -> int:
+        """Uncapped count for unsigned_by — lets the boot surface say
+        'showing N of M' rather than silently truncating (aae7281's lesson)."""
+        return len(self.unsigned_by(reader, thread=thread, limit=10**9))
+
+    def migrate_consumed_to_signatures(self, dry_run: bool = True) -> dict:
+        """Turn each legacy consumed_by into that seat's signature.
+
+        Lossless and reversible: `consumed_at`/`consumed_by` are NOT removed,
+        and rollback is `rm signatures.jsonl`. Placeholder consumers
+        ("unknown", "test") are counted and SKIPPED rather than written — they
+        name no reader, and importing them would launder 237 meaningless rows
+        into a fresh audit trail.
+        """
+        migrated, skipped, already = 0, 0, 0
+        plan: list[tuple[str, str]] = []
+        for rec in self._load_all():
+            consumer = (rec.get("consumed_by") or "").strip()
+            if not consumer:
+                continue
+            if consumer.lower() in NON_IDENTIFYING_CONSUMERS:
+                skipped += 1
+                continue
+            path = rec.get("_path", "")
+            if consumer in {s.get("signer") for s in self.signatures(path)}:
+                already += 1
+                continue
+            plan.append((path, consumer))
+        if not dry_run:
+            for path, consumer in plan:
+                self.sign(path, consumer, note="migrated from legacy consumed_by")
+                migrated += 1
+        return {
+            "dry_run": dry_run,
+            "would_migrate" if dry_run else "migrated": len(plan) if dry_run else migrated,
+            "skipped_placeholder_consumers": skipped,
+            "already_signed": already,
+        }
+
 
 def format_handoff_for_surface(record: dict) -> str:
     """
