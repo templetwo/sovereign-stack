@@ -35,7 +35,12 @@ from mcp.types import TextContent
 
 from .interceptor import RING_1_TOOLS, RING_2_TOOLS, intercept, is_ring_3
 from .manifest import MANIFEST, manifest_text
-from .tool_adapter import call_ring1_tool, call_ring2_tool, get_all_bridge_schemas
+from .tool_adapter import (
+    call_ring1_tool,
+    call_ring2_tool,
+    get_all_bridge_schemas,
+    render_bridge_toolkit,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +103,21 @@ async def handle_bridge_tool(name: str, arguments: dict):
                 "Proceed with the boot ritual. Ring 1 tools are available."
             ),
         )]
+
+    # Discovery is connector-local.  Proxying native my_toolkit here advertised
+    # the Stack's unfiltered 98-tool catalog rather than the ring-filtered MCP
+    # surface this server actually published.
+    if name == "my_toolkit":
+        schemas = await get_all_bridge_schemas()
+        return [
+            TextContent(
+                type="text",
+                text=render_bridge_toolkit(
+                    schemas,
+                    include_schema=bool(arguments.get("include_schema", False)),
+                ),
+            )
+        ]
 
     # Ring 1 pass-through
     if name in RING_1_TOOLS and name != "self_model":

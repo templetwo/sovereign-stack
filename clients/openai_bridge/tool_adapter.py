@@ -12,6 +12,7 @@ Ring 1 calls proxy to the bridge REST API at http://127.0.0.1:8100/api/call.
 Ring 2 calls run through the interceptor — never touch the Stack directly.
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -237,45 +238,133 @@ _RING2_SCHEMA_MAP: dict[str, Tool] = {t.name: t for t in _RING2_SCHEMAS}
 
 _ring1_cache: list[Tool] | None = None
 
+_NOT_WIRED_RING1 = frozenset({"verify_proposal", "list_bridge_proposals"})
+_LOCAL_RING1 = frozenset({"witness_boot"})
+
+
+def _bridge_toolkit_schema() -> Tool:
+    """The connector-local discovery contract; never proxy the native one."""
+    return Tool(
+        name="my_toolkit",
+        description=(
+            "Show the exact callable OpenAI bridge surface. Built from the same "
+            "schemas returned by MCP list_tools, so native Stack tools that the ring "
+            "membrane does not publish cannot appear here."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "include_schema": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Include each callable tool's input JSON schema.",
+                }
+            },
+            "required": [],
+        },
+    )
+
 
 async def get_ring1_schemas() -> list[Tool]:
     """
     Fetch Ring 1 tool schemas from the sovereign Stack via the bridge REST API.
     Results are cached for the process lifetime.
 
-    Falls back to an empty list if the Stack is unreachable, so the bridge
-    can still start and serve Ring 2 tools.
+    ``/api/tools?name=...`` is the live schema source.  The former implementation
+    called native ``my_toolkit`` (which returns prose), discarded its result, and
+    then published empty placeholder schemas from a May 2026 allowlist.  That let
+    native discovery and MCP callability diverge while both claimed to be live.
+
+    Falls back first to the installed Stack's in-process registry, then to static
+    definitions if both live surfaces are unavailable, so the bridge can still
+    start and serve Ring 2 tools.  New tools are never admitted by discovery
+    alone: the explicit Ring-1 allowlist remains the access-control gate.
     """
     global _ring1_cache
     if _ring1_cache is not None:
         return _ring1_cache
 
+    headers = {
+        "Authorization": f"Bearer {BRIDGE_TOKEN}",
+        "Content-Type": "application/json",
+    }
+
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.post(
-                f"{BRIDGE_URL}/api/call",
-                headers={
-                    "Authorization": f"Bearer {BRIDGE_TOKEN}",
-                    "Content-Type": "application/json",
-                },
-                json={"tool": "my_toolkit", "arguments": {"tier": "all"}},
-            )
-            resp.raise_for_status()
-            # my_toolkit returns a text summary — we need the actual MCP tool schemas.
-            # Use the bridge's /api/tools endpoint if available; otherwise fall through.
-            data = resp.json()
-            if not data.get("ok"):
-                raise RuntimeError(data.get("error", "my_toolkit failed"))
-    except Exception as e:
-        logger.warning("Could not fetch Ring 1 schemas from Stack: %s — using minimal fallback", e)
-        _ring1_cache = _minimal_ring1_fallback()
-        return _ring1_cache
+            catalog_response = await client.get(f"{BRIDGE_URL}/api/tools", headers=headers)
+            catalog_response.raise_for_status()
+            catalog = catalog_response.json()
+            catalog_items = catalog.get("tools")
+            if not isinstance(catalog_items, list):
+                raise RuntimeError("/api/tools response has no tools list")
 
-    # Build Tool objects from the names we know are Ring 1.
-    # The bridge REST API doesn't return MCP Tool schemas directly from my_toolkit;
-    # we construct minimal but valid Tool objects so ChatGPT can call them.
-    # Full schemas are in the sovereign_stack server and enforced server-side.
-    _ring1_cache = _minimal_ring1_fallback()
+            live_names = {
+                item.get("name") for item in catalog_items if isinstance(item, dict)
+            }
+            remote_names = sorted(
+                (RING_1_TOOLS - _NOT_WIRED_RING1 - _LOCAL_RING1 - {"self_model"})
+                & live_names
+            )
+            responses = await asyncio.gather(
+                *(
+                    client.get(
+                        f"{BRIDGE_URL}/api/tools",
+                        headers=headers,
+                        params={"name": name},
+                    )
+                    for name in remote_names
+                )
+            )
+
+            tools: list[Tool] = []
+            for expected_name, response in zip(remote_names, responses, strict=True):
+                response.raise_for_status()
+                payload = response.json()
+                if payload.get("name") != expected_name:
+                    raise RuntimeError(
+                        f"schema mismatch: requested {expected_name!r}, "
+                        f"received {payload.get('name')!r}"
+                    )
+                schema = payload.get("inputSchema")
+                if not isinstance(schema, dict):
+                    raise RuntimeError(f"{expected_name}: missing inputSchema")
+                tools.append(
+                    Tool(
+                        name=expected_name,
+                        description=str(payload.get("description") or f"[Ring 1] {expected_name}"),
+                        inputSchema=schema,
+                    )
+                )
+    except Exception as e:
+        logger.warning(
+            "Could not fetch Ring 1 schemas from Stack: %s — using in-process registry",
+            e,
+        )
+        try:
+            from sovereign_stack.server import list_tools as list_native_tools
+
+            native_tools = await list_native_tools()
+            allowed_remote = RING_1_TOOLS - _NOT_WIRED_RING1 - _LOCAL_RING1 - {"self_model"}
+            tools = [tool for tool in native_tools if tool.name in allowed_remote]
+        except Exception as fallback_error:
+            logger.warning(
+                "Could not read in-process Stack schemas: %s — using static fallback",
+                fallback_error,
+            )
+            # Do not cache the least-trustworthy fallback.  A later discovery
+            # call retries the live and in-process registries after recovery.
+            return _minimal_ring1_fallback()
+
+    by_name = {tool.name: tool for tool in tools}
+    if "my_toolkit" in by_name:
+        by_name["my_toolkit"] = _bridge_toolkit_schema()
+
+    # witness_boot is implemented by this bridge rather than the native Stack.
+    fallback_by_name = {tool.name: tool for tool in _minimal_ring1_fallback()}
+    for name in _LOCAL_RING1 & RING_1_TOOLS:
+        by_name[name] = fallback_by_name[name]
+
+    _ring1_cache = [by_name[name] for name in sorted(by_name)]
     return _ring1_cache
 
 
@@ -286,8 +375,10 @@ def _minimal_ring1_fallback() -> list[Tool]:
     """
     descriptions = {
         "where_did_i_leave_off": "Boot call. Returns spiral status, handoffs, open threads, recent activity. Call this first.",
+        "arrive": "Thin, side-effect-free arrival foyer. Read-only.",
+        "arrive_lineage": "Gentle lineage-only arrival with no handoff consumption. Read-only.",
         "start_here": "First-arrival orientation narrative. Call after where_did_i_leave_off on a fresh session.",
-        "my_toolkit": "Show available tools for this bridge session.",
+        "my_toolkit": "Show the exact callable OpenAI bridge surface.",
         "connectivity_status": "Check bridge and Stack endpoint health. Read-only.",
         "spiral_status": "Current cognitive phase and session summary.",
         "spiral_inherit": "Porous context inheritance (R=0.46). Does not write state.",
@@ -302,6 +393,10 @@ def _minimal_ring1_fallback() -> list[Tool]:
         "get_inheritable_context": "Layered inheritance: ground truths + hypotheses + open threads.",
         "check_mistakes": "Find relevant past learnings before taking action.",
         "reflexive_surface": "Surface relevant threads/handoffs/insights by domain_tags.",
+        "current_policies": "Read the standing-policy registry. Read-only.",
+        "inspect_claim": "Inspect one chronicle claim and its receipts. Read-only.",
+        "season_review": "Read-only digest of chronicle health and candidate work.",
+        "the_ground": "Read the catch ledger. Read-only.",
         "get_open_threads": "List unresolved questions, newest first.",
         "triage_threads": "Open threads ranked by urgency. Read-only.",
         "thread_get_touches": "Who has touched a thread. Read-only.",
@@ -331,20 +426,81 @@ def _minimal_ring1_fallback() -> list[Tool]:
     # Don't advertise capabilities this bridge can't dispatch — wire local handlers
     # in openai_bridge/mcp_filtered.py before advertising. Follow-up gate before the
     # next openai bridge restart. The canonical ring POLICY stays unified regardless.
-    _NOT_WIRED_HERE = {"verify_proposal", "list_bridge_proposals"}
+    fallback_schemas = {
+        "arrive": {
+            "type": "object",
+            "properties": {"source_instance": {"type": "string"}},
+            "required": [],
+        },
+        "arrive_lineage": {
+            "type": "object",
+            "properties": {
+                "source_instance": {"type": "string"},
+                "full_content": {"type": "boolean"},
+                "limit_per_bucket": {
+                    "type": "integer",
+                    "default": 5,
+                    "minimum": 1,
+                    "maximum": 100,
+                },
+            },
+            "required": [],
+        },
+        "current_policies": {
+            "type": "object",
+            "properties": {
+                "domain": {"type": "string"},
+                "include_retired": {"type": "boolean", "default": False},
+            },
+        },
+        "inspect_claim": {
+            "type": "object",
+            "properties": {
+                "claim_id": {"type": "string"},
+                "verify_receipts": {"type": "boolean", "default": False},
+            },
+            "required": ["claim_id"],
+        },
+        "season_review": {
+            "type": "object",
+            "properties": {
+                "domain": {"type": "string"},
+                "window_days": {"type": "integer", "default": 90},
+                "max_candidates": {"type": "integer", "default": 10},
+            },
+        },
+        "the_ground": {
+            "type": "object",
+            "properties": {
+                "limit": {"type": "integer", "default": 3},
+                "direction": {
+                    "type": "string",
+                    "enum": ["instrument", "sibling", "human", "self", "outward"],
+                },
+                "caught": {"type": "string"},
+                "full_content": {"type": "boolean", "default": False},
+            },
+            "required": [],
+        },
+    }
 
     tools = []
     for name in sorted(RING_1_TOOLS):
         if name == "self_model":
             continue  # handled in Ring 2 schema as direction-sensitive
-        if name in _NOT_WIRED_HERE:
+        if name in _NOT_WIRED_RING1:
+            continue
+        if name == "my_toolkit":
+            tools.append(_bridge_toolkit_schema())
             continue
         desc = descriptions.get(name, f"[Ring 1] {name}")
         tools.append(
             Tool(
                 name=name,
                 description=desc,
-                inputSchema={"type": "object", "properties": {}},
+                inputSchema=fallback_schemas.get(
+                    name, {"type": "object", "properties": {}}
+                ),
             )
         )
     return tools
@@ -354,6 +510,54 @@ async def get_all_bridge_schemas() -> list[Tool]:
     """Return the full filtered tool list: Ring 1 + Ring 2."""
     ring1 = await get_ring1_schemas()
     return ring1 + _RING2_SCHEMAS
+
+
+def render_bridge_toolkit(tools: list[Tool], *, include_schema: bool = False) -> str:
+    """Render discovery from the exact schema list returned by MCP list_tools."""
+    ordered = sorted(tools, key=lambda tool: tool.name)
+    ring1 = [
+        tool for tool in ordered if tool.name in RING_1_TOOLS and tool.name != "self_model"
+    ]
+    directional = [tool for tool in ordered if tool.name == "self_model"]
+    ring2 = [
+        tool for tool in ordered if tool.name in RING_2_TOOLS and tool.name != "self_model"
+    ]
+
+    lines = [
+        f"━━━ OPENAI BRIDGE TOOLKIT ({len(ordered)} callable tools) ━━━",
+        "",
+        "This is the exact MCP-published surface for this connector.",
+        "Native Stack tools not listed here are not callable through the OpenAI bridge.",
+        "",
+    ]
+
+    def _section(title: str, section_tools: list[Tool]) -> None:
+        if not section_tools:
+            return
+        lines.append(f"## {title} ({len(section_tools)})")
+        for tool in section_tools:
+            description = (tool.description or "").strip().split("\n")[0]
+            lines.append(f"  • {tool.name} — {description}")
+            if include_schema:
+                schema = json.dumps(tool.inputSchema, indent=2, sort_keys=True)
+                lines.extend(f"      {line}" for line in schema.splitlines())
+        lines.append("")
+
+    _section("Ring 1 — read / orient", ring1)
+    _section("Ring 1 read / Ring 2 update", directional)
+    _section("Ring 2 — proposal only", ring2)
+
+    lines.extend(
+        [
+            "Native write translations:",
+            "  • record_insight → propose_insight",
+            "  • record_learning → propose_learning",
+            "  • close_session → end_bridge_session",
+            "",
+            "Every Ring 2 call creates a pending proposal; it does not commit to the Stack.",
+        ]
+    )
+    return "\n".join(lines).rstrip() + "\n"
 
 
 # ── Call dispatchers ──────────────────────────────────────────────────────────
