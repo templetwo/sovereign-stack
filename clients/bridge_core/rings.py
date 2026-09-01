@@ -36,6 +36,8 @@ surface and bypasses the ring filter entirely. Every other substrate is ringed.
 CANONICAL_RING_1: frozenset[str] = frozenset({
     # Orientation / boot
     "where_did_i_leave_off",
+    "arrive",
+    "arrive_lineage",
     "start_here",
     "my_toolkit",
     "connectivity_status",
@@ -51,6 +53,13 @@ CANONICAL_RING_1: frozenset[str] = frozenset({
     "get_inheritable_context",
     "check_mistakes",
     "reflexive_surface",
+    # Provenance / standing-state reads added after the original 78-tool map.
+    # Each is side-effect-free and explicitly admitted here; new Stack tools
+    # still default to Ring 3 until Anthony adds them to this allowlist.
+    "current_policies",
+    "inspect_claim",
+    "season_review",
+    "the_ground",
     # Threads
     "get_open_threads",
     "triage_threads",
