@@ -325,7 +325,10 @@ class TestConsumedCountReporting:
         assert len(state.handoffs) == 20  # unconsumed()'s cap
         assert state.total_unconsumed_count == 25
         text = render_full(state)
-        assert "showing 20 of 25 unconsumed" in text
+        # Wording moved to "unsigned by you" with the signature ledger; the
+        # guarded property — a capped list must never read as the complete
+        # list — is unchanged.
+        assert "showing 20 of 25 unsigned by you" in text
 
     def test_build_arrival_state_omits_truncation_note_under_the_cap(self, tmp_path):
         """Sanity: the ordinary case (few handoffs) must render exactly as
@@ -403,7 +406,10 @@ class TestConsumedCountReporting:
         text = render_full(state)
         assert "HANDOFFS FROM PREVIOUS INSTANCES (1)" in text
         assert "still pending" in text
-        assert "1 additional handoff(s) already consumed earlier — archived" in text
+        # Wording updated with the signature ledger; the PROPERTY is unchanged and is
+        # what this guards: a non-empty pending list must not crowd out disclosure
+        # that a pre-ledger archive exists.
+        assert "1 handoff(s) carry a pre-ledger consumed_at stamp" in text
 
 
 # ── 4. an unidentified reader must not crash boot, and must not erase ───────
