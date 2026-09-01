@@ -312,7 +312,7 @@ class TestSingleDoorway:
 
 class TestRenderDetails:
     def test_consumed_handoff_line_renders_with_count(self, tmp_path: Path):
-        # The default consume=True path prints a "(N handoff(s) marked consumed …)"
+        # The default consume=True path prints a "(N handoff(s) signed by you …)"
         # line the golden (consume=False) never sees. Render it directly.
         root = tmp_path / ".sovereign"
         fx.build_fixture(root)
@@ -320,10 +320,10 @@ class TestRenderDetails:
         from sovereign_stack.arrival_state import render_full
 
         with_consume = render_full(state, consumed_count=2)
-        assert "(2 handoff(s) marked consumed" in with_consume
+        assert "(2 handoff(s) signed by you" in with_consume
         # None (not consumed) omits the line entirely.
         without = render_full(state, consumed_count=None)
-        assert "marked consumed" not in without
+        assert "signed by you" not in without
 
     def test_full_content_and_compact_assemble(self, tmp_path: Path):
         # Light smoke on the other flag combos: they must assemble without error

@@ -828,7 +828,7 @@ def render_full(
             # the oldest pending handoffs are the ones being hidden here.
             lines.append(
                 f"━━━ HANDOFFS FROM PREVIOUS INSTANCES (showing {len(pending)} of "
-                f"{total_pending} unconsumed) ━━━"
+                f"{total_pending} unsigned by you) ━━━"
             )
         else:
             lines.append(f"━━━ HANDOFFS FROM PREVIOUS INSTANCES ({len(pending)}) ━━━")
@@ -839,7 +839,8 @@ def render_full(
             lines.append("")
         if consumed_count is not None:
             lines.append(
-                f"  ({consumed_count} handoff(s) marked consumed — still queryable, won't re-surface)"
+                f"  ({consumed_count} handoff(s) signed by you — they stay visible to "
+                "every other seat; only an explicit retire() clears them for everyone)"
             )
             lines.append("")
         if state.consumed_handoffs_count:
@@ -850,8 +851,10 @@ def render_full(
             # the archive when pending was EMPTY, which is not the live
             # store's typical state (some handoffs are usually pending).
             lines.append(
-                f"  ({state.consumed_handoffs_count} additional handoff(s) already consumed "
-                "earlier — archived, not shown here.)"
+                f"  ({state.consumed_handoffs_count} handoff(s) carry a pre-ledger "
+                "consumed_at stamp. That flag no longer hides anything: it counts as its "
+                "own reader's signature only, so these still surface to any seat that has "
+                "not signed them.)"
             )
             lines.append("")
     else:
