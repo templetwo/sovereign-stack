@@ -33,6 +33,18 @@ class AuditEvent(str, Enum):
     # tamper check and leaves no trace at all.
     RETRY_ARMED = "retry_armed"
     REJECTED = "rejected"
+    # An APPROVED proposal deliberately un-approved and closed. Distinct from
+    # REJECTED on purpose: before this existed the only edges out of `approved`
+    # were `committed` and `commit_failed`, so an approval could never be taken
+    # back — nine approved-never-committed test proposals from 2026-05-25/27 had
+    # no exit at all, and `reject` answered "Cannot reject proposal in status
+    # 'approved'". The terminal status is still `rejected`; this event is what
+    # makes the WITHDRAWAL OF A HUMAN'S APPROVAL legible in the chain, carrying
+    # the prior status and the original reviewer/timestamp that are about to be
+    # overwritten on the proposal file. A revocation that looked like an
+    # ordinary rejection would erase, from the audit trail, the fact that
+    # somebody had once said yes.
+    APPROVAL_REVOKED = "approval_revoked"
     NEEDS_REVISION = "needs_revision"
     CHAIN_VERIFIED = "chain_verified"
     CHAIN_BROKEN = "chain_broken"

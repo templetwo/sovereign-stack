@@ -144,6 +144,25 @@ def validate_pending_write(proposal: Proposal) -> list[str]:
             f"referential check could not run ({type(exc).__name__}) — refusing rather than assuming the target exists"
         )
 
+
+    # DOMAIN-LABEL VALIDATION — the 2026-08-28 commit_failed specimen. A "/" in
+    # a domain validated clean here, was approved by a human, and then died at
+    # commit as a bare ENOENT, because upstream turns that argument into a
+    # shard filename. Refused at PROPOSAL time now, in the vocabulary of the
+    # mistake rather than of a syscall, while the proposer can still fix it.
+    # Same rules as the storage-side gate, deliberately: a looser gate here
+    # lets the class through again, a tighter one refuses writes the Stack
+    # would have taken.
+    try:
+        from bridge_core.target_risk import domain_label_errors
+
+        errors.extend(domain_label_errors(proposal.tool, proposal.arguments))
+    except Exception as exc:  # noqa: BLE001
+        errors.append(
+            f"domain-label check could not run ({type(exc).__name__}) — refusing rather "
+            "than filing a label that may not be addressable"
+        )
+
     # ONE normalisation function, imported by both substrates, so the enum lives
     # in exactly one place. Refuses PAUSE, refuses any unrecognised value, and
     # refuses a canonical meaning in a non-canonical spelling — so anything that
@@ -427,6 +446,15 @@ PROVENANCE_PASSTHROUGH_TARGETS: frozenset[str] = frozenset(
 )
 
 
+# Commit targets whose LIVE Stack inputSchema declares `original_timestamp`.
+# Mirrors bridge_core's set for the same reason VERIFIED_BY_TARGETS is scoped:
+# since `_reject_unknown_params`, forwarding an undeclared parameter turns
+# every commit carrying it into a hard Stack-side error.
+ORIGINAL_TIMESTAMP_TARGETS: frozenset[str] = frozenset(
+    {"record_insight", "record_learning", "record_open_thread"}
+)
+
+
 def build_commit_arguments(proposal: Proposal) -> dict[str, Any]:
     """
     Build the exact ``arguments`` dict forwarded to the Stack REST call.
@@ -463,6 +491,39 @@ def build_commit_arguments(proposal: Proposal) -> dict[str, Any]:
 
     if proposal.commit_target in PROVENANCE_PASSTHROUGH_TARGETS:
         commit_args["source_instance"] = proposal.source_instance
+
+    # FILING TIME -> AUTHORSHIP TIME. A proposal is written at one moment and
+    # drained at another, and the gap is routinely days: the 2026-05-25/27 test
+    # proposals are still pending, and the Grok/GPT pause acknowledgements sat
+    # a full day in their queues before anyone drained them. Committed bare,
+    # every one of those lands in the chronicle under the DRAIN operator's
+    # clock — the substrate-provenance bug one axis over, where the proposer's
+    # identity travelled and their moment did not.
+    #
+    # Per Anthony's 2026-06-19 ruling the Stack sets `timestamp` to this value
+    # and keeps the real write instant as `occurred_at`, so a reader who knows
+    # nothing about either field still finds the entry on the day it was
+    # written. The proposal's own value WINS if it supplied one: an explicit
+    # authorship time from the proposer is better evidence than the envelope's
+    # filing stamp, which is only the best available proxy.
+    if (
+        proposal.commit_target in ORIGINAL_TIMESTAMP_TARGETS
+        and proposal.timestamp
+        and not commit_args.get("original_timestamp")
+    ):
+        commit_args["original_timestamp"] = proposal.timestamp
+
+    # proposal_id DELIBERATELY DOES NOT TRAVEL, and this comment is the record
+    # of why rather than an oversight: no Ring-2 commit target declares it, and
+    # `_reject_unknown_params` (server.py) derives its allowlist from the LIVE
+    # tool registry — so injecting it would make every drained proposal fail on
+    # the Stack with "unknown parameter 'proposal_id'". It is not droppable
+    # either: the storage layer's `**metadata` would keep it, but the MCP
+    # dispatch never reaches that with an undeclared key. The proposal id
+    # remains addressable through the audit trail and the proposal file, which
+    # is where a reader looks for it. Closing this properly means DECLARING
+    # proposal_id on the record_* schemas — a Stack-side change, not a bridge
+    # one, and out of scope here.
 
     return commit_args
 
@@ -755,13 +816,61 @@ def retry_pending_write(proposal_id: str, *, actor: str) -> Proposal:
     return proposal
 
 
-def reject_pending_write(proposal_id: str, reason: str, *, rejected_by: str) -> Proposal:
-    """Mark a pending or needs_revision proposal as rejected."""
+# THE REJECT-EDGE STATE MACHINE. Imported from bridge_core so the two
+# substrates cannot drift: this module and bridge_core/pending_writes.py are
+# separate implementations of the same governance, and the last time a
+# guarantee held on one and not the other (provenance passthrough, 2026-08-03
+# -> 2026-08-30) it was "true for grok and FALSE for openai" for 27 days
+# without anybody noticing. A guarantee that holds on one substrate is not a
+# guarantee; it is a guarantee-shaped belief.
+from bridge_core.pending_writes import (  # noqa: E402
+    _REJECTABLE_STATUSES,
+    _REVOCABLE_STATUSES,
+    _reject_refusal_message,
+)
+
+
+def reject_pending_write(
+    proposal_id: str,
+    reason: str,
+    *,
+    rejected_by: str,
+    revoke_approval: bool = False,
+) -> Proposal:
+    """Mark a pending, needs_revision — or, with ``revoke_approval``, an
+    APPROVED — proposal as rejected.
+
+    THE MISSING EDGE. The only transitions out of `approved` were `committed`
+    and `commit_failed`: an approval, once given, could not be taken back. Nine
+    approved-never-committed test proposals ("Test: does the membrane hold?",
+    2026-05-25/27) have therefore sat in the queue with no exit, and ``reject``
+    answered "Cannot reject proposal in status 'approved'".
+
+    THE FLAG IS THE GATE, and it is deliberately not a default. Un-approving is
+    a governance act on a human's decision, not a queue-tidying convenience —
+    it must be typed on purpose. Default ``reject`` keeps refusing an approved
+    proposal with the same error it always gave, now with a pointer to the flag.
+
+    ``committed`` IS NEVER REVOCABLE, flag or not: that write is already in the
+    chronicle, and a queue that says "rejected" over a chronicle that says
+    "written" is a worse record than no edge at all.
+
+    ``commit_result`` IS LEFT UNTOUCHED — it is the evidence of what actually
+    happened at the Stack, and a revocation must not edit that history.
+    """
     rejected_by = _require_reviewer(rejected_by, "rejected_by")
     proposal, path = _load_proposal(proposal_id)
 
-    if proposal.status not in ("pending", "needs_revision"):
-        raise ValueError(f"Cannot reject proposal in status '{proposal.status}'")
+    allowed = _REVOCABLE_STATUSES if revoke_approval else _REJECTABLE_STATUSES
+    if proposal.status not in allowed:
+        raise ValueError(_reject_refusal_message(proposal.status, revoke_approval))
+
+    # Captured BEFORE the assignments below overwrite them. These three fields
+    # ARE the approval being revoked; losing them to the reject stamp would
+    # leave a chain that cannot say who had approved this, or when.
+    prior_status = proposal.status
+    prior_reviewed_by = proposal.reviewed_by
+    prior_reviewed_at = proposal.reviewed_at
 
     proposal.status = "rejected"
     proposal.reviewed_by = rejected_by
@@ -769,6 +878,33 @@ def reject_pending_write(proposal_id: str, reason: str, *, rejected_by: str) -> 
     proposal.revision_notes = reason
 
     _save_proposal(proposal, path)
+
+    if prior_status == "approved":
+        append_audit_event(
+            AuditEvent.APPROVAL_REVOKED,
+            proposal_id=proposal_id,
+            actor=rejected_by,
+            details={
+                "reason": reason,
+                "tool": proposal.tool,
+                "prior_status": prior_status,
+                "prior_reviewed_by": prior_reviewed_by,
+                "prior_reviewed_at": prior_reviewed_at,
+                # Stated explicitly so a reader counting outcomes by event type
+                # is not silently short one rejection.
+                "resulting_status": "rejected",
+            },
+        )
+        logger.info(
+            "Proposal APPROVAL REVOKED: %s by %s (was approved by %s at %s) reason=%s",
+            proposal_id,
+            rejected_by,
+            prior_reviewed_by,
+            prior_reviewed_at,
+            reason,
+        )
+        return proposal
+
     append_audit_event(
         AuditEvent.REJECTED,
         proposal_id=proposal_id,

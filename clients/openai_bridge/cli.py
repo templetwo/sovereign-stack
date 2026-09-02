@@ -7,7 +7,8 @@ Usage (after install or python -m invocation):
     bridge list-pending
     bridge show <proposal_id>
     bridge approve <proposal_id>
-    bridge reject <proposal_id> --reason "..."
+    bridge reject <proposal_id> --reason "..." --by "..."
+    bridge reject <proposal_id> --reason "..." --by "..." --revoke-approval
     bridge needs-revision <proposal_id> --reason "..."
     bridge commit <proposal_id> [--live]
     bridge audit-tail [--n 20]
@@ -191,18 +192,41 @@ def approve(proposal_id: str, by: str):
         sys.exit(1)
 
 
+def _status_before(proposal_id: str) -> str | None:
+    """The proposal's status BEFORE the operation, read for display only.
+
+    The proposal returned by reject_pending_write is already stamped
+    `rejected`, so the console could not otherwise tell an ordinary rejection
+    from the withdrawal of an approval — which is the one thing the operator
+    most needs to see confirmed. A read failure degrades the label, never the
+    operation.
+    """
+    try:
+        for row in list_pending_writes(status=None) or []:
+            if str(row.get("proposal_id", "")).startswith(proposal_id):
+                return row.get("status")
+    except Exception:  # noqa: BLE001
+        return None
+    return None
+
+
 # ── reject ────────────────────────────────────────────────────────────────────
 
 @cli.command("reject")
 @click.argument("proposal_id")
 @click.option("--reason", required=True, help="Rejection reason")
 @click.option("--by", required=True, help="Reviewer identity — REQUIRED. Name yourself; automated callers must not inherit a human's name.")
-def reject(proposal_id: str, reason: str, by: str):
-    """Reject a pending proposal."""
+@click.option("--revoke-approval", "revoke_approval", is_flag=True, default=False, help="REVOKE A HUMAN APPROVAL: also allow rejecting a proposal in status 'approved'. Off by default — un-approving is a governance act on a human's decision, not queue tidying, so it must be typed on purpose. Never permits committed -> rejected. Writes an approval_revoked audit entry carrying the prior status and the original reviewer/timestamp.")
+def reject(proposal_id: str, reason: str, by: str, revoke_approval: bool):
+    """Reject a pending proposal (or, with --revoke-approval, an approved one)."""
     try:
-        p = reject_pending_write(proposal_id, reason=reason, rejected_by=by)
+        was_approved = revoke_approval and _status_before(proposal_id) == "approved"
+        p = reject_pending_write(
+            proposal_id, reason=reason, rejected_by=by, revoke_approval=revoke_approval
+        )
+        label = "APPROVAL REVOKED" if was_approved else "Rejected"
         click.echo(
-            f"Rejected: {_short(p.proposal_id)}  [{p.tool}]  "
+            f"{label}: {_short(p.proposal_id)}  [{p.tool}]  "
             f"reason={reason}"
         )
     except (FileNotFoundError, ValueError) as e:

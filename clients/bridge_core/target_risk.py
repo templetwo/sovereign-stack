@@ -395,6 +395,76 @@ def referential_errors(
     ]
 
 
+# ─── Domain-label validation ──────────────────────────────────────────────────
+#
+# WHY THIS IS A PROPOSAL-TIME GATE AND NOT ONLY A STORAGE ONE.
+#
+# LIVE SPECIMEN, 2026-08-28: a `propose_learning` proposal was filed with a "/"
+# in its domain. It validated clean, was APPROVED by a human, and then died at
+# commit — the Stack addresses a learnings shard as
+# `learnings_dir/{applies_to}.jsonl`, so the separator asked for a subdirectory
+# nobody had created and the write came back as a bare ENOENT. The proposal is
+# still sitting in commit_failed.
+#
+# Every layer behaved "correctly" and the outcome was still the worst available
+# one: the defect was detectable at the moment it was typed, and instead it was
+# reported after a human had spent their approval on it, in the vocabulary of a
+# syscall rather than of the mistake. The storage-side gate (memory.py's
+# `_validate_domain_label`, now on all three record paths) is the last line and
+# must stay. THIS is the line that tells the PROPOSER, while they can still fix
+# it.
+#
+# The rules are deliberately identical to the storage gate's, because a
+# proposal-time gate that is LOOSER than storage lets the same class through
+# again, and one that is TIGHTER refuses proposals the Stack would have
+# accepted — either drift reintroduces the surprise this closes.
+_DOMAIN_ARG_BY_TOOL: dict[str, str] = {
+    # proposal tool name -> the argument that becomes a shard FILENAME upstream
+    "propose_insight": "domain",
+    "record_insight": "domain",
+    "propose_learning": "applies_to",
+    "record_learning": "applies_to",
+    "record_open_thread": "domain",
+}
+
+
+def domain_label_errors(tool_name: str, args: dict) -> list[str]:
+    """HARD validation errors for a domain-shaped argument that is not a label.
+
+    A domain is a LABEL, not a path: it becomes a directory or a filename in
+    the chronicle. Refused rather than escaped — an escaped domain would land
+    the entry somewhere no exact-match recall ever queries, which is the quiet
+    version of the same loss (SOP #10: the bytes survive, the address does
+    not).
+    """
+    field = _DOMAIN_ARG_BY_TOOL.get(tool_name)
+    if field is None:
+        return []
+    raw = args.get(field)
+    if raw is None:
+        return []  # absent is fine — upstream applies its own default
+    if not isinstance(raw, str) or not raw.strip():
+        return [f"{tool_name}: '{field}' must be a non-empty label"]
+    value = raw.strip()
+    problems: list[str] = []
+    if "/" in value or "\\" in value or "\x00" in value:
+        problems.append("path separators are not allowed; use commas for compound tags")
+    if value in (".", ".."):
+        problems.append("'.' and '..' are traversal tokens, not labels")
+    elif value.startswith("."):
+        problems.append(
+            "a leading dot makes the shard hidden from every reader that walks the store"
+        )
+    if not problems:
+        return []
+    return [
+        f"{tool_name}: invalid {field} {raw!r} — a domain is a label, not a path "
+        f"({'; '.join(problems)}). This is refused HERE so you can fix it now; "
+        "uncaught, it reaches the chronicle write path and fails as a bare "
+        "filesystem error after a human has already approved it."
+    ]
+
+
 # ─── Compass value handling ───────────────────────────────────────────────────
 #
 # THE COMPASS RESULT IS SELF-REPORTED FREE TEXT FROM AN EXTERNAL SUBSTRATE.

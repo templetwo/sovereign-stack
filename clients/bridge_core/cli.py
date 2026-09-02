@@ -61,6 +61,25 @@ def _short(proposal_id: str) -> str:
     return proposal_id[:8] if proposal_id else "?"
 
 
+def _status_of(ops, proposal_id: str) -> str | None:
+    """The proposal's status BEFORE the operation, read for display only.
+
+    Read here rather than returned by reject_pending_write because the returned
+    proposal is already stamped `rejected` — the console would otherwise report
+    an ordinary rejection for what was in fact the withdrawal of an approval,
+    which is the one thing the operator most needs to see confirmed. Display
+    only: never load-bearing, and a read failure degrades the label, not the
+    operation.
+    """
+    try:
+        for row in ops.list("all") or []:
+            if str(row.get("proposal_id", "")).startswith(proposal_id):
+                return row.get("status")
+    except Exception:  # noqa: BLE001
+        return None
+    return None
+
+
 # ── Substrate dispatch ────────────────────────────────────────────────────────
 
 class _SubstrateOps:
@@ -82,7 +101,9 @@ class _SubstrateOps:
                 retry_pending_write,
             )
             self._approve = lambda pid, by: approve_pending_write(pid, approved_by=by)
-            self._reject = lambda pid, reason, by: reject_pending_write(pid, reason=reason, rejected_by=by)
+            self._reject = lambda pid, reason, by, revoke=False: reject_pending_write(
+                pid, reason=reason, rejected_by=by, revoke_approval=revoke
+            )
             self._needs_revision = lambda pid, notes, by: needs_revision_pending_write(pid, notes=notes, actor=by)
             self._commit = lambda pid, live: commit_pending_write(pid, live=live)
             self._list = lambda status: list_pending_writes(status=status)
@@ -108,7 +129,9 @@ class _SubstrateOps:
             )
             ctx = get_context("grok-xai")
             self._approve = lambda pid, by: approve_pending_write(ctx, pid, approved_by=by)
-            self._reject = lambda pid, reason, by: reject_pending_write(ctx, pid, reason=reason, rejected_by=by)
+            self._reject = lambda pid, reason, by, revoke=False: reject_pending_write(
+                ctx, pid, reason=reason, rejected_by=by, revoke_approval=revoke
+            )
             self._needs_revision = lambda pid, notes, by: needs_revision_pending_write(ctx, pid, notes=notes, actor=by)
             self._commit = lambda pid, live: commit_pending_write(ctx, pid, live=live)
             self._list = lambda status: list_pending_writes(ctx, status=status)
@@ -128,7 +151,7 @@ class _SubstrateOps:
 
     def list(self, status):       return self._list(status)
     def approve(self, pid, by):   return self._approve(pid, by)
-    def reject(self, pid, r, by): return self._reject(pid, r, by)
+    def reject(self, pid, r, by, revoke=False): return self._reject(pid, r, by, revoke)
     def needs_revision(self, pid, n, by): return self._needs_revision(pid, n, by)
     def commit(self, pid, live):  return self._commit(pid, live)
     def read_audit(self, pid):    return self._read_audit(pid)
@@ -281,13 +304,16 @@ def approve(ctx, proposal_id: str, by: str):
 @click.argument("proposal_id")
 @click.option("--reason", required=True, help="Rejection reason")
 @click.option("--by", required=True, help="Reviewer identity — REQUIRED. Name yourself; automated callers must not inherit a human's name.")
+@click.option("--revoke-approval", "revoke_approval", is_flag=True, default=False, help="REVOKE A HUMAN APPROVAL: also allow rejecting a proposal in status 'approved'. Off by default — un-approving is a governance act on a human's decision, not queue tidying, so it must be typed on purpose. Never permits committed -> rejected. Writes an approval_revoked audit entry carrying the prior status and the original reviewer/timestamp.")
 @click.pass_context
-def reject(ctx, proposal_id: str, reason: str, by: str):
-    """Reject a pending proposal."""
+def reject(ctx, proposal_id: str, reason: str, by: str, revoke_approval: bool):
+    """Reject a pending proposal (or, with --revoke-approval, an approved one)."""
     ops = ctx.obj["ops"]
     try:
-        p = ops.reject(proposal_id, reason, by)
-        click.echo(f"Rejected: {_short(p.proposal_id)}  [{p.tool}]  reason={reason}")
+        was_approved = revoke_approval and _status_of(ops, proposal_id) == "approved"
+        p = ops.reject(proposal_id, reason, by, revoke_approval)
+        label = "APPROVAL REVOKED" if was_approved else "Rejected"
+        click.echo(f"{label}: {_short(p.proposal_id)}  [{p.tool}]  reason={reason}")
     except (FileNotFoundError, ValueError) as e:
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)
