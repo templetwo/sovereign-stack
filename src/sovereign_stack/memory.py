@@ -196,6 +196,98 @@ def _validate_domain_label(domain: str) -> None:
         )
     if domain in (".", ".."):
         raise ValueError(f"invalid domain {domain!r}: a domain is a label, not a path")
+    # A leading dot makes the shard a HIDDEN directory/file, and the house's
+    # ONE walk (iter_thread_shards) deliberately skips dotted paths so a
+    # ".pre-md-backup-20260609/" style migration copy can never be folded back
+    # into the live corpus. A domain that starts with a dot therefore writes a
+    # record no reader can reach — reachability loss with an ok:true receipt,
+    # which is the exact class this gate exists to close (SOP #10).
+    # Measured before tightening: ZERO live domains under
+    # ~/.sovereign/chronicle/{insights,open_threads} begin with a dot, so this
+    # closes a door nothing is standing in.
+    if domain.startswith("."):
+        raise ValueError(
+            f"invalid domain {domain!r}: a domain must not start with '.' "
+            "(a dotted shard is hidden from every reader that walks the store)"
+        )
+
+
+# ── Authorship time: BACKDATE IN PLACE, keep both axes ───────────────────────
+#
+# ANTHONY'S RULING, 2026-06-19 (Stack domain
+# `lineage,never-forget,migrated-vault,timestamp-restoration,backdate-decided,...`),
+# and it rejects the obvious alternative BY NAME: back-date `timestamp` itself
+# to the real source date — "every reader's sort/filter then finds them, zero
+# code changes" — AND keep a provenance marker, because an occurred_at-only
+# design "lets any un-taught reader silently miss them". Recency-ordered
+# recall, the date-bounded readers, the boot surfaces and the dashboards all
+# key on `timestamp`; teaching each of them a second field is a migration with
+# a long tail of readers that never learn, and every one of those readers goes
+# on being confidently wrong.
+#
+# So: `original_timestamp` in -> the entry's `timestamp` IS that value, the
+# entry's `occurred_at` records the actual WRITE INSTANT, and
+# `timestamp_source` says out loud that this entry was stamped rather than
+# observed. Nothing is lost and nothing has to be taught. This is the shape the
+# 2026-06-19 vault restore already used on 1,024 rows.
+#
+# CONSEQUENCE, stated here because it is easy to miss and expensive to
+# discover: `provenance.derive_claim_id` hashes timestamp + domain + content,
+# so setting `timestamp` DOES change the entry's claim id. That is fine for a
+# new write (no id existed yet) and is the whole risk of a backfill over
+# already-cited entries — see scripts/backfill_occurred_at.py, which reports
+# every planned rewrite that is cited elsewhere and refuses to be quiet about it.
+ORIGINAL_TIMESTAMP_FLOOR = datetime(2024, 1, 1, tzinfo=timezone.utc)
+# Clock skew allowance. A seat on a slightly fast clock, or one stamping "now"
+# from another machine, must not be refused; a value hours or days ahead is a
+# typo or a fabrication and is.
+ORIGINAL_TIMESTAMP_MAX_FUTURE_SKEW_SECONDS = 300
+TIMESTAMP_SOURCE_ORIGINAL = "original_timestamp"
+
+
+def _validate_original_timestamp(value: str) -> str:
+    """Validate a caller-supplied authorship time and return it VERBATIM.
+
+    REJECTS, never silently drops. A dropped original_timestamp is the
+    fail-open shape this house keeps paying for: the caller is told ok:true and
+    the entry carries the filing instant as if it were the authorship time,
+    which is indistinguishable from a correct write to every later reader.
+
+    RETURNED VERBATIM, not normalized. The live store already holds both shapes
+    under the sibling field — 1,024 full ISO datetimes from the vault import
+    and 31 date-only strings from ``ground.record_catch``, measured
+    2026-09-01 — and the readers slice ``[:10]`` and string-sort, which is
+    correct for both. Normalizing a date-only value would invent a
+    time-of-day and a timezone the caller never claimed.
+    """
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("original_timestamp must be a non-empty ISO-8601 string")
+    raw = value.strip()
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        raise ValueError(
+            f"original_timestamp must parse as ISO-8601 (e.g. '2026-06-19' or "
+            f"'2026-06-19T05:18:19+00:00'), got {raw!r}"
+        ) from None
+    # A naive value is read as UTC for the BOUNDS CHECK only; the stored string
+    # keeps whatever the caller wrote.
+    compare = parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+    if compare < ORIGINAL_TIMESTAMP_FLOOR:
+        raise ValueError(
+            f"original_timestamp {raw!r} is before "
+            f"{ORIGINAL_TIMESTAMP_FLOOR.date().isoformat()} — refused as a probable typo; "
+            "nothing in this chronicle predates it"
+        )
+    now = datetime.now(timezone.utc)
+    ahead = (compare - now).total_seconds()
+    if ahead > ORIGINAL_TIMESTAMP_MAX_FUTURE_SKEW_SECONDS:
+        raise ValueError(
+            f"original_timestamp {raw!r} is {int(ahead)}s in the future (allowance is "
+            f"{ORIGINAL_TIMESTAMP_MAX_FUTURE_SKEW_SECONDS}s of clock skew) — "
+            "a thing cannot have happened after it was recorded"
+        )
+    return raw
 
 
 def _last_jsonl_entry(path: Path) -> dict | None:
@@ -805,6 +897,7 @@ class ExperientialMemory:
         emotion_source: str = None,
         emotion_note: str = None,
         content_class: str = None,
+        original_timestamp: str = None,
         return_claim_id: bool = False,
         **metadata,
     ) -> str:
@@ -862,6 +955,18 @@ class ExperientialMemory:
                    fixing it is anthony_declared / anthony_corrected. He is the
                    authority on his own felt experience.
             emotion_note: Optional short nuance string on the feeling.
+            original_timestamp: Optional ISO-8601 AUTHORSHIP time for a record being
+                   filed after the fact (a drained bridge proposal, an import, a
+                   note written up the next morning). When given, the entry's
+                   `timestamp` IS this value — so every existing reader's sort and
+                   filter finds it where it belongs — and the real write instant is
+                   preserved as `occurred_at`, with `timestamp_source` naming the
+                   substitution. Anthony's 2026-06-19 ruling; an occurred_at-only
+                   design was rejected because it lets an un-taught reader silently
+                   miss the entry. Must parse, be >= 2024-01-01, and not be more
+                   than 5 minutes in the future. Rejected, never dropped.
+                   CHANGES THE ENTRY'S claim_id (timestamp is in the preimage) —
+                   harmless for a new write, load-bearing for any backfill.
             content_class: Optional CLOSED-vocabulary tag naming WHAT KIND of
                    claim this is — one of CONTENT_CLASSES (outcome |
                    specification | governance | provenance | process). The
@@ -947,6 +1052,12 @@ class ExperientialMemory:
         # as untagged.
         if content_class is not None and content_class not in self.CONTENT_CLASSES:
             raise ValueError(f"content_class must be one of {sorted(self.CONTENT_CLASSES)}")
+
+        # Authorship time (task #7, Anthony's ruling 2026-06-19). Validated
+        # here — before the write instant, the dedup probe and any filesystem
+        # call — so a rejected value writes nothing at all.
+        if original_timestamp is not None:
+            original_timestamp = _validate_original_timestamp(original_timestamp)
 
         timestamp = datetime.now(timezone.utc)
         session_id = session_id or f"session_{timestamp.strftime('%Y%m%d_%H%M%S')}"
@@ -1036,6 +1147,24 @@ class ExperientialMemory:
             # dict (and thus the JSONL bytes) identical to an untagged write.
             if content_class is not None:
                 insight["content_class"] = content_class
+            # BACKDATE IN PLACE, per the 2026-06-19 ruling. Assigned AFTER the
+            # **metadata splat so the named, VALIDATED parameter always wins.
+            # `timestamp` becomes the authorship time (so every existing reader
+            # finds this entry where it belongs, untaught); `occurred_at`
+            # records the real write instant, which is the provenance half the
+            # ruling insists on keeping; `timestamp_source` says out loud that
+            # this row was stamped rather than observed, so no later reader has
+            # to infer it. The write instant is NOT discarded — it is only
+            # moved out of the sort key.
+            #
+            # NOTE: the dedup probe and session_id above deliberately keep
+            # using the WRITE INSTANT. Deduping on a backdated stamp would
+            # compare this write against a window that has nothing to do with
+            # when the retry actually arrived.
+            if original_timestamp is not None:
+                insight["timestamp"] = original_timestamp
+                insight["occurred_at"] = timestamp.isoformat()
+                insight["timestamp_source"] = TIMESTAMP_SOURCE_ORIGINAL
             if stamped_receipts:
                 insight["verified_by"] = stamped_receipts
             if resolved_predecessors:
@@ -1103,6 +1232,7 @@ class ExperientialMemory:
         what_learned: str,
         applies_to: str = "general",
         session_id: str = None,
+        original_timestamp: str = None,
     ) -> str:
         """
         Record a learning from experience.
@@ -1110,12 +1240,30 @@ class ExperientialMemory:
         Args:
             what_happened: The situation or mistake
             what_learned: The lesson extracted
-            applies_to: Context where this applies
+            applies_to: Context where this applies — a LABEL, not a path; it
+                   becomes the shard filename, so separators are refused
             session_id: Current session identifier
+            original_timestamp: Optional ISO-8601 authorship time. Same contract as
+                   record_insight: `timestamp` becomes this value, `occurred_at`
+                   keeps the write instant, `timestamp_source` names it.
 
         Returns:
             Path to the recorded learning
         """
+        # FAIL CLOSED ON THE LABEL, and this is the specimen that earned it: a
+        # propose_learning proposal filed 2026-08-28 carried a domain with a
+        # "/" in it, was approved, and died at commit — this path addresses its
+        # shard as `learnings_dir/{applies_to}.jsonl`, so the separator asked
+        # for a SUBDIRECTORY nobody had created and the write came back as a
+        # bare ENOENT. record_insight has had this gate since P1
+        # (mesh-20260719); its two sibling write paths never got it. A raw
+        # OSError is not a validation error — it names a syscall, not the
+        # caller's mistake.
+        applies_to = _normalize_domain(applies_to)
+        _validate_domain_label(applies_to)
+        if original_timestamp is not None:
+            original_timestamp = _validate_original_timestamp(original_timestamp)
+
         timestamp = datetime.now(timezone.utc)
         session_id = session_id or f"session_{timestamp.strftime('%Y%m%d_%H%M%S')}"
 
@@ -1126,6 +1274,10 @@ class ExperientialMemory:
             "applies_to": applies_to,
             "session_id": session_id,
         }
+        if original_timestamp is not None:
+            learning["timestamp"] = original_timestamp
+            learning["occurred_at"] = timestamp.isoformat()
+            learning["timestamp_source"] = TIMESTAMP_SOURCE_ORIGINAL
 
         jsonl_path = self.learnings_dir / f"{applies_to}.jsonl"
         with open(jsonl_path, "a") as f:
@@ -1166,7 +1318,12 @@ class ExperientialMemory:
         return str(jsonl_path)
 
     def record_open_thread(
-        self, question: str, context: str = "", domain: str = "general", session_id: str = None
+        self,
+        question: str,
+        context: str = "",
+        domain: str = "general",
+        session_id: str = None,
+        original_timestamp: str = None,
     ) -> str:
         """
         Record an unresolved question for the next instance to explore.
@@ -1181,12 +1338,22 @@ class ExperientialMemory:
         Args:
             question: The open question (auto-split if bundled)
             context: What led to this question
-            domain: Knowledge domain
+            domain: Knowledge domain — a LABEL, not a path; it becomes the
+                   shard filename, so separators are refused
             session_id: Current session identifier
+            original_timestamp: Optional ISO-8601 authorship time. Same contract as
+                   record_insight.
 
         Returns:
             Path to the recorded thread
         """
+        # Same gate, same reason as record_learning above: this domain becomes
+        # a filename, and a "/" in it asked for a directory nothing created.
+        domain = _normalize_domain(domain)
+        _validate_domain_label(domain)
+        if original_timestamp is not None:
+            original_timestamp = _validate_original_timestamp(original_timestamp)
+
         timestamp = datetime.now(timezone.utc)
         session_id = session_id or f"session_{timestamp.strftime('%Y%m%d_%H%M%S')}"
 
@@ -1207,6 +1374,15 @@ class ExperientialMemory:
                     "layer": self.LAYER_OPEN_THREAD,
                     "resolved": False,
                 }
+                if original_timestamp is not None:
+                    # thread_id is derived from (question, timestamp) ABOVE and
+                    # is deliberately left on the write instant: it is an
+                    # opaque address other records already point at, not a
+                    # sortable field, and re-deriving it from a backdated
+                    # stamp would move an id for no reader's benefit.
+                    thread["timestamp"] = original_timestamp
+                    thread["occurred_at"] = timestamp.isoformat()
+                    thread["timestamp_source"] = TIMESTAMP_SOURCE_ORIGINAL
                 f.write(json.dumps(thread) + "\n")
 
         return str(jsonl_path)

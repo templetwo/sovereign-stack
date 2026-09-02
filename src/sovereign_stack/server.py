@@ -611,6 +611,26 @@ async def list_tools():
                                 "tagging never shifts an entry's id."
                             ),
                         },
+                        "original_timestamp": {
+                            "type": "string",
+                            "description": (
+                                "Optional ISO-8601 AUTHORSHIP time, for a record you are "
+                                "filing AFTER THE FACT — a bridge proposal drained days "
+                                "later, an imported note, a lived entry written up the "
+                                "next morning. When given, this entry's `timestamp` IS "
+                                "this value, so every reader's existing sort and filter "
+                                "finds it where it belongs; the real write instant is "
+                                "kept as `occurred_at` and `timestamp_source` names the "
+                                "substitution. (Anthony's 2026-06-19 ruling: an "
+                                "occurred_at-only design was rejected by name, because "
+                                "it lets an un-taught reader silently miss the entry.) "
+                                "Must parse; must be >= 2024-01-01; must not be more "
+                                "than 5 minutes ahead of now. An invalid value REJECTS "
+                                "the whole call — it is never silently dropped. NOTE: "
+                                "`timestamp` is in the claim_id preimage, so this "
+                                "changes the id this entry would otherwise have had."
+                            ),
+                        },
                         "return_claim_id": {
                             "type": "boolean",
                             "default": False,
@@ -718,7 +738,36 @@ async def list_tools():
                     "properties": {
                         "what_happened": {"type": "string"},
                         "what_learned": {"type": "string"},
-                        "applies_to": {"type": "string", "default": "general"},
+                        "applies_to": {
+                            "type": "string",
+                            "default": "general",
+                            "description": (
+                                "Context label this applies to. A LABEL, NOT A PATH — it "
+                                "becomes the shard filename, so '/', '\\', NUL, '.', '..' "
+                                "and a leading dot are refused with a named validation "
+                                "error instead of an ENOENT from the filesystem."
+                            ),
+                        },
+                        "original_timestamp": {
+                            "type": "string",
+                            "description": (
+                                "Optional ISO-8601 AUTHORSHIP time, for a record you are "
+                                "filing AFTER THE FACT — a bridge proposal drained days "
+                                "later, an imported note, a lived entry written up the "
+                                "next morning. When given, this entry's `timestamp` IS "
+                                "this value, so every reader's existing sort and filter "
+                                "finds it where it belongs; the real write instant is "
+                                "kept as `occurred_at` and `timestamp_source` names the "
+                                "substitution. (Anthony's 2026-06-19 ruling: an "
+                                "occurred_at-only design was rejected by name, because "
+                                "it lets an un-taught reader silently miss the entry.) "
+                                "Must parse; must be >= 2024-01-01; must not be more "
+                                "than 5 minutes ahead of now. An invalid value REJECTS "
+                                "the whole call — it is never silently dropped. NOTE: "
+                                "`timestamp` is in the claim_id preimage, so this "
+                                "changes the id this entry would otherwise have had."
+                            ),
+                        },
                     },
                     "required": ["what_happened", "what_learned"],
                 },
@@ -783,7 +832,36 @@ async def list_tools():
                     "properties": {
                         "question": {"type": "string", "description": "The open question"},
                         "context": {"type": "string", "description": "What led to this question"},
-                        "domain": {"type": "string", "default": "general"},
+                        "domain": {
+                            "type": "string",
+                            "default": "general",
+                            "description": (
+                                "Knowledge domain. A LABEL, NOT A PATH — it becomes the "
+                                "shard filename, so '/', '\\', NUL, '.', '..' and a "
+                                "leading dot are refused with a named validation error "
+                                "instead of an ENOENT from the filesystem."
+                            ),
+                        },
+                        "original_timestamp": {
+                            "type": "string",
+                            "description": (
+                                "Optional ISO-8601 AUTHORSHIP time, for a record you are "
+                                "filing AFTER THE FACT — a bridge proposal drained days "
+                                "later, an imported note, a lived entry written up the "
+                                "next morning. When given, this entry's `timestamp` IS "
+                                "this value, so every reader's existing sort and filter "
+                                "finds it where it belongs; the real write instant is "
+                                "kept as `occurred_at` and `timestamp_source` names the "
+                                "substitution. (Anthony's 2026-06-19 ruling: an "
+                                "occurred_at-only design was rejected by name, because "
+                                "it lets an un-taught reader silently miss the entry.) "
+                                "Must parse; must be >= 2024-01-01; must not be more "
+                                "than 5 minutes ahead of now. An invalid value REJECTS "
+                                "the whole call — it is never silently dropped. NOTE: "
+                                "`timestamp` is in the claim_id preimage, so this "
+                                "changes the id this entry would otherwise have had."
+                            ),
+                        },
                     },
                     "required": ["question"],
                 },
@@ -2902,6 +2980,7 @@ async def _dispatch_tool(name: str, arguments: dict):
                 emotion_source=arguments.get("emotion_source"),
                 emotion_note=arguments.get("emotion_note"),
                 content_class=arguments.get("content_class"),
+                original_timestamp=arguments.get("original_timestamp"),
                 return_claim_id=arguments.get("return_claim_id", False),
                 # Reaches the record via **metadata and is stored as a
                 # first-class key. memory.py:1000 already consumed it for the
@@ -2964,9 +3043,20 @@ async def _dispatch_tool(name: str, arguments: dict):
         what_happened = arguments.get("what_happened", "")
         what_learned = arguments.get("what_learned", "")
         applies_to = arguments.get("applies_to", "general")
-        path = experiential.record_learning(
-            what_happened, what_learned, applies_to, spiral_state.session_id
-        )
+        try:
+            path = experiential.record_learning(
+                what_happened,
+                what_learned,
+                applies_to,
+                spiral_state.session_id,
+                original_timestamp=arguments.get("original_timestamp"),
+            )
+        except ValueError as exc:
+            # Label / authorship-time rejections must reach the wire as errors
+            # (isError=True), naming the offending value. Before this, a
+            # separator in applies_to reached the filesystem and came back as a
+            # bare ENOENT: a syscall, not a cause the proposer could act on.
+            raise ValueError(f"record_learning rejected: {exc}") from exc
         return [
             TextContent(type="text", text=f"{glyph_for('gentle_ache')} Learning recorded: {path}")
         ]
@@ -3035,7 +3125,16 @@ async def _dispatch_tool(name: str, arguments: dict):
         question = arguments.get("question", "")
         context = arguments.get("context", "")
         domain = arguments.get("domain", "general")
-        path = experiential.record_open_thread(question, context, domain, spiral_state.session_id)
+        try:
+            path = experiential.record_open_thread(
+                question,
+                context,
+                domain,
+                spiral_state.session_id,
+                original_timestamp=arguments.get("original_timestamp"),
+            )
+        except ValueError as exc:
+            raise ValueError(f"record_open_thread rejected: {exc}") from exc
         return [TextContent(type="text", text=f"Thread recorded: {question[:80]}... → {path}")]
 
     if name == "resolve_thread":
