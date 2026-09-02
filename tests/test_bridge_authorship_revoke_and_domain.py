@@ -468,3 +468,45 @@ class TestTheConsolesExposeIt:
         flag = next(o for o in cmd.params if o.name == "revoke_approval")
         assert flag.default is False
         assert flag.is_flag
+
+
+class TestTheConsoleLabelsARevocationCorrectly:
+    """The console must SAY it revoked an approval. The label is display-only,
+    which is precisely why it degrades silently when its status probe is wrong
+    — the operator then reads "Rejected" for a governance act on a human's
+    decision and has no way to tell the difference."""
+
+    def _ops(self, ctx):
+        from bridge_core.cli import _SubstrateOps
+
+        ops = _SubstrateOps.__new__(_SubstrateOps)
+        ops._list = lambda status: __import__(
+            "bridge_core.pending_writes", fromlist=["list_pending_writes"]
+        ).list_pending_writes(ctx, status=status)
+        return ops
+
+    def test_the_status_probe_finds_an_approved_proposal(self, ctx):
+        """`ops.list("all")` filters for a status literally equal to "all" and
+        returns nothing — the list COMMAND maps "all" -> None before calling,
+        but the ops shim forwards its argument raw."""
+        from bridge_core.cli import _status_of
+
+        p = _propose(ctx, "propose_insight", {"domain": "d", "content": "c"})
+        approve_pending_write(ctx, p.proposal_id, approved_by="Anthony")
+        assert _status_of(self._ops(ctx), p.proposal_id) == "approved"
+
+    def test_the_probe_degrades_rather_than_raising(self, ctx):
+        """Display only: a read failure must cost the label, never the
+        operation."""
+        from bridge_core.cli import _status_of
+
+        class _Broken:
+            def list(self, status):
+                raise RuntimeError("queue unreadable")
+
+        assert _status_of(_Broken(), "whatever") is None
+
+    def test_an_unknown_id_probes_to_none(self, ctx):
+        from bridge_core.cli import _status_of
+
+        assert _status_of(self._ops(ctx), "no-such-proposal") is None

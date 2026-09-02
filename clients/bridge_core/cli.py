@@ -72,7 +72,13 @@ def _status_of(ops, proposal_id: str) -> str | None:
     operation.
     """
     try:
-        for row in ops.list("all") or []:
+        # None, NOT "all": the list COMMAND maps "all" -> None before calling,
+        # but the ops shim forwards its argument raw, so ops.list("all")
+        # filters for a status literally equal to "all" and returns nothing —
+        # every revoke would then print the ordinary "Rejected" label. Caught
+        # by review, not by a test, because the label is display-only and
+        # degrades silently. That is exactly why it is worth getting right.
+        for row in ops.list(None) or []:
             if str(row.get("proposal_id", "")).startswith(proposal_id):
                 return row.get("status")
     except Exception:  # noqa: BLE001

@@ -232,13 +232,44 @@ class TestTheCitationReport:
         assert again["citations"], "a citation on disk must be reported"
         assert any("supersessions" in w for w in again["citations"][old_id])
 
-    def test_an_entry_is_not_a_citation_of_itself(self, tmp_path):
-        """Its own shard contains its content, not its id — but if the id form
-        ever changes, this is the assertion that stops the report inflating."""
+    def test_an_uncited_entry_reports_no_citation(self, tmp_path):
+        """A claim id is derived on read and never stored, so an entry cannot
+        contain its own id. No citation anywhere means an empty report."""
         root = _store(tmp_path)
         _proposal(root, "p1", content="c1", domain="dom")
         _entry(root, content="c1", domain="dom")
         assert backfill.build_plan(root)["citations"] == {}
+
+    def test_a_citation_in_the_entrys_OWN_shard_is_counted(self, tmp_path):
+        """THE CORRECTION, and the reason the first draft was wrong. A draft
+        excluded the entry's own shard on the reasoning that an entry is not a
+        citation of itself — but ids are never stored, so the only way the id
+        appears in that shard is a DIFFERENT entry citing it, which is the
+        commonest citation shape there is (a same-domain supersession). The
+        exclusion suppressed exactly the rows that matter and understated the
+        one number gating --apply."""
+        root = _store(tmp_path)
+        _proposal(root, "p1", content="c1", domain="dom")
+        _entry(root, content="c1", domain="dom")
+        old_id = backfill.build_plan(root)["matched"][0]["old_claim_id"]
+        _entry(
+            root,
+            content=f"superseding the earlier finding, claim {old_id[:16]}",
+            domain="dom",
+            ts="2026-08-31T00:00:00+00:00",
+        )
+        plan = backfill.build_plan(root)
+        assert old_id in plan["citations"], "an in-shard citation must be counted"
+
+    def test_a_full_64_hex_citation_is_caught_by_the_16_hex_probe(self, tmp_path):
+        root = _store(tmp_path)
+        _proposal(root, "p1", content="c1", domain="dom")
+        _entry(root, content="c1", domain="dom")
+        old_id = backfill.build_plan(root)["matched"][0]["old_claim_id"]
+        (root / "chronicle" / "supersessions.jsonl").write_text(
+            json.dumps({"superseded_id": old_id}) + "\n"
+        )
+        assert old_id in backfill.build_plan(root)["citations"]
 
     def test_backdating_actually_changes_the_claim_id(self, tmp_path):
         """The premise of the whole citation report, asserted rather than
@@ -362,3 +393,64 @@ class TestItNeverReadsTheLiveStore:
         assert "root" in inspect.signature(backfill.find_citations).parameters
         with pytest.raises((SystemExit, TypeError)):
             backfill.build_plan()  # type: ignore[call-arg]
+
+
+class TestTheGapFilter:
+    """A claim-id rewrite buys something only in proportion to how wrong the
+    stamp was. On the live store the MEDIAN correction is 0.02 days and the
+    max is 98 — one undifferentiated total of 46 hides that difference, and
+    it is the difference a human is being asked to decide on."""
+
+    def _two_gaps(self, tmp_path):
+        root = _store(tmp_path)
+        _proposal(root, "quick", content="cq", domain="dom", ts="2026-08-30T02:00:00+00:00")
+        _entry(root, content="cq", domain="dom", ts="2026-08-30T02:30:00+00:00")
+        _proposal(root, "slow", content="cs", domain="dom", ts="2026-05-25T14:00:00+00:00")
+        _entry(root, content="cs", domain="dom", ts="2026-08-30T02:30:00+00:00")
+        return root
+
+    def test_gap_days_measures_the_backdate_distance(self, tmp_path):
+        root = self._two_gaps(tmp_path)
+        gaps = sorted(backfill.gap_days(r) for r in backfill.build_plan(root)["matched"])
+        assert gaps[0] == pytest.approx(0.5 / 24, abs=1e-6)
+        assert gaps[1] > 90
+
+    def test_min_gap_sets_rows_aside_and_still_counts_them(self, tmp_path):
+        """A filtered row is not a dropped row. A report that shrinks its own
+        denominator to look tidy is the fail-open shape in a report's costume."""
+        root = self._two_gaps(tmp_path)
+        plan = backfill.build_plan(root, min_gap_days=1.0)
+        assert len(plan["matched"]) == 1
+        assert plan["matched"][0]["proposal"] == "slow"
+        assert len(plan["below_threshold"]) == 1
+        assert plan["below_threshold"][0]["proposal"] == "quick"
+
+    def test_min_gap_zero_is_the_default_and_filters_nothing(self, tmp_path):
+        root = self._two_gaps(tmp_path)
+        plan = backfill.build_plan(root)
+        assert len(plan["matched"]) == 2
+        assert plan["below_threshold"] == []
+
+    def test_citations_are_computed_after_the_filter(self, tmp_path):
+        """The citation report must describe what would ACTUALLY be rewritten,
+        not a superset — otherwise the number gating --apply is for a different
+        operation than the one about to run."""
+        root = self._two_gaps(tmp_path)
+        quick_id = next(
+            r["old_claim_id"]
+            for r in backfill.build_plan(root)["matched"]
+            if r["proposal"] == "quick"
+        )
+        (root / "chronicle" / "supersessions.jsonl").write_text(
+            json.dumps({"superseded_id": quick_id[:16]}) + "\n"
+        )
+        assert quick_id in backfill.build_plan(root)["citations"]
+        assert quick_id not in backfill.build_plan(root, min_gap_days=1.0)["citations"]
+
+    def test_the_report_buckets_the_distances(self, tmp_path, capsys):
+        root = self._two_gaps(tmp_path)
+        backfill.main(["--root", str(root)])
+        out = capsys.readouterr().out
+        assert "HOW FAR BACK" in out
+        assert "under 1 hour" in out
+        assert "over 7 days" in out

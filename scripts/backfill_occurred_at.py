@@ -179,7 +179,7 @@ def load_insight_index(root: Path) -> tuple[dict, list[str]]:
     return index, problems
 
 
-def build_plan(root: Path) -> dict:
+def build_plan(root: Path, min_gap_days: float = 0.0) -> dict:
     """Everything the dry run reports. Pure: reads, never writes."""
     proposals, proposal_problems = load_committed_proposals(root)
     index, index_problems = load_insight_index(root)
@@ -248,8 +248,24 @@ def build_plan(root: Path) -> dict:
         )
         matched.append(row)
 
+    # --min-gap: rows below the threshold are set aside as BELOW THRESHOLD,
+    # never silently dropped — a filtered-out row is still part of the
+    # denominator and is reported as its own count.
+    below_threshold: list[dict] = []
+    if min_gap_days > 0:
+        kept: list[dict] = []
+        for row in matched:
+            gap = gap_days(row)
+            if gap is not None and gap < min_gap_days:
+                below_threshold.append(row)
+            else:
+                kept.append(row)
+        matched = kept
+
     citations = find_citations(root, matched)
     return {
+        "min_gap_days": min_gap_days,
+        "below_threshold": below_threshold,
         "root": str(root),
         "proposals_committed": len(proposals),
         "matched": matched,
@@ -264,17 +280,26 @@ def build_plan(root: Path) -> dict:
 
 
 def find_citations(root: Path, matched: list[dict]) -> dict[str, list[str]]:
-    """For each planned rewrite, where else in the store its OLD id appears.
+    """For each planned rewrite, where in the store its OLD id appears.
 
     Searches the 16-hex DISPLAY prefix, which is the form entries actually cite
     (provenance.display_id truncates to 16); a full-64 citation contains the
-    prefix, so one probe catches both. The shard the entry itself lives on is
-    excluded from its own count — an entry is not a citation of itself.
+    prefix, so one probe catches both.
+
+    NOTHING IS EXCLUDED, AND THAT IS THE CORRECTION. A first draft skipped the
+    entry's own shard, on the reasoning that "an entry is not a citation of
+    itself". But a claim id is DERIVED ON READ AND NEVER STORED — an entry
+    cannot contain its own id — so the only way that id appears in that shard
+    is a DIFFERENT entry citing it, which is precisely the citation this
+    report exists to count. Excluding the shard suppressed exactly the
+    same-domain supersession, the commonest citation shape there is, and it
+    would have understated the one number gating --apply. The unit test that
+    covered it passed either way, because the fixture had no in-shard citation
+    to miss.
     """
     if not matched:
         return {}
     probes = {row["old_claim_id"][:16]: row["old_claim_id"] for row in matched}
-    own_shard = {row["old_claim_id"][:16]: row.get("shard") for row in matched}
     found: dict[str, list[str]] = {full: [] for full in probes.values()}
     for path in sorted(root.rglob("*")):
         if not path.is_file() or path.suffix not in (".jsonl", ".json", ".md", ".txt"):
@@ -284,9 +309,30 @@ def find_citations(root: Path, matched: list[dict]) -> dict[str, list[str]]:
         except OSError:
             continue
         for prefix, full in probes.items():
-            if prefix in text and str(path) != own_shard.get(prefix):
+            if prefix in text:
                 found[full].append(str(path))
     return {k: v for k, v in found.items() if v}
+
+
+def gap_days(row: dict) -> float | None:
+    """How far back this rewrite would move the entry, in days.
+
+    THE NUMBER THAT TURNS A COUNT INTO A DECISION. A claim-id change buys
+    something only in proportion to how wrong the stamp was: measured on the
+    live store 2026-09-02, the MEDIAN correction is 0.02 days — about half an
+    hour — while the maximum is 98 days. Rewriting 46 addresses to fix mostly
+    half-hours is a different proposition from rewriting the handful that are
+    months out, and the report must let a human tell them apart rather than
+    presenting one undifferentiated total.
+    """
+    try:
+        old = datetime.fromisoformat(row["old_timestamp"])
+        new = datetime.fromisoformat(row["new_timestamp"])
+    except (ValueError, KeyError, TypeError):
+        return None
+    if (old.tzinfo is None) != (new.tzinfo is None):
+        return None
+    return (old - new).total_seconds() / 86400.0
 
 
 def print_report(plan: dict, verbose: bool) -> None:
@@ -304,6 +350,31 @@ def print_report(plan: dict, verbose: bool) -> None:
     print(f"  not applicable (non-insight targets) : {len(plan['not_applicable'])}")
     print(f"  already stamped           : {len(plan['already_stamped'])}")
     print(f"  already aligned (no change needed)   : {len(plan['already_aligned'])}")
+    if plan.get("min_gap_days"):
+        print(
+            f"  below --min-gap {plan['min_gap_days']}d (set aside): "
+            f"{len(plan['below_threshold'])}"
+        )
+    print()
+    # HOW FAR BACK, BUCKETED. A claim-id rewrite buys something only in
+    # proportion to how wrong the stamp was; an undifferentiated total of 46
+    # hides that most of them are half-hours.
+    gaps = [g for g in (gap_days(row) for row in m) if g is not None]
+    if gaps:
+        gaps.sort()
+        buckets = {
+            "under 1 hour": sum(1 for g in gaps if g < 1 / 24),
+            "1 hour - 1 day": sum(1 for g in gaps if 1 / 24 <= g < 1),
+            "1 - 7 days": sum(1 for g in gaps if 1 <= g < 7),
+            "over 7 days": sum(1 for g in gaps if g >= 7),
+        }
+        print("  HOW FAR BACK each rewrite would move the entry:")
+        for label, count in buckets.items():
+            print(f"      {label:<16} {count}")
+        print(
+            f"      min {gaps[0]:.2f}d  median {gaps[len(gaps) // 2]:.2f}d  max {gaps[-1]:.2f}d"
+        )
+        print("      (--min-gap DAYS takes only the rewrites that buy something)")
     print()
     print(f"  CITED ELSEWHERE           : {cited_planned} of {len(m)} planned rewrites")
     print("      (backdating changes claim_id — timestamp is in the preimage)")
@@ -409,6 +480,17 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--root", default=str(Path.home() / ".sovereign"))
     ap.add_argument("--apply", action="store_true", help="WRITE. Default is a dry run.")
     ap.add_argument("--verbose", action="store_true")
+    ap.add_argument(
+        "--min-gap",
+        type=float,
+        default=0.0,
+        dest="min_gap",
+        metavar="DAYS",
+        help=(
+            "Only plan rewrites that move the entry back at least DAYS. Rows below "
+            "the threshold are reported as a count, never silently dropped."
+        ),
+    )
     ap.add_argument("--json", action="store_true", help="emit the plan as JSON")
     args = ap.parse_args(argv)
 
@@ -417,7 +499,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"store not found: {root}", file=sys.stderr)
         return 2
 
-    plan = build_plan(root)
+    plan = build_plan(root, min_gap_days=args.min_gap)
     if args.apply:
         if not plan["matched"]:
             print("nothing to apply.")
