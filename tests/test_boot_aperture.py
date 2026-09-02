@@ -61,7 +61,7 @@ class TestTheApertureBlock:
 
     def test_names_the_policy_version(self):
         """No neutral projection — viewing conditions must be versioned."""
-        assert "aperture-v1" in _aperture_text()
+        assert "aperture-v2" in _aperture_text()
 
     def test_gives_totals_not_just_what_it_showed(self):
         """The specimen: a seat saw 5 letters and could not learn 13 existed."""

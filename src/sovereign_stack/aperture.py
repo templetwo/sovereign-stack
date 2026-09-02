@@ -38,20 +38,58 @@ import os
 from datetime import datetime
 from pathlib import Path
 
+from .handoff import HandoffEngine
 from .memory import iter_thread_shards
 
-APERTURE_POLICY_VERSION = "aperture-v1"
+APERTURE_POLICY_VERSION = "aperture-v2"
 
 _DEFAULT_ROOT = Path(os.path.expanduser("~/.sovereign"))
 
+# What the boot door actually lists, hardcoded at its _pending_for_reader call
+# in arrival_state. Named here the way lineage's `default_shown: 5` is: the
+# aperture reports the door's caps, so it carries the door's numbers.
+_BOOT_HANDOFF_CAP = 20
 
-def measure_aperture(now: datetime, root: Path | None = None) -> dict:
+
+def _unsigned_by_reader(root: Path, reader: str | None) -> int | None:
+    """This reader's real handoff queue under the signature ledger.
+
+    Returns None when the CALL SITE carried no usable reader identity — a fact
+    about the call, not a count. The caller renders that as "not measurable
+    here", never as a number: a per-reader queue reported without a reader is
+    the invented figure this module exists to prevent.
+
+    Delegates to HandoffEngine rather than re-reading signatures.jsonl inline.
+    One implementation, two surfaces — a second ledger reader here is exactly
+    the second head this module's own docstring warns about.
+    """
+    if not reader or not str(reader).strip():
+        return None
+    if not (root / "handoffs").is_dir():
+        # No store is an empty queue, and saying so costs nothing. Constructing
+        # the engine would CREATE the directory (its __init__ mkdirs), and a
+        # measuring path must not write.
+        return 0
+    try:
+        return HandoffEngine(root=str(root)).unsigned_by_count(reader)
+    except ValueError:
+        # Placeholder / non-identifying reader ("unknown", "test", ...). Same
+        # class as no reader at all: the call site cannot name who is asking.
+        return None
+
+
+def measure_aperture(now: datetime, root: Path | None = None, reader: str | None = None) -> dict:
     """
     Measure every surface an arriving seat reads, live.
 
     Counts are never cached. A full ~3,373-record scan measures at ~37ms,
     cheaper than the git subprocess the heartbeat handler already makes. A
     cached aperture would be a stale projection describing the projection.
+
+    `reader` is the seat this projection is FOR. Since the signature ledger
+    (2026-08-31) the handoff queue is per-reader, so without a reader there is
+    no such number to report — the handoffs surface then says so instead of
+    substituting the legacy global count.
 
     Raises on any failure. Never returns partial numbers.
     """
@@ -106,20 +144,60 @@ def measure_aperture(now: datetime, root: Path | None = None) -> dict:
     }
 
     handoff_files = list((root / "handoffs").glob("*.json"))
-    unconsumed = 0
+    legacy_unconsumed = 0
     for hf in handoff_files:
         try:
             if not json.loads(hf.read_text()).get("consumed_at"):
-                unconsumed += 1
+                legacy_unconsumed += 1
         except Exception:
             continue
-    surfaces["handoffs"] = {
+    # THE MECHANISM THIS SURFACE DESCRIBED NO LONGER EXISTS. Until the
+    # signature ledger (2026-08-31, commits 7bf249f/2d698f8) reading a handoff
+    # at boot RETIRED it for every future reader, and this note said so. It is
+    # now additive: a read SIGNS, per reader, and only an explicit retire()
+    # clears a handoff for anyone else. An aperture that keeps narrating the
+    # retired mechanism is the same failure it was built to stop — a confident
+    # description of a projection that is not the one being served.
+    #
+    # `consumed_at` is kept as `legacy_unconsumed`, LABELLED legacy, because it
+    # still exists on disk and a reader who greps for it deserves to find it
+    # named rather than silently dropped. It is nobody's queue.
+    unsigned = _unsigned_by_reader(root, reader)
+    handoffs = {
         "on_disk": len(handoff_files),
-        "default_shown": unconsumed,
-        "unconsumed": unconsumed,
-        "widen_with": "handoff_archaeology(limit=N) — the consumed archive",
-        "note": "boot surfaces an unconsumed handoff ONCE and retires it; the rest are archive",
+        "legacy_unconsumed": legacy_unconsumed,
+        "legacy_unconsumed_is": (
+            "the pre-ledger global consumed_at field. It hides nothing from anyone now "
+            "— it counts as its own reader's signature only. NOT your queue."
+        ),
+        "widen_with": "handoff_archaeology(limit=N) — the whole store, signed and unsigned",
     }
+    if unsigned is None:
+        handoffs["default_shown"] = "per-reader queue — not measurable here (no reader identity)"
+        handoffs["note"] = (
+            "boot SIGNS a handoff for the reading seat (additive, per-reader); nothing is "
+            "retired by reading — only an explicit retire() clears one for everyone. "
+            "unsigned_by(reader) is the reader's real queue, and this call named no "
+            "reader, so that number is UNKNOWN here, not zero. A call that names its "
+            "reader gets that reader's own queue here; this one did not. The boot door "
+            "falls back to the legacy global filter for an unnamed seat, so any handoff "
+            "count it prints in that case is legacy_unconsumed above — reconcile against "
+            "that field, and do not read it as yours"
+        )
+    else:
+        handoffs["reader"] = reader
+        handoffs["unsigned_by_reader"] = unsigned
+        # A count, then a cap — because "N shown here" would be false past 20.
+        handoffs["default_shown"] = (
+            f"{min(unsigned, _BOOT_HANDOFF_CAP)} of {unsigned} unsigned by this reader"
+        )
+        handoffs["note"] = (
+            "boot SIGNS a handoff for the reading seat (additive, per-reader); nothing is "
+            "retired by reading — only an explicit retire() clears one for everyone. "
+            "unsigned_by_reader is THIS reader's real queue, uncapped and unfiltered by "
+            "thread; the handoffs section states its own coverage when it truncates"
+        )
+    surfaces["handoffs"] = handoffs
 
     total_threads = 0
     unresolved = 0

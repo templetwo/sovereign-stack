@@ -686,7 +686,7 @@ def _bucket_count(lineage: dict | None) -> int:
 # =============================================================================
 
 
-def _render_aperture() -> list[str]:
+def _render_aperture(reader: str | None = None) -> list[str]:
     """
     The APERTURE block — what this door is NOT showing you.
 
@@ -714,7 +714,7 @@ def _render_aperture() -> list[str]:
     """
     now = datetime.now(timezone.utc)
     try:
-        ap = measure_aperture(now)
+        ap = measure_aperture(now, reader=reader)
     except Exception as exc:  # noqa: BLE001 — any failure is "unmeasured"
         ap = aperture_unmeasured(now, exc)
 
@@ -730,12 +730,25 @@ def _render_aperture() -> list[str]:
 
     lines.append("  (what exists behind each surface, and what this door hands you)")
     for name, sur in ap["surfaces"].items():
-        lines.append(f"  {name:24} {sur['on_disk']:>6} on disk · {sur['default_shown']} shown here")
+        shown = sur["default_shown"]
+        if isinstance(shown, int):
+            lines.append(f"  {name:24} {sur['on_disk']:>6} on disk · {shown} shown here")
+        else:
+            # Not every surface has a number to give. Since the signature
+            # ledger the handoff queue is per-reader, so an unnamed seat gets a
+            # stated absence rather than a count borrowed from the legacy
+            # global field — unknown is not zero.
+            lines.append(f"  {name:24} {sur['on_disk']:>6} on disk · {shown}")
     for _, nr in ap.get("not_reachable", {}).items():
         lines.append(f"  NOT REACHABLE BY ANY PARAMETER: {nr['count']} — {nr['why']}")
-    ins = ap["surfaces"].get("insights", {})
-    if ins.get("note"):
-        lines.append(f"  ⚠ {ins['note']}")
+    # The notes reach the DOOR, not only the heartbeat JSON. The handoffs note
+    # is where the retired consumption mechanism was described for arriving
+    # seats; correcting it in aperture.py alone would have fixed the JSON and
+    # left the text every seat actually reads unchanged.
+    for key in ("insights", "handoffs"):
+        note = ap["surfaces"].get(key, {}).get("note")
+        if note:
+            lines.append(f"  ⚠ {note}")
     lines += [
         f"  {ap['how_to_widen']['caution']}",
         "  Widen with the call named on each surface; every default above is a cap, not a corpus.",
@@ -807,7 +820,7 @@ def render_full(
     ]
 
     lines += _render_as_of(state)
-    lines += _render_aperture()
+    lines += _render_aperture(state.reader)
 
     # 1.5 Lineage — letters from past instances.
     if state.lineage_degraded:
