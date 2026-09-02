@@ -24,6 +24,7 @@ and lands it where arrival actually happens.
 from __future__ import annotations
 
 import asyncio
+import json
 
 from sovereign_stack import server
 
@@ -106,3 +107,85 @@ class TestFailsClosed:
 
         monkeypatch.setattr(ast_mod, "measure_aperture", boom)
         assert "on disk" not in _aperture_text().lower()
+
+
+class TestTheThreadCountReachesNestedShards:
+    """THE APERTURE AND THE CONSOLE MUST AGREE, and for one release they did
+    not: `dashboard_readers.read_open_threads` walked the store with `rglob`
+    while the aperture used a flat `glob`, so the legacy nested shard
+    `open_threads/tech-debt,compaction,auto-detection/log.jsonl` was counted by
+    the console and invisible to the door. The surface whose entire job is to
+    stop a projection passing as the corpus was itself projecting.
+
+    Fixed in 66a9984 by routing the aperture through `iter_thread_shards` —
+    memory's ONE walk, which is recursive AND dot-filtered. UNTESTED until now:
+    nothing pinned the recursion, so a future edit back to a flat glob would
+    have gone green. This class is that pin, on a tmp root — no live dependency.
+    """
+
+    @staticmethod
+    def _seed(tmp_path):
+        root = tmp_path / ".sovereign"
+        threads = root / "chronicle" / "open_threads"
+        threads.mkdir(parents=True)
+        # measure_aperture scandirs these unconditionally and raises
+        # FileNotFoundError when they are absent (the caller in arrival_state
+        # catches it and renders `unmeasured`). Seed them so this class tests
+        # the thread walk and nothing else.
+        (root / "chronicle" / "insights").mkdir(parents=True)
+        (root / "handoffs").mkdir(parents=True)
+        (threads / "flat.jsonl").write_text(
+            '{"question": "a", "resolved": false}\n{"question": "b", "resolved": true}\n'
+        )
+        nested = threads / "tech-debt,compaction,auto-detection"
+        nested.mkdir()
+        (nested / "log.jsonl").write_text('{"question": "c", "resolved": false}\n')
+        return root
+
+    def test_nested_shards_are_counted(self, tmp_path):
+        from datetime import datetime, timezone
+
+        from sovereign_stack.aperture import measure_aperture
+
+        root = self._seed(tmp_path)
+        ap = measure_aperture(datetime.now(timezone.utc), root=root)["surfaces"]["open_threads"]
+        # 3, not 2: a flat glob sees only flat.jsonl's two lines.
+        assert ap["on_disk"] == 3
+        assert ap["unresolved"] == 2
+
+    def test_it_agrees_with_the_console_reader_on_the_same_store(self, tmp_path):
+        """One store, two surfaces, no drift — asserted against the reader
+        itself rather than against a number copied from it."""
+        from datetime import datetime, timezone
+
+        from sovereign_stack import dashboard_readers
+        from sovereign_stack.aperture import measure_aperture
+
+        root = self._seed(tmp_path)
+        ap = measure_aperture(datetime.now(timezone.utc), root=root)["surfaces"]["open_threads"]
+        directory = root / "chronicle" / "open_threads"
+        console_unresolved = sum(
+            1
+            for path in directory.rglob("*.jsonl")
+            for line in path.read_text().splitlines()
+            if line.strip() and not json.loads(line).get("resolved", False)
+        )
+        assert ap["unresolved"] == console_unresolved
+        assert dashboard_readers is not None  # the reader this parity is owed to
+
+    def test_a_dotted_backup_dir_is_still_excluded(self, tmp_path):
+        """Recursion without the dot-filter trades an under-read for a
+        CORRUPTING over-read: a retired copy served as live, and writable
+        through resolve_thread_by_id. The aperture must count what readers can
+        actually reach, no more."""
+        from datetime import datetime, timezone
+
+        from sovereign_stack.aperture import measure_aperture
+
+        root = self._seed(tmp_path)
+        backup = root / "chronicle" / "open_threads" / ".bak-20260502"
+        backup.mkdir()
+        (backup / "old.jsonl").write_text('{"question": "retired", "resolved": false}\n')
+        ap = measure_aperture(datetime.now(timezone.utc), root=root)["surfaces"]["open_threads"]
+        assert ap["on_disk"] == 3
+        assert ap["unresolved"] == 2
