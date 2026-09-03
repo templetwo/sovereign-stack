@@ -438,9 +438,22 @@ _LAYER_MAP = {"reflection": "hypothesis"}
 
 # Commit targets whose Stack inputSchema declares source_instance, so the
 # PROPOSAL's substrate identity can ride the commit instead of the drain
-# operator's. Mirrors bridge_core.pending_writes.PROVENANCE_PASSTHROUGH_TARGETS
-# — kept as a separate literal because this legacy module imports nothing from
-# bridge_core, and asserted equal to it by test_bridge_drain_provenance.
+# operator's. Mirrors bridge_core.pending_writes.PROVENANCE_PASSTHROUGH_TARGETS.
+#
+# CORRECTED: this comment used to say the literal was kept separate "because
+# this legacy module imports nothing from bridge_core". That is false and has
+# been for a while — this module imports `bridge_core.target_risk` in six
+# places and, at the bottom of the file, imports the whole reject-edge state
+# machine from `bridge_core.pending_writes` precisely so the two substrates
+# cannot drift. A duplicated literal justified by a reason that is not true is
+# how a stale copy survives review.
+#
+# THE REAL PATTERN, which is mixed on purpose: BEHAVIOUR is imported (one
+# implementation, no drift possible); DECLARATIONS OF WHAT THE REMOTE SCHEMA
+# ACCEPTS are duplicated per substrate, because each bridge may legitimately
+# face a Stack of a different version, and are held together by an equality
+# test rather than by an import. Kept separate on that basis, and asserted
+# equal by test_bridge_drain_provenance / test_ring2_post_v121_regressions.
 PROVENANCE_PASSTHROUGH_TARGETS: frozenset[str] = frozenset(
     {"handoff", "close_session", "record_insight"}
 )

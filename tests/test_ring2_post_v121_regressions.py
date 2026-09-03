@@ -1340,3 +1340,55 @@ def test_both_substrates_agree_on_the_verified_by_targets():
     from openai_bridge.pending_writes import VERIFIED_BY_TARGETS as oai_targets
 
     assert core_targets == oai_targets == frozenset({"record_insight"})
+
+
+def test_both_substrates_agree_on_the_original_timestamp_targets():
+    """The third duplicated target set, held together the same way as the
+    other two.
+
+    ORIGINAL_TIMESTAMP_TARGETS is declared as its own literal in
+    bridge_core/pending_writes.py and openai_bridge/pending_writes.py. The two
+    existing parity tests cover VERIFIED_BY_TARGETS (above) and
+    PROVENANCE_PASSTHROUGH_TARGETS (test_bridge_drain_provenance); this one was
+    shipped without a pin.
+
+    THE COST OF DRIFT IS ASYMMETRIC AND BOTH DIRECTIONS ARE BAD. Too NARROW
+    here and a proposal's authorship time is silently dropped on one substrate
+    while travelling on the other — the exact "true for grok and FALSE for
+    openai" shape that went 27 days unnoticed for provenance passthrough. Too
+    WIDE and, since `_reject_unknown_params`, every commit carrying the
+    parameter to a target that does not declare it becomes a hard Stack-side
+    error. The set is asserted by VALUE as well as by equality, so widening it
+    in both files at once still has to be a deliberate edit here.
+    """
+    from bridge_core.pending_writes import ORIGINAL_TIMESTAMP_TARGETS as core_targets
+    from openai_bridge.pending_writes import ORIGINAL_TIMESTAMP_TARGETS as oai_targets
+
+    assert core_targets == oai_targets
+    assert core_targets == frozenset({"record_insight", "record_learning", "record_open_thread"})
+
+
+def test_the_three_duplicated_target_sets_are_each_pinned():
+    """Meta-pin: a fourth duplicated set must not ship unpinned.
+
+    Each name that exists as a separate literal in BOTH pending_writes modules
+    is asserted equal somewhere. This test names the three that exist today; a
+    new one fails here until its own parity test is written.
+    """
+    from bridge_core import pending_writes as core
+    from openai_bridge import pending_writes as oai
+
+    duplicated = {
+        name
+        for name in dir(core)
+        if name.endswith("_TARGETS")
+        and isinstance(getattr(core, name, None), frozenset)
+        and isinstance(getattr(oai, name, None), frozenset)
+    }
+    assert duplicated == {
+        "VERIFIED_BY_TARGETS",
+        "PROVENANCE_PASSTHROUGH_TARGETS",
+        "ORIGINAL_TIMESTAMP_TARGETS",
+    }, f"a duplicated target set has no parity test: {duplicated}"
+    for name in duplicated:
+        assert getattr(core, name) == getattr(oai, name), name
