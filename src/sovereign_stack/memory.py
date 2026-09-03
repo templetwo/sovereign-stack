@@ -259,12 +259,22 @@ def _validate_original_timestamp(value: str) -> str:
     2026-09-01 — and the readers slice ``[:10]`` and string-sort, which is
     correct for both. Normalizing a date-only value would invent a
     time-of-day and a timezone the caller never claimed.
+
+    THE `Z` SPELLING IS PARSED, NEVER STORED NORMALIZED. `fromisoformat` did
+    not accept a trailing `Z` before CPython 3.11, so on 3.10 this validator
+    REFUSED `2026-06-19T05:18:19Z` — the spelling `post_fix_tools._iso` emits
+    and the one the live store already holds specimens of — as unparseable.
+    A refusal is loud rather than fail-open, but it refuses a correct value,
+    which is its own defect: the caller's only recourse is to rewrite a
+    timestamp they were right about. The `Z` is swapped for `+00:00` on a COPY
+    used solely for the bounds check; `raw` is what is returned and stored, so
+    the claim id an entry gets is unchanged by this function.
     """
     if not isinstance(value, str) or not value.strip():
         raise ValueError("original_timestamp must be a non-empty ISO-8601 string")
     raw = value.strip()
     try:
-        parsed = datetime.fromisoformat(raw)
+        parsed = datetime.fromisoformat(provenance.iso_parseable(raw))
     except ValueError:
         raise ValueError(
             f"original_timestamp must parse as ISO-8601 (e.g. '2026-06-19' or "

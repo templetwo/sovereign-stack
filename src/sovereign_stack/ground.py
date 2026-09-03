@@ -315,7 +315,14 @@ def record_catch(
     if not isinstance(occurred_at, str) or not occurred_at.strip():
         return "record_catch rejected: occurred_at must be a non-empty ISO date"
     try:
-        datetime.fromisoformat(occurred_at)
+        # PARSE-ONLY normalization of a trailing `Z` (see prov.iso_parseable).
+        # `fromisoformat` refused that spelling before CPython 3.11, and this
+        # store holds live `Z`-suffixed specimens — a catch entered with the
+        # spelling the house itself emits must not be refused on 3.10. The
+        # VALUE STAYS the caller's own string: `occurred_at` rides to
+        # record_insight verbatim below, and rewriting it here would put a
+        # second spelling of the same instant into the record for no reason.
+        datetime.fromisoformat(prov.iso_parseable(occurred_at))
     except ValueError:
         return f"record_catch rejected: occurred_at must parse as an ISO date, got {occurred_at!r}"
 

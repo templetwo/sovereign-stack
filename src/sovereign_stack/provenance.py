@@ -75,6 +75,28 @@ _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 LEGACY_MARKER_RE = re.compile(r"CORRECTED|DEFINITIVE|supersedes")
 
 
+def iso_parseable(raw: str) -> str:
+    """`raw` with a trailing `Z` swapped for `+00:00`, FOR PARSING ONLY.
+
+    `datetime.fromisoformat` did not accept the `Z` spelling before CPython
+    3.11, so every validator that parsed a caller-supplied ISO string with a
+    bare `fromisoformat` refused `2026-06-19T05:18:19Z` on 3.10 — a spelling
+    this house emits itself (`post_fix_tools._iso`) and holds live specimens
+    of. A refusal is not fail-open, but refusing a correct value is its own
+    defect: the caller's only recourse is to rewrite a timestamp they were
+    right about.
+
+    THE RETURN VALUE IS FOR THE PARSER, NEVER FOR THE STORE. Callers validate
+    with this and keep writing the caller's own string, because `timestamp` is
+    in `derive_claim_id`'s preimage: normalizing on the way in would silently
+    change the id an entry gets. Nothing else is touched — no lowercase `z`,
+    no interior substitution, no whitespace handling.
+    """
+    if isinstance(raw, str) and raw.endswith("Z"):
+        return raw[:-1] + "+00:00"
+    return raw
+
+
 def default_sovereign_root() -> Path:
     """The live sovereign root. Computed on call, never at import."""
     return Path(os.environ.get("SOVEREIGN_ROOT") or (Path.home() / ".sovereign"))
