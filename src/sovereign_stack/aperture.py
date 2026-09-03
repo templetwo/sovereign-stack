@@ -46,9 +46,15 @@ APERTURE_POLICY_VERSION = "aperture-v2"
 _DEFAULT_ROOT = Path(os.path.expanduser("~/.sovereign"))
 
 # What the boot door actually lists, hardcoded at its _pending_for_reader call
-# in arrival_state. Named here the way lineage's `default_shown: 5` is: the
-# aperture reports the door's caps, so it carries the door's numbers.
+# in arrival_state. Named here because the aperture reports the door's caps,
+# so it carries the door's numbers.
 _BOOT_HANDOFF_CAP = 20
+
+# The DEFAULT value of arrive_lineage / where_did_i_leave_off's
+# `limit_per_bucket`, mirroring `arrival_state.build_arrival_state`'s default.
+# It is reported ONLY as a default, never as this payload's shown count — the
+# caller's own coverage envelope supplies that. See measure_aperture.
+_LINEAGE_DEFAULT_SHOWN = 5
 
 
 def _unsigned_by_reader(root: Path, reader: str | None) -> int | None:
@@ -78,7 +84,23 @@ def _unsigned_by_reader(root: Path, reader: str | None) -> int | None:
         return None
 
 
-def measure_aperture(now: datetime, root: Path | None = None, reader: str | None = None) -> dict:
+# The lineage bucket names as this module reports them, mapped to the key
+# `witness.collect_lineage` files their coverage envelope under. The two
+# vocabularies differ ("to_arrival" vs "arrivals") and always have.
+_LINEAGE_COVERAGE_KEYS = {
+    "to_arrival": "arrivals",
+    "to_self": "to_self",
+    "breakthroughs": "breakthroughs",
+}
+
+
+def measure_aperture(
+    now: datetime,
+    root: Path | None = None,
+    reader: str | None = None,
+    *,
+    lineage_coverage: dict | None = None,
+) -> dict:
     """
     Measure every surface an arriving seat reads, live.
 
@@ -91,6 +113,12 @@ def measure_aperture(now: datetime, root: Path | None = None, reader: str | None
     no such number to report — the handoffs surface then says so instead of
     substituting the legacy global count.
 
+    `lineage_coverage` is the per-bucket envelope `witness.collect_lineage`
+    already computed FOR THIS CALL — the caller's own payload, not a re-read.
+    It is the only source of a truthful `default_shown` for the lineage
+    buckets, and passing it is what stops this surface describing a payload it
+    is not looking at. See the block below.
+
     Raises on any failure. Never returns partial numbers.
     """
     root = root or _DEFAULT_ROOT
@@ -98,9 +126,29 @@ def measure_aperture(now: datetime, root: Path | None = None, reader: str | None
     surfaces: dict[str, dict] = {}
 
     for bucket in ("to_arrival", "to_self", "breakthroughs"):
+        # THE SENTENCE THIS FIXES: "<on_disk> on disk · 5 shown here". The 5
+        # was HARDCODED, so the aperture asserted it for every caller — a
+        # `limit_per_bucket=20` boot that showed 13 letters was described as
+        # showing 5, and to_self is additionally reader-filtered, so a seat
+        # shown ONE letter out of 18 was told it had been shown five. The
+        # surface whose entire job is to stop a projection passing as the
+        # corpus was itself reporting a projection it had not measured.
+        #
+        # THE ONLY HONEST NUMBER IS THE CALLER'S OWN `shown`. It is not
+        # `min(on_disk, limit)`: that ignores the reader filter, so it is wrong
+        # for to_self in exactly the case the bucket's own note warns about,
+        # and it is wrong for a no-reader call, where coverage correctly
+        # reports shown 0 with `no_reader: True`.
+        #
+        # WITHOUT COVERAGE, SAY "DEFAULT" AND CLAIM NOTHING. A caller with no
+        # lineage payload (the heartbeat; any profile that did not gather it)
+        # gets the string "default 5" — a true statement about the parameter's
+        # default rather than a false one about this payload.
+        cov = (lineage_coverage or {}).get(_LINEAGE_COVERAGE_KEYS[bucket]) or {}
+        shown = cov.get("shown") if isinstance(cov.get("shown"), int) else None
         entry = {
             "on_disk": len(list((letters / bucket).glob("*.md"))),
-            "default_shown": 5,
+            "default_shown": shown if shown is not None else f"default {_LINEAGE_DEFAULT_SHOWN}",
             # ONE LEVER, NAMED ONCE. This used to read
             # "... or full_content=true", and full_content does NOT widen a
             # bucket — it inlines BODIES; the count is identical with it on and
@@ -111,6 +159,15 @@ def measure_aperture(now: datetime, root: Path | None = None, reader: str | None
             # the second clause widens nothing and has no way to tell.
             "widen_with": "arrive_lineage(limit_per_bucket=N)",
         }
+        if shown is not None:
+            # Say where the number came from, so a reader can tell a measured
+            # count from the default without diffing two boots.
+            entry["shown_is"] = "measured from this call's own lineage payload"
+            if cov.get("no_reader"):
+                entry["shown_is"] = (
+                    "measured: 0, because this call named no reader and to_self is "
+                    "addressee-filtered — not 0 letters on disk"
+                )
         if bucket == "to_self":
             entry["note"] = (
                 "additionally filtered by READER IDENTITY — pass the bare model name, "

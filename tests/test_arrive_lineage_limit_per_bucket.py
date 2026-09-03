@@ -348,3 +348,87 @@ def test_a_non_integer_limit_is_refused_not_coerced(lineage_root: Path, bad: obj
     assert text.startswith("arrive_lineage: limit_per_bucket must be an integer"), why
     assert "Nothing was read." in text
     assert "to_self" not in text, "the door read the store before refusing"
+
+
+@pytest.fixture
+def aperture_sees_the_same_root(lineage_root: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """`_render_aperture` calls measure_aperture with NO root, so it always
+    measures ~/.sovereign — pre-existing, out of scope here, and harmless in
+    production where the door's root IS ~/.sovereign. Point the module default
+    at this test's root so the APERTURE block describes ONE store.
+
+    THE SEEDED DIRECTORIES ARE NOT DECORATION. measure_aperture scandirs
+    chronicle/insights, chronicle/open_threads and handoffs unconditionally and
+    RAISES when they are absent — correctly, it fails closed — and the renderer
+    then emits the `unmeasured` branch with no counts at all. Without them
+    every assertion below would be matching against a block that measured
+    nothing, which is how the first draft of these tests "passed" a grep for
+    lineage lines that were actually chronicle entries mentioning the word.
+    """
+    from sovereign_stack import aperture as ap_mod
+
+    for sub in ("chronicle/insights", "chronicle/open_threads", "handoffs"):
+        (lineage_root / sub).mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(ap_mod, "_DEFAULT_ROOT", lineage_root)
+    return lineage_root
+
+
+_APERTURE_SHOWN = re.compile(r"lineage_(\w+)\s+(\d+) on disk · (\d+) shown here")
+
+
+def test_the_aperture_reports_the_limit_the_caller_actually_got(
+    aperture_sees_the_same_root: Path, no_boot_scribe
+):
+    """THE APERTURE'S OWN SENTENCE WAS THE ONE THING IT DID NOT MEASURE.
+
+    `default_shown` was a hardcoded 5, so the block that exists to stop a seat
+    mistaking a projection for the corpus told every caller it had been shown
+    five letters — at limit_per_bucket=20 over a 13/7/18 tree, and to a reader
+    whose to_self bucket had been filtered down to one. Same defect class as
+    the `full_content` clause this file was written for: a surface naming a
+    lever and then not describing what the lever did.
+    """
+    wide = _dispatch(
+        "where_did_i_leave_off",
+        {"source_instance": READER, "consume": False, "limit_per_bucket": 20},
+    )
+    shown = {m[0]: (int(m[1]), int(m[2])) for m in _APERTURE_SHOWN.findall(wide)}
+    assert shown["to_arrival"] == (13, 13)
+    assert shown["breakthroughs"] == (7, 7)
+    assert shown["to_self"] == (18, 18)
+
+    narrow = _dispatch(
+        "where_did_i_leave_off",
+        {"source_instance": READER, "consume": False, "limit_per_bucket": 1},
+    )
+    shown = {m[0]: (int(m[1]), int(m[2])) for m in _APERTURE_SHOWN.findall(narrow)}
+    assert shown["to_arrival"] == (13, 1)
+    assert shown["to_self"] == (18, 1)
+
+
+def test_the_default_limit_still_reports_five(aperture_sees_the_same_root: Path, no_boot_scribe):
+    """The inverse. The fix must not make the aperture wrong in the case it
+    was accidentally right in."""
+    text = _dispatch("where_did_i_leave_off", {"source_instance": READER, "consume": False})
+    shown = {m[0]: (int(m[1]), int(m[2])) for m in _APERTURE_SHOWN.findall(text)}
+    assert shown["to_arrival"] == (13, 5)
+    assert shown["to_self"] == (18, 5)
+
+
+def test_the_aperture_agrees_with_the_lineage_headers_on_the_same_payload(
+    aperture_sees_the_same_root: Path, no_boot_scribe
+):
+    """Two surfaces, one payload, and they must not disagree — the aperture
+    counting one thing while the bucket header counts another is the drift
+    this whole file exists to prevent."""
+    text = _dispatch(
+        "where_did_i_leave_off",
+        {"source_instance": READER, "consume": False, "limit_per_bucket": 3},
+    )
+    aperture = {m[0]: int(m[2]) for m in _APERTURE_SHOWN.findall(text)}
+    headers = _shown_counts(text)
+    for bucket, n in aperture.items():
+        if bucket in headers:
+            assert headers[bucket] == n, (
+                f"{bucket}: aperture says {n} shown, the bucket header says {headers[bucket]}"
+            )

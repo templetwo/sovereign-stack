@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 
 from sovereign_stack import server
 
@@ -189,3 +190,169 @@ class TestTheThreadCountReachesNestedShards:
         ap = measure_aperture(datetime.now(timezone.utc), root=root)["surfaces"]["open_threads"]
         assert ap["on_disk"] == 3
         assert ap["unresolved"] == 2
+
+
+class TestTheShownCountDescribesTHISPayload:
+    """`<on_disk> on disk · 5 shown here` was a HARDCODED 5.
+
+    `aperture.measure_aperture` set `default_shown: 5` for all three lineage
+    buckets regardless of the caller's `limit_per_bucket` and regardless of the
+    reader filter. So a boot at limit_per_bucket=20 that handed over 13
+    to_arrival letters described itself as showing 5, and a seat handed ONE
+    to_self letter out of 18 — the decorated-source_instance trap this house
+    has re-diagnosed three times — was told it had been shown five. The surface
+    whose entire job is to stop a projection passing as the corpus was
+    reporting a projection it had not measured.
+
+    The fix reads the caller's OWN coverage envelope, the one
+    `witness.collect_lineage` already computed for that call. It is the only
+    number that accounts for the reader filter; `min(on_disk, limit)` does not,
+    which is why it is not used.
+    """
+
+    BUCKETS = ("lineage_to_arrival", "lineage_to_self", "lineage_breakthroughs")
+
+    @staticmethod
+    def _root(tmp_path, counts):
+        root = tmp_path / ".sovereign"
+        for bucket, n in counts.items():
+            d = root / "comms" / "letters" / bucket
+            d.mkdir(parents=True, exist_ok=True)
+            for i in range(n):
+                (d / f"2026-08-{i + 1:02d}-l{i}.md").write_text(
+                    f"---\nfrom: seat-{i}\n---\n\nbody {i}\n"
+                )
+        for sub in ("chronicle/insights", "chronicle/open_threads", "handoffs"):
+            (root / sub).mkdir(parents=True, exist_ok=True)
+        return root
+
+    def test_a_non_default_limit_is_reflected(self, tmp_path):
+        from datetime import datetime, timezone
+
+        from sovereign_stack.aperture import measure_aperture
+
+        root = self._root(tmp_path, {"to_arrival": 13, "to_self": 18, "breakthroughs": 7})
+        coverage = {
+            "arrivals": {"shown": 13, "total_on_disk": 13},
+            "breakthroughs": {"shown": 7, "total_on_disk": 7},
+            "to_self": {"shown": 18, "total_on_disk": 18},
+        }
+        ap = measure_aperture(datetime.now(timezone.utc), root=root, lineage_coverage=coverage)[
+            "surfaces"
+        ]
+        assert ap["lineage_to_arrival"]["default_shown"] == 13
+        assert ap["lineage_breakthroughs"]["default_shown"] == 7
+        assert ap["lineage_to_self"]["default_shown"] == 18
+
+    def test_the_reader_filter_is_reflected_not_the_cap(self, tmp_path):
+        """THE CASE min(on_disk, limit) GETS WRONG. 18 on disk, limit 5, but
+        only one letter is addressed to this reader: the honest number is 1."""
+        from datetime import datetime, timezone
+
+        from sovereign_stack.aperture import measure_aperture
+
+        root = self._root(tmp_path, {"to_arrival": 1, "to_self": 18, "breakthroughs": 1})
+        coverage = {"to_self": {"shown": 1, "matched": 1, "total_on_disk": 18}}
+        ap = measure_aperture(datetime.now(timezone.utc), root=root, lineage_coverage=coverage)[
+            "surfaces"
+        ]
+        assert ap["lineage_to_self"]["default_shown"] == 1
+        assert ap["lineage_to_self"]["on_disk"] == 18
+
+    def test_without_coverage_it_claims_a_DEFAULT_not_a_measurement(self, tmp_path):
+        """The heartbeat and any profile that did not gather lineage. A true
+        statement about the parameter beats a false one about the payload."""
+        from datetime import datetime, timezone
+
+        from sovereign_stack.aperture import measure_aperture
+
+        root = self._root(tmp_path, {"to_arrival": 13, "to_self": 18, "breakthroughs": 7})
+        ap = measure_aperture(datetime.now(timezone.utc), root=root)["surfaces"]
+        for bucket in self.BUCKETS:
+            assert ap[bucket]["default_shown"] == "default 5"
+            assert "shown_is" not in ap[bucket]
+
+    def test_a_no_reader_zero_is_labelled_as_a_filter_not_as_emptiness(self, tmp_path):
+        from datetime import datetime, timezone
+
+        from sovereign_stack.aperture import measure_aperture
+
+        root = self._root(tmp_path, {"to_arrival": 1, "to_self": 18, "breakthroughs": 1})
+        coverage = {"to_self": {"shown": 0, "total_on_disk": 18, "no_reader": True}}
+        ap = measure_aperture(datetime.now(timezone.utc), root=root, lineage_coverage=coverage)[
+            "surfaces"
+        ]["lineage_to_self"]
+        assert ap["default_shown"] == 0
+        assert ap["on_disk"] == 18
+        assert "not 0 letters on disk" in ap["shown_is"]
+
+    def test_the_RENDERED_line_says_the_measured_number(self, tmp_path, monkeypatch):
+        """The dict is not the deliverable; the sentence a seat reads is.
+
+        `_render_aperture` calls measure_aperture with NO root, so it always
+        measures ~/.sovereign — a pre-existing defect, out of scope here and
+        harmless in production (where the door's root IS ~/.sovereign) but it
+        would make this test read two different stores. Point the module
+        default at the tmp root so the whole block describes one store.
+        """
+        from sovereign_stack import aperture as ap_mod
+
+        root = self._root(tmp_path, {"to_arrival": 13, "to_self": 18, "breakthroughs": 7})
+        monkeypatch.setattr(ap_mod, "_DEFAULT_ROOT", root)
+        coverage = {
+            "arrivals": {"shown": 13, "total_on_disk": 13},
+            "breakthroughs": {"shown": 7, "total_on_disk": 7},
+            "to_self": {"shown": 1, "total_on_disk": 18},
+        }
+        text = "\n".join(ast_mod._render_aperture("claude-opus-5", coverage))
+        # Whitespace-agnostic: the renderer pads with {name:24} and {on_disk:>6},
+        # and pinning that padding would make this a formatting test.
+        assert re.search(r"lineage_to_arrival\s+13 on disk · 13 shown here", text), text
+        assert re.search(r"lineage_to_self\s+18 on disk · 1 shown here", text), text
+        assert re.search(r"lineage_breakthroughs\s+7 on disk · 7 shown here", text), text
+        assert "5 shown here" not in text, (
+            "the aperture is still asserting the hardcoded default over a payload "
+            "that showed something else"
+        )
+
+
+class TestEverySurfaceNoteReachesTheDoor:
+    """The renderer emitted notes for a HARDCODED ("insights", "handoffs").
+
+    `lineage_to_self` has carried a note since aperture-v2 — the one warning
+    that a DECORATED source_instance hides that line's mail, which is the trap
+    this house has re-diagnosed three times and which costs an arriving seat
+    its inheritance. It was written in aperture.py and reached nobody through
+    the door. A renderer that enumerates which warnings it will pass on drops
+    the next one silently too.
+    """
+
+    def test_the_to_self_decorated_name_warning_is_rendered(self):
+        text = _aperture_text()
+        assert "not a decorated seat string" in text
+
+    def test_the_older_two_notes_still_render(self):
+        text = _aperture_text()
+        assert "relevance" in text.lower()  # insights
+        assert "retired by reading" in text or "legacy_unconsumed" in text  # handoffs
+
+    def test_it_is_not_a_hardcoded_list(self, tmp_path, monkeypatch):
+        """A note on a surface the renderer has never heard of must render."""
+        from datetime import datetime, timezone
+
+        from sovereign_stack import aperture as ap_mod
+
+        real = ap_mod.measure_aperture
+
+        def with_extra(now, root=None, reader=None, **kw):
+            out = real(now, root=root, reader=reader, **kw)
+            out["surfaces"]["a_surface_invented_after_the_renderer"] = {
+                "on_disk": 1,
+                "default_shown": 1,
+                "note": "a warning nobody enumerated",
+            }
+            return out
+
+        monkeypatch.setattr(ast_mod, "measure_aperture", with_extra)
+        assert "a warning nobody enumerated" in "\n".join(ast_mod._render_aperture())
+        assert datetime.now(timezone.utc)  # keeps the import honest

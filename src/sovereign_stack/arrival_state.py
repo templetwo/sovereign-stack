@@ -686,7 +686,7 @@ def _bucket_count(lineage: dict | None) -> int:
 # =============================================================================
 
 
-def _render_aperture(reader: str | None = None) -> list[str]:
+def _render_aperture(reader: str | None = None, lineage_coverage: dict | None = None) -> list[str]:
     """
     The APERTURE block — what this door is NOT showing you.
 
@@ -714,7 +714,7 @@ def _render_aperture(reader: str | None = None) -> list[str]:
     """
     now = datetime.now(timezone.utc)
     try:
-        ap = measure_aperture(now, reader=reader)
+        ap = measure_aperture(now, reader=reader, lineage_coverage=lineage_coverage)
     except Exception as exc:  # noqa: BLE001 — any failure is "unmeasured"
         ap = aperture_unmeasured(now, exc)
 
@@ -745,8 +745,15 @@ def _render_aperture(reader: str | None = None) -> list[str]:
     # is where the retired consumption mechanism was described for arriving
     # seats; correcting it in aperture.py alone would have fixed the JSON and
     # left the text every seat actually reads unchanged.
-    for key in ("insights", "handoffs"):
-        note = ap["surfaces"].get(key, {}).get("note")
+    #
+    # EVERY SURFACE CARRYING A NOTE, not a hardcoded pair. This read
+    # `("insights", "handoffs")`, so `lineage_to_self`'s note — the one warning
+    # that a DECORATED source_instance hides that line's mail, the trap this
+    # house has re-diagnosed three times — was written in aperture.py and
+    # reached nobody through the door. A renderer that enumerates which
+    # warnings it is willing to pass on will silently drop the next one too.
+    for _name, sur in ap["surfaces"].items():
+        note = sur.get("note")
         if note:
             lines.append(f"  ⚠ {note}")
     lines += [
@@ -820,7 +827,12 @@ def render_full(
     ]
 
     lines += _render_as_of(state)
-    lines += _render_aperture(state.reader)
+    # The caller's OWN lineage coverage, so the aperture reports the payload
+    # being served rather than a hardcoded default. `lineage` is None when the
+    # letters directory is absent and when the gather degraded, so this is
+    # guarded rather than indexed — a door that raised here would take the
+    # whole boot down to fix a count.
+    lines += _render_aperture(state.reader, (state.lineage or {}).get("coverage"))
 
     # 1.5 Lineage — letters from past instances.
     if state.lineage_degraded:
