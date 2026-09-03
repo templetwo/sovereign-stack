@@ -38,12 +38,11 @@ import os
 from datetime import datetime
 from pathlib import Path
 
+from . import provenance
 from .handoff import HandoffEngine
 from .memory import iter_thread_shards
 
 APERTURE_POLICY_VERSION = "aperture-v2"
-
-_DEFAULT_ROOT = Path(os.path.expanduser("~/.sovereign"))
 
 # What the boot door actually lists, hardcoded at its _pending_for_reader call
 # in arrival_state. Named here because the aperture reports the door's caps,
@@ -121,7 +120,14 @@ def measure_aperture(
 
     Raises on any failure. Never returns partial numbers.
     """
-    root = root or _DEFAULT_ROOT
+    # RESOLVED ON CALL, AND THROUGH provenance. This was a module-level
+    # `Path(os.path.expanduser("~/.sovereign"))` computed at import, which (a)
+    # ignored SOVEREIGN_ROOT — the override every other root in this package
+    # honours via provenance.default_sovereign_root — and (b) made an unrooted
+    # caller measure ~/.sovereign while reporting coverage for a different
+    # store. The door now passes its own root (arrival_state.ArrivalState
+    # carries it); this fallback is for callers that genuinely have none.
+    root = root or provenance.default_sovereign_root()
     letters = root / "comms" / "letters"
     surfaces: dict[str, dict] = {}
 
@@ -164,9 +170,15 @@ def measure_aperture(
             # count from the default without diffing two boots.
             entry["shown_is"] = "measured from this call's own lineage payload"
             if cov.get("no_reader"):
+                # DERIVED, NOT TYPED. This read "measured: 0 ... not 0 letters
+                # on disk" as a literal, true only because witness builds a
+                # no-reader coverage from `_zero_cov()`. A sentence asserting a
+                # measurement it did not read is this module's own defect one
+                # layer down — the thing it exists to stop.
                 entry["shown_is"] = (
-                    "measured: 0, because this call named no reader and to_self is "
-                    "addressee-filtered — not 0 letters on disk"
+                    f"measured: {shown}, because this call named no reader and to_self "
+                    f"is addressee-filtered — a filter result, not the "
+                    f"{entry['on_disk']} letters on disk"
                 )
         if bucket == "to_self":
             entry["note"] = (
@@ -293,6 +305,27 @@ def measure_aperture(
             "is the corpus."
         ),
         "surfaces": surfaces,
+        # THE FOURTH BUCKET. `witness.collect_lineage` fills FOUR coverage
+        # keys; the loop above measures three. Reporting three and saying
+        # nothing about the fourth is a coverage gap inside the anti-coverage-
+        # gap surface — exactly what this module refuses to do to any other
+        # reader. It is NOT measured rather than measured-as-zero, because
+        # which directories apply (to_opus/, to_sonnet/, to_haiku/ …) is
+        # resolved from the READER's model family inside witness, and a number
+        # this surface cannot derive must not be invented here.
+        "not_measured_here": {
+            "lineage_to_family": {
+                "why": (
+                    "collect_lineage produces a fourth lineage bucket, to_family — the "
+                    "per-model-family letter directories (to_opus/, to_sonnet/, "
+                    "to_haiku/ …). Which ones apply is resolved from the reader's model "
+                    "family, so this surface has no directory to count. The bucket IS "
+                    "rendered by the lineage section and IS capped by limit_per_bucket: "
+                    "read its own coverage line there. This block's silence about it is "
+                    "not a statement that you have no family mail"
+                ),
+            },
+        },
         "not_reachable": {
             "resolved_open_threads": {
                 "count": total_threads - unresolved,

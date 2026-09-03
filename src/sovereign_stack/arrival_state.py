@@ -282,6 +282,14 @@ class ArrivalState:
     source_receipts: list[SectionReceipt] = field(default_factory=list)
 
     # ---- request context ----
+    # THE STORE THIS PROJECTION WAS BUILT FROM. Carried because the APERTURE
+    # block reports the caller's coverage and must measure the SAME store: with
+    # no root to pass, `_render_aperture` measured ~/.sovereign unconditionally
+    # while asserting "measured from this call's own lineage payload", which is
+    # a provenance claim that is only true when the two roots coincide. Two
+    # test fixtures had to monkeypatch the aperture's module default to work
+    # around it.
+    sovereign_root: str | None = None
     reader: str = "unknown"
     profile: str = "full"
     compact: bool = False
@@ -644,6 +652,7 @@ def build_arrival_state(
         freshness=freshness,
         partial_reasons=partial_reasons,
         source_receipts=receipts,
+        sovereign_root=str(sovereign_root),
         reader=reader,
         profile=profile,
         compact=compact,
@@ -686,7 +695,11 @@ def _bucket_count(lineage: dict | None) -> int:
 # =============================================================================
 
 
-def _render_aperture(reader: str | None = None, lineage_coverage: dict | None = None) -> list[str]:
+def _render_aperture(
+    reader: str | None = None,
+    lineage_coverage: dict | None = None,
+    root: Path | None = None,
+) -> list[str]:
     """
     The APERTURE block — what this door is NOT showing you.
 
@@ -714,7 +727,7 @@ def _render_aperture(reader: str | None = None, lineage_coverage: dict | None = 
     """
     now = datetime.now(timezone.utc)
     try:
-        ap = measure_aperture(now, reader=reader, lineage_coverage=lineage_coverage)
+        ap = measure_aperture(now, root=root, reader=reader, lineage_coverage=lineage_coverage)
     except Exception as exc:  # noqa: BLE001 — any failure is "unmeasured"
         ap = aperture_unmeasured(now, exc)
 
@@ -741,6 +754,11 @@ def _render_aperture(reader: str | None = None, lineage_coverage: dict | None = 
             lines.append(f"  {name:24} {sur['on_disk']:>6} on disk · {shown}")
     for _, nr in ap.get("not_reachable", {}).items():
         lines.append(f"  NOT REACHABLE BY ANY PARAMETER: {nr['count']} — {nr['why']}")
+    # A bucket this block does not measure has to SAY it does not measure it,
+    # or its silence reads as a zero. Same rule as every surface above, applied
+    # to the one the loop cannot reach.
+    for name, nm in ap.get("not_measured_here", {}).items():
+        lines.append(f"  NOT MEASURED HERE: {name} — {nm['why']}")
     # The notes reach the DOOR, not only the heartbeat JSON. The handoffs note
     # is where the retired consumption mechanism was described for arriving
     # seats; correcting it in aperture.py alone would have fixed the JSON and
@@ -832,7 +850,15 @@ def render_full(
     # letters directory is absent and when the gather degraded, so this is
     # guarded rather than indexed — a door that raised here would take the
     # whole boot down to fix a count.
-    lines += _render_aperture(state.reader, (state.lineage or {}).get("coverage"))
+    # THE DOOR'S OWN ROOT, not ~/.sovereign by assumption. The block asserts
+    # its lineage numbers are "measured from this call's own lineage payload";
+    # measuring a different store than the one the payload came from would make
+    # that provenance claim false wherever the two diverge.
+    lines += _render_aperture(
+        state.reader,
+        (state.lineage or {}).get("coverage"),
+        Path(state.sovereign_root) if state.sovereign_root else None,
+    )
 
     # 1.5 Lineage — letters from past instances.
     if state.lineage_degraded:

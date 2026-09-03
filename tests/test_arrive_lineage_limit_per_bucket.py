@@ -352,10 +352,12 @@ def test_a_non_integer_limit_is_refused_not_coerced(lineage_root: Path, bad: obj
 
 @pytest.fixture
 def aperture_sees_the_same_root(lineage_root: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """`_render_aperture` calls measure_aperture with NO root, so it always
-    measures ~/.sovereign — pre-existing, out of scope here, and harmless in
-    production where the door's root IS ~/.sovereign. Point the module default
-    at this test's root so the APERTURE block describes ONE store.
+    """The APERTURE block measures the DOOR'S root, so it describes ONE store.
+
+    `_render_aperture` used to call measure_aperture with no root and always
+    measure ~/.sovereign, and this fixture monkeypatched the module default to
+    work around it; the door now passes `ArrivalState.sovereign_root` through.
+    What remains here is the seeding, which is not a workaround:
 
     THE SEEDED DIRECTORIES ARE NOT DECORATION. measure_aperture scandirs
     chronicle/insights, chronicle/open_threads and handoffs unconditionally and
@@ -365,11 +367,8 @@ def aperture_sees_the_same_root(lineage_root: Path, monkeypatch: pytest.MonkeyPa
     nothing, which is how the first draft of these tests "passed" a grep for
     lineage lines that were actually chronicle entries mentioning the word.
     """
-    from sovereign_stack import aperture as ap_mod
-
     for sub in ("chronicle/insights", "chronicle/open_threads", "handoffs"):
         (lineage_root / sub).mkdir(parents=True, exist_ok=True)
-    monkeypatch.setattr(ap_mod, "_DEFAULT_ROOT", lineage_root)
     return lineage_root
 
 

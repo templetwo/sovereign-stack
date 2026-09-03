@@ -284,27 +284,46 @@ class TestTheShownCountDescribesTHISPayload:
         ]["lineage_to_self"]
         assert ap["default_shown"] == 0
         assert ap["on_disk"] == 18
-        assert "not 0 letters on disk" in ap["shown_is"]
+        # BOTH NUMBERS DERIVED. The sentence was a literal — "measured: 0 ...
+        # not 0 letters on disk" — true only because witness builds a
+        # no-reader coverage from _zero_cov(). A hardcoded number inside a
+        # string that asserts a measurement is this module's own defect one
+        # layer down, so both halves are asserted against the payload.
+        assert "measured: 0" in ap["shown_is"]
+        assert "18 letters on disk" in ap["shown_is"]
+        assert "a filter result" in ap["shown_is"]
+
+    def test_the_no_reader_sentence_is_DERIVED_not_typed(self, tmp_path):
+        """Same branch, different numbers. A literal sentence passes the test
+        above and fails this one."""
+        from datetime import datetime, timezone
+
+        from sovereign_stack.aperture import measure_aperture
+
+        root = self._root(tmp_path, {"to_arrival": 1, "to_self": 4, "breakthroughs": 1})
+        coverage = {"to_self": {"shown": 2, "total_on_disk": 4, "no_reader": True}}
+        ap = measure_aperture(datetime.now(timezone.utc), root=root, lineage_coverage=coverage)[
+            "surfaces"
+        ]["lineage_to_self"]
+        assert "measured: 2" in ap["shown_is"], ap["shown_is"]
+        assert "4 letters on disk" in ap["shown_is"], ap["shown_is"]
 
     def test_the_RENDERED_line_says_the_measured_number(self, tmp_path, monkeypatch):
         """The dict is not the deliverable; the sentence a seat reads is.
 
-        `_render_aperture` calls measure_aperture with NO root, so it always
-        measures ~/.sovereign — a pre-existing defect, out of scope here and
-        harmless in production (where the door's root IS ~/.sovereign) but it
-        would make this test read two different stores. Point the module
-        default at the tmp root so the whole block describes one store.
+        `_render_aperture` now takes the door's own root — the boot passes
+        `ArrivalState.sovereign_root`, so the block measures the store the
+        payload came from. Before that it measured ~/.sovereign
+        unconditionally and this test had to monkeypatch a module default to
+        keep the assertions on one store.
         """
-        from sovereign_stack import aperture as ap_mod
-
         root = self._root(tmp_path, {"to_arrival": 13, "to_self": 18, "breakthroughs": 7})
-        monkeypatch.setattr(ap_mod, "_DEFAULT_ROOT", root)
         coverage = {
             "arrivals": {"shown": 13, "total_on_disk": 13},
             "breakthroughs": {"shown": 7, "total_on_disk": 7},
             "to_self": {"shown": 1, "total_on_disk": 18},
         }
-        text = "\n".join(ast_mod._render_aperture("claude-opus-5", coverage))
+        text = "\n".join(ast_mod._render_aperture("claude-opus-5", coverage, root))
         # Whitespace-agnostic: the renderer pads with {name:24} and {on_disk:>6},
         # and pinning that padding would make this a formatting test.
         assert re.search(r"lineage_to_arrival\s+13 on disk · 13 shown here", text), text
@@ -338,9 +357,13 @@ class TestEverySurfaceNoteReachesTheDoor:
         `unmeasured` branch, and every note assertion would go red for a reason
         that has nothing to do with the renderer. These new ones own their
         store so the assertion is about the code under test and nothing else.
-        """
-        from sovereign_stack import aperture as ap_mod
 
+        SOVEREIGN_ROOT, not a monkeypatched module attribute: the aperture
+        resolves its fallback root through `provenance.default_sovereign_root`
+        on every call now, so the env override every other root in the package
+        honours works here too. `monkeypatch` stays in the signature because
+        setenv is what does the work.
+        """
         root = tmp_path / ".sovereign"
         for sub in (
             "chronicle/insights",
@@ -351,7 +374,7 @@ class TestEverySurfaceNoteReachesTheDoor:
             "comms/letters/breakthroughs",
         ):
             (root / sub).mkdir(parents=True, exist_ok=True)
-        monkeypatch.setattr(ap_mod, "_DEFAULT_ROOT", root)
+        monkeypatch.setenv("SOVEREIGN_ROOT", str(root))
         return "\n".join(ast_mod._render_aperture())
 
     def test_the_to_self_decorated_name_warning_is_rendered(self, tmp_path, monkeypatch):
@@ -382,3 +405,124 @@ class TestEverySurfaceNoteReachesTheDoor:
         monkeypatch.setattr(ast_mod, "measure_aperture", with_extra)
         assert "a warning nobody enumerated" in "\n".join(ast_mod._render_aperture())
         assert datetime.now(timezone.utc)  # keeps the import honest
+
+
+def _seeded_root(tmp_path, counts):
+    """A store measure_aperture can read: the three letter buckets plus the
+    three directories it scandirs unconditionally (it RAISES without them, and
+    the renderer then emits `unmeasured` with no counts at all — which is how a
+    test can 'pass' against a block that measured nothing)."""
+    root = tmp_path / ".sovereign"
+    for bucket, n in counts.items():
+        d = root / "comms" / "letters" / bucket
+        d.mkdir(parents=True, exist_ok=True)
+        for i in range(n):
+            (d / f"2026-08-{i + 1:02d}-l{i}.md").write_text(f"---\nfrom: s{i}\n---\n\nb{i}\n")
+    for sub in ("chronicle/insights", "chronicle/open_threads", "handoffs"):
+        (root / sub).mkdir(parents=True, exist_ok=True)
+    return root
+
+
+class TestTheFourthLineageBucketIsNamed:
+    """`witness.collect_lineage` fills FOUR coverage keys; the aperture's loop
+    measures three (to_arrival, to_self, breakthroughs). Saying nothing about
+    to_family is a coverage gap INSIDE the anti-coverage-gap surface, and it
+    got sharper when the block started claiming its lineage numbers were
+    "measured from this call's own lineage payload" — a payload with a fourth
+    bucket in it.
+
+    NOT MEASURED, not measured-as-zero: which family directories apply
+    (to_opus/, to_sonnet/, to_haiku/ …) is resolved from the READER's model
+    family inside witness, so a number this surface cannot derive must not be
+    invented here. The fix is to say so, in both the payload and the sentence.
+    """
+
+    def test_the_payload_names_it(self, tmp_path):
+        from datetime import datetime, timezone
+
+        from sovereign_stack.aperture import measure_aperture
+
+        root = _seeded_root(tmp_path, {"to_arrival": 1, "to_self": 1, "breakthroughs": 1})
+        ap = measure_aperture(datetime.now(timezone.utc), root=root)
+        assert "lineage_to_family" in ap["not_measured_here"]
+        why = ap["not_measured_here"]["lineage_to_family"]["why"]
+        assert "to_family" in why and "limit_per_bucket" in why
+
+    def test_it_is_NOT_reported_as_a_measured_surface(self, tmp_path):
+        """The whole point of the not_measured_here key: a bucket with no
+        derivable number must not appear as one with a count."""
+        from datetime import datetime, timezone
+
+        from sovereign_stack.aperture import measure_aperture
+
+        root = _seeded_root(tmp_path, {"to_arrival": 1, "to_self": 1, "breakthroughs": 1})
+        ap = measure_aperture(datetime.now(timezone.utc), root=root)
+        assert "lineage_to_family" not in ap["surfaces"]
+
+    def test_the_RENDERED_block_says_it(self, tmp_path):
+        """The dict is not the deliverable. A statement that reaches the JSON
+        and not the door repeats the note-enumeration bug one key over."""
+        root = _seeded_root(tmp_path, {"to_arrival": 1, "to_self": 1, "breakthroughs": 1})
+        text = "\n".join(ast_mod._render_aperture("claude-opus-5", None, root))
+        assert "NOT MEASURED HERE: lineage_to_family" in text
+
+
+class TestTheApertureMeasuresTheCallersStore:
+    """`_render_aperture` called measure_aperture with NO root, so it measured
+    ~/.sovereign unconditionally while the surrounding block asserted its
+    lineage numbers were "measured from this call's own lineage payload". That
+    provenance claim is only true when the two roots coincide. Harmless in
+    production (the door's root IS ~/.sovereign) and not harmless as a claim —
+    and it forced two fixtures to monkeypatch a module default to test the
+    block at all.
+    """
+
+    def test_the_renderer_measures_the_root_it_is_given(self, tmp_path, monkeypatch):
+        """Explicit root wins over the env fallback, so the two are
+        distinguishable and this cannot pass by coincidence."""
+        given = _seeded_root(
+            tmp_path / "given", {"to_arrival": 3, "to_self": 1, "breakthroughs": 1}
+        )
+        other = _seeded_root(
+            tmp_path / "other", {"to_arrival": 9, "to_self": 1, "breakthroughs": 1}
+        )
+        monkeypatch.setenv("SOVEREIGN_ROOT", str(other))
+        text = "\n".join(ast_mod._render_aperture("claude-opus-5", None, given))
+        assert re.search(r"lineage_to_arrival\s+3 on disk", text), text
+        assert "9 on disk" not in text
+
+    def test_the_fallback_root_honours_SOVEREIGN_ROOT(self, tmp_path, monkeypatch):
+        """The module default was `Path(os.path.expanduser("~/.sovereign"))`
+        computed AT IMPORT — it ignored the override every other root in the
+        package honours through provenance, and could not be changed after
+        import except by patching the attribute."""
+        root = _seeded_root(tmp_path, {"to_arrival": 4, "to_self": 1, "breakthroughs": 1})
+        monkeypatch.setenv("SOVEREIGN_ROOT", str(root))
+        text = "\n".join(ast_mod._render_aperture())
+        assert re.search(r"lineage_to_arrival\s+4 on disk", text), text
+
+    def test_the_state_carries_the_root_the_projection_was_built_from(self, tmp_path):
+        """The door's half: ArrivalState had no root field, so there was
+        nothing for the renderer to be given."""
+        from sovereign_stack.arrival_state import build_arrival_state
+        from sovereign_stack.handoff import HandoffEngine
+        from sovereign_stack.memory import ExperientialMemory
+        from sovereign_stack.reflexive import ReflexiveSurface
+
+        root = _seeded_root(tmp_path, {"to_arrival": 1, "to_self": 1, "breakthroughs": 1})
+        state = build_arrival_state(
+            root,
+            reader="claude-opus-5",
+            profile="gentle",
+            experiential=ExperientialMemory(root=str(root / "chronicle")),
+            handoff_engine=HandoffEngine(root=str(root)),
+            reflexive_surface=ReflexiveSurface(sovereign_root=root),
+            spiral_summary={
+                "session_id": "s",
+                "current_phase": "p",
+                "tool_call_count": 0,
+                "reflection_depth": 0,
+                "session_duration_seconds": 0.0,
+            },
+        )
+        assert state.sovereign_root == str(root)
