@@ -18,13 +18,25 @@ WHY THE FIX IS CONDITIONAL, AND WHY THAT CONDITION IS THE TEST THAT MATTERS.
 "Prefer `occurred_at` when present" is the obvious repair and it is wrong.
 `occurred_at` is an overloaded field: `ground.record_catch` writes it as the
 human EVENT date — routinely date-only, "2026-08-14" — and stamps no
-`timestamp_source`. On the live store all 1,059 rows carrying `occurred_at`
-lack that marker. Reading it unconditionally would hand the probe a naive date
-for every Ground row and every legacy import and turn a working guard off
-across the whole corpus. `timestamp_source` is the only field that asserts
-"this row's `timestamp` is not its write instant", so it is the only thing
-allowed to redirect the read. TestTheConditionIsLoadBearing is the pin: drop
-the condition and it goes red.
+`timestamp_source`. Census of the live store, 2026-09-02: of 3,590 insight
+entries, 1,059 carry `occurred_at` and all 1,059 carry NO `timestamp_source`.
+Reading it unconditionally would hand the probe a naive date for every Ground
+row and every legacy import and turn a working guard off across the whole
+corpus. `timestamp_source` is the only field that asserts "this row's
+`timestamp` is not its write instant", so it is the only thing allowed to
+redirect the read. TestTheConditionIsLoadBearing is the pin: drop the
+condition and it goes red.
+
+THE CONDITION IS MARKER PRESENCE, NOT EQUALITY TO ONE LITERAL, and that is
+itself a pinned decision (TestEveryWriterOfTheMarkerIsRead). There are two
+writers of `timestamp_source` in the tree and they stamp DIFFERENT values —
+`memory.TIMESTAMP_SOURCE_ORIGINAL` and
+`scripts/backfill_occurred_at.TIMESTAMP_SOURCE` — while meaning the SAME
+thing: `timestamp` is authorship, `occurred_at` is the write instant. An
+equality test against the first recognized the second's rows as ordinary and
+reopened this exact fail-open on every row that backfill rewrites. Presence
+covers both, and still excludes the unstamped Ground/legacy rows, because they
+carry no marker at all.
 
 Naive/date-only stored values are answered with "no dedup hit", never with a
 TypeError out of a read-only probe.
@@ -32,11 +44,32 @@ TypeError out of a read-only probe.
 
 from __future__ import annotations
 
+import importlib.util
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from sovereign_stack.memory import TIMESTAMP_SOURCE_ORIGINAL, ExperientialMemory
+
+
+def _load_backfill():
+    """The backfill SCRIPT, loaded by path.
+
+    It is deliberately import-free of the package it rewrites (it must run
+    against a store with no venv), so it is not on sys.path and cannot be
+    imported by name. Loading it here is what lets the composition test seed
+    the marker from `backfill.TIMESTAMP_SOURCE` instead of re-typing the
+    literal — a re-typed literal is a test that keeps passing after the two
+    sides drift, which is the failure it exists to catch.
+    """
+    path = Path(__file__).resolve().parent.parent / "scripts" / "backfill_occurred_at.py"
+    spec = importlib.util.spec_from_file_location("backfill_occurred_at", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+backfill = _load_backfill()
 
 
 def _mem(tmp_path: Path) -> ExperientialMemory:
@@ -146,10 +179,13 @@ class TestABackdatedRetryDedups:
 class TestTheConditionIsLoadBearing:
     """(b) — the Ground shape. THIS IS THE REGRESSION PIN.
 
-    Remove the `timestamp_source == TIMESTAMP_SOURCE_ORIGINAL` condition from
+    Remove the `timestamp_source` marker-presence condition from
     `_write_instant_of` — i.e. prefer `occurred_at` whenever it is present —
     and every test in this class goes red, because a Ground row's `occurred_at`
     is a naive human event date and its `timestamp` is the aware write instant.
+    The Ground rows carry NO marker, so widening the condition from one literal
+    to presence (see TestEveryWriterOfTheMarkerIsRead) leaves this pin exactly
+    as load-bearing as it was.
     """
 
     def test_a_ground_shaped_row_still_dedups_a_retry(self, tmp_path):
@@ -234,6 +270,102 @@ class TestTheConditionIsLoadBearing:
                 assert written == 1, f"record_catch retry duplicated: {written} rows"
                 return
         raise AssertionError("every attempt straddled a second boundary — nothing was exercised")
+
+
+class TestEveryWriterOfTheMarkerIsRead:
+    """THE TWO CHANGES IN THIS SERIES HAVE TO COMPOSE, and once they did not.
+
+    `_write_instant_of` originally tested `timestamp_source ==
+    TIMESTAMP_SOURCE_ORIGINAL` — a single literal, "original_timestamp". The
+    sibling commit in the same series shipped
+    `scripts/backfill_occurred_at.py`, whose writer stamps a DIFFERENT value
+    ("bridge_backfill_20260902") on rows of the IDENTICAL shape: `timestamp` =
+    the proposal's filing time, `occurred_at` = the real commit instant. Every
+    row that backfill rewrites therefore landed in exactly the state this
+    function was written to recognize, wearing a marker it did not recognize,
+    and the dedup probe would again compare `now` against an authorship time
+    months earlier and could not fire. The fail-open closed by one commit was
+    reopened, on the same rows, by the next.
+
+    THE DECISION: the condition is marker PRESENCE. Both writers in the tree
+    mean the same thing by the field, and presence covers a third one nobody
+    has written yet. It costs nothing against the Ground/legacy corpus —
+    census 2026-09-02, 1,059 of 3,590 live insight rows carry `occurred_at`
+    and all 1,059 carry no `timestamp_source` at all, so they are excluded by
+    presence exactly as they were by the literal
+    (TestTheConditionIsLoadBearing remains the pin for that half).
+    """
+
+    def test_the_two_writers_stamp_DIFFERENT_values(self):
+        """Without this the composition tests below are vacuous."""
+        assert backfill.TIMESTAMP_SOURCE != TIMESTAMP_SOURCE_ORIGINAL
+
+    def test_a_backfilled_row_dedups_its_retry(self, tmp_path):
+        """The exact shape apply_plan writes: `timestamp` months back,
+        `occurred_at` the commit instant, marker = the SCRIPT's own constant."""
+        now = datetime.now(timezone.utc)
+        _seed_row(
+            tmp_path,
+            "dom",
+            {
+                "timestamp": "2026-05-25T14:00:00+00:00",  # the filing time
+                "occurred_at": now.isoformat(),  # the real write instant
+                "timestamp_source": backfill.TIMESTAMP_SOURCE,
+                "domain": "dom",
+                "content": "c",
+                "layer": "hypothesis",
+            },
+        )
+        _mem(tmp_path).record_insight("dom", "c", session_id=SEEDED_SESSION)
+        rows = _rows(tmp_path, "dom")
+        assert len(rows) == 1, (
+            "a row wearing the backfill's marker was read as an ordinary row — "
+            f"the dedup probe compared now against the FILING time: {rows}"
+        )
+
+    def test_a_backfilled_row_can_still_NOT_dedup(self, tmp_path):
+        """Law #2 on the same row: shown to fire, and shown to hold off. A
+        write instant six hours old is a deliberate re-recording, not a retry.
+        """
+        old = datetime.now(timezone.utc) - timedelta(hours=6)
+        _seed_row(
+            tmp_path,
+            "dom",
+            {
+                "timestamp": "2026-05-25T14:00:00+00:00",
+                "occurred_at": old.isoformat(),
+                "timestamp_source": backfill.TIMESTAMP_SOURCE,
+                "domain": "dom",
+                "content": "c",
+                "layer": "hypothesis",
+            },
+        )
+        _mem(tmp_path).record_insight("dom", "c", session_id=SEEDED_SESSION)
+        assert len(_rows(tmp_path, "dom")) == 2
+
+    def test_the_contract_is_the_FIELD_not_a_list_of_known_values(self, tmp_path):
+        """A marker this reader has never heard of still redirects the read.
+
+        That is the field's documented contract (`memory.py`, at
+        TIMESTAMP_SOURCE_ORIGINAL): ANY value asserts "timestamp is
+        authorship, occurred_at is the write instant". A future backfill must
+        not have to teach this function its name.
+        """
+        now = datetime.now(timezone.utc)
+        _seed_row(
+            tmp_path,
+            "dom",
+            {
+                "timestamp": "2026-05-25T14:00:00+00:00",
+                "occurred_at": now.isoformat(),
+                "timestamp_source": "some_future_backfill_20270101",
+                "domain": "dom",
+                "content": "c",
+                "layer": "hypothesis",
+            },
+        )
+        _mem(tmp_path).record_insight("dom", "c", session_id=SEEDED_SESSION)
+        assert len(_rows(tmp_path, "dom")) == 1
 
 
 class TestNaiveStoredValuesDoNotRaise:

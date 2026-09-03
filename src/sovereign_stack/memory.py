@@ -242,6 +242,12 @@ ORIGINAL_TIMESTAMP_FLOOR = datetime(2024, 1, 1, tzinfo=timezone.utc)
 # from another machine, must not be refused; a value hours or days ahead is a
 # typo or a fabrication and is.
 ORIGINAL_TIMESTAMP_MAX_FUTURE_SKEW_SECONDS = 300
+# `timestamp_source` IS A WRITE-INSTANT REDIRECT MARKER, and its PRESENCE — not
+# its value — is what `_write_instant_of` reads. Any value asserts "this row's
+# `timestamp` is an authorship time; `occurred_at` holds the write instant".
+# This constant is the value THIS module stamps; scripts/backfill_occurred_at.py
+# stamps its own ("bridge_backfill_20260902") on rows of the identical shape and
+# is read by the same rule. Do not repurpose the field for anything else.
 TIMESTAMP_SOURCE_ORIGINAL = "original_timestamp"
 
 
@@ -320,27 +326,47 @@ def _last_jsonl_entry(path: Path) -> dict | None:
 def _write_instant_of(entry: dict) -> str | None:
     """The moment `entry` was APPENDED, as the ISO string it was stored as.
 
-    Normally that is `timestamp`. The ONE exception is a backdated write: when
-    `record_insight` is given `original_timestamp` it puts the AUTHORSHIP time
-    in `timestamp` (Anthony's 2026-06-19 backdate-in-place ruling — every
-    untaught reader's sort must find the entry where it belongs) and moves the
-    real write instant to `occurred_at`, saying so in `timestamp_source`.
+    Normally that is `timestamp`. The exception is a BACKDATED row, and the
+    thing that declares one is the PRESENCE of `timestamp_source`.
 
-    THE CONDITION IS LOAD-BEARING AND MUST NOT BE WIDENED TO "occurred_at IF
-    PRESENT". `occurred_at` is an overloaded field: `ground.record_catch`
-    writes it as the human EVENT date (frequently date-only, e.g. "2026-08-14")
-    with NO `timestamp_source`, and on the live store all 1,059 rows carrying
-    `occurred_at` lack that marker. Preferring it unconditionally would hand
-    the dedup probe a naive date for every Ground row and every legacy import,
-    turning a working guard off across the whole corpus. `timestamp_source` is
-    the only field that says "this row's `timestamp` is not its write instant",
-    so it is the only thing allowed to redirect the read.
+    THE FIELD'S CONTRACT, stated here because this reader is what makes it a
+    contract: **any** value of `timestamp_source` asserts "this row's
+    `timestamp` is an AUTHORSHIP time, and `occurred_at` holds the real write
+    instant". That is what both writers in the tree mean by it —
+    `record_insight` / `propose_learning` / `record_open_thread` stamp
+    ``TIMESTAMP_SOURCE_ORIGINAL`` on Anthony's 2026-06-19 backdate-in-place
+    ruling (the authorship time goes in `timestamp` so every untaught reader's
+    sort finds the entry where it belongs), and
+    ``scripts/backfill_occurred_at.py`` stamps ``"bridge_backfill_20260902"``
+    on rows of the IDENTICAL shape. A FUTURE WRITER MUST NOT REPURPOSE THIS
+    FIELD for anything else; a marker that does not mean the above breaks this
+    read silently.
+
+    WHY PRESENCE AND NOT EQUALITY-TO-ONE-LITERAL. The literal
+    ``== TIMESTAMP_SOURCE_ORIGINAL`` recognized exactly one of the two writers.
+    Every row the bridge backfill rewrites lands in precisely the state this
+    function exists to read — `timestamp` = filing time, `occurred_at` = the
+    commit instant — wearing a marker the literal did not match, so the dedup
+    probe would again compare `now` against an authorship time months earlier
+    and could not fire. The fail-open would have been reintroduced, on the same
+    rows, by a sibling commit in the same series. Presence covers both markers
+    and every future one.
+
+    IT MUST STILL NOT BE WIDENED TO "occurred_at IF PRESENT". `occurred_at` is
+    an overloaded field: `ground.record_catch` writes it as the human EVENT
+    date (frequently date-only, e.g. "2026-08-14") and stamps NO
+    `timestamp_source`. Census of the live store, 2026-09-02: of 3,590 insight
+    entries, 1,059 carry `occurred_at` and all 1,059 carry no
+    `timestamp_source` at all — so a presence test excludes every Ground row
+    and every legacy/vault import exactly as the literal did, while covering
+    both markers. Preferring `occurred_at` unconditionally would hand the probe
+    a naive date across the whole corpus and turn a working guard off.
 
     Falls back to `timestamp` when the marker is set but `occurred_at` is
     missing — a malformed row is read exactly as it was before this function
     existed, never as an absence.
     """
-    if entry.get("timestamp_source") == TIMESTAMP_SOURCE_ORIGINAL:
+    if entry.get("timestamp_source"):
         return entry.get("occurred_at") or entry.get("timestamp")
     return entry.get("timestamp")
 
