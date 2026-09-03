@@ -50,7 +50,30 @@ USAGE
     python3 scripts/backfill_occurred_at.py --root PATH     # a different store
     python3 scripts/backfill_occurred_at.py --apply         # writes. See below.
 
---apply, in one pass, per touched shard:
+--apply is GATED TWICE, both fail-closed, because this rewrites the primary
+record by LINE POSITION and holds no lock any other process respects
+(`provenance.chronicle_write_lock` is an in-process RLock; the real
+cross-process fix is the unmerged `hardening/cross-process-flock` branch, whose
+own race proof loses 35 of 60 writes silently):
+
+  1. A LIVE SERVER REFUSES THE WHOLE RUN. If anything answers on
+     127.0.0.1:3434 (sovereign-sse) or 127.0.0.1:8100 (sovereign-bridge),
+     --apply exits 3 naming the port and the launchctl labels to stop. A
+     server appending to a shard mid-rewrite loses its write to this script's
+     whole-file `write_text`, with no error on either side.
+  2. EVERY PLANNED LINE IS RE-READ AND COMPARED against the entry the plan
+     captured, as a PARSED DICT — not bytes (which would refuse over key
+     ordering) and not the claim id (whose preimage is only
+     timestamp+domain+content, so a line that drifted in `layer` or
+     `verified_by` would be waved through). One mismatch refuses the WHOLE
+     shard: the file moved under the plan, so every other line number in it is
+     suspect. A refused shard gets no backup, no rewrite, no alias row and no
+     changelog line, and is named in the report.
+
+The DRY RUN is gated by neither — the report a human needs in order to decide
+is always available.
+
+--apply, in one pass, per touched shard that passes both gates:
     * copies the shard to ~/.sovereign/backups/occurred_at_backfill_<ts>/
       (mirroring its path under the store) BEFORE any rewrite;
     * rewrites only the matched lines, leaving every other byte untouched;
@@ -243,6 +266,13 @@ def build_plan(root: Path, min_gap_days: float = 0.0) -> dict:
                 "new_timestamp": filed,
                 "old_claim_id": derive_claim_id(entry),
                 "new_claim_id": derive_claim_id(new_entry),
+                # BOTH SIDES ARE CARRIED. `old_entry` is what apply_plan
+                # re-reads the target line against before overwriting it —
+                # comparing the PARSED DICT, because `derive_claim_id` hashes
+                # only timestamp+domain+content and a line that had drifted in
+                # `layer`, `verified_by` or any other field would match on id
+                # while being a different record.
+                "old_entry": entry,
                 "new_entry": new_entry,
             }
         )
@@ -385,6 +415,15 @@ def print_report(plan: dict, verbose: bool) -> None:
                 print(f"          {w}")
             if len(where) > 6:
                 print(f"          ... and {len(where) - 6} more")
+    refused = plan.get("refused_shards") or []
+    if refused:
+        print()
+        print(f"  SHARDS REFUSED (left completely untouched): {len(refused)}")
+        print("      a planned line was no longer the entry that was planned — the")
+        print("      file moved under the plan, so the WHOLE shard was skipped.")
+        for r in refused:
+            print(f"      {r['shard']}  ({r['entries']} planned entries)")
+            print(f"          {r['reason']}")
     if plan["problems"]:
         print()
         print(f"  UNREADABLE (holes in the denominator): {len(plan['problems'])}")
@@ -409,8 +448,66 @@ def print_report(plan: dict, verbose: bool) -> None:
         print("and only after the citation count above has been decided on.")
 
 
+def _revalidate_shard(shard: Path, rows: list[dict]) -> str | None:
+    """None when every planned line in `shard` is still the entry that was
+    planned; otherwise the reason the WHOLE shard must be refused.
+
+    THE GUARD THIS FUNCTION IS. `build_plan` captures a LINE POSITION, and
+    `apply_plan` overwrites that position later — with no lock any other writer
+    respects (`chronicle_write_lock` is an in-process RLock; the cross-process
+    fix lives unmerged on `hardening/cross-process-flock`). Between the two, an
+    append shifts nothing but a compaction, an archive pass or a metabolism
+    rewrite shifts everything, and the script would then overwrite whatever
+    innocent entry had slid into line N with the backdated content of a
+    different one. That failure is SILENT and INDISTINGUISHABLE from a correct
+    run afterwards, which is precisely the class the whole script is written
+    against.
+
+    COMPARISON IS THE PARSED DICT, NOT THE BYTES AND NOT THE CLAIM ID. Bytes
+    would refuse a shard over key ordering or whitespace that changes no
+    meaning; the claim id would ACCEPT a drifted line, because its preimage is
+    only timestamp+domain+content and says nothing about `layer`,
+    `verified_by`, `supersedes` or any other field.
+
+    ALL-OR-NOTHING PER SHARD. One bad line means the file has moved under the
+    plan, so every other line number in it is suspect too — rewriting the rest
+    "because they still match" would be trusting the same stale index that just
+    failed.
+    """
+    try:
+        lines = shard.read_text(errors="replace").splitlines()
+    except OSError as exc:
+        return f"unreadable: {exc}"
+    for row in rows:
+        lineno = row["lineno"]
+        if lineno < 1 or lineno > len(lines):
+            return (
+                f"line {lineno} no longer exists (shard now has {len(lines)} lines) "
+                f"— the file moved under the plan"
+            )
+        try:
+            found = json.loads(lines[lineno - 1])
+        except json.JSONDecodeError as exc:
+            return f"line {lineno} is no longer parseable JSON: {exc}"
+        if found != row["old_entry"]:
+            return (
+                f"line {lineno} is not the entry that was planned "
+                f"(planned content {str(row['old_entry'].get('content'))[:40]!r}, "
+                f"found {str(found.get('content'))[:40]!r}) — the file moved under the plan"
+            )
+    return None
+
+
 def apply_plan(root: Path, plan: dict) -> Path:
-    """Rewrite matched lines, after backing up every shard it touches."""
+    """Rewrite matched lines, after backing up every shard it touches.
+
+    FAILS CLOSED PER SHARD. Every planned line is re-read and compared against
+    the entry the plan captured BEFORE anything is copied or written; a shard
+    that fails is left completely untouched — no backup, no rewrite, no alias
+    row, no changelog line — and named in ``plan["refused_shards"]`` for the
+    report. Validating after the backup would leave a stray copy asserting a
+    rewrite that never happened.
+    """
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     backup_root = root / "backups" / f"occurred_at_backfill_{stamp}"
     backup_root.mkdir(parents=True, exist_ok=True)
@@ -419,14 +516,17 @@ def apply_plan(root: Path, plan: dict) -> Path:
     for row in plan["matched"]:
         by_shard.setdefault(row["shard"], []).append(row)
 
-    changelog: list[str] = [
-        f"# occurred_at / original_timestamp backfill — {stamp}",
-        f"# store: {root}",
-        f"# entries rewritten: {len(plan['matched'])} across {len(by_shard)} shard(s)",
-        "",
-    ]
+    refused: list[dict] = []
+    written_rows: list[dict] = []
+    changelog: list[str] = []
     for shard_str, rows in sorted(by_shard.items()):
         shard = Path(shard_str)
+        # REVALIDATE FIRST — before the copy, before the write.
+        reason = _revalidate_shard(shard, rows)
+        if reason is not None:
+            refused.append({"shard": shard_str, "entries": len(rows), "reason": reason})
+            continue
+
         # BACKUP BEFORE THE REWRITE, mirroring the shard's path under the
         # store so a restore is an unambiguous copy-back.
         rel = shard.relative_to(root)
@@ -443,6 +543,7 @@ def apply_plan(root: Path, plan: dict) -> Path:
                 out.append(line)
                 continue
             out.append(json.dumps(row["new_entry"]))
+            written_rows.append(row)
             changelog.append(
                 f"{shard_str}:{i}  {row['old_timestamp']} -> {row['new_timestamp']}  "
                 f"claim {row['old_claim_id'][:16]} -> {row['new_claim_id'][:16]}  "
@@ -450,32 +551,90 @@ def apply_plan(root: Path, plan: dict) -> Path:
             )
         shard.write_text("\n".join(out) + "\n")
 
+    # The counts describe what was WRITTEN, never what was planned — a header
+    # claiming the plan's totals over a partially refused run is the same
+    # confident-partiality this script exists to make impossible.
+    shards_written = len(by_shard) - len(refused)
+    changelog = [
+        f"# occurred_at / original_timestamp backfill — {stamp}",
+        f"# store: {root}",
+        f"# entries rewritten: {len(written_rows)} across {shards_written} shard(s)",
+        *(
+            [f"# shards REFUSED (left untouched): {len(refused)}"]
+            + [f"#   {r['shard']}  ({r['entries']} entries)  {r['reason']}" for r in refused]
+            if refused
+            else []
+        ),
+        "",
+        *changelog,
+    ]
+    plan["refused_shards"] = refused
+
     # THE ALIAS FILE. A proposal, not a decision — nothing reads it yet.
-    aliases = root / "chronicle" / "claim_aliases.jsonl"
-    aliases.parent.mkdir(parents=True, exist_ok=True)
-    now = datetime.now(timezone.utc).isoformat()
-    with aliases.open("a") as f:
-        for row in plan["matched"]:
-            f.write(
-                json.dumps(
-                    {
-                        "old_claim_id": row["old_claim_id"],
-                        "new_claim_id": row["new_claim_id"],
-                        "reason": (
-                            "authorship-time backfill: timestamp backdated to the bridge "
-                            "proposal's filing time; timestamp is in the claim_id preimage"
-                        ),
-                        "ts": now,
-                    }
+    # Iterates the rows actually WRITTEN, not plan["matched"]: an alias row for
+    # a line a refused shard never rewrote would point a reader at an id that
+    # does not exist, which is the fail-open shape one layer over.
+    # NOT EVEN CREATED when nothing was written: an empty alias file left
+    # behind by a fully-refused run reads as "the backfill ran and mapped
+    # nothing", which is a different claim from "the backfill refused".
+    if written_rows:
+        aliases = root / "chronicle" / "claim_aliases.jsonl"
+        aliases.parent.mkdir(parents=True, exist_ok=True)
+        now = datetime.now(timezone.utc).isoformat()
+        with aliases.open("a") as f:
+            for row in written_rows:
+                f.write(
+                    json.dumps(
+                        {
+                            "old_claim_id": row["old_claim_id"],
+                            "new_claim_id": row["new_claim_id"],
+                            "reason": (
+                                "authorship-time backfill: timestamp backdated to the bridge "
+                                "proposal's filing time; timestamp is in the claim_id preimage"
+                            ),
+                            "ts": now,
+                        }
+                    )
+                    + "\n"
                 )
-                + "\n"
-            )
 
     (backup_root / "CHANGELOG.txt").write_text("\n".join(changelog) + "\n")
     return backup_root
 
 
-def main(argv: list[str] | None = None) -> int:
+# Ports a running Sovereign Stack answers on: the SSE daemon and the local
+# bridge. Both hold the chronicle open and both write to it.
+LIVE_PORTS: tuple[int, ...] = (3434, 8100)
+LIVE_PORT_LABELS = ("com.templetwo.sovereign-sse", "com.templetwo.sovereign-bridge")
+
+
+def answering_ports(ports: tuple[int, ...] = LIVE_PORTS, host: str = "127.0.0.1") -> list[int]:
+    """Which of `ports` accept a TCP connection right now.
+
+    A CONNECT, NOT A REQUEST. The question is only "is something holding this
+    port", and a connect answers it in milliseconds without an auth token, a
+    route or a dependency on either service's HTTP surface staying the shape
+    this script remembers.
+
+    Presence is a weak probe in general (SOP #5) — but here the weak direction
+    is the safe one: this gate refuses on presence, so a false POSITIVE costs a
+    re-run and a false negative is the only outcome that could hurt.
+    """
+    import socket
+
+    answering: list[int] = []
+    for port in ports:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(0.25)
+            try:
+                if s.connect_ex((host, port)) == 0:
+                    answering.append(port)
+            except OSError:
+                continue
+    return answering
+
+
+def main(argv: list[str] | None = None, *, live_ports: tuple[int, ...] = LIVE_PORTS) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[1])
     ap.add_argument("--root", default=str(Path.home() / ".sovereign"))
     ap.add_argument("--apply", action="store_true", help="WRITE. Default is a dry run.")
@@ -499,6 +658,36 @@ def main(argv: list[str] | None = None) -> int:
         print(f"store not found: {root}", file=sys.stderr)
         return 2
 
+    # THE LIVE-SERVER GATE, and it is checked BEFORE the plan is even built.
+    #
+    # This script rewrites shards by LINE POSITION and holds no lock any other
+    # process respects: `provenance.chronicle_write_lock` is an in-process
+    # RLock, so it does not exist as far as the bridge and the SSE daemon are
+    # concerned (the real cross-process fix is the unmerged
+    # `hardening/cross-process-flock` branch — 35 of 60 writes lost silently in
+    # its own race proof). A running server appending to a shard mid-rewrite
+    # loses its write to this script's whole-file `write_text`, with no error
+    # on either side.
+    #
+    # Refusal is the only safe answer, and it is DRY-RUN-ONLY-SAFE by design:
+    # the dry run reads and is never gated, so the report a human needs in
+    # order to decide is always available.
+    if args.apply:
+        answering = answering_ports(live_ports)
+        if answering:
+            print(
+                "REFUSED: a live server is answering on "
+                + ", ".join(f"127.0.0.1:{p}" for p in answering)
+                + ".\n"
+                "This script rewrites chronicle shards by line position and holds no "
+                "cross-process lock, so a concurrent append is lost silently.\n"
+                "Stop them first:\n"
+                + "\n".join(f"    launchctl bootout gui/$(id -u)/{lbl}" for lbl in LIVE_PORT_LABELS)
+                + "\nThe dry run is unaffected — re-run without --apply for the report.",
+                file=sys.stderr,
+            )
+            return 3
+
     plan = build_plan(root, min_gap_days=args.min_gap)
     if args.apply:
         if not plan["matched"]:
@@ -511,6 +700,7 @@ def main(argv: list[str] | None = None) -> int:
         printable = json.loads(json.dumps(plan, default=str))
         for row in printable.get("matched", []):
             row.pop("new_entry", None)
+            row.pop("old_entry", None)
         print(json.dumps(printable, indent=2))
     else:
         print_report(plan, args.verbose)

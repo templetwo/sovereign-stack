@@ -454,3 +454,238 @@ class TestTheGapFilter:
         assert "HOW FAR BACK" in out
         assert "under 1 hour" in out
         assert "over 7 days" in out
+
+
+class TestTheShardIsRevalidatedBeforeItIsRewritten:
+    """apply_plan rewrites by LINE POSITION captured in build_plan, and holds no
+    lock any other process respects. If the shard moved in between — a
+    compaction, an archive pass, a metabolism whole-file rewrite — the script
+    would overwrite whatever innocent entry slid into line N with the backdated
+    content of a different one, SILENTLY and indistinguishably from a correct
+    run. Every test here has an inverse: a guard only shown to fire is half a
+    guard.
+    """
+
+    @staticmethod
+    def _plan_then_disturb(tmp_path, disturb):
+        root = _store(tmp_path)
+        _proposal(root, "p1", content="c1", domain="dom")
+        _entry(root, content="before", domain="dom")
+        _entry(root, content="c1", domain="dom")
+        _entry(root, content="after", domain="dom")
+        plan = backfill.build_plan(root)
+        assert len(plan["matched"]) == 1
+        shard = root / "chronicle" / "insights" / "dom" / "session_x.jsonl"
+        disturb(shard)
+        before = shard.read_bytes()
+        backup = backfill.apply_plan(root, plan)
+        return root, plan, shard, before, backup
+
+    def test_an_inserted_line_shifts_the_target_and_the_shard_is_refused(self, tmp_path):
+        def insert_first(shard):
+            body = shard.read_text()
+            shard.write_text(json.dumps({"timestamp": COMMITTED, "content": "new"}) + "\n" + body)
+
+        _root, plan, shard, before, _backup = self._plan_then_disturb(tmp_path, insert_first)
+        assert len(plan["refused_shards"]) == 1
+        assert shard.read_bytes() == before, "a shifted shard was rewritten anyway"
+
+    def test_a_removed_line_is_refused(self, tmp_path):
+        def drop_first(shard):
+            # The line BEFORE the target. Dropping the trailing line shifts
+            # nothing and is correctly NOT refused — see
+            # test_a_removal_AFTER_the_target_does_not_refuse below.
+            lines = [x for x in shard.read_text().splitlines() if x.strip()]
+            shard.write_text("\n".join(lines[1:]) + "\n")
+
+        _root, plan, shard, before, _backup = self._plan_then_disturb(tmp_path, drop_first)
+        assert len(plan["refused_shards"]) == 1
+        assert shard.read_bytes() == before
+
+    def test_truncation_past_the_target_lineno_is_refused(self, tmp_path):
+        def truncate(shard):
+            shard.write_text(json.dumps({"timestamp": COMMITTED, "content": "only"}) + "\n")
+
+        _root, plan, shard, before, _backup = self._plan_then_disturb(tmp_path, truncate)
+        assert len(plan["refused_shards"]) == 1
+        assert "no longer exists" in plan["refused_shards"][0]["reason"]
+        assert shard.read_bytes() == before
+
+    def test_a_line_that_drifted_in_a_field_OUTSIDE_the_claim_preimage_is_refused(self, tmp_path):
+        """THE REASON THE COMPARISON IS THE PARSED DICT AND NOT THE CLAIM ID.
+
+        derive_claim_id hashes only timestamp + domain + content. A line whose
+        `layer` or `verified_by` changed has the SAME id and is a different
+        record; an id-based check would wave it through and the rewrite would
+        drop the drifted fields on the floor.
+        """
+
+        def edit_layer(shard):
+            lines = [x for x in shard.read_text().splitlines() if x.strip()]
+            row = json.loads(lines[1])
+            row["layer"] = "ground_truth"
+            lines[1] = json.dumps(row)
+            shard.write_text("\n".join(lines) + "\n")
+
+        _root, plan, shard, before, _backup = self._plan_then_disturb(tmp_path, edit_layer)
+        assert len(plan["refused_shards"]) == 1, (
+            "a line differing outside the claim_id preimage was accepted — the "
+            "guard is comparing ids, not entries"
+        )
+        assert shard.read_bytes() == before
+
+    def test_a_refused_shard_gets_NO_backup(self, tmp_path):
+        """Validating after the copy would leave a stray backup asserting a
+        rewrite that never happened."""
+
+        def drop_first(shard):
+            # The line BEFORE the target. Dropping the trailing line shifts
+            # nothing and is correctly NOT refused — see
+            # test_a_removal_AFTER_the_target_does_not_refuse below.
+            lines = [x for x in shard.read_text().splitlines() if x.strip()]
+            shard.write_text("\n".join(lines[1:]) + "\n")
+
+        root, _plan, _shard, _before, backup = self._plan_then_disturb(tmp_path, drop_first)
+        assert not list(backup.rglob("*.jsonl")), "a refused shard was backed up"
+        assert not (root / "chronicle" / "claim_aliases.jsonl").exists(), (
+            "an alias row was written for a rewrite that never happened"
+        )
+
+    def test_a_refused_shard_is_named_in_the_report(self, tmp_path, capsys):
+        def drop_first(shard):
+            # The line BEFORE the target. Dropping the trailing line shifts
+            # nothing and is correctly NOT refused — see
+            # test_a_removal_AFTER_the_target_does_not_refuse below.
+            lines = [x for x in shard.read_text().splitlines() if x.strip()]
+            shard.write_text("\n".join(lines[1:]) + "\n")
+
+        _root, plan, _shard, _before, _backup = self._plan_then_disturb(tmp_path, drop_first)
+        plan["_applied"] = True
+        backfill.print_report(plan, verbose=False)
+        out = capsys.readouterr().out
+        assert "SHARDS REFUSED" in out
+        assert "session_x.jsonl" in out
+
+    # ── THE INVERSE ────────────────────────────────────────────────────────
+    def test_a_removal_AFTER_the_target_does_not_refuse(self, tmp_path):
+        """The guard is about the PLANNED LINES, not about the file being
+        byte-identical. A change past the last planned line shifts nothing, and
+        refusing it would make the guard fire on movement it does not care
+        about. (This is also why the first draft of the removal test above
+        passed while asserting refusal: it dropped the TRAILING line.)"""
+
+        def drop_last(shard):
+            lines = [x for x in shard.read_text().splitlines() if x.strip()]
+            shard.write_text("\n".join(lines[:-1]) + "\n")
+
+        _root, plan, shard, before, _backup = self._plan_then_disturb(tmp_path, drop_last)
+        assert plan["refused_shards"] == []
+        assert shard.read_bytes() != before
+        rows = [json.loads(x) for x in shard.read_text().splitlines() if x.strip()]
+        assert rows[1]["timestamp"] == FILED
+
+    def test_an_UNDISTURBED_shard_is_rewritten_normally(self, tmp_path):
+        """A gate that refuses everything is not a gate."""
+        root, plan, shard, before, backup = self._plan_then_disturb(tmp_path, lambda _s: None)
+        assert plan["refused_shards"] == []
+        assert shard.read_bytes() != before
+        rows = [json.loads(x) for x in shard.read_text().splitlines() if x.strip()]
+        assert rows[1]["timestamp"] == FILED
+        assert rows[0]["content"] == "before" and rows[2]["content"] == "after"
+        assert (root / "chronicle" / "claim_aliases.jsonl").exists()
+        assert list(backup.rglob("*.jsonl")), "an applied shard was not backed up"
+
+    def test_a_second_shard_still_applies_when_the_first_is_refused(self, tmp_path):
+        """Refusal is scoped to the shard that moved, not to the whole run."""
+        root = _store(tmp_path)
+        _proposal(root, "p1", content="c1", domain="dom")
+        _proposal(root, "p2", content="c2", domain="other")
+        _entry(root, content="c1", domain="dom")
+        _entry(root, content="pad", domain="dom")
+        _entry(root, content="c2", domain="other")
+        plan = backfill.build_plan(root)
+        assert len(plan["matched"]) == 2
+        bad = root / "chronicle" / "insights" / "dom" / "session_x.jsonl"
+        bad.write_text(json.dumps({"timestamp": COMMITTED, "content": "swapped"}) + "\n")
+        untouched = bad.read_bytes()
+        backfill.apply_plan(root, plan)
+        assert len(plan["refused_shards"]) == 1
+        assert bad.read_bytes() == untouched
+        good = root / "chronicle" / "insights" / "other" / "session_x.jsonl"
+        assert json.loads(good.read_text().splitlines()[0])["timestamp"] == FILED
+
+
+class TestApplyRefusesWhileAServerIsLive:
+    """The script rewrites shards by line position with no cross-process lock
+    (chronicle_write_lock is an in-process RLock; the real fix is the unmerged
+    hardening/cross-process-flock branch). A running bridge or SSE daemon
+    appending mid-rewrite loses its write to the whole-file write_text, with no
+    error on either side."""
+
+    @staticmethod
+    def _listener():
+        import socket
+
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.bind(("127.0.0.1", 0))
+        s.listen(1)
+        return s, s.getsockname()[1]
+
+    @staticmethod
+    def _seed(tmp_path):
+        root = _store(tmp_path)
+        _proposal(root, "p1", content="c1", domain="dom")
+        shard = _entry(root, content="c1", domain="dom")
+        return root, shard
+
+    def test_apply_is_refused_and_writes_nothing(self, tmp_path, capsys):
+        root, shard = self._seed(tmp_path)
+        before = shard.read_bytes()
+        sock, port = self._listener()
+        try:
+            rc = backfill.main(["--root", str(root), "--apply"], live_ports=(port,))
+        finally:
+            sock.close()
+        assert rc == 3
+        assert shard.read_bytes() == before
+        assert not (root / "backups").exists()
+        assert not (root / "chronicle" / "claim_aliases.jsonl").exists()
+        err = capsys.readouterr().err
+        assert f"127.0.0.1:{port}" in err
+        assert "com.templetwo.sovereign-sse" in err
+        assert "com.templetwo.sovereign-bridge" in err
+
+    def test_the_DRY_RUN_is_never_gated(self, tmp_path, capsys):
+        """The report a human needs in order to decide must always be
+        available, live server or not."""
+        root, _shard = self._seed(tmp_path)
+        sock, port = self._listener()
+        try:
+            rc = backfill.main(["--root", str(root)], live_ports=(port,))
+        finally:
+            sock.close()
+        assert rc == 0
+        assert "DRY RUN" in capsys.readouterr().out
+
+    # ── THE INVERSE ────────────────────────────────────────────────────────
+    def test_apply_PROCEEDS_when_no_port_answers(self, tmp_path):
+        """A gate that refuses unconditionally is not a gate."""
+        root, shard = self._seed(tmp_path)
+        sock, port = self._listener()
+        sock.close()  # now nothing is listening on `port`
+        before = shard.read_bytes()
+        rc = backfill.main(["--root", str(root), "--apply"], live_ports=(port,))
+        assert rc == 0
+        assert shard.read_bytes() != before
+
+    def test_the_probe_itself_can_tell_the_difference(self, tmp_path):
+        """Positive control on answering_ports, independent of main()."""
+        sock, port = self._listener()
+        try:
+            assert backfill.answering_ports((port,)) == [port]
+        finally:
+            sock.close()
+        assert backfill.answering_ports((port,)) == []
+
+    def test_the_default_ports_are_the_live_stack_ones(self):
+        assert backfill.LIVE_PORTS == (3434, 8100)
