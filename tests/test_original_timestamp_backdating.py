@@ -258,3 +258,97 @@ class TestTheSchemaDeclaresIt:
                     "record_insight", {"domain": "d", "content": "c", "originl_timestamp": "x"}
                 )
             )
+
+
+class TestTheSchemaSaysTheClaimIdConsequenceOnlyWhereItIsTRUE:
+    """One description, three tools, and the claim-id clause is NOT shared.
+
+    The three inputSchema entries were byte-identical 1,490-char pastes, and
+    all three carried "NOTE: `timestamp` is in the claim_id preimage, so this
+    changes the id this entry would otherwise have had."
+
+    THAT CLAUSE IS FALSE FOR TWO OF THEM. `derive_claim_id` is only ever
+    applied to entries reached through `provenance.iter_chronicle_entries`,
+    which globs `insights/**/*.jsonl` + `_quarantine_*/**/*.jsonl` under the
+    chronicle root. `record_learning` writes to `learnings/<applies_to>.jsonl`
+    and `record_open_thread` to `open_threads/<domain>.jsonl` — outside that
+    glob, and never passed to derive_claim_id anywhere in the tree. Telling a
+    caller that backdating a learning changes an id it does not have is false
+    precision, and false precision on a cost is what stops a correct call from
+    being made.
+
+    The tests below assert the WRITE LOCATIONS, not just the prose, so the
+    schema cannot quietly become right-for-the-wrong-reason if a write path
+    moves.
+    """
+
+    _CLAIM_CLAUSE = "`timestamp` is in the claim_id preimage"
+
+    @staticmethod
+    def _description(tool_name: str) -> str:
+        import asyncio
+
+        from sovereign_stack import server
+
+        tools = asyncio.run(server.list_tools())
+        tool = next(t for t in tools if t.name == tool_name)
+        return tool.inputSchema["properties"]["original_timestamp"]["description"]
+
+    def test_record_insight_states_it(self):
+        assert self._CLAIM_CLAUSE in self._description("record_insight")
+
+    @pytest.mark.parametrize("tool", ["record_learning", "record_open_thread"])
+    def test_the_siblings_do_not_state_it(self, tool):
+        d = self._description(tool)
+        assert self._CLAIM_CLAUSE not in d
+        assert "NOT addressed by a derived claim_id" in d
+
+    def test_all_three_still_share_the_common_contract(self):
+        """Hoisting must not have let the three texts drift; only the tail
+        differs."""
+        common = "the real write instant is kept as `occurred_at`"
+        for tool in ("record_insight", "record_learning", "record_open_thread"):
+            d = self._description(tool)
+            assert common in d
+            assert "must be >= 2024-01-01" in d
+            assert "REJECTS" in d
+
+    def test_a_learning_lands_OUTSIDE_the_tree_claim_ids_are_derived_over(self, tmp_path):
+        """The fact the schema now rests on."""
+        mem = _mem(tmp_path)
+        path = Path(mem.record_learning("applies", "lesson", original_timestamp="2026-05-25"))
+        root = tmp_path / ".sovereign"
+        assert path.parent == root / "learnings"
+        assert path not in set(root.glob("insights/**/*.jsonl"))
+        assert path not in set(root.glob("_quarantine_*/**/*.jsonl"))
+
+    def test_an_open_thread_lands_outside_it_too(self, tmp_path):
+        mem = _mem(tmp_path)
+        path = Path(mem.record_open_thread("q", "ctx", "d", original_timestamp="2026-05-25"))
+        root = tmp_path / ".sovereign"
+        assert path.parent == root / "open_threads"
+        assert path not in set(root.glob("insights/**/*.jsonl"))
+
+    def test_iter_chronicle_entries_does_not_see_either_of_them(self, tmp_path):
+        """The mechanism, asserted directly rather than inferred from paths."""
+        from sovereign_stack import provenance
+
+        mem = _mem(tmp_path)
+        mem.record_insight("dom", "an insight")
+        mem.record_learning("applies", "a learning")
+        mem.record_open_thread("a thread question", "ctx", "dom")
+        seen = [e for e, _f, _loc in provenance.iter_chronicle_entries(tmp_path / ".sovereign")]
+        contents = {e.get("content") for e in seen}
+        assert "an insight" in contents
+        assert "a learning" not in contents
+        assert all(e.get("question") != "a thread question" for e in seen)
+
+    def test_an_insight_IS_addressed_by_a_derived_id(self, tmp_path):
+        """The inverse: the clause is true where it is stated."""
+        from sovereign_stack import provenance
+
+        mem = _mem(tmp_path)
+        mem.record_insight("dom", "an insight")
+        seen = list(provenance.iter_chronicle_entries(tmp_path / ".sovereign"))
+        assert len(seen) == 1
+        assert provenance.derive_claim_id(seen[0][0])

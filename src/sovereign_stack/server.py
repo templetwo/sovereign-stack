@@ -367,6 +367,68 @@ Restraint is not constraint. It is conscience.
 
 
 # =============================================================================
+# SHARED inputSchema FRAGMENTS
+# =============================================================================
+
+
+def _original_timestamp_schema(*, changes_claim_id: bool) -> dict:
+    """The `original_timestamp` property, for the three tools that declare it.
+
+    ONE TEXT, THREE TOOLS. record_insight, record_learning and
+    record_open_thread carried three byte-identical 1,490-char copies of this
+    description. A correction applied to one of them and not the others is
+    indistinguishable, from the outside, from a schema that says three
+    different things.
+
+    THE CLAIM-ID CLAUSE IS NOT SHARED, BECAUSE IT IS NOT TRUE OF ALL THREE,
+    and the pasted copies asserted it for all three. `derive_claim_id` is only
+    ever applied to entries reached through `provenance.iter_chronicle_entries`,
+    which globs `insights/**/*.jsonl` plus `_quarantine_*/**/*.jsonl` under the
+    chronicle root. record_insight writes to `insights/<domain>/`, so its
+    entries HAVE claim ids and backdating moves them. record_learning writes to
+    `learnings/<applies_to>.jsonl` and record_open_thread to
+    `open_threads/<domain>.jsonl` — both OUTSIDE that glob, both never passed to
+    derive_claim_id anywhere in the tree. Telling a caller that backdating a
+    learning "changes the id this entry would otherwise have had" names a
+    consequence that does not exist, which is the kind of false precision that
+    stops a correct call from being made.
+
+    Args:
+        changes_claim_id: True only for a target whose entries are addressed by
+            a derived claim id (today: record_insight alone).
+    """
+    common = (
+        "Optional ISO-8601 AUTHORSHIP time, for a record you are "
+        "filing AFTER THE FACT — a bridge proposal drained days "
+        "later, an imported note, a lived entry written up the "
+        "next morning. When given, this entry's `timestamp` IS "
+        "this value, so every reader's existing sort and filter "
+        "finds it where it belongs; the real write instant is "
+        "kept as `occurred_at` and `timestamp_source` names the "
+        "substitution. (Anthony's 2026-06-19 ruling: an "
+        "occurred_at-only design was rejected by name, because "
+        "it lets an un-taught reader silently miss the entry.) "
+        "Must parse; must be >= 2024-01-01; must not be more "
+        "than 5 minutes ahead of now. An invalid value REJECTS "
+        "the whole call — it is never silently dropped. "
+    )
+    if changes_claim_id:
+        tail = (
+            "NOTE: "
+            "`timestamp` is in the claim_id preimage, so this "
+            "changes the id this entry would otherwise have had."
+        )
+    else:
+        tail = (
+            "NOTE: this target's entries are NOT addressed by a derived "
+            "claim_id — they are written outside insights/, which is the only "
+            "tree claim ids are derived over — so backdating here changes no "
+            "id and orphans no pointer."
+        )
+    return {"type": "string", "description": common + tail}
+
+
+# =============================================================================
 # TOOLS - ROUTING
 # =============================================================================
 
@@ -611,26 +673,7 @@ async def list_tools():
                                 "tagging never shifts an entry's id."
                             ),
                         },
-                        "original_timestamp": {
-                            "type": "string",
-                            "description": (
-                                "Optional ISO-8601 AUTHORSHIP time, for a record you are "
-                                "filing AFTER THE FACT — a bridge proposal drained days "
-                                "later, an imported note, a lived entry written up the "
-                                "next morning. When given, this entry's `timestamp` IS "
-                                "this value, so every reader's existing sort and filter "
-                                "finds it where it belongs; the real write instant is "
-                                "kept as `occurred_at` and `timestamp_source` names the "
-                                "substitution. (Anthony's 2026-06-19 ruling: an "
-                                "occurred_at-only design was rejected by name, because "
-                                "it lets an un-taught reader silently miss the entry.) "
-                                "Must parse; must be >= 2024-01-01; must not be more "
-                                "than 5 minutes ahead of now. An invalid value REJECTS "
-                                "the whole call — it is never silently dropped. NOTE: "
-                                "`timestamp` is in the claim_id preimage, so this "
-                                "changes the id this entry would otherwise have had."
-                            ),
-                        },
+                        "original_timestamp": _original_timestamp_schema(changes_claim_id=True),
                         "return_claim_id": {
                             "type": "boolean",
                             "default": False,
@@ -748,26 +791,7 @@ async def list_tools():
                                 "error instead of an ENOENT from the filesystem."
                             ),
                         },
-                        "original_timestamp": {
-                            "type": "string",
-                            "description": (
-                                "Optional ISO-8601 AUTHORSHIP time, for a record you are "
-                                "filing AFTER THE FACT — a bridge proposal drained days "
-                                "later, an imported note, a lived entry written up the "
-                                "next morning. When given, this entry's `timestamp` IS "
-                                "this value, so every reader's existing sort and filter "
-                                "finds it where it belongs; the real write instant is "
-                                "kept as `occurred_at` and `timestamp_source` names the "
-                                "substitution. (Anthony's 2026-06-19 ruling: an "
-                                "occurred_at-only design was rejected by name, because "
-                                "it lets an un-taught reader silently miss the entry.) "
-                                "Must parse; must be >= 2024-01-01; must not be more "
-                                "than 5 minutes ahead of now. An invalid value REJECTS "
-                                "the whole call — it is never silently dropped. NOTE: "
-                                "`timestamp` is in the claim_id preimage, so this "
-                                "changes the id this entry would otherwise have had."
-                            ),
-                        },
+                        "original_timestamp": _original_timestamp_schema(changes_claim_id=False),
                     },
                     "required": ["what_happened", "what_learned"],
                 },
@@ -842,26 +866,7 @@ async def list_tools():
                                 "instead of an ENOENT from the filesystem."
                             ),
                         },
-                        "original_timestamp": {
-                            "type": "string",
-                            "description": (
-                                "Optional ISO-8601 AUTHORSHIP time, for a record you are "
-                                "filing AFTER THE FACT — a bridge proposal drained days "
-                                "later, an imported note, a lived entry written up the "
-                                "next morning. When given, this entry's `timestamp` IS "
-                                "this value, so every reader's existing sort and filter "
-                                "finds it where it belongs; the real write instant is "
-                                "kept as `occurred_at` and `timestamp_source` names the "
-                                "substitution. (Anthony's 2026-06-19 ruling: an "
-                                "occurred_at-only design was rejected by name, because "
-                                "it lets an un-taught reader silently miss the entry.) "
-                                "Must parse; must be >= 2024-01-01; must not be more "
-                                "than 5 minutes ahead of now. An invalid value REJECTS "
-                                "the whole call — it is never silently dropped. NOTE: "
-                                "`timestamp` is in the claim_id preimage, so this "
-                                "changes the id this entry would otherwise have had."
-                            ),
-                        },
+                        "original_timestamp": _original_timestamp_schema(changes_claim_id=False),
                     },
                     "required": ["question"],
                 },
