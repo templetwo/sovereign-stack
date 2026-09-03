@@ -27,7 +27,7 @@ Every test below asserts the stored bytes, not just that the call succeeded.
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -226,3 +226,100 @@ class TestUnderThe310Parser:
         monkeypatch.setattr(memory_mod, "datetime", Py310Datetime)
         with pytest.raises(ValueError, match="original_timestamp"):
             _mem(tmp_path).record_insight("d", "c", original_timestamp="nonsenseZ")
+
+
+class TestTheREADERSideUnderThe310Parser:
+    """The validators were taught the `Z` spelling; `memory._parse_iso` — the
+    READ side — was not, and it is the same one-call fix.
+
+    WHAT IT COSTS ON 3.10. `_parse_iso` feeds `_dedup_hit` and the two
+    thread-id backfills. The live store holds 176 rows whose `timestamp` ends
+    in `Z`, all under `insights/temple-vault-import,…`, so on 3.10 every one of
+    them parsed to None: the retry-dedup probe declined silently on exactly the
+    imported corpus (the safe direction, but a guard that is off), and the
+    thread-id backfills fell through to `datetime.now()` — which means a legacy
+    Z-stamped thread got a DIFFERENT derived thread_id on every call, since the
+    id is derived from the timestamp handed in.
+
+    SUBSTITUTING THE PARSER, NOT THE INTERPRETER, for the reason this file's
+    Py310Datetime docstring already gives: on the 3.12 venv a bare
+    `fromisoformat` accepts `Z` by itself and every assertion here would pass on
+    unfixed code.
+    """
+
+    @staticmethod
+    def _seed(tmp_path: Path, row: dict, session: str = "session_seeded") -> Path:
+        d = tmp_path / ".sovereign" / "insights" / "dom"
+        d.mkdir(parents=True, exist_ok=True)
+        path = d / f"{session}.jsonl"
+        with path.open("a") as f:
+            f.write(json.dumps(row) + "\n")
+        return path
+
+    @staticmethod
+    def _rows(tmp_path: Path) -> list[dict]:
+        d = tmp_path / ".sovereign" / "insights" / "dom"
+        return [
+            json.loads(ln)
+            for f in sorted(d.glob("*.jsonl"))
+            for ln in f.read_text().splitlines()
+            if ln.strip()
+        ]
+
+    def test_parse_iso_reads_Z_under_the_310_parser(self, monkeypatch):
+        from sovereign_stack import memory as memory_mod
+
+        monkeypatch.setattr(memory_mod, "datetime", Py310Datetime)
+        parsed = memory_mod._parse_iso(Z_FORM)
+        assert parsed is not None, "a Z-spelled timestamp read as unparseable"
+        assert parsed == memory_mod._parse_iso(OFFSET_FORM)
+
+    def test_the_dedup_probe_fires_on_a_Z_stamped_row_under_the_310_parser(
+        self, tmp_path, monkeypatch
+    ):
+        from sovereign_stack import memory as memory_mod
+
+        now = datetime.now(timezone.utc)
+        self._seed(
+            tmp_path,
+            {
+                "timestamp": now.isoformat().replace("+00:00", "Z"),
+                "domain": "dom",
+                "content": "c",
+                "layer": "hypothesis",
+            },
+        )
+        monkeypatch.setattr(memory_mod, "datetime", Py310Datetime)
+        _mem(tmp_path).record_insight("dom", "c", session_id="session_seeded")
+        assert len(self._rows(tmp_path)) == 1, (
+            "the Z-stamped previous write parsed to None, so dedup declined"
+        )
+
+    def test_it_can_still_NOT_fire(self, tmp_path, monkeypatch):
+        """Law #2. A Z-stamped write six hours old is a deliberate
+        re-recording, not a retry, and must append."""
+        from sovereign_stack import memory as memory_mod
+
+        old = datetime.now(timezone.utc) - timedelta(hours=6)
+        self._seed(
+            tmp_path,
+            {
+                "timestamp": old.isoformat().replace("+00:00", "Z"),
+                "domain": "dom",
+                "content": "c",
+                "layer": "hypothesis",
+            },
+        )
+        monkeypatch.setattr(memory_mod, "datetime", Py310Datetime)
+        _mem(tmp_path).record_insight("dom", "c", session_id="session_seeded")
+        assert len(self._rows(tmp_path)) == 2
+
+    def test_real_garbage_still_reads_as_None(self, monkeypatch):
+        """The normalization is a trailing capital Z and nothing else — a
+        reader that started accepting anything would be a different change."""
+        from sovereign_stack import memory as memory_mod
+
+        monkeypatch.setattr(memory_mod, "datetime", Py310Datetime)
+        assert memory_mod._parse_iso("who knows") is None
+        assert memory_mod._parse_iso("2026-06-19T05:18:19z") is None
+        assert memory_mod._parse_iso(None) is None

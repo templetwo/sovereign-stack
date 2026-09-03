@@ -1372,8 +1372,19 @@ def test_the_three_duplicated_target_sets_are_each_pinned():
     """Meta-pin: a fourth duplicated set must not ship unpinned.
 
     Each name that exists as a separate literal in BOTH pending_writes modules
-    is asserted equal somewhere. This test names the three that exist today; a
-    new one fails here until its own parity test is written.
+    is asserted equal somewhere. This test names the three that exist today.
+
+    SAY WHAT IT CANNOT SEE, so nobody reads it as a guarantee. The scan is
+    `dir(core)` filtered to names ENDING IN `_TARGETS` that are `frozenset` in
+    BOTH modules, which is the shape all three duplicated sets happen to have
+    today — and only that shape. A fourth duplicated declaration slips past
+    silently if it is a plain `set`, a `tuple`, a `list`, or named anything
+    else (`*_COMMIT_TARGETS` matches; `TARGETS_*` and `*_ALLOWED` do not). It
+    is a TRIPWIRE over the current convention, not an exhaustive audit of
+    duplicated declarations: it catches the next set that follows the pattern
+    and cannot catch the one that does not. Keeping the convention is what
+    makes it work; widening the scan to every module-level container would
+    catch the imports and the behaviour sets too, which is a different test.
     """
     from bridge_core import pending_writes as core
     from openai_bridge import pending_writes as oai

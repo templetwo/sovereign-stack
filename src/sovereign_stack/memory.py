@@ -148,11 +148,26 @@ def iter_thread_shards(threads_dir: Path) -> list[Path]:
 
 
 def _parse_iso(ts: str | None) -> datetime | None:
-    """Parse an ISO8601 timestamp, returning None on failure or missing input."""
+    """Parse an ISO8601 timestamp, returning None on failure or missing input.
+
+    THE `Z` SPELLING PARSES HERE, on 3.10 too. `datetime.fromisoformat` did not
+    accept a trailing `Z` before CPython 3.11, and the live store holds 176 rows
+    whose `timestamp` ends in one (all under `insights/temple-vault-import,…`).
+    Every one of them parsed to None here, so `_dedup_hit` declined silently on
+    exactly the imported corpus, and the two thread-id backfills below fell
+    through to `datetime.now()` — which means a legacy Z-stamped thread got a
+    DIFFERENT derived thread_id on every call, since the id is derived from the
+    timestamp handed in. Same class as the validator fix
+    (`provenance.iso_parseable`), one reader over, and it is the same call.
+
+    THE NORMALIZATION IS FOR THE PARSER, NEVER FOR THE STORE — nothing here
+    writes the returned value back; `timestamp` is in `derive_claim_id`'s
+    preimage, so rewriting the string would move an entry's id.
+    """
     if not ts:
         return None
     try:
-        return datetime.fromisoformat(ts)
+        return datetime.fromisoformat(provenance.iso_parseable(ts))
     except ValueError:
         return None
 
