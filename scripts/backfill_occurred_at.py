@@ -108,6 +108,7 @@ is always available.
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import json
 import shutil
@@ -211,9 +212,7 @@ def load_insight_index(root: Path) -> tuple[dict, list[str]]:
             if not isinstance(entry, dict):
                 continue
             key = (str(entry.get("content") or ""), normalize_domain(entry.get("domain") or ""))
-            index.setdefault(key, []).append(
-                {"entry": entry, "shard": shard, "lineno": lineno}
-            )
+            index.setdefault(key, []).append({"entry": entry, "shard": shard, "lineno": lineno})
     return index, problems
 
 
@@ -268,6 +267,14 @@ def build_plan(root: Path, min_gap_days: float = 0.0) -> dict:
         if filed == old_ts:
             already_aligned.append(row)
             continue
+        # DEEP, not `dict(entry)`. `new_entry` below is a shallow copy, so a
+        # shallow `old_entry` would share the SAME nested `verified_by` /
+        # `supersedes` objects with it. Nothing mutates them today; the moment
+        # something edits a nested field on `new_entry`, the guard's own
+        # reference mutates with it and `_revalidate_shard`'s comparison goes
+        # vacuously true — a guard that cannot fail, which is the thing this
+        # script exists to not be.
+        old_entry = copy.deepcopy(entry)
         new_entry = dict(entry)
         new_entry["timestamp"] = filed
         if not new_entry.get("occurred_at"):
@@ -287,7 +294,7 @@ def build_plan(root: Path, min_gap_days: float = 0.0) -> dict:
                 # only timestamp+domain+content and a line that had drifted in
                 # `layer`, `verified_by` or any other field would match on id
                 # while being a different record.
-                "old_entry": entry,
+                "old_entry": old_entry,
                 "new_entry": new_entry,
             }
         )
@@ -397,8 +404,7 @@ def print_report(plan: dict, verbose: bool) -> None:
     print(f"  already aligned (no change needed)   : {len(plan['already_aligned'])}")
     if plan.get("min_gap_days"):
         print(
-            f"  below --min-gap {plan['min_gap_days']}d (set aside): "
-            f"{len(plan['below_threshold'])}"
+            f"  below --min-gap {plan['min_gap_days']}d (set aside): {len(plan['below_threshold'])}"
         )
     print()
     # HOW FAR BACK, BUCKETED. A claim-id rewrite buys something only in
@@ -416,9 +422,7 @@ def print_report(plan: dict, verbose: bool) -> None:
         print("  HOW FAR BACK each rewrite would move the entry:")
         for label, count in buckets.items():
             print(f"      {label:<16} {count}")
-        print(
-            f"      min {gaps[0]:.2f}d  median {gaps[len(gaps) // 2]:.2f}d  max {gaps[-1]:.2f}d"
-        )
+        print(f"      min {gaps[0]:.2f}d  median {gaps[len(gaps) // 2]:.2f}d  max {gaps[-1]:.2f}d")
         print("      (--min-gap DAYS takes only the rewrites that buy something)")
     print()
     print(f"  CITED ELSEWHERE           : {cited_planned} of {len(m)} planned rewrites")
@@ -463,9 +467,31 @@ def print_report(plan: dict, verbose: bool) -> None:
         print("and only after the citation count above has been decided on.")
 
 
-def _revalidate_shard(shard: Path, rows: list[dict]) -> str | None:
-    """None when every planned line in `shard` is still the entry that was
-    planned; otherwise the reason the WHOLE shard must be refused.
+def _revalidate_shard(shard: Path, rows: list[dict]) -> tuple[str | None, list[str]]:
+    """`(None, lines)` when every planned line in `shard` is still the entry
+    that was planned; otherwise `(reason, [])` — the reason the WHOLE shard
+    must be refused.
+
+    IT RETURNS THE LINES IT VALIDATED, and that is not a convenience. The
+    first version read the shard here and `apply_plan` re-read the same file
+    before writing it: a shard that changed between those two reads was
+    validated in one state and rewritten from another — the cure containing a
+    narrow instance of the disease. The window is only one `shutil.copy2`
+    wide, and the live-port gate covers the realistic writers, so this was
+    never the same class as the plan->apply window the guard exists to close.
+    It was free to shut, so it is shut: ONE read is validated, backed up and
+    rewritten.
+
+    THE TRADE, STATED RATHER THAN CLAIMED AWAY. Reusing the validated snapshot
+    means an append that lands between the read and the `write_text` is dropped
+    by the rewrite instead of carried through it. That is a real cost and it is
+    the smaller one: the whole-file `write_text` loses concurrent appends in
+    every version of this code (which is why the live-port gate exists at all),
+    while a SHIFT in the same window under a re-read would overwrite an
+    innocent entry with another entry's backdated content — silent corruption
+    of an existing record, and the exact failure this guard was written to make
+    impossible. Losing a just-appended row is recoverable and loud; corrupting
+    a stored one is neither.
 
     THE GUARD THIS FUNCTION IS. `build_plan` captures a LINE POSITION, and
     `apply_plan` overwrites that position later — with no lock any other writer
@@ -492,25 +518,27 @@ def _revalidate_shard(shard: Path, rows: list[dict]) -> str | None:
     try:
         lines = shard.read_text(errors="replace").splitlines()
     except OSError as exc:
-        return f"unreadable: {exc}"
+        return f"unreadable: {exc}", []
     for row in rows:
         lineno = row["lineno"]
         if lineno < 1 or lineno > len(lines):
             return (
                 f"line {lineno} no longer exists (shard now has {len(lines)} lines) "
-                f"— the file moved under the plan"
+                f"— the file moved under the plan",
+                [],
             )
         try:
             found = json.loads(lines[lineno - 1])
         except json.JSONDecodeError as exc:
-            return f"line {lineno} is no longer parseable JSON: {exc}"
+            return f"line {lineno} is no longer parseable JSON: {exc}", []
         if found != row["old_entry"]:
             return (
                 f"line {lineno} is not the entry that was planned "
                 f"(planned content {str(row['old_entry'].get('content'))[:40]!r}, "
-                f"found {str(found.get('content'))[:40]!r}) — the file moved under the plan"
+                f"found {str(found.get('content'))[:40]!r}) — the file moved under the plan",
+                [],
             )
-    return None
+    return None, lines
 
 
 def apply_plan(root: Path, plan: dict) -> Path:
@@ -522,6 +550,10 @@ def apply_plan(root: Path, plan: dict) -> Path:
     row, no changelog line — and named in ``plan["refused_shards"]`` for the
     report. Validating after the backup would leave a stray copy asserting a
     rewrite that never happened.
+
+    ONE READ, VALIDATED AND REWRITTEN. `_revalidate_shard` hands back the lines
+    it checked and those are the lines written out, so there is no second read
+    for the file to change underneath.
     """
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     backup_root = root / "backups" / f"occurred_at_backfill_{stamp}"
@@ -536,8 +568,10 @@ def apply_plan(root: Path, plan: dict) -> Path:
     changelog: list[str] = []
     for shard_str, rows in sorted(by_shard.items()):
         shard = Path(shard_str)
-        # REVALIDATE FIRST — before the copy, before the write.
-        reason = _revalidate_shard(shard, rows)
+        # REVALIDATE FIRST — before the copy, before the write. The lines it
+        # validated are the lines rewritten below; re-reading the file here
+        # would validate one snapshot and rewrite a different one.
+        reason, lines = _revalidate_shard(shard, rows)
         if reason is not None:
             refused.append({"shard": shard_str, "entries": len(rows), "reason": reason})
             continue
@@ -549,7 +583,6 @@ def apply_plan(root: Path, plan: dict) -> Path:
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(shard, dest)
 
-        lines = shard.read_text(errors="replace").splitlines()
         by_lineno = {row["lineno"]: row for row in rows}
         out: list[str] = []
         for i, line in enumerate(lines, start=1):

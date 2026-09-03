@@ -482,13 +482,25 @@ class TestTheShardIsRevalidatedBeforeItIsRewritten:
         return root, plan, shard, before, backup
 
     def test_an_inserted_line_shifts_the_target_and_the_shard_is_refused(self, tmp_path):
+        """THE HEADLINE. The bytes assertion comes FIRST on purpose.
+
+        Reproduced against the unfixed script: with one line prepended after
+        planning, apply_plan overwrote the innocent entry at line 2 with the
+        backdated `c1` content — the original "before" record destroyed, `c1`
+        duplicated, no error, indistinguishable from a correct run afterwards.
+        Asserting `refused_shards` first put a `KeyError: 'refused_shards'`
+        between the test and that reproduction: on unfixed code it died at the
+        API shape and never exercised the defect. Corruption first, bookkeeping
+        second.
+        """
+
         def insert_first(shard):
             body = shard.read_text()
             shard.write_text(json.dumps({"timestamp": COMMITTED, "content": "new"}) + "\n" + body)
 
         _root, plan, shard, before, _backup = self._plan_then_disturb(tmp_path, insert_first)
-        assert len(plan["refused_shards"]) == 1
         assert shard.read_bytes() == before, "a shifted shard was rewritten anyway"
+        assert len(plan["refused_shards"]) == 1
 
     def test_a_removed_line_is_refused(self, tmp_path):
         def drop_first(shard):
@@ -510,6 +522,63 @@ class TestTheShardIsRevalidatedBeforeItIsRewritten:
         assert len(plan["refused_shards"]) == 1
         assert "no longer exists" in plan["refused_shards"][0]["reason"]
         assert shard.read_bytes() == before
+
+    def test_the_lines_VALIDATED_are_the_lines_REWRITTEN(self, tmp_path, monkeypatch):
+        """The guard validated one snapshot and `apply_plan` re-read another.
+
+        A shard that changed between those two reads was checked in one state
+        and rewritten from a different one — the cure containing a narrow
+        instance of the disease. The window is only as wide as the
+        `shutil.copy2` that sits between them, so this disturbs the shard from
+        INSIDE that copy: a prepended line, the same shift the guard refuses
+        when it happens earlier. The rewrite must come from the validated
+        snapshot, so no innocent line is overwritten with another entry's
+        backdated content.
+        """
+        root = _store(tmp_path)
+        _proposal(root, "p1", content="c1", domain="dom")
+        _entry(root, content="before", domain="dom")
+        _entry(root, content="c1", domain="dom")
+        plan = backfill.build_plan(root)
+        assert len(plan["matched"]) == 1
+        shard = root / "chronicle" / "insights" / "dom" / "session_x.jsonl"
+
+        real_copy = backfill.shutil.copy2
+
+        def copy_then_shift(src, dst):
+            out = real_copy(src, dst)
+            body = shard.read_text()
+            shard.write_text(json.dumps({"timestamp": COMMITTED, "content": "raced"}) + "\n" + body)
+            return out
+
+        monkeypatch.setattr(backfill.shutil, "copy2", copy_then_shift)
+        backfill.apply_plan(root, plan)
+
+        rows = [json.loads(x) for x in shard.read_text().splitlines() if x.strip()]
+        contents = [r["content"] for r in rows]
+        assert contents == ["before", "c1"], (
+            "the rewrite came from a read taken AFTER the shift — an innocent "
+            f"line was overwritten with another entry's content: {contents}"
+        )
+        assert rows[0].get("timestamp_source") is None, "the wrong line was backdated"
+        assert rows[1]["timestamp_source"] == backfill.TIMESTAMP_SOURCE
+
+    def test_the_guards_own_reference_is_not_reachable_through_new_entry(self, tmp_path):
+        """`old_entry` is what the guard compares the on-disk line against. It
+        was a SHALLOW alias of the same dict `new_entry` was copied from, so
+        the two shared their nested `verified_by` / `supersedes` objects.
+        Nothing mutates them today; the day something edits a nested field on
+        `new_entry`, the guard's own reference changes with it and the
+        comparison becomes vacuously true — a guard that cannot fail.
+        """
+        root = _store(tmp_path)
+        _proposal(root, "p1", content="c1", domain="dom")
+        _entry(root, content="c1", domain="dom", verified_by=[{"kind": "file", "ref": "a"}])
+        row = backfill.build_plan(root)["matched"][0]
+        assert row["old_entry"] is not row["new_entry"]
+        assert row["old_entry"]["verified_by"] is not row["new_entry"]["verified_by"]
+        row["new_entry"]["verified_by"][0]["ref"] = "MUTATED"
+        assert row["old_entry"]["verified_by"][0]["ref"] == "a"
 
     def test_a_line_that_drifted_in_a_field_OUTSIDE_the_claim_preimage_is_refused(self, tmp_path):
         """THE REASON THE COMPARISON IS THE PARSED DICT AND NOT THE CLAIM ID.
