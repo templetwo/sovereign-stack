@@ -307,6 +307,34 @@ def _last_jsonl_entry(path: Path) -> dict | None:
         return None
 
 
+def _write_instant_of(entry: dict) -> str | None:
+    """The moment `entry` was APPENDED, as the ISO string it was stored as.
+
+    Normally that is `timestamp`. The ONE exception is a backdated write: when
+    `record_insight` is given `original_timestamp` it puts the AUTHORSHIP time
+    in `timestamp` (Anthony's 2026-06-19 backdate-in-place ruling — every
+    untaught reader's sort must find the entry where it belongs) and moves the
+    real write instant to `occurred_at`, saying so in `timestamp_source`.
+
+    THE CONDITION IS LOAD-BEARING AND MUST NOT BE WIDENED TO "occurred_at IF
+    PRESENT". `occurred_at` is an overloaded field: `ground.record_catch`
+    writes it as the human EVENT date (frequently date-only, e.g. "2026-08-14")
+    with NO `timestamp_source`, and on the live store all 1,059 rows carrying
+    `occurred_at` lack that marker. Preferring it unconditionally would hand
+    the dedup probe a naive date for every Ground row and every legacy import,
+    turning a working guard off across the whole corpus. `timestamp_source` is
+    the only field that says "this row's `timestamp` is not its write instant",
+    so it is the only thing allowed to redirect the read.
+
+    Falls back to `timestamp` when the marker is set but `occurred_at` is
+    missing — a malformed row is read exactly as it was before this function
+    existed, never as an absence.
+    """
+    if entry.get("timestamp_source") == TIMESTAMP_SOURCE_ORIGINAL:
+        return entry.get("occurred_at") or entry.get("timestamp")
+    return entry.get("timestamp")
+
+
 def _dedup_hit(
     path: Path, content: str, domain: str, layer: str, timestamp: datetime
 ) -> dict | None:
@@ -315,6 +343,21 @@ def _dedup_hit(
     file's last entry (identical content+domain+layer inside the dedup window),
     else None. Read-only — record_insight runs it once as a fast bail and again
     under the write lock, where the file cannot move underneath it.
+
+    BOTH SIDES OF THE COMPARISON ARE WRITE INSTANTS. `timestamp` (the incoming
+    side) is always "now"; the stored side is read through `_write_instant_of`,
+    because a backdated entry keeps its write instant in `occurred_at`. Before
+    that, a retry of a backdated write compared NOW against an AUTHORSHIP time
+    months or years earlier, so the delta was always astronomically outside the
+    window and the dedup guard could not fire at all: the client retry that
+    dedup exists to absorb landed as a second, byte-identical entry, silently,
+    on exactly the writes the house had just taught to carry provenance.
+
+    NOT COMPARABLE IS NOT A CRASH AND NOT A HIT. A date-only or otherwise naive
+    stored value (`"2026-06-19"` parses to a naive datetime) cannot be
+    subtracted from an aware `now`. That is answered with "no dedup hit" — the
+    write proceeds — never with a TypeError out of a read-only probe and never
+    with a hit nobody proved.
     """
     last = _last_jsonl_entry(path)
     if (
@@ -324,8 +367,11 @@ def _dedup_hit(
         or last.get("layer") != layer
     ):
         return None
-    prev_ts = _parse_iso(last.get("timestamp"))
+    prev_ts = _parse_iso(_write_instant_of(last))
     if prev_ts is None:
+        return None
+    if (prev_ts.tzinfo is None) != (timestamp.tzinfo is None):
+        # Naive vs aware: unanswerable without inventing a zone. Say no.
         return None
     try:
         delta = abs((timestamp - prev_ts).total_seconds())
@@ -1160,7 +1206,11 @@ class ExperientialMemory:
             # NOTE: the dedup probe and session_id above deliberately keep
             # using the WRITE INSTANT. Deduping on a backdated stamp would
             # compare this write against a window that has nothing to do with
-            # when the retry actually arrived.
+            # when the retry actually arrived. The STORED side of that
+            # comparison is recovered by `_write_instant_of`, which reads
+            # `occurred_at` back out for exactly the rows this block wrote —
+            # otherwise the probe compared now against the authorship time and
+            # no retry of a backdated write could ever dedup.
             if original_timestamp is not None:
                 insight["timestamp"] = original_timestamp
                 insight["occurred_at"] = timestamp.isoformat()
