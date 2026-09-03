@@ -50,6 +50,19 @@ USAGE
     python3 scripts/backfill_occurred_at.py --root PATH     # a different store
     python3 scripts/backfill_occurred_at.py --apply         # writes. See below.
 
+EXIT CODES, and they are the machine-readable half of everything below. The
+report says "SHARDS REFUSED" in prose; a caller scripting `--apply && ...`
+never reads prose, so a refusal has to be a code or it is a fail-open on the
+exit status of a script written against fail-open (SOP #1: exit code 0 is not
+"ran").
+    0  the run did what it said — a dry run, or an --apply that refused nothing
+    2  no store at --root
+    3  --apply REFUSED ENTIRELY: a live server is answering (guard 1)
+    4  --apply ran but AT LEAST ONE SHARD WAS REFUSED by guard 2. Partial or
+       total: any refusal is 4, because "some of it landed" is not "it landed".
+       Nothing is corrupted — a refused shard is genuinely untouched — and the
+       report names every one of them.
+
 --apply is GATED TWICE, both fail-closed, because this rewrites the primary
 record by LINE POSITION and holds no lock any other process respects
 (`provenance.chronicle_write_lock` is an in-process RLock; the real
@@ -68,7 +81,9 @@ own race proof loses 35 of 60 writes silently):
      `verified_by` would be waved through). One mismatch refuses the WHOLE
      shard: the file moved under the plan, so every other line number in it is
      suspect. A refused shard gets no backup, no rewrite, no alias row and no
-     changelog line, and is named in the report.
+     changelog line, is named in the report, and makes the whole run EXIT 4 —
+     partial or total, because a caller scripting `--apply && ...` reads prose
+     never and the exit status always.
 
 The DRY RUN is gated by neither — the report a human needs in order to decide
 is always available.
@@ -689,12 +704,14 @@ def main(argv: list[str] | None = None, *, live_ports: tuple[int, ...] = LIVE_PO
             return 3
 
     plan = build_plan(root, min_gap_days=args.min_gap)
+    refused = False
     if args.apply:
         if not plan["matched"]:
             print("nothing to apply.")
             return 0
         backup = apply_plan(root, plan)
         plan["_applied"] = True
+        refused = bool(plan.get("refused_shards"))
         print(f"backups + changelog: {backup}")
     if args.json:
         printable = json.loads(json.dumps(plan, default=str))
@@ -704,7 +721,14 @@ def main(argv: list[str] | None = None, *, live_ports: tuple[int, ...] = LIVE_PO
         print(json.dumps(printable, indent=2))
     else:
         print_report(plan, args.verbose)
-    return 0
+    # THE REPORT FIRST, THE CODE LAST. Guard 2 is fail-closed on the WRITE —
+    # a refused shard is genuinely untouched — and was fail-OPEN on the exit
+    # status: this returned 0 whether one shard was refused or all of them,
+    # so a caller scripting `--apply && ...` read a fully refused migration as
+    # a completed one. Guard 1 three lines up already returns 3 and the
+    # missing store returns 2; the vocabulary existed and this path was the
+    # one hole in it. Any refusal, partial or total, is 4.
+    return 4 if refused else 0
 
 
 if __name__ == "__main__":

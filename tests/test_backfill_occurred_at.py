@@ -689,3 +689,88 @@ class TestApplyRefusesWhileAServerIsLive:
 
     def test_the_default_ports_are_the_live_stack_ones(self):
         assert backfill.LIVE_PORTS == (3434, 8100)
+
+
+class TestARefusedShardIsARefusedRUN:
+    """GUARD 2 WAS FAIL-CLOSED ON THE WRITE AND FAIL-OPEN ON THE EXIT CODE.
+
+    `main` returned 0 after `apply_plan` whether one shard was refused or all
+    of them were, so a caller scripting `--apply && ...` read a fully refused
+    migration as a completed one — SOP #1's own "exit code 0 is not ran",
+    inside the script written against SOP #2. Nothing was ever corrupted (a
+    refused shard is genuinely untouched, and `print_report` does print SHARDS
+    REFUSED); the hole was that the only signal was prose.
+
+    The vocabulary already existed three lines of control flow away: 2 = no
+    store, 3 = a live server refused the whole run. This adds 4 = applied, at
+    least one shard refused.
+
+    HOW THIS IS EXERCISED THROUGH `main`, WHICH IS THE POINT. Every other
+    guard-2 test calls `apply_plan` directly, which is exactly why nothing
+    caught the exit code. `main` plans and applies in one call, so a shard
+    cannot be disturbed in between — the plan is built here, the shard is
+    disturbed, and `build_plan` is then monkeypatched to hand `main` that
+    stale plan. `live_ports=()` keeps guard 1 from firing first and masking
+    the assertion with a 3.
+    """
+
+    @staticmethod
+    def _stale_plan(tmp_path, monkeypatch, *, extra_shard=False):
+        root = _store(tmp_path)
+        _proposal(root, "p1", content="c1", domain="dom")
+        _entry(root, content="before", domain="dom")
+        _entry(root, content="c1", domain="dom")
+        if extra_shard:
+            # A SECOND, UNDISTURBED shard, so the run is PARTIAL: one shard is
+            # rewritten and one is refused. 4 must not require total refusal.
+            _proposal(root, "p2", content="c2", domain="other")
+            _entry(root, content="c2", domain="other")
+        plan = backfill.build_plan(root)
+        assert len(plan["matched"]) == (2 if extra_shard else 1)
+        shard = root / "chronicle" / "insights" / "dom" / "session_x.jsonl"
+        body = shard.read_text()
+        shard.write_text(json.dumps({"timestamp": COMMITTED, "content": "new"}) + "\n" + body)
+        monkeypatch.setattr(backfill, "build_plan", lambda *a, **k: plan)
+        return root, shard, plan
+
+    def test_a_totally_refused_apply_exits_4(self, tmp_path, monkeypatch, capsys):
+        root, shard, _plan = self._stale_plan(tmp_path, monkeypatch)
+        before = shard.read_bytes()
+        rc = backfill.main(["--root", str(root), "--apply"], live_ports=())
+        assert rc == 4, "a fully refused migration reported success on its exit status"
+        assert shard.read_bytes() == before
+        assert "SHARDS REFUSED" in capsys.readouterr().out
+
+    def test_a_PARTIALLY_refused_apply_also_exits_4(self, tmp_path, monkeypatch):
+        """ "Some of it landed" is not "it landed"."""
+        root, shard, _plan = self._stale_plan(tmp_path, monkeypatch, extra_shard=True)
+        before = shard.read_bytes()
+        rc = backfill.main(["--root", str(root), "--apply"], live_ports=())
+        assert rc == 4
+        assert shard.read_bytes() == before
+        other = root / "chronicle" / "insights" / "other" / "session_x.jsonl"
+        assert backfill.TIMESTAMP_SOURCE in other.read_text(), (
+            "the undisturbed shard should still have been rewritten — 4 reports a "
+            "refusal, it does not abort the run"
+        )
+
+    # ── THE INVERSE ────────────────────────────────────────────────────────
+    def test_an_apply_that_refuses_NOTHING_still_exits_0(self, tmp_path):
+        """A code that is always 4 says nothing. Same store, undisturbed."""
+        root = _store(tmp_path)
+        _proposal(root, "p1", content="c1", domain="dom")
+        shard = _entry(root, content="c1", domain="dom")
+        before = shard.read_bytes()
+        rc = backfill.main(["--root", str(root), "--apply"], live_ports=())
+        assert rc == 0
+        assert shard.read_bytes() != before
+
+    def test_the_json_surface_carries_the_refusal_too(self, tmp_path, monkeypatch, capsys):
+        """--json bypasses print_report, so the prose signal is gone there.
+        The exit code is then the ONLY signal, plus refused_shards in the
+        payload — assert both, since a JSON caller is the scripted one."""
+        root, _shard, _plan = self._stale_plan(tmp_path, monkeypatch)
+        rc = backfill.main(["--root", str(root), "--apply", "--json"], live_ports=())
+        assert rc == 4
+        payload = json.loads(capsys.readouterr().out.split("\n", 1)[1])
+        assert len(payload["refused_shards"]) == 1
