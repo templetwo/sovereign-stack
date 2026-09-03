@@ -327,12 +327,38 @@ class TestEverySurfaceNoteReachesTheDoor:
     the next one silently too.
     """
 
-    def test_the_to_self_decorated_name_warning_is_rendered(self):
-        text = _aperture_text()
-        assert "not a decorated seat string" in text
+    @staticmethod
+    def _hermetic_text(tmp_path, monkeypatch) -> str:
+        """Render the block against a TMP root, not ~/.sovereign.
 
-    def test_the_older_two_notes_still_render(self):
-        text = _aperture_text()
+        The older tests in this file read the live store — `_aperture_text()`
+        returns only the 14-line block, so they are scoped, but they depend on
+        the live store still having the three directories measure_aperture
+        scandirs: it RAISES when one is missing, the renderer emits the
+        `unmeasured` branch, and every note assertion would go red for a reason
+        that has nothing to do with the renderer. These new ones own their
+        store so the assertion is about the code under test and nothing else.
+        """
+        from sovereign_stack import aperture as ap_mod
+
+        root = tmp_path / ".sovereign"
+        for sub in (
+            "chronicle/insights",
+            "chronicle/open_threads",
+            "handoffs",
+            "comms/letters/to_arrival",
+            "comms/letters/to_self",
+            "comms/letters/breakthroughs",
+        ):
+            (root / sub).mkdir(parents=True, exist_ok=True)
+        monkeypatch.setattr(ap_mod, "_DEFAULT_ROOT", root)
+        return "\n".join(ast_mod._render_aperture())
+
+    def test_the_to_self_decorated_name_warning_is_rendered(self, tmp_path, monkeypatch):
+        assert "not a decorated seat string" in self._hermetic_text(tmp_path, monkeypatch)
+
+    def test_the_older_two_notes_still_render(self, tmp_path, monkeypatch):
+        text = self._hermetic_text(tmp_path, monkeypatch)
         assert "relevance" in text.lower()  # insights
         assert "retired by reading" in text or "legacy_unconsumed" in text  # handoffs
 
