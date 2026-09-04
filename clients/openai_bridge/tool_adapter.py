@@ -16,6 +16,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 from typing import Any
 
 import httpx
@@ -237,9 +238,29 @@ _RING2_SCHEMA_MAP: dict[str, Tool] = {t.name: t for t in _RING2_SCHEMAS}
 # ── Ring 1 schema fetch ───────────────────────────────────────────────────────
 
 _ring1_cache: list[Tool] | None = None
+_ring1_cache_at: float = 0.0
+
+# The projection lives inside the long-running sovereign-sse process, so a
+# process-lifetime cache pins whatever schema happened to be reachable at the
+# first discovery call until someone restarts a service.  Bound it: a stale
+# projection then self-heals within one TTL instead of surviving a deploy of the
+# very tools it describes.
+RING1_CACHE_TTL_SECONDS = float(os.environ.get("OPENAI_BRIDGE_SCHEMA_TTL_SECONDS", "900"))
 
 _NOT_WIRED_RING1 = frozenset({"verify_proposal", "list_bridge_proposals"})
 _LOCAL_RING1 = frozenset({"witness_boot"})
+
+
+def _expected_remote_ring1() -> frozenset[str]:
+    """Ring-1 names this bridge proxies to the Stack (not bridge-local, wired)."""
+    return frozenset(RING_1_TOOLS - _NOT_WIRED_RING1 - _LOCAL_RING1 - {"self_model"})
+
+
+def reset_ring1_cache() -> None:
+    """Drop the cached projection so the next discovery call refetches."""
+    global _ring1_cache, _ring1_cache_at
+    _ring1_cache = None
+    _ring1_cache_at = 0.0
 
 
 def _bridge_toolkit_schema() -> Tool:
@@ -279,9 +300,15 @@ async def get_ring1_schemas() -> list[Tool]:
     definitions if both live surfaces are unavailable, so the bridge can still
     start and serve Ring 2 tools.  New tools are never admitted by discovery
     alone: the explicit Ring-1 allowlist remains the access-control gate.
+
+    The published schema is the only description of a tool the remote seat ever
+    sees, so a projected tool must carry the Stack's real ``inputSchema`` or not
+    be projected at all.  A description-only tool whose backend requires an
+    argument is the fail-open shape: it reads as callable, the seat calls it
+    bare, and the Stack rejects it for a field the seat was never shown.
     """
-    global _ring1_cache
-    if _ring1_cache is not None:
+    global _ring1_cache, _ring1_cache_at
+    if _ring1_cache is not None and (time.monotonic() - _ring1_cache_at) < RING1_CACHE_TTL_SECONDS:
         return _ring1_cache
 
     headers = {
@@ -301,10 +328,20 @@ async def get_ring1_schemas() -> list[Tool]:
             live_names = {
                 item.get("name") for item in catalog_items if isinstance(item, dict)
             }
-            remote_names = sorted(
-                (RING_1_TOOLS - _NOT_WIRED_RING1 - _LOCAL_RING1 - {"self_model"})
-                & live_names
-            )
+            # Intersecting the allowlist with the catalog silently shrinks the
+            # projection when the catalog is partial, and the reduced surface was
+            # then cached for the process lifetime with no coverage signal.  A
+            # partial catalog is a failed read, not a smaller Stack: say so and
+            # let the in-process registry answer instead.
+            expected = _expected_remote_ring1()
+            missing = sorted(expected - live_names)
+            if missing:
+                raise RuntimeError(
+                    f"/api/tools catalog is missing {len(missing)} allowlisted "
+                    f"Ring-1 tools ({', '.join(missing)}) — refusing to publish a "
+                    "silently partial surface"
+                )
+            remote_names = sorted(expected)
             responses = await asyncio.gather(
                 *(
                     client.get(
@@ -344,7 +381,7 @@ async def get_ring1_schemas() -> list[Tool]:
             from sovereign_stack.server import list_tools as list_native_tools
 
             native_tools = await list_native_tools()
-            allowed_remote = RING_1_TOOLS - _NOT_WIRED_RING1 - _LOCAL_RING1 - {"self_model"}
+            allowed_remote = _expected_remote_ring1()
             tools = [tool for tool in native_tools if tool.name in allowed_remote]
         except Exception as fallback_error:
             logger.warning(
@@ -365,13 +402,34 @@ async def get_ring1_schemas() -> list[Tool]:
         by_name[name] = fallback_by_name[name]
 
     _ring1_cache = [by_name[name] for name in sorted(by_name)]
+    _ring1_cache_at = time.monotonic()
     return _ring1_cache
 
 
 def _minimal_ring1_fallback() -> list[Tool]:
     """
-    Minimal Ring 1 tool definitions — enough for ChatGPT to call them.
-    The sovereign Stack enforces the real schema server-side.
+    Last-resort Ring 1 definitions, reached only when BOTH the live ``/api/tools``
+    endpoint and the in-process Stack registry are unavailable.
+
+    It publishes only the tools whose real input schema is known here, plus the
+    bridge-local tools this connector dispatches itself.  Everything else is
+    OMITTED rather than advertised argument-less.
+
+    This is the bug the OpenAI seat reported on 2026-08-28: the old version
+    handed every unlisted tool ``{"type": "object", "properties": {}}``, so
+    ``compass_check``, ``context_retrieve`` and ``reflexive_surface`` reached
+    ChatGPT as tools that "accept no arguments" and were then rejected by the
+    Stack for missing ``action`` / ``current_focus`` / ``domain_tags`` — fields
+    the seat had never been shown.  A description is not a schema, and the Stack
+    enforcing the real schema server-side is not a substitute for publishing it:
+    server-side enforcement is exactly what turns the silent lie into a rejected
+    call.  In MCP, "unavailable" is spelled by omission from ``list_tools``, so
+    an undescribable tool is left out.
+
+    Omission costs little here by construction: a bridge in this state cannot
+    proxy Ring 1 at all — ``call_ring1_tool`` posts to the same unreachable
+    ``BRIDGE_URL`` — so the omitted tools were not callable either way.  Ring 2
+    proposals are local and keep working, which is why this fallback exists.
     """
     descriptions = {
         "where_did_i_leave_off": "Boot call. Returns spiral status, handoffs, open threads, recent activity. Call this first.",
@@ -484,7 +542,15 @@ def _minimal_ring1_fallback() -> list[Tool]:
         },
     }
 
+    # Bridge-local tools this connector answers itself.  witness_boot really does
+    # take no arguments (mcp_filtered.handle_bridge_tool returns its text inline),
+    # so an empty property set is the truth for it rather than a missing schema.
+    bridge_local_schemas: dict[str, dict[str, Any]] = {
+        "witness_boot": {"type": "object", "properties": {}, "required": []},
+    }
+
     tools = []
+    omitted: list[str] = []
     for name in sorted(RING_1_TOOLS):
         if name == "self_model":
             continue  # handled in Ring 2 schema as direction-sensitive
@@ -493,15 +559,27 @@ def _minimal_ring1_fallback() -> list[Tool]:
         if name == "my_toolkit":
             tools.append(_bridge_toolkit_schema())
             continue
-        desc = descriptions.get(name, f"[Ring 1] {name}")
+        schema = fallback_schemas.get(name) or bridge_local_schemas.get(name)
+        if schema is None:
+            # No real schema known offline.  Advertising it argument-less would
+            # publish a call shape that cannot succeed; stay silent instead.
+            omitted.append(name)
+            continue
         tools.append(
             Tool(
                 name=name,
-                description=desc,
-                inputSchema=fallback_schemas.get(
-                    name, {"type": "object", "properties": {}}
-                ),
+                description=descriptions.get(name, f"[Ring 1] {name}"),
+                inputSchema=schema,
             )
+        )
+
+    if omitted:
+        logger.warning(
+            "Static Ring 1 fallback: withholding %d tool(s) with no offline schema "
+            "(%s). They are omitted rather than advertised argument-less; "
+            "Ring 1 cannot be proxied in this state anyway.",
+            len(omitted),
+            ", ".join(omitted),
         )
     return tools
 
