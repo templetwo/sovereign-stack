@@ -15,8 +15,10 @@ Ring 2 calls run through the interceptor — never touch the Stack directly.
 import asyncio
 import json
 import logging
+import math
 import os
 import time
+from copy import deepcopy
 from typing import Any
 
 import httpx
@@ -245,10 +247,102 @@ _ring1_cache_at: float = 0.0
 # first discovery call until someone restarts a service.  Bound it: a stale
 # projection then self-heals within one TTL instead of surviving a deploy of the
 # very tools it describes.
-RING1_CACHE_TTL_SECONDS = float(os.environ.get("OPENAI_BRIDGE_SCHEMA_TTL_SECONDS", "900"))
+_DEFAULT_SCHEMA_TTL_SECONDS = 900.0
+
+# Floor, not a preference.  ``get_ring1_schemas`` issues 1 + len(expected) GETs
+# on a miss, so a TTL of 0 (or a negative one) turns every list_tools into a full
+# fan-out rather than the "no cache" an operator debugging a stale projection
+# probably meant.  Five seconds keeps a refetch effectively immediate by hand
+# while bounding a burst of concurrent sessions to one fan-out.
+_MIN_SCHEMA_TTL_SECONDS = 5.0
+
+
+def _schema_ttl_seconds() -> float:
+    """Parse the TTL override without letting a typo take the SSE server down.
+
+    ``sovereign_stack.sse_server`` imports this module at startup, so an
+    unparseable value here used to raise at import time and present to an
+    operator as a tunnel or connector outage rather than as a config error.
+    Read the value, complain about a bad one, and carry on with the default.
+    """
+    raw = os.environ.get("OPENAI_BRIDGE_SCHEMA_TTL_SECONDS", "").strip()
+    if not raw:
+        return _DEFAULT_SCHEMA_TTL_SECONDS
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        logger.warning(
+            "OPENAI_BRIDGE_SCHEMA_TTL_SECONDS=%r is not a number — using %.0fs",
+            raw,
+            _DEFAULT_SCHEMA_TTL_SECONDS,
+        )
+        return _DEFAULT_SCHEMA_TTL_SECONDS
+    # "inf" and "nan" both parse as floats.  inf is the dangerous one: it passes
+    # a bare `< floor` check and silently restores the unbounded process-lifetime
+    # cache this TTL exists to end.  Neither is a duration, so neither is clamped
+    # to the floor — that would be answering the wrong question.  Fall back.
+    if not math.isfinite(value):
+        logger.warning(
+            "OPENAI_BRIDGE_SCHEMA_TTL_SECONDS=%r is not a finite duration — "
+            "using %.0fs (an unbounded TTL is the stale projection this cache "
+            "bound exists to prevent)",
+            raw,
+            _DEFAULT_SCHEMA_TTL_SECONDS,
+        )
+        return _DEFAULT_SCHEMA_TTL_SECONDS
+    if value < _MIN_SCHEMA_TTL_SECONDS:
+        logger.warning(
+            "OPENAI_BRIDGE_SCHEMA_TTL_SECONDS=%r is below the %.0fs floor — clamping",
+            raw,
+            _MIN_SCHEMA_TTL_SECONDS,
+        )
+        return _MIN_SCHEMA_TTL_SECONDS
+    return value
+
+
+# Parsed once, at import, and read as a module attribute so tests can override it.
+RING1_CACHE_TTL_SECONDS = _schema_ttl_seconds()
 
 _NOT_WIRED_RING1 = frozenset({"verify_proposal", "list_bridge_proposals"})
-_LOCAL_RING1 = frozenset({"witness_boot"})
+
+# Ring-1 tools this connector dispatches itself (mcp_filtered.handle_bridge_tool)
+# rather than proxying to the Stack.  Their schemas are known here on every path,
+# healthy or degraded, so they live at module scope: the healthy path needs
+# witness_boot without calling the static fallback for it, and calling the
+# fallback purely to source one tool made the fallback's degradation warning fire
+# on successful discovery.  witness_boot really does take no arguments, so an
+# empty property set is the truth for it rather than a missing schema.
+_BRIDGE_LOCAL_TOOLS: dict[str, dict[str, Any]] = {
+    "witness_boot": {
+        "description": (
+            "[Phase 6] Identity constraints and witness posture injection. "
+            "Not yet implemented."
+        ),
+        "inputSchema": {"type": "object", "properties": {}, "required": []},
+    },
+}
+
+# Derived, never hand-maintained: a bridge-local name that _expected_remote_ring1
+# still asked the Stack for would be fetched remotely and then not found, and a
+# name in _LOCAL_RING1 with no entry above used to be a KeyError on the live
+# success path.  One source of truth makes both unrepresentable.
+_LOCAL_RING1 = frozenset(_BRIDGE_LOCAL_TOOLS)
+
+
+def _bridge_local_tool(name: str) -> Tool:
+    """Build a fresh Tool for a bridge-local name.
+
+    Built per call rather than shared from a module-level ``Tool``: the SSE
+    process is long-lived and ``Tool`` is a mutable pydantic model, so handing
+    the same instance (and the same ``inputSchema`` dict) to every cache
+    generation would let one mutation reach every future reader.
+    """
+    spec = _BRIDGE_LOCAL_TOOLS[name]
+    return Tool(
+        name=name,
+        description=str(spec["description"]),
+        inputSchema=deepcopy(spec["inputSchema"]),
+    )
 
 
 def _expected_remote_ring1() -> frozenset[str]:
@@ -308,6 +402,13 @@ async def get_ring1_schemas() -> list[Tool]:
     bare, and the Stack rejects it for a field the seat was never shown.
     """
     global _ring1_cache, _ring1_cache_at
+    # Known and deliberately not gated: no single-flight around this refresh, so
+    # k sessions listing in the same instant each run their own 1 + len(expected)
+    # fan-out.  Bounding the cache turned "once per process" into "once per TTL
+    # window", which is more stampedes, not fewer.  It stays a comment because
+    # the fan-out is loopback and k is small, while a lock held across a 10s HTTP
+    # timeout inside the shared SSE process is a worse failure than a duplicated
+    # read.  Revisit if this bridge ever fans out to a non-local Stack.
     if _ring1_cache is not None and (time.monotonic() - _ring1_cache_at) < RING1_CACHE_TTL_SECONDS:
         return _ring1_cache
 
@@ -315,6 +416,10 @@ async def get_ring1_schemas() -> list[Tool]:
         "Authorization": f"Bearer {BRIDGE_TOKEN}",
         "Content-Type": "application/json",
     }
+
+    # Cleared when we knowingly publish a short surface, so it is not pinned for
+    # a TTL.  The live path never sets it: it refuses a short catalog outright.
+    cacheable = True
 
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
@@ -333,6 +438,13 @@ async def get_ring1_schemas() -> list[Tool]:
             # then cached for the process lifetime with no coverage signal.  A
             # partial catalog is a failed read, not a smaller Stack: say so and
             # let the in-process registry answer instead.
+            #
+            # The invariant this buys is narrow, so state it narrowly.  It is
+            # NOT "the published surface can never shrink" — it still can, via
+            # the in-process registry below and via the static fallback.  It is:
+            # a short surface is never published SILENTLY and is never CACHED.
+            # Those two were the actual defect; the shrinking itself is
+            # sometimes the correct answer.
             expected = _expected_remote_ring1()
             missing = sorted(expected - live_names)
             if missing:
@@ -382,7 +494,32 @@ async def get_ring1_schemas() -> list[Tool]:
 
             native_tools = await list_native_tools()
             allowed_remote = _expected_remote_ring1()
-            tools = [tool for tool in native_tools if tool.name in allowed_remote]
+            by_native = {
+                tool.name: tool for tool in native_tools if tool.name in allowed_remote
+            }
+            tools = list(by_native.values())
+            # This is the same intersect-and-shrink the live path refuses, and it
+            # is NOT the same failure, so it does not get the same remedy.  A
+            # short HTTP catalog is plausibly a failed read; a short in-process
+            # registry is the authoritative answer.  If list_tools() has no
+            # ``foo``, the Stack has no ``foo`` and the allowlist is stale — the
+            # read was fine.  Refusing here would send a healthy bridge to the
+            # static fallback over one renamed tool, cutting the seat from 34
+            # tools to 8 and taking where_did_i_leave_off, recall_insights and
+            # compass_check with it.  The defect was the SILENCE and the
+            # full-TTL cache, not the shrinking: say what was dropped and do not
+            # cache it, so a redeploy is picked up on the next call.
+            registry_missing = sorted(allowed_remote - set(by_native))
+            if registry_missing:
+                cacheable = False
+                logger.warning(
+                    "In-process registry does not define %d allowlisted Ring-1 "
+                    "tool(s) (%s) — the allowlist is stale, not the read. "
+                    "Publishing the %d the registry does hold, uncached.",
+                    len(registry_missing),
+                    ", ".join(registry_missing),
+                    len(tools),
+                )
         except Exception as fallback_error:
             logger.warning(
                 "Could not read in-process Stack schemas: %s — using static fallback",
@@ -397,11 +534,19 @@ async def get_ring1_schemas() -> list[Tool]:
         by_name["my_toolkit"] = _bridge_toolkit_schema()
 
     # witness_boot is implemented by this bridge rather than the native Stack.
-    fallback_by_name = {tool.name: tool for tool in _minimal_ring1_fallback()}
+    # Sourced from _BRIDGE_LOCAL_TOOLS, not from _minimal_ring1_fallback(): that
+    # call happened on the fully healthy path too, and its degradation warning
+    # then fired as a side effect of a successful discovery, writing a false
+    # "compass_check withheld" line into sse.log on every list_tools.
     for name in _LOCAL_RING1 & RING_1_TOOLS:
-        by_name[name] = fallback_by_name[name]
+        by_name[name] = _bridge_local_tool(name)
 
-    _ring1_cache = [by_name[name] for name in sorted(by_name)]
+    projection = [by_name[name] for name in sorted(by_name)]
+    if not cacheable:
+        # A surface we already know is short does not get pinned for a TTL.
+        return projection
+
+    _ring1_cache = projection
     _ring1_cache_at = time.monotonic()
     return _ring1_cache
 
@@ -430,6 +575,14 @@ def _minimal_ring1_fallback() -> list[Tool]:
     proxy Ring 1 at all — ``call_ring1_tool`` posts to the same unreachable
     ``BRIDGE_URL`` — so the omitted tools were not callable either way.  Ring 2
     proposals are local and keep working, which is why this fallback exists.
+
+    That clause is load-bearing and conditional on reaching here only when a
+    surface is UNREADABLE.  An earlier revision made the in-process registry
+    raise on an incomplete catalog, which would have routed a perfectly healthy
+    bridge here over one stale allowlist entry — and then this log would have
+    asserted Ring 1 was unproxyable while it was in fact fine.  If a future
+    change adds another route into this function, re-check the claim before
+    keeping it.
     """
     descriptions = {
         "where_did_i_leave_off": "Boot call. Returns spiral status, handoffs, open threads, recent activity. Call this first.",
@@ -475,7 +628,8 @@ def _minimal_ring1_fallback() -> list[Tool]:
             "REQUIRED before any Ring 2 write proposal with CRITICAL risk. "
             "Returns PAUSE/WITNESS/PROCEED. Read-only self-check."
         ),
-        "witness_boot": "[Phase 6] Identity constraints and witness posture injection. Not yet implemented.",
+        # witness_boot's description lives in _BRIDGE_LOCAL_TOOLS, with its
+        # schema, so the two cannot drift apart.
     }
 
     # Canonical Ring 1 includes verify_proposal / list_bridge_proposals, but the
@@ -542,13 +696,6 @@ def _minimal_ring1_fallback() -> list[Tool]:
         },
     }
 
-    # Bridge-local tools this connector answers itself.  witness_boot really does
-    # take no arguments (mcp_filtered.handle_bridge_tool returns its text inline),
-    # so an empty property set is the truth for it rather than a missing schema.
-    bridge_local_schemas: dict[str, dict[str, Any]] = {
-        "witness_boot": {"type": "object", "properties": {}, "required": []},
-    }
-
     tools = []
     omitted: list[str] = []
     for name in sorted(RING_1_TOOLS):
@@ -559,7 +706,11 @@ def _minimal_ring1_fallback() -> list[Tool]:
         if name == "my_toolkit":
             tools.append(_bridge_toolkit_schema())
             continue
-        schema = fallback_schemas.get(name) or bridge_local_schemas.get(name)
+        if name in _BRIDGE_LOCAL_TOOLS:
+            # Answered by this bridge, so its schema is known on every path.
+            tools.append(_bridge_local_tool(name))
+            continue
+        schema = fallback_schemas.get(name)
         if schema is None:
             # No real schema known offline.  Advertising it argument-less would
             # publish a call shape that cannot succeed; stay silent instead.
