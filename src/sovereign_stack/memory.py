@@ -187,6 +187,14 @@ def _normalize_domain(domain: str) -> str:
     agree — historically two normalizers disagreed, leaving entries whose
     stored domain had spaces while their directory name had none.
     """
+    # A NON-STRING PASSES THROUGH UNCHANGED rather than raising here. Every
+    # write path calls this normalizer and THEN _validate_domain_label, so
+    # letting a bad type reach the validator is what lets the refusal name the
+    # caller's own field ("invalid applies_to: expected a string label, got
+    # int") instead of the AttributeError this .split() used to raise from
+    # inside a helper the caller never named.
+    if not isinstance(domain, str):
+        return domain
     if not domain:
         return domain
     return ",".join(part.strip() for part in domain.split(","))
@@ -198,10 +206,17 @@ def _normalize_domain(domain: str) -> str:
 # `{label}.jsonl`, so the label itself gets 255 - len(".jsonl") = 249. The
 # insights path uses the label as a bare directory name and could afford 255,
 # but ONE number is the point: `bridge_core.target_risk.domain_label_errors` is
-# the proposal-time twin of this gate and is pinned to it by test
-# (test_bridge_authorship_revoke_and_domain.py), and that gate does not know
-# which tool's suffix will be appended downstream. The strictest of the three
-# is the only value both can hold without drifting.
+# the proposal-time twin of this gate and is pinned to it by
+# tests/test_learning_label_names_its_own_field.py::TestBothGatesAgree, which
+# catches constant drift in BOTH directions (a tighter bridge constant fails on
+# "x"*249, a looser one on "x"*250). NOT by
+# test_bridge_authorship_revoke_and_domain.py, which this comment named until
+# 2026-09-05: that file's BAD list is ["a/b", "..", ".", ".hidden", "a\\b"] and
+# contains no length case at all, so it could not have held the pin it was
+# credited with — a comment pointing at a guard that is not there is the same
+# class of defect as the fail-open this gate closes. That gate also does not
+# know which tool's suffix will be appended downstream. The strictest of the
+# three is the only value both can hold without drifting.
 #
 # HEADROOM, MEASURED RATHER THAN ASSUMED (2026-09-05, live
 # ~/.sovereign/chronicle): the longest live shard name in the house is a
@@ -229,18 +244,34 @@ def _validate_domain_label(domain: str, field: str = "domain") -> None:
     twin of this gate has always named the real one, so the two surfaces
     disagreed about the name of the same mistake.
     """
+    # A NON-STRING LABEL USED TO DIE AS AttributeError, which is the same
+    # complaint this gate answers one type over: `record_learning('h','l',123)`
+    # raised "'int' object has no attribute 'split'" out of _normalize_domain,
+    # and server.py catches only ValueError, so the message that reached the
+    # wire named a Python internal instead of the caller's mistake. The
+    # proposal-time twin has checked isinstance since it was written
+    # (target_risk.domain_label_errors); storage had not.
+    if not isinstance(domain, str):
+        raise ValueError(f"invalid {field}: expected a string label, got {type(domain).__name__}")
     if not domain:
         raise ValueError(f"{field} must be a non-empty label")
+    # PREVIEWED ONCE, FOR EVERY BRANCH BELOW. This used to be computed only in
+    # the length branch, so a 400-byte label carrying a slash was echoed back in
+    # full and produced a 522-character error — burying the reason in the value,
+    # which is precisely what the preview exists to prevent. The proposal-time
+    # twin previews once at the end for all problems; this is that shape.
+    # Short labels are unaffected: preview == domain below 60 chars.
+    preview = domain[:60] + ("…" if len(domain) > 60 else "")
     offending = next((ch for ch in domain if ch in _PATH_SEPARATORS), None)
     if offending is not None:
         raise ValueError(
-            f"invalid {field} {domain!r}: this is a label, not a path "
+            f"invalid {field} {preview!r}: this is a label, not a path "
             f"(the character {offending!r} is a path separator; "
             "use commas for compound tags)"
         )
     if domain in (".", ".."):
         raise ValueError(
-            f"invalid {field} {domain!r}: this is a label, not a path "
+            f"invalid {field} {preview!r}: this is a label, not a path "
             "('.' and '..' are traversal tokens)"
         )
     # A leading dot makes the shard a HIDDEN directory/file, and the house's
@@ -254,7 +285,7 @@ def _validate_domain_label(domain: str, field: str = "domain") -> None:
     # closes a door nothing is standing in.
     if domain.startswith("."):
         raise ValueError(
-            f"invalid {field} {domain!r}: a label must not start with '.' "
+            f"invalid {field} {preview!r}: a label must not start with '.' "
             "(a dotted shard is hidden from every reader that walks the store)"
         )
     # LENGTH IS THE SAME DEFECT AS THE SLASH, ONE SYSCALL OVER. An over-long
@@ -268,7 +299,6 @@ def _validate_domain_label(domain: str, field: str = "domain") -> None:
         # a label of accented or CJK characters can pass a length-in-characters
         # check and still fail at open(); counting characters here would leave
         # exactly the errno this gate exists to replace.
-        preview = domain[:60] + ("…" if len(domain) > 60 else "")
         raise ValueError(
             f"invalid {field} {preview!r}: label is {encoded} bytes, limit is "
             f"{MAX_DOMAIN_LABEL_BYTES} (a shard name is one filesystem component, "

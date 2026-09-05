@@ -136,6 +136,86 @@ class TestLengthIsAValidationErrorNotAnErrno:
             _mem(tmp_path).record_learning("h", "l", "q" * 400)
         assert len(str(exc.value)) < 300
 
+    @pytest.mark.parametrize(
+        ("label", "rule"),
+        [
+            ("a/" + "x" * 400, "separator"),
+            ("." + "x" * 400, "leading dot"),
+            ("x" * 400, "length"),
+        ],
+        ids=["separator", "leading-dot", "length"],
+    )
+    def test_no_branch_dumps_the_whole_label(self, tmp_path, label, rule):
+        """THE PREVIEW WAS APPLIED IN ONE BRANCH OF FIVE (found 2026-09-05).
+
+        The rule above is the right one and it was pinned by a single
+        separator-free case, so it only ever exercised the LENGTH branch. The
+        other branches formatted the label raw: measured before the fix, a
+        400-byte label carrying a slash produced a 522-character message and a
+        leading-dot one 521 — the reason buried in the value, which is the
+        defect the preview exists to prevent. A label can break two rules at
+        once, so every branch has to preview, not just the one whose test
+        happened to be written.
+        """
+        with pytest.raises(ValueError) as exc:
+            _mem(tmp_path).record_learning("h", "l", label)
+        message = str(exc.value)
+        assert len(message) < 300, f"{rule} branch dumped {len(message)} chars"
+        assert "x" * 100 not in message
+
+    def test_the_traversal_branch_previews_too(self, tmp_path):
+        """'..' is short, so this branch cannot be caught by a length assert —
+        it is here so the preview is pinned on all four refusal branches rather
+        than the three that happen to be long."""
+        with pytest.raises(ValueError) as exc:
+            _mem(tmp_path).record_learning("h", "l", "..")
+        assert "'..'" in str(exc.value)
+
+
+class TestATypedLabelIsRefusedInTheCallersVocabulary:
+    """A non-string label used to raise AttributeError from inside
+    ``_normalize_domain`` — "'int' object has no attribute 'split'". server.py
+    catches only ValueError, so what reached the wire named a Python internal
+    instead of the caller's mistake. Still fail-CLOSED either way (the bridge's
+    isError check makes it ok:false), so this is message quality, not a lost
+    write — but it is the same complaint this whole gate answers, and the
+    proposal-time twin has done the isinstance check since it was written."""
+
+    @pytest.mark.parametrize("label", [123, 4.5, ["a", "b"], {"a": 1}, True])
+    def test_a_non_string_label_raises_valueerror(self, tmp_path, label):
+        with pytest.raises(ValueError):
+            _mem(tmp_path).record_learning("h", "l", label)
+
+    def test_the_message_names_applies_to_and_the_type(self, tmp_path):
+        with pytest.raises(ValueError) as exc:
+            _mem(tmp_path).record_learning("h", "l", 123)
+        message = str(exc.value)
+        assert "applies_to" in message
+        assert "int" in message
+
+    def test_it_is_not_an_attributeerror(self, tmp_path):
+        """The falsifier: this is the exception the old path actually raised."""
+        with pytest.raises(ValueError):
+            try:
+                _mem(tmp_path).record_learning("h", "l", 123)
+            except AttributeError as exc:  # pragma: no cover - regression guard
+                raise AssertionError(f"still an AttributeError: {exc}") from exc
+
+    def test_a_refused_type_writes_nothing(self, tmp_path):
+        mem = _mem(tmp_path)
+        with pytest.raises(ValueError):
+            mem.record_learning("h", "l", 123)
+        assert _shards(mem) == []
+
+    @pytest.mark.parametrize("path", ["insight", "thread"])
+    def test_the_sibling_paths_refuse_a_typed_label_too(self, tmp_path, path):
+        mem = _mem(tmp_path)
+        with pytest.raises(ValueError):
+            if path == "insight":
+                mem.record_insight(123, "c")
+            else:
+                mem.record_open_thread("q?", "", 123)
+
     def test_bytes_not_characters(self, tmp_path):
         """The filesystem caps the component in BYTES. A label of 200 3-byte
         characters is 600 bytes: a length-in-characters check passes it and

@@ -468,7 +468,13 @@ def domain_label_errors(tool_name: str, args: dict) -> list[str]:
             "a leading dot makes the shard hidden from every reader that walks the store"
         )
     # Kept in lockstep with memory.MAX_DOMAIN_LABEL_BYTES by
-    # test_bridge_authorship_revoke_and_domain.py. Duplicated rather than
+    # tests/test_learning_label_names_its_own_field.py::TestBothGatesAgree,
+    # which fails in BOTH directions on drift (a tighter constant here refuses
+    # "x"*249, which storage takes; a looser one accepts "x"*250, which storage
+    # refuses). NOT by test_bridge_authorship_revoke_and_domain.py, which this
+    # comment named until 2026-09-05: that file's BAD list is
+    # ["a/b", "..", ".", ".hidden", "a\\b"] and has no length case, so it never
+    # held this pin. Duplicated rather than
     # imported on purpose, exactly as the separator rules above are: bridge_core
     # is the client-side package and must validate without the Stack installed.
     #
@@ -486,8 +492,13 @@ def domain_label_errors(tool_name: str, args: dict) -> list[str]:
     # Previewed, not dumped: an over-long label is one of the things refused
     # here, and echoing 400 bytes of it back would bury the reason in the value.
     preview = raw if len(raw) <= 80 else raw[:80] + "…"
+    # "this is a label" and not "a domain is a label": `field` is `applies_to`
+    # for a learning, and the storage twin was changed to the field-agnostic
+    # phrasing when it learned to name the caller's own parameter. These two
+    # gates are the one pair this file explicitly wants identical, so the
+    # wording follows the field name rather than contradicting it.
     return [
-        f"{tool_name}: invalid {field} {preview!r} — a domain is a label, not a path "
+        f"{tool_name}: invalid {field} {preview!r} — this is a label, not a path "
         f"({'; '.join(problems)}). This is refused HERE so you can fix it now; "
         "uncaught, it reaches the chronicle write path and fails as a bare "
         "filesystem error after a human has already approved it."
