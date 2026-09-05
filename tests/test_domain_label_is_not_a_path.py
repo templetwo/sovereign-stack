@@ -30,6 +30,19 @@ def _mem(tmp_path: Path) -> ExperientialMemory:
     return ExperientialMemory(str(tmp_path / ".sovereign"))
 
 
+def _shards(directory: Path) -> list[Path]:
+    """The shards ACTUALLY on disk under a directory the memory object owns.
+
+    Both "writes nothing" checks here used to spell the directory by hand as
+    ``tmp_path/".sovereign"/"chronicle"/<kind>``. ``ExperientialMemory(root)``
+    writes to ``root/<kind>``, so that path exists on no outcome, ``rglob``
+    returned ``[]`` for a landed write as readily as for a refused one, and the
+    assertion could not fail. Ask the object for its own directory
+    (``mem.learnings_dir`` / ``mem.threads_dir``); positive control below.
+    """
+    return sorted(directory.rglob("*.jsonl"))
+
+
 BAD_LABELS = [
     "a/b",
     "tech-debt/compaction",
@@ -46,7 +59,11 @@ class TestRecordLearningRefusesAPath:
     @pytest.mark.parametrize("bad", BAD_LABELS)
     def test_refused(self, tmp_path, bad):
         mem = _mem(tmp_path)
-        with pytest.raises(ValueError, match="domain"):
+        # `applies_to`, not `domain` — this path's parameter is not called
+        # `domain`, and naming the wrong one sent a proposer looking for a field
+        # they never passed. Tightened 2026-09-05; it read `match="domain"`
+        # before, which passed on a message that misnamed the field.
+        with pytest.raises(ValueError, match="applies_to"):
             mem.record_learning("happened", "learned", bad)
 
     def test_the_error_is_a_validation_error_not_an_oserror(self, tmp_path):
@@ -62,8 +79,7 @@ class TestRecordLearningRefusesAPath:
         mem = _mem(tmp_path)
         with pytest.raises(ValueError):
             mem.record_learning("h", "l", "a/b")
-        learnings = tmp_path / ".sovereign" / "chronicle" / "learnings"
-        assert not any(learnings.rglob("*.jsonl"))
+        assert _shards(mem.learnings_dir) == []
 
     def test_a_good_label_still_writes(self, tmp_path):
         mem = _mem(tmp_path)
@@ -86,12 +102,35 @@ class TestRecordOpenThreadRefusesAPath:
         mem = _mem(tmp_path)
         with pytest.raises(ValueError):
             mem.record_open_thread("q?", "", "a/b")
-        threads = tmp_path / ".sovereign" / "chronicle" / "open_threads"
-        assert not any(threads.rglob("*.jsonl"))
+        assert _shards(mem.threads_dir) == []
 
     def test_a_good_label_still_writes(self, tmp_path):
         mem = _mem(tmp_path)
         assert Path(mem.record_open_thread("q?", "", "a,b")).name == "a,b.jsonl"
+
+
+class TestTheWritesNothingChecksCanFail:
+    """Law #2 applied to this file's own instrument. Until 2026-09-05 both
+    "writes nothing" assertions read a directory the constructor never creates,
+    so they were green over a landed shard as readily as over a refusal."""
+
+    def test_a_landed_learning_makes_the_assertion_fail(self, tmp_path):
+        mem = _mem(tmp_path)
+        assert _shards(mem.learnings_dir) == []
+        mem.record_learning("h", "l", "good-label")
+        assert [p.name for p in _shards(mem.learnings_dir)] == ["good-label.jsonl"]
+
+    def test_a_landed_thread_makes_the_assertion_fail(self, tmp_path):
+        mem = _mem(tmp_path)
+        assert _shards(mem.threads_dir) == []
+        mem.record_open_thread("q?", "", "good-label")
+        assert [p.name for p in _shards(mem.threads_dir)] == ["good-label.jsonl"]
+
+    def test_the_directory_the_old_checks_read_is_never_created(self, tmp_path):
+        mem = _mem(tmp_path)
+        mem.record_learning("h", "l", "good-label")
+        mem.record_open_thread("q?", "", "good-label")
+        assert not (tmp_path / ".sovereign" / "chronicle").exists()
 
 
 class TestLeadingDotIsRefusedEverywhere:
@@ -114,7 +153,7 @@ class TestLeadingDotIsRefusedEverywhere:
         directory placed by hand is invisible to the walk every reader uses."""
         from sovereign_stack.memory import iter_thread_shards
 
-        threads = tmp_path / ".sovereign" / "chronicle" / "open_threads"
+        threads = _mem(tmp_path).threads_dir
         (threads / ".hidden").mkdir(parents=True)
         (threads / ".hidden" / "log.jsonl").write_text('{"resolved": false}\n')
         assert iter_thread_shards(threads) == []

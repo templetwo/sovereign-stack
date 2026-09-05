@@ -418,6 +418,12 @@ def referential_errors(
 # proposal-time gate that is LOOSER than storage lets the same class through
 # again, and one that is TIGHTER refuses proposals the Stack would have
 # accepted — either drift reintroduces the surprise this closes.
+#
+# The byte cap is memory.MAX_DOMAIN_LABEL_BYTES: 255 (NAME_MAX) minus
+# len(".jsonl"), so the same label is safe as a bare directory name AND as a
+# `{label}.jsonl` filename on every record path.
+_MAX_DOMAIN_LABEL_BYTES = 249
+
 _DOMAIN_ARG_BY_TOOL: dict[str, str] = {
     # proposal tool name -> the argument that becomes a shard FILENAME upstream
     "propose_insight": "domain",
@@ -445,7 +451,13 @@ def domain_label_errors(tool_name: str, args: dict) -> list[str]:
         return []  # absent is fine — upstream applies its own default
     if not isinstance(raw, str) or not raw.strip():
         return [f"{tool_name}: '{field}' must be a non-empty label"]
-    value = raw.strip()
+    # Normalized the way STORAGE normalizes before it validates
+    # (memory._normalize_domain: strip whitespace around commas). Checking the
+    # raw string instead would make this gate TIGHTER than storage on exactly
+    # the length rule below — "a, b, c…" shrinks by two bytes per tag on its way
+    # to disk — and a proposal-time gate that refuses what the Stack would have
+    # accepted is the other half of the drift this file exists to prevent.
+    value = ",".join(part.strip() for part in raw.strip().split(","))
     problems: list[str] = []
     if "/" in value or "\\" in value or "\x00" in value:
         problems.append("path separators are not allowed; use commas for compound tags")
@@ -455,10 +467,38 @@ def domain_label_errors(tool_name: str, args: dict) -> list[str]:
         problems.append(
             "a leading dot makes the shard hidden from every reader that walks the store"
         )
+    # Kept in lockstep with memory.MAX_DOMAIN_LABEL_BYTES by
+    # tests/test_learning_label_names_its_own_field.py::TestBothGatesAgree,
+    # which fails in BOTH directions on drift (a tighter constant here refuses
+    # "x"*249, which storage takes; a looser one accepts "x"*250, which storage
+    # refuses). NOT by test_bridge_authorship_revoke_and_domain.py, which this
+    # comment named until 2026-09-05: that file's BAD list is
+    # ["a/b", "..", ".", ".hidden", "a\\b"] and has no length case, so it never
+    # held this pin. Duplicated rather than
+    # imported on purpose, exactly as the separator rules above are: bridge_core
+    # is the client-side package and must validate without the Stack installed.
+    #
+    # This is the same 2026-08-28 shape as the slash, one syscall over: an
+    # over-long label sailed through proposal AND approval and died at commit as
+    # a bare `[Errno 63] File name too long`.
+    encoded = len(value.encode("utf-8"))
+    if encoded > _MAX_DOMAIN_LABEL_BYTES:
+        problems.append(
+            f"it is {encoded} bytes and the limit is {_MAX_DOMAIN_LABEL_BYTES} "
+            "(a shard name is one filesystem component, capped at 255 bytes)"
+        )
     if not problems:
         return []
+    # Previewed, not dumped: an over-long label is one of the things refused
+    # here, and echoing 400 bytes of it back would bury the reason in the value.
+    preview = raw if len(raw) <= 80 else raw[:80] + "…"
+    # "this is a label" and not "a domain is a label": `field` is `applies_to`
+    # for a learning, and the storage twin was changed to the field-agnostic
+    # phrasing when it learned to name the caller's own parameter. These two
+    # gates are the one pair this file explicitly wants identical, so the
+    # wording follows the field name rather than contradicting it.
     return [
-        f"{tool_name}: invalid {field} {raw!r} — a domain is a label, not a path "
+        f"{tool_name}: invalid {field} {preview!r} — this is a label, not a path "
         f"({'; '.join(problems)}). This is refused HERE so you can fix it now; "
         "uncaught, it reaches the chronicle write path and fails as a bare "
         "filesystem error after a human has already approved it."

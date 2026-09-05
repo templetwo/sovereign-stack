@@ -596,9 +596,12 @@ async def _get_schemas():
     """Async helper to call get_all_bridge_schemas() from sync test runner."""
     # Import here to avoid polluting module-level namespace before path setup
     from clients.grok_bridge.tool_adapter import get_all_bridge_schemas
-    # Reset cache so we pick up the freshly-built RING_1_TOOLS (including new tools)
-    import clients.grok_bridge.tool_adapter as _ta
-    _ta._RING1_CACHE = None
+    # Reset cache so we pick up the freshly-built RING_1_TOOLS (including new
+    # tools). Through the accessor, not by assigning the module global: the
+    # cache is now a (value, timestamp) pair and clearing only the value left a
+    # stale `_ring1_cache_at` behind.
+    from clients.grok_bridge.tool_adapter import reset_ring1_cache
+    reset_ring1_cache()
     return await get_all_bridge_schemas()
 
 
