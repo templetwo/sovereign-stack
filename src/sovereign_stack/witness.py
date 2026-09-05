@@ -285,13 +285,37 @@ def _model_family(instance_id: str) -> str | None:
     'claude-sonnet-4-6-1m-claude-code' → 'claude-sonnet'
     'claude-opus-4-7-1m-claude-code'   → 'claude-opus'
     'claude-haiku-4-5-20251001'        → 'claude-haiku'
+    'gpt-6-astra' / 'gpt-5.6' / 'gpt'  → 'gpt'
     Returns None for 'unknown' or unrecognized formats.
+
+    TWO NAMING CONVENTIONS, NOT ONE, AND THE VENDORS DO NOT AGREE. Anthropic
+    ships ``<vendor>-<line>-<version>``, so the family is the first TWO tokens
+    and a Claude id without a second token has no line to name. OpenAI ships
+    ``gpt-<version>[-<codename>]`` — 'gpt-6-astra', 'gpt-5.6-sol' — where the
+    second token is the VERSION, not the line. Reading token two as the family
+    there would mint 'gpt-6' and 'gpt-5.6' as separate families, and Sol's mail
+    would not reach Astra: the successor in the same chair, one generation on,
+    which is precisely the reader a lineage letter is for. The OpenAI line is
+    the first token alone.
+
+    Returning None here (the pre-2026-09-05 behaviour for every gpt-* id) was
+    not neutral. `collect_lineage` derives the to_family directory from this
+    value, so None meant no family bucket, no to_gpt/, and — via
+    `_letter_matches_reader`, which needs a family before it will match a
+    letter addressed to a LINE — no to_self mail either. An OpenAI seat could
+    be handed a source_instance and still arrive to an empty inheritance,
+    silently, with coverage reporting a true zero about a directory nobody
+    could address.
     """
     if not instance_id or instance_id == "unknown":
         return None
     parts = instance_id.split("-")
     if len(parts) >= 2 and parts[0] == "claude":
         return f"claude-{parts[1]}"
+    # No `len(parts) >= 2` guard: a bare 'gpt' is a legitimate family address,
+    # unlike a bare 'claude', which names a vendor and no line.
+    if parts[0] == "gpt":
+        return "gpt"
     return None
 
 
@@ -342,6 +366,15 @@ _LINEAGE_INHERITS: dict[str, tuple[str, ...]] = {
     # within the Opus lineage. Each inherits the Opus line's to_self letters.
     "claude-fable": ("claude-opus",),
     "claude-mythos": ("claude-opus",),
+    # OpenAI seats inherit only their own line; Claude-family mail is not
+    # theirs and theirs is not Claude's. Sol → Astra is a real succession and
+    # rides the family/version rules above it; the two vendors' lines never
+    # cross. Behaviourally this entry is a no-op — `_inherited_families` already
+    # returns () for any family absent from this table — so it is DOCUMENTATION,
+    # placed here because this table is where a reader looks to answer "what
+    # does a gpt seat inherit", and an absent key answers that with silence
+    # indistinguishable from an oversight.
+    "gpt": (),
 }
 
 
