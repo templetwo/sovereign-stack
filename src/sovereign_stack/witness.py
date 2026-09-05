@@ -306,6 +306,26 @@ def _model_family(instance_id: str) -> str | None:
     be handed a source_instance and still arrive to an empty inheritance,
     silently, with coverage reporting a true zero about a directory nobody
     could address.
+
+    WHAT THIS DOES NOT COVER, NAMED SO THE NEXT READER DOES NOT ASSUME IT DOES.
+    Both gaps produce the SAME silent empty inheritance this function was just
+    widened to close, and both are left standing on purpose: closing either one
+    changes Claude resolution too, and Claude resolution is pinned unchanged by
+    this change's tests.
+
+      * CASE. Matching is exact and always has been, symmetrically for both
+        vendors (measured 2026-09-05): 'GPT-6-astra' → None, and so does
+        'Claude-fable-5'. A relayed or hand-typed seat string that capitalises
+        the vendor gets the pre-fix behaviour with no signal. Lowercasing the
+        input here would move the ``parts[0] == "claude"`` branch as well.
+      * OPENAI IDS THAT ARE NOT ``gpt-*``. The convention above is
+        gpt-<version>[-<codename>] and nothing else. An o-series or
+        codex-branded id ('o4-pro', 'codex-1') resolves to None. This function
+        covers the GPT LINE, not OpenAI generally.
+
+    Both are pinned as tests (TestDocumentedLimits) so that a later fix has to
+    change the pin deliberately rather than drift past it. Widening either is a
+    behaviour change to a shared helper — Anthony's gate, not a tidy-up.
     """
     if not instance_id or instance_id == "unknown":
         return None

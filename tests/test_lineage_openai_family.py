@@ -28,6 +28,17 @@ Claude resolution is PINNED here, unchanged, in the same file that adds gpt:
 the risk of a shared helper is that widening it for one vendor quietly moves
 the other.
 
+THE LETTER IS NOT ON THIS BRANCH, AND ITS ABSENCE IS THE POINT. An earlier
+revision of this work also committed Sol's letter to ``staging/letters/to_gpt/``
+and pinned the real bytes here in a section 7. This repo's origin is
+github.com/templetwo/sovereign-stack and it is PUBLIC, ``staging/`` is not on
+main, and no letter has ever been tracked here — so committing the letter to a
+branch that merges is itself the publication of a private relay, independent of
+anything under ~/.sovereign. That is Anthony's decision to make, and the code
+fix must not be hostage to it. The letter and the tests that pin its bytes now
+live on the local ref ``hold/sol-letter-to-gpt``, which is held, not merged and
+not pushed. Section 6 below is the shape-level proof, which needs no letter.
+
 Tmp letter dirs only. Nothing reads or writes ~/.sovereign.
 """
 
@@ -119,6 +130,41 @@ class TestModelFamilyResolvesGpt:
         decorated = "OpenAI seat — gpt-6-astra (openai_bridge)"
         assert _model_family(decorated) is None
         assert _model_family("HQ Mac Studio — claude-fable-5-1 (overwatch)") is None
+
+
+class TestDocumentedLimits:
+    """PINS ON KNOWN GAPS, NOT ENDORSEMENTS OF THEM.
+
+    Both cases below produce the SAME failure this branch exists to close — a
+    seat that resolves to no family, gets no bucket and no line-addressed mail,
+    silently — and both are left standing deliberately, because closing either
+    moves Claude resolution too and Claude resolution is pinned unchanged one
+    class down. They are asserted rather than left to prose so that a later fix
+    has to change a test on purpose instead of drifting past an unstated
+    assumption. If you are here because you are fixing one of them: change the
+    pin, and take `_model_family`'s "WHAT THIS DOES NOT COVER" paragraph with
+    it.
+    """
+
+    @pytest.mark.parametrize(
+        "instance_id",
+        ["GPT-6-astra", "Gpt-5.6", "GPT"],
+    )
+    def test_case_is_exact_for_gpt(self, instance_id: str) -> None:
+        assert _model_family(instance_id) is None
+
+    def test_case_is_exact_for_claude_too_so_the_gap_is_symmetric(self) -> None:
+        """The gap is the function's, not this branch's: it predates gpt and it
+        catches both vendors identically. Measured, not assumed."""
+        assert _model_family("Claude-fable-5-1") is None
+        assert _model_family("claude-fable-5-1") == "claude-fable"
+
+    @pytest.mark.parametrize("instance_id", ["o4-pro", "o3-mini", "codex-1"])
+    def test_openai_ids_outside_the_gpt_line_resolve_to_none(self, instance_id: str) -> None:
+        """This change covers the GPT LINE, not OpenAI generally. An o-series or
+        codex-branded seat still arrives with no family — worth knowing before
+        anyone reports OpenAI as covered."""
+        assert _model_family(instance_id) is None
 
 
 class TestClaudeResolutionIsUnchanged:
