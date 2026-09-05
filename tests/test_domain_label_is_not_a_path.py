@@ -46,7 +46,11 @@ class TestRecordLearningRefusesAPath:
     @pytest.mark.parametrize("bad", BAD_LABELS)
     def test_refused(self, tmp_path, bad):
         mem = _mem(tmp_path)
-        with pytest.raises(ValueError, match="domain"):
+        # `applies_to`, not `domain` — this path's parameter is not called
+        # `domain`, and naming the wrong one sent a proposer looking for a field
+        # they never passed. Tightened 2026-09-05; it read `match="domain"`
+        # before, which passed on a message that misnamed the field.
+        with pytest.raises(ValueError, match="applies_to"):
             mem.record_learning("happened", "learned", bad)
 
     def test_the_error_is_a_validation_error_not_an_oserror(self, tmp_path):

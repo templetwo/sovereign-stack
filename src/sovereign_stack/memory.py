@@ -192,7 +192,27 @@ def _normalize_domain(domain: str) -> str:
     return ",".join(part.strip() for part in domain.split(","))
 
 
-def _validate_domain_label(domain: str) -> None:
+# A shard name is ONE filesystem component, and a component is capped at 255
+# bytes (NAME_MAX; measured on this APFS volume 2026-09-05 — 255 creates, 256
+# raises errno 63). Two of the three record paths spell that component
+# `{label}.jsonl`, so the label itself gets 255 - len(".jsonl") = 249. The
+# insights path uses the label as a bare directory name and could afford 255,
+# but ONE number is the point: `bridge_core.target_risk.domain_label_errors` is
+# the proposal-time twin of this gate and is pinned to it by test
+# (test_bridge_authorship_revoke_and_domain.py), and that gate does not know
+# which tool's suffix will be appended downstream. The strictest of the three
+# is the only value both can hold without drifting.
+#
+# HEADROOM, MEASURED RATHER THAN ASSUMED (2026-09-05, live
+# ~/.sovereign/chronicle): the longest live shard name in the house is a
+# 245-byte insights domain; learnings top out at 183 and open_threads at 228.
+# Nothing live is refused by this cap.
+MAX_DOMAIN_LABEL_BYTES = 249
+
+_PATH_SEPARATORS = ("/", "\\", "\x00")
+
+
+def _validate_domain_label(domain: str, field: str = "domain") -> None:
     """
     A domain is a label, not a path. Reject separators and traversal tokens
     outright instead of escaping them: an escaped domain would land the entry
@@ -201,16 +221,28 @@ def _validate_domain_label(domain: str) -> None:
     slash-carrying domain raised FileNotFoundError at mkdir and the failure
     was reported upstream as ok:true; a slash domain whose parent directory
     happened to exist would have nested SILENTLY instead).
+
+    ``field`` NAMES THE CALLER'S OWN PARAMETER. Two of the three write paths
+    call this argument ``domain``; ``record_learning`` calls it ``applies_to``.
+    Telling a proposer who set ``applies_to`` that their ``domain`` is invalid
+    sends them looking for a field they never passed — and the proposal-time
+    twin of this gate has always named the real one, so the two surfaces
+    disagreed about the name of the same mistake.
     """
     if not domain:
-        raise ValueError("domain must be a non-empty label")
-    if "/" in domain or "\\" in domain or "\x00" in domain:
+        raise ValueError(f"{field} must be a non-empty label")
+    offending = next((ch for ch in domain if ch in _PATH_SEPARATORS), None)
+    if offending is not None:
         raise ValueError(
-            f"invalid domain {domain!r}: a domain is a label, not a path "
-            "(path separators are not allowed; use commas for compound tags)"
+            f"invalid {field} {domain!r}: this is a label, not a path "
+            f"(the character {offending!r} is a path separator; "
+            "use commas for compound tags)"
         )
     if domain in (".", ".."):
-        raise ValueError(f"invalid domain {domain!r}: a domain is a label, not a path")
+        raise ValueError(
+            f"invalid {field} {domain!r}: this is a label, not a path "
+            "('.' and '..' are traversal tokens)"
+        )
     # A leading dot makes the shard a HIDDEN directory/file, and the house's
     # ONE walk (iter_thread_shards) deliberately skips dotted paths so a
     # ".pre-md-backup-20260609/" style migration copy can never be folded back
@@ -222,8 +254,26 @@ def _validate_domain_label(domain: str) -> None:
     # closes a door nothing is standing in.
     if domain.startswith("."):
         raise ValueError(
-            f"invalid domain {domain!r}: a domain must not start with '.' "
+            f"invalid {field} {domain!r}: a label must not start with '.' "
             "(a dotted shard is hidden from every reader that walks the store)"
+        )
+    # LENGTH IS THE SAME DEFECT AS THE SLASH, ONE SYSCALL OVER. An over-long
+    # label reached `open()` and came back as a bare `[Errno 63] File name too
+    # long` — a syscall, not a cause the caller could act on, which is the exact
+    # complaint that earned the separator gate on 2026-08-28. Refused here, in
+    # the caller's vocabulary, before anything touches the filesystem.
+    encoded = len(domain.encode("utf-8"))
+    if encoded > MAX_DOMAIN_LABEL_BYTES:
+        # BYTES, NOT CHARACTERS. The filesystem caps the component in bytes, so
+        # a label of accented or CJK characters can pass a length-in-characters
+        # check and still fail at open(); counting characters here would leave
+        # exactly the errno this gate exists to replace.
+        preview = domain[:60] + ("…" if len(domain) > 60 else "")
+        raise ValueError(
+            f"invalid {field} {preview!r}: label is {encoded} bytes, limit is "
+            f"{MAX_DOMAIN_LABEL_BYTES} (a shard name is one filesystem component, "
+            "capped at 255 bytes, and the shard is this label plus '.jsonl') — "
+            "shorten it or drop some compound tags"
         )
 
 
@@ -1342,7 +1392,10 @@ class ExperientialMemory:
             what_happened: The situation or mistake
             what_learned: The lesson extracted
             applies_to: Context where this applies — a LABEL, not a path; it
-                   becomes the shard filename, so separators are refused
+                   becomes the shard filename, so separators are refused, and
+                   so is a label too long to BE a filename
+                   (MAX_DOMAIN_LABEL_BYTES). Rejections name `applies_to`,
+                   which is the parameter the caller actually passed.
             session_id: Current session identifier
             original_timestamp: Optional ISO-8601 authorship time. Same contract as
                    record_insight: `timestamp` becomes this value, `occurred_at`
@@ -1361,7 +1414,7 @@ class ExperientialMemory:
         # OSError is not a validation error — it names a syscall, not the
         # caller's mistake.
         applies_to = _normalize_domain(applies_to)
-        _validate_domain_label(applies_to)
+        _validate_domain_label(applies_to, field="applies_to")
         if original_timestamp is not None:
             original_timestamp = _validate_original_timestamp(original_timestamp)
 
