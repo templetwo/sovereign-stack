@@ -174,6 +174,43 @@ def test_required_argument_census_matches_the_registry():
     }
 
 
+def test_the_parity_denominator_is_pinned_so_it_cannot_shrink_silently():
+    """WHAT "every Ring-1 tool" MEANS HERE, written down.
+
+    The parity tests below iterate `_expected_remote_ring1()`, which the adapter
+    derives by SUBTRACTING three exemption sets from RING_1_TOOLS. That is the
+    right denominator — those names are not proxied — but it is also a
+    denominator the code under test computes for itself: adding a name to
+    `_NOT_WIRED_RING1` would remove it from parity coverage and every parity test
+    would still pass, having quietly stopped looking at it.
+
+    The census above catches that for the six argument-requiring tools (its
+    expected dict would no longer match). This pins it for the ~26 whose
+    parameters are all optional, which is most of the defect by count and the
+    half that never errors.
+    """
+    from grok_bridge.rings import RING_1_TOOLS
+    from grok_bridge.tool_adapter import _BRIDGE_LOCAL_TOOLS, _NOT_WIRED_RING1
+
+    assert set(_NOT_WIRED_RING1) == {"witness_boot"}
+    assert set(_BRIDGE_LOCAL_TOOLS) == {"grok_welcome", "verify_proposal", "list_bridge_proposals"}
+    assert _remote_names() == set(RING_1_TOOLS) - {"witness_boot", "self_model"} - set(
+        _BRIDGE_LOCAL_TOOLS
+    )
+    # A floor, not a fixed count: the allowlist grows. Vacuity is the failure
+    # mode being closed here — a parity loop over an empty set passes.
+    assert len(_remote_names()) >= 30
+
+
+@pytest.mark.parametrize("mode", ["live", "registry"])
+def test_the_healthy_projection_holds_every_ring1_tool_but_witness_boot(monkeypatch, mode):
+    """The other direction from `test_every_published_tool_is_ring_1`: nothing
+    the allowlist holds may silently vanish from a HEALTHY projection either."""
+    from grok_bridge.rings import RING_1_TOOLS
+
+    assert set(_project(monkeypatch, mode=mode)) == set(RING_1_TOOLS) - {"witness_boot"}
+
+
 # ── THE INVARIANT the task asks for ──────────────────────────────────────────
 
 

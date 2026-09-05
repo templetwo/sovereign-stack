@@ -51,6 +51,25 @@ def _mem(tmp_path: Path) -> ExperientialMemory:
     return ExperientialMemory(str(tmp_path / ".sovereign"))
 
 
+def _shards(mem: ExperientialMemory) -> list[Path]:
+    """Every learning shard ACTUALLY on disk for this memory.
+
+    ASKED OF THE OBJECT, NEVER SPELLED BY HAND. Both "writes nothing" checks in
+    this file read ``tmp_path/".sovereign"/"chronicle"/"learnings"``, and
+    ``ExperientialMemory(root)`` writes to ``root/learnings`` — so they were
+    reading a directory this constructor never creates. ``rglob`` on a path that
+    does not exist returns ``[]``, so the assertion passed whether or not a write
+    landed: a "writes nothing" check structurally incapable of failing, which is
+    the same fail-open family as the defect the file exists to close.
+
+    Measured 2026-09-05, and it is not a hypothetical: a SUCCESSFUL
+    ``record_learning`` leaves ``root/chronicle/learnings`` non-existent, and
+    ``assert not any(that.rglob("*.jsonl"))`` stays green over a landed shard.
+    ``TestTheWritesNothingCheckCanFail`` below is the positive control.
+    """
+    return sorted(mem.learnings_dir.rglob("*.jsonl"))
+
+
 class TestTheRefusalNamesTheCallersOwnField:
     def test_record_learning_says_applies_to_not_domain(self, tmp_path):
         with pytest.raises(ValueError) as exc:
@@ -106,10 +125,10 @@ class TestLengthIsAValidationErrorNotAnErrno:
             _mem(tmp_path).record_learning("h", "l", "y" * 400)
 
     def test_a_refused_length_writes_nothing(self, tmp_path):
+        mem = _mem(tmp_path)
         with pytest.raises(ValueError):
-            _mem(tmp_path).record_learning("h", "l", "z" * 400)
-        learnings = tmp_path / ".sovereign" / "chronicle" / "learnings"
-        assert not any(learnings.rglob("*.jsonl"))
+            mem.record_learning("h", "l", "z" * 400)
+        assert _shards(mem) == []
 
     def test_the_error_does_not_dump_the_whole_label(self, tmp_path):
         """A 400-byte label echoed in full buries the reason in the value."""
@@ -159,6 +178,28 @@ class TestTheGateCanFailAndCanPass:
         assert _mem(tmp_path).record_learning("h", "l", "x" * 245)
 
 
+class TestTheWritesNothingCheckCanFail:
+    """Law #2, turned on this file's own instrument: a check never shown to FAIL
+    is not a check. Both "writes nothing" assertions above passed for the wrong
+    reason until 2026-09-05 — they read a directory that does not exist on any
+    outcome — so the emptiness they proved was the emptiness of a typo."""
+
+    def test_a_landed_shard_makes_the_same_assertion_fail(self, tmp_path):
+        mem = _mem(tmp_path)
+        assert _shards(mem) == []
+        mem.record_learning("h", "l", "a-perfectly-good-label")
+        assert [p.name for p in _shards(mem)] == ["a-perfectly-good-label.jsonl"]
+
+    def test_the_directory_the_old_check_read_is_never_created(self, tmp_path):
+        """The mechanism, exercised rather than asserted."""
+        mem = _mem(tmp_path)
+        mem.record_learning("h", "l", "a-perfectly-good-label")
+        stale = tmp_path / ".sovereign" / "chronicle" / "learnings"
+        assert not stale.exists()
+        assert not any(stale.rglob("*.jsonl"))  # green over a shard that landed
+        assert _shards(mem)  # ...which the real directory holds
+
+
 class TestThe20260828SpecimenReplayed:
     """The exact arguments from the still-`commit_failed` proposal."""
 
@@ -177,10 +218,10 @@ class TestThe20260828SpecimenReplayed:
         assert "label, not a path" in message
 
     def test_it_writes_nothing(self, tmp_path):
+        mem = _mem(tmp_path)
         with pytest.raises(ValueError):
-            _mem(tmp_path).record_learning("h", "l", SPECIMEN_APPLIES_TO)
-        learnings = tmp_path / ".sovereign" / "chronicle" / "learnings"
-        assert not any(learnings.rglob("*.jsonl"))
+            mem.record_learning("h", "l", SPECIMEN_APPLIES_TO)
+        assert _shards(mem) == []
 
     def test_the_sanitized_label_commits_cleanly(self, tmp_path):
         """The whole fix on the caller's side: one '/' spelled as a word."""
