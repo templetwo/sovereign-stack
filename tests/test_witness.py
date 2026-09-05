@@ -316,8 +316,29 @@ class TestModelFamily:
     def test_empty_returns_none(self):
         assert _model_family("") is None
 
-    def test_non_claude_returns_none(self):
-        assert _model_family("gpt-4-turbo") is None
+    def test_unrecognized_vendor_returns_none(self):
+        """WAS ``test_non_claude_returns_none``, asserting on 'gpt-4-turbo'.
+
+        THE CONTRACT IT PINNED IS GONE, DELIBERATELY (2026-09-05). "Non-Claude
+        means no family" was true only while Claude was the sole vendor with a
+        lineage here; it made every OpenAI id resolve to None, which cost that
+        line both its to_gpt/ bucket and its line-addressed to_self mail. See
+        tests/test_lineage_openai_family.py for the full account.
+
+        What this test was actually FOR survives and is what it now asserts:
+        an id whose first token names no family the house knows resolves to
+        None rather than to a guess. The examples are vendors with no lineage
+        in this store — and 'gpt-4-turbo' is asserted on its NEW value in the
+        same breath, so the change is visible here and not only in the new
+        file.
+        """
+        assert _model_family("gemini-2-flash") is None
+        assert _model_family("mistral-large") is None
+        assert _model_family("llama-4-scout") is None
+        assert _model_family("gptx-1") is None  # merely starts with the letters
+        # The recognised OpenAI line — the assertion this test used to make in
+        # reverse.
+        assert _model_family("gpt-4-turbo") == "gpt"
 
 
 # ── _letter_matches_reader ───────────────────────────────────────────────────
