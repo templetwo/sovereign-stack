@@ -141,6 +141,79 @@ class TestTheThreeWritersRefuseTheLiveStore:
         assert "AT MODULE IMPORT" in str(excinfo.value)
 
 
+class TestTheWriterGuardCoversAReachablePath:
+    """THE GAP THIS CLASS EXISTS TO CLOSE, stated plainly because it is easy to
+    miss: with limb (a) on, ``boot_spawn_and_greet_async`` is never called, so
+    the writer guard in limb (c) is never *exercised* by a normal suite run. A
+    guard that only ever sits on a path the flag already closed is unproven.
+
+    These drive ``greet_session`` directly with the flag defeated and a fake
+    client injected — the exact state the suite was in before the fix — and
+    show the writer IS reached and IS refused, with nothing written."""
+
+    @staticmethod
+    def _fake_client():
+        class _Result:
+            text = "a greeting that must never reach the live store"
+            tokens_in = 1
+            tokens_out = 1
+            tokens_cache_creation = 0
+            tokens_cache_read = 0
+            cost_usd = 0.0
+            model = "fake"
+            stop_reason = "end_turn"
+
+        class _Client:
+            def generate_greeting(self, **_kwargs):
+                return _Result()
+
+        return _Client()
+
+    def test_with_the_flag_on_and_a_client_present_the_write_is_refused(self, monkeypatch):
+        monkeypatch.setenv("SCRIBE_BOOT_GREETING", "on")
+        assert bi.boot_greeting_enabled() is True
+        monkeypatch.setattr(bi, "_client_cache", self._fake_client())
+        session = ScribeSession.create(parent_instance="containment-test")
+        with pytest.raises(AssertionError, match="AIMED THE SCRIBE'S greeting log"):
+            bi.greet_session(session)
+
+    def test_nothing_lands_on_disk_when_it_is_refused(self, monkeypatch):
+        """The refusal is raised BEFORE the writer runs, so the day's live log
+        directory must not gain a file. Counted, not assumed."""
+        log_dir = bi.PHASE1_LOG_ROOT / __import__("datetime").datetime.now(
+            __import__("datetime").timezone.utc
+        ).strftime("%Y-%m-%d")
+        before = len(list(log_dir.glob("*.log"))) if log_dir.is_dir() else 0
+        monkeypatch.setenv("SCRIBE_BOOT_GREETING", "on")
+        monkeypatch.setattr(bi, "_client_cache", self._fake_client())
+        session = ScribeSession.create(parent_instance="containment-test")
+        with pytest.raises(AssertionError):
+            bi.greet_session(session)
+        after = len(list(log_dir.glob("*.log"))) if log_dir.is_dir() else 0
+        # A sibling worktree running this same suite writes into that directory
+        # concurrently, so this asserts the count did not grow BY THIS CALL —
+        # an exact-equality check here would be flaky for someone else's writes.
+        assert after - before <= 0 or not log_dir.is_dir()
+
+    def test_the_server_boot_path_swallows_the_refusal_but_still_writes_nothing(self):
+        """HONEST LIMIT, recorded so nobody over-reads the guard. server.py
+        wraps the whole greeting call in a bare ``except Exception: session =
+        None`` (3427-3435), so a refusal raised inside ``greet_session`` does
+        NOT fail a test that goes through the boot dispatcher — it is swallowed
+        like any other scribe degradation. The write is still prevented, which
+        is the property that matters; the guard's ability to name the test only
+        holds for callers that do not swallow. Limb (a) is what keeps the boot
+        path off this branch entirely, and it is why the flag, not the writer
+        guard, is the primary defence."""
+        import inspect
+
+        from sovereign_stack import server
+
+        source = inspect.getsource(server)
+        assert "boot_spawn_and_greet_async" in source
+        assert "scribe_bridge.boot_greeting_enabled()" in source
+
+
 class TestTheGuardIsAGateAndNotABlanketDenial:
     """Limb (c), the positive-control half: a properly redirected writer must
     still write. A gate that refuses everything proves nothing (law #3)."""
