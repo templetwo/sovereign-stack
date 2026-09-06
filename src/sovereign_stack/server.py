@@ -89,6 +89,12 @@ from .seasons import (
     SEASON_TOOLS,
     handle_season_tool,
 )
+from .signal_ledger import (
+    SIGNAL_TOOL_INTENTS,
+    SIGNAL_TOOL_TIERS,
+    SIGNAL_TOOLS,
+    handle_signal_tool,
+)
 from .spiral import (
     PHASE_ORDER,
     SpiralPhase,
@@ -2124,8 +2130,10 @@ async def list_tools():
         + PROVENANCE_TOOLS
         + SEASON_TOOLS
         + GROUND_TOOLS
+        + SIGNAL_TOOLS
     )  # consciousness + compaction + guardian + metabolism + post_fix + connectivity
     # + policies + provenance + seasons (v1.7.0 Receipts & Seasons) + ground (The Ground)
+    # + signal ledger (watch seat)
 
 
 # Category mapping for my_toolkit. Source of truth for how tools are grouped
@@ -2140,6 +2148,8 @@ TOOL_CATEGORIES: dict[str, str] = {
     "scan_thresholds": "governance",
     "govern": "governance",
     "compass_check": "governance",
+    "signals_summary": "governance",
+    "signal_ack": "governance",
     # Memory
     "record_insight": "memory",
     "record_learning": "memory",
@@ -2325,6 +2335,7 @@ TOOL_TIERS.update(POLICY_TOOL_TIERS)
 TOOL_TIERS.update(PROVENANCE_TOOL_TIERS)
 TOOL_TIERS.update(SEASON_TOOL_TIERS)
 TOOL_TIERS.update(GROUND_TOOL_TIERS)
+TOOL_TIERS.update(SIGNAL_TOOL_TIERS)
 
 
 # Map from tool_name → intent. Tools missing here fall under "advanced".
@@ -2437,6 +2448,7 @@ TOOL_INTENTS.update(POLICY_TOOL_INTENTS)
 TOOL_INTENTS.update(PROVENANCE_TOOL_INTENTS)
 TOOL_INTENTS.update(SEASON_TOOL_INTENTS)
 TOOL_INTENTS.update(GROUND_TOOL_INTENTS)
+TOOL_INTENTS.update(SIGNAL_TOOL_INTENTS)
 
 
 def _tier_for(tool_name: str) -> str:
@@ -3958,6 +3970,10 @@ Phase: {spiral_state.current_phase.value}
     # subtree, record_catch takes the chronicle write lock in the sync layer.
     if name in [t.name for t in GROUND_TOOLS]:
         text = await asyncio.to_thread(handle_ground_tool, name, arguments)
+        return [TextContent(type="text", text=text)]
+
+    if name in [t.name for t in SIGNAL_TOOLS]:
+        text = await asyncio.to_thread(handle_signal_tool, name, arguments)
         return [TextContent(type="text", text=text)]
 
     # Nape daemon — runtime critique layer

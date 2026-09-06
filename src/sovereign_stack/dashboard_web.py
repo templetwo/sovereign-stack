@@ -42,6 +42,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from pathlib import Path
 
 from . import connectivity, dashboard, dashboard_readers, nape_daemon
+from .signal_ledger import heartbeat_field
 
 # ── Shared activity feed + background watcher ──────────────────────────────
 #
@@ -429,6 +430,7 @@ def build_snapshot() -> dict:
         "halts_count": state.halts_count,
         "decisions_count": state.decisions_count,
         "unacked_honks": state.unacked_honks,
+        "unacked_signals": heartbeat_field(),
         "listener_stale": state.listener_stale,
         "latest": state.latest,
         "feed": _GLOBAL_FEED.to_list(limit=_FEED_LIMIT_IN_SNAPSHOT),

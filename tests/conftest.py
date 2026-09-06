@@ -149,6 +149,7 @@ _SOVEREIGN_SUBDIRS = [
     "handoffs",
     "reflexive",
     "consciousness",
+    "signals",
 ]
 
 
