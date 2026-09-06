@@ -275,6 +275,13 @@ class TestF3TheHonkFoldIsReal:
                     "pattern": "declare_before_verify",
                     "observation": "declared clean before reading the file",
                     "timestamp": "2026-09-01T00:00:00Z",
+                    # claim_id ADDED FOR ROUND 4 (R1). A concern whose
+                    # provenance cannot be evaluated is now withheld at every
+                    # display surface, so a fixture that wants to assert the
+                    # BODY has to carry the citation a real honk carries. What
+                    # this test is about — the fold returns an id AND a body a
+                    # seat can read — is unchanged.
+                    "claim_id": "a" * 64,
                 }
             ],
         )
@@ -304,6 +311,9 @@ class TestF3TheHonkFoldIsReal:
                     "pattern": "premature_summary",
                     "observation": "summarised early",
                     "timestamp": "2026-09-01T00:00:00Z",
+                    # See the note in the previous test: R1 withholds a concern
+                    # whose provenance was never evaluated.
+                    "claim_id": "b" * 64,
                 }
             ],
         )

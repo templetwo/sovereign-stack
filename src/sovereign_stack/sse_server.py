@@ -271,9 +271,17 @@ def seat_from_scope(scope: dict) -> tuple[str | None, str | None]:
     two places that serve `/sse` (this module's ASGI router and the Starlette
     route below) cannot drift apart on the rules.
     """
-    raw = _first_header(scope, SEAT_HEADER)
-    if not raw:
+    # ── PRESENCE IS NOT VALUE (R3) ─────────────────────────────────────────
+    # `_first_header` returns b'' for a header that is absent AND for one that
+    # is present and empty, and round 3 treated both as "no header" — so a
+    # client that explicitly sent `X-Sovereign-Seat: ` reached connect_sse and
+    # was answered as the SERVER, silently. That is the same fail-open as a
+    # malformed value, one indirection down: the client stated an identity,
+    # the statement was unusable, and it got somebody else's.
+    present = any(key == SEAT_HEADER for key, _value in scope.get("headers") or [])
+    if not present:
         return None, None
+    raw = _first_header(scope, SEAT_HEADER)
     if scope.get("path") != "/sse":
         # Not read on the substrate doors. Ignored, not refused: those clients
         # never agreed to this convention and must not be broken by sending a
@@ -285,6 +293,13 @@ def seat_from_scope(scope: dict) -> tuple[str | None, str | None]:
             f"connection is from {scope.get('client')!r}"
         )
     value = raw.decode("utf-8", errors="replace").strip()
+    if not value:
+        return None, (
+            "X-Sovereign-Seat was sent with an empty value; a header that is "
+            "present states an identity, and an unusable statement is refused "
+            "rather than answered as the server. Omit the header entirely to "
+            "use the server's own identity."
+        )
     if not SEAT_VALUE_RE.match(value):
         return None, (
             f"X-Sovereign-Seat {value!r} is refused: a seat name matches {SEAT_VALUE_RE.pattern}"

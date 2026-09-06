@@ -9,6 +9,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Uncertain provenance withholds; a certificate is not a lock
+
+A third independent review rejected the candidate on nine findings, two of
+them release-blocking on the protected-text invariant. The theme is narrower
+than the last round's and sharper: several gates were built to catch the case
+they were shown, and answered confidently about the cases next to it.
+
+**A concern is shown only when its provenance was evaluated and came back
+clean.** The previous round published rows whose origin carried no claim id
+and counted them beside the queue, on the reasoning that withholding them all
+would blank it. The reviewer answered by putting a designated record's body in
+a honk that simply omitted the claim id: the count was accurate and the body
+was still on the wire. Unevaluated concerns are now withheld under their own
+marker at both display surfaces — list mode and the row `signal_ack` returns —
+and both responses always carry both counts. Only the concern is replaced;
+signal_id, source, kind, opened_at, owner, state and origin survive, so the
+queue stays addressable. Rescanning now BACKFILLS origin onto a row whose
+source still carries its claim id: ingestion was idempotent on state and never
+restored provenance, so without this the fix for the exposure would have
+blinded every pre-existing row permanently.
+
+**An uninterpretable designation is not an empty index.** The index reader
+checked JSON syntax and then handed the rows to a fold that silently skips a
+record with no action or a non-string claim id. Replacing a real designation
+with valid JSON carrying only a claim id therefore produced an empty, healthy
+index and printed the protected body. Each row's action and claim id are now
+validated before folding, and a row that cannot be read as a designation is
+exactly as disqualifying as a parse failure.
+
+**The refresh lock moved off the certificate.** Locking `last_scan.json`
+created `last_scan.json`, which forced an empty certificate to be read as an
+absent one — so destroying a certificate was indistinguishable from a store
+that had never been scanned, and blanking both it and the ledger produced
+`error: null, ingestion: "ok", total: 0` for a store whose signal was gone.
+The lock is now its own sidecar; no file means a fresh root, an empty file
+means a certificate that was destroyed.
+
+**And the recovery instruction now recovers.** Following the old text moved
+the ledger aside and left the certificate, so the next read refused again and
+told the operator to move a file that was no longer there. The refusal now
+names the ledger, the certificate and the lock, and a quarantine directory to
+move all three into; nothing is deleted, and a test follows that exact text to
+a clean initialization.
+
+**Also:** the certified row count is reconciled exactly against the bytes the
+certificate covers, so neither an understatement nor an ack appended after the
+scan can mask a contradiction; the watch listing resolves each candidate path
+before opening it, so a symlink out of the store is skipped and counted rather
+than read; a diagnostic entry is bounded before it is appended, so one 2 MiB
+exception can no longer produce a 2 MiB log under a 1 MiB cap; an SSE seat
+header that is present but empty is refused rather than treated as absent; and
+a configuration error now reports ingestion `config_error` with a null total
+instead of riding along under a healthy status.
+
 ### The reader does not choose who it is, and does not repair what it found
 
 A second independent review of the release candidate rejected it again, on

@@ -333,13 +333,39 @@ def list_watches(status: str | None = None) -> list[dict[str, Any]]:
     status="all"        — active + archived
     status=<other>      — filter by exact status field
     """
+    return list_watches_counted(status)[0]
+
+
+def list_watches_counted(status: str | None = None) -> tuple[list[dict[str, Any]], int]:
+    """(watches, skipped_uncontained). The listing checks containment TOO (R6).
+
+    The direct modes were fixed to resolve their path before touching it; the
+    LISTING was not, and it opens every file the glob returns. The reviewer
+    replaced a legitimate watch file with a symlink to a file outside the
+    store and read that file's contents out of `post_fix_verify(mode="status")`
+    — a read out of the store through the one door that had no check.
+
+    THE CHECK IS BEFORE THE OPEN, not after. Resolving afterwards would mean
+    the bytes had already been read, which is the disclosure. Skipped entries
+    are COUNTED rather than dropped in silence: a listing that quietly shrinks
+    is how a watch goes missing without anyone noticing.
+    """
     _ensure_dirs()
     watches: list[dict[str, Any]] = []
+    skipped = 0
     dirs: list[Path] = [_watches_dir()]
     if status == "all" or status in ("completed_clean", "drift_detected", "cancelled"):
         dirs.append(_archive_dir())
     for d in dirs:
+        base = d.resolve()
         for p in d.glob("pfw_*.json"):
+            try:
+                if p.resolve().parent != base:
+                    skipped += 1
+                    continue
+            except OSError:
+                skipped += 1
+                continue
             try:
                 w = json.loads(p.read_text())
             except (json.JSONDecodeError, OSError):
@@ -362,7 +388,7 @@ def list_watches(status: str | None = None) -> list[dict[str, Any]]:
             elif w.get("status") == status:
                 watches.append(w)
     watches.sort(key=lambda w: w.get("created_at", ""), reverse=True)
-    return watches
+    return watches, skipped
 
 
 # =============================================================================
@@ -1098,13 +1124,17 @@ async def handle_post_fix_tool(
             if watch is None:
                 return [TextContent(type="text", text=f"watch not found: {watch_id}")]
             return [TextContent(type="text", text=json.dumps(watch, indent=2))]
-        watches = list_watches(status="all" if include_archived else "active")
+        watches, skipped = list_watches_counted(status="all" if include_archived else "active")
         return [
             TextContent(
                 type="text",
                 text=json.dumps(
                     {
                         "count": len(watches),
+                        # NAMED, NOT DROPPED (R6). A file the glob matched and
+                        # containment refused is a fact about the store, and a
+                        # listing that silently shrinks is how one goes missing.
+                        "skipped_uncontained": skipped,
                         "watches": [_watch_summary(w) for w in watches],
                     },
                     indent=2,

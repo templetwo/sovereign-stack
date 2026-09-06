@@ -123,6 +123,20 @@ def scan_marker_path(root: Path | None = None) -> Path:
     return _root(root) / "signals" / "last_scan.json"
 
 
+def scan_lock_path(root: Path | None = None) -> Path:
+    """The refresh lock's own file (R4).
+
+    SEPARATE FROM THE CERTIFICATE, and the separation is the whole point.
+    Round 3 flocked the certificate itself, so opening it for the lock CREATED
+    it on a fresh root — which forced "empty certificate" to be read as "no
+    certificate", which made a DESTROYED certificate indistinguishable from a
+    store that had never been scanned. A lock is an artifact of coordination;
+    a certificate is a claim about a scan. One file cannot be both without one
+    of them lying.
+    """
+    return _root(root) / "signals" / "last_scan.lock"
+
+
 def signal_id_for(source: str, native_id: str) -> str:
     raw = f"{source}:{native_id}".encode()
     return hashlib.sha256(raw).hexdigest()
@@ -477,13 +491,19 @@ def _read_scan_marker(root: Path | None = None) -> tuple[dict | None, str | None
     except (OSError, UnicodeDecodeError) as exc:
         return None, f"marker_unreadable:{exc.__class__.__name__}"
     if not raw.strip():
-        # A ZERO-BYTE MARKER IS NO MARKER, and saying so is load-bearing: the
-        # refresh lock flocks THIS path, and opening it for the lock creates
-        # an empty file on a root that has never been scanned. Reading that as
-        # "marker_invalid" would make the first ever read of a fresh store an
-        # error. It certifies nothing either way, so "absent" is also the
-        # honest reading — an empty file makes no claim.
-        return None, None
+        # A ZERO-BYTE CERTIFICATE IS INVALID, NOT ABSENT (R4). Round 3 read it
+        # as absent, and had a reason: the refresh lock flocked this same path,
+        # so opening it for the lock created an empty file on a fresh root, and
+        # calling that invalid would have made the first ever read an error.
+        # The reviewer showed what it cost — blank the certificate of a scanned
+        # store and the next read RECERTIFIES it silently; blank the ledger too
+        # and the answer is `error:null, ingestion:"ok", total:0` for a store
+        # whose signal is gone.
+        #
+        # The lock now lives on its own sidecar path, so the two facts are no
+        # longer entangled: NO FILE AT ALL is a fresh root, and a file that
+        # exists and claims nothing is a certificate that was destroyed.
+        return None, "marker_invalid:the certificate exists but is empty"
     try:
         rec = json.loads(raw)
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -556,12 +576,25 @@ def _check_marker_integrity(marker: dict, root: Path | None = None) -> str | Non
     # watch seat legitimately acks a second after a scan, so `actual > claimed`
     # is the ordinary honest case. Only a SHRINK is loss.
     if isinstance(claimed_rows, int) and not isinstance(claimed_rows, bool):
-        actual_rows = sum(
-            1 for line in data.decode("utf-8", "replace").splitlines() if line.strip()
+        # WITHIN THE CERTIFIED PREFIX, AND EXACTLY (R5). Round 3 counted the
+        # WHOLE current file and only refused a shortfall, which broke both
+        # ways: an understated count was accepted outright, and a legitimate
+        # ack appended after the scan could push the whole-file count up past
+        # an overstated claim and mask it. The prefix is the only region the
+        # certificate speaks about — `ledger_bytes` and `ledger_sha256`
+        # already pin it — and inside it the row count is a fact with exactly
+        # one correct value. Rows appended beyond the prefix stay legitimate
+        # and are not counted here; that is what makes an append-only ledger
+        # checkable at all.
+        prefix_rows = sum(
+            1
+            for line in data[:claimed_bytes].decode("utf-8", "replace").splitlines()
+            if line.strip()
         )
-        if actual_rows < claimed_rows:
+        if prefix_rows != claimed_rows:
             return (
-                f"ledger_rows_shrank:marker certified {claimed_rows} rows, file holds {actual_rows}"
+                f"ledger_rows_mismatch:marker certified {claimed_rows} rows in its "
+                f"first {claimed_bytes} bytes, those bytes hold {prefix_rows}"
             )
     return None
 
@@ -742,8 +775,29 @@ def open_signal(
         # rightly call the resulting row corrupt, and the corruption would
         # have been minted by our own writer.
         produced_at = now
+    origin = _origin(source, native, claim_id=origin_claim_id, path=origin_path)
     with _append_lock(root) as fh:
-        if sid in load_latest(root):
+        existing = load_latest(root).get(sid)
+        if existing is not None:
+            # ── PROVENANCE BACKFILL (R1) ────────────────────────────────────
+            # INGESTION IS IDEMPOTENT ON STATE, NOT ON PROVENANCE. A signal
+            # opened before origin existed — every row written before this
+            # release — never gained one, because the only thing that wrote
+            # origin was the branch that opens a NEW signal. So a rescan of a
+            # honk that still carries its claim id left the row unprovenanced
+            # forever, and R1 then withholds its concern forever: the fix for
+            # the exposure would have permanently blinded the queue instead.
+            #
+            # Narrow on purpose. It fires only when the source can supply a
+            # claim id the stored row lacks, i.e. only when it changes the
+            # provenance verdict. State, reason, closer and close time are
+            # copied through untouched — this is a provenance write, never a
+            # lifecycle one, and an append that quietly reopened an acked
+            # signal would be N7 all over again.
+            if origin.get("claim_id") and not _row_origin_claim(existing):
+                merged = dict(existing.get("origin") or {})
+                merged.update(origin)
+                _append_locked(fh, dict(existing, origin=merged, updated_at=now))
             return None
         return _append_locked(
             fh,
@@ -759,7 +813,7 @@ def open_signal(
                 updated_at=now,
                 kind=_text_or_none(kind),
                 concern=_text_or_none(concern),
-                origin=_origin(source, native, claim_id=origin_claim_id, path=origin_path),
+                origin=origin,
             ),
         )
 
@@ -1191,8 +1245,15 @@ def heartbeat_field(root: Path | None = None, *, scan: bool = False) -> dict:
             ingestion = "error" if ingestion != "error" else ingestion
         if summary["unmeasured"] and not error:
             error = "unmeasured_sources:" + ",".join(summary["unmeasured"])
-        if summary.get("config_error"):
-            error = f"{error}; {summary['config_error']}" if error else summary["config_error"]
+        config_error = summary.get("config_error")
+        if config_error:
+            # R9. Round 3 put the configuration failure into `error` and left
+            # `ingestion: "ok"` with a numeric total beside it — a declaration
+            # this reader could not interpret, published under a healthy
+            # status. The scope of the count is exactly what the unreadable
+            # file was going to define, so the count cannot stand either.
+            error = f"{error}; {config_error}" if error else config_error
+            ingestion = "config_error"
         # ── N5: THE ledger_shrank BRANCH RETURNS NULL LIKE EVERY OTHER ONE ──
         # It used to set `error` and then copy the numeric total out of the
         # fold unchanged, so the one branch that has ARITHMETIC PROOF that
@@ -1202,7 +1263,8 @@ def heartbeat_field(root: Path | None = None, *, scan: bool = False) -> dict:
         # the missing rows have no source to subtract them from either.
         by_source_open = {k: v["open"] for k, v in summary["by_source"].items()}
         by_source_detail = summary["by_source"]
-        if shrank:
+        blind_aggregates = shrank or bool(config_error)
+        if blind_aggregates:
             by_source_open = dict.fromkeys(by_source_open)
             by_source_detail = {k: dict.fromkeys(v) for k, v in summary["by_source"].items()}
         return {
@@ -1213,12 +1275,12 @@ def heartbeat_field(root: Path | None = None, *, scan: bool = False) -> dict:
             # THE NULLS COME STRAIGHT FROM summarize(). Nothing here recomputes
             # a count from rows it happens to hold — that recomputation is what
             # the reviewer caught the tool surface doing.
-            "total": None if shrank else summary["total"],
-            "total_configured": None if shrank else summary["total_configured"],
+            "total": None if blind_aggregates else summary["total"],
+            "total_configured": None if blind_aggregates else summary["total_configured"],
             "total_configured_scope": summary["total_configured_scope"],
             "not_configured": summary["not_configured"],
-            "stale_24h": None if shrank else summary["stale_24h"],
-            "stale_7d": None if shrank else summary["stale_7d"],
+            "stale_24h": None if blind_aggregates else summary["stale_24h"],
+            "stale_7d": None if blind_aggregates else summary["stale_7d"],
             "by_source": by_source_open,
             # THE NESTED VIEW, CARRIED ON THE SAME FOLD. `signals_summary`
             # needs stale windows and oldest_unacked per source; the reviewer
@@ -1758,6 +1820,12 @@ def scan_threads(root: Path, owner: str = "watch-2/3") -> ScanResult:
 # costs the public surface nothing.
 
 DIAGNOSTICS_MAX_BYTES = 1024 * 1024
+# R7. The file bound was checked BEFORE appending an unbounded render, so one
+# exception carrying a 2 MiB message produced a 2,097,902-byte file under a
+# 1,048,576-byte cap. A bound you check before writing something unbounded is
+# not a bound. The entry is capped first, and small enough relative to the file
+# cap that the file cap holds after any single append.
+DIAGNOSTICS_ENTRY_MAX_BYTES = 64 * 1024
 
 
 def diagnostics_path(root: Path | None = None) -> Path:
@@ -1781,15 +1849,30 @@ def _log_diagnostic(root: Path | None, label: str, exc: BaseException) -> None:
     try:
         path = diagnostics_path(root)
         path.parent.mkdir(parents=True, exist_ok=True)
-        if path.exists() and path.stat().st_size > DIAGNOSTICS_MAX_BYTES:
+        rendered = f"--- {_now()} {label}\n" + "".join(
+            traceback.format_exception(type(exc), exc, exc.__traceback__)
+        )
+        raw = rendered.encode("utf-8", "replace")
+        if len(raw) > DIAGNOSTICS_ENTRY_MAX_BYTES:
+            # TRUNCATE THE ENTRY, AND SAY SO IN THE ENTRY. A silently clipped
+            # traceback reads as a complete one that simply ended early, which
+            # is the shape of every fail-open in this file.
+            notice = (
+                f"\n[entry truncated at {DIAGNOSTICS_ENTRY_MAX_BYTES} bytes; "
+                f"{len(raw)} bytes rendered]\n"
+            )
+            keep = DIAGNOSTICS_ENTRY_MAX_BYTES - len(notice.encode("utf-8"))
+            rendered = raw[: max(0, keep)].decode("utf-8", "replace") + notice
+            raw = rendered.encode("utf-8", "replace")
+        existing = path.stat().st_size if path.exists() else 0
+        if existing + len(raw) > DIAGNOSTICS_MAX_BYTES:
             path.write_text(
                 f"--- {_now()} truncated at {DIAGNOSTICS_MAX_BYTES} bytes; "
                 "earlier diagnostics discarded\n",
                 encoding="utf-8",
             )
         with path.open("a", encoding="utf-8") as fh:
-            fh.write(f"--- {_now()} {label}\n")
-            fh.write("".join(traceback.format_exception(type(exc), exc, exc.__traceback__)))
+            fh.write(rendered)
     except Exception:  # noqa: BLE001 — see the docstring
         return
 
@@ -1859,11 +1942,11 @@ def _refresh_lock(root: Path | None = None):
     write. Never take this lock while holding a ledger append; that inversion
     is a deadlock between two scanners.
 
-    Opening the marker path for the lock CREATES it when absent. That empty
-    file is why `_read_scan_marker` treats a zero-byte marker as no marker at
-    all — see the comment there.
+    IT IS ITS OWN FILE (R4). Locking the certificate created the certificate,
+    which forced "empty certificate" to mean "no certificate" and hid a
+    destroyed one. The sidecar carries no claims and is safe to create.
     """
-    path = scan_marker_path(root)
+    path = scan_lock_path(root)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a+", encoding="utf-8") as fh:
         fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
@@ -1873,11 +1956,38 @@ def _refresh_lock(root: Path | None = None):
             fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
 
 
-DAMAGED_LEDGER_REMEDY = (
-    "a rescan would overwrite the marker and erase the evidence, so ingestion "
-    "is refused until a human moves the damaged ledger aside (mv {path} "
-    "{path}.damaged) and lets the next read start a clean one"
-)
+def quarantine_dir(root: Path | None = None, stamp: str | None = None) -> Path:
+    """Where a human puts the damaged evidence so ingestion can start again."""
+    return _root(root) / "signals" / "quarantine" / (stamp or "<timestamp>")
+
+
+def damaged_ledger_remedy(root: Path | None = None) -> str:
+    """The recovery instruction, and it has to actually reach a clean start (R8).
+
+    Round 3 said "move the damaged ledger aside". The reviewer followed that
+    exact instruction on a temporary root and landed in a NEW refusal: the
+    certificate survived the move, so the next read saw a valid certificate
+    over an absent ledger, answered `ledger_missing`, and told the operator to
+    move a file that was no longer there. Containment held and the store was
+    unrecoverable — an instruction that does not reach a recoverable state is
+    a wedge with good manners.
+
+    BOTH ARTIFACTS AND THE LOCK MOVE, TOGETHER, INTO ONE TIMESTAMPED
+    DIRECTORY. The certificate is the thing that makes an absent ledger an
+    error, so it has to go with it; the lock sidecar goes too so nothing
+    stale is left holding coordination state. NOTHING IS DELETED — the
+    evidence is the receipt for whatever happened, and a recovery that
+    destroys it trades one silent loss for another.
+    """
+    q = quarantine_dir(root)
+    return (
+        "a rescan would overwrite the certificate and erase the evidence, so "
+        "ingestion is refused until a human quarantines the damaged pair. "
+        f"Nothing is deleted: mkdir -p {q} && mv {ledger_path(root)} "
+        f"{scan_marker_path(root)} {scan_lock_path(root)} {q}/ "
+        "(the lock may not exist; that is fine). The next read then starts a "
+        "clean scan and the quarantined files remain as the receipt."
+    )
 
 
 def _refresh_decision(root: Path | None, *, now: datetime | None = None) -> tuple[str, str | None]:
@@ -1905,16 +2015,12 @@ def _refresh_decision(root: Path | None, *, now: datetime | None = None) -> tupl
         # A CERTIFICATE WE CANNOT READ IS NOT A LICENCE TO ISSUE A NEW ONE.
         # Rescanning would replace it, and the replacement would certify
         # whatever the ledger now holds — the same erasure one door over.
-        return "refuse", (
-            f"{marker_error}; " + DAMAGED_LEDGER_REMEDY.format(path=scan_marker_path(root))
-        )
+        return "refuse", (f"{marker_error}; " + damaged_ledger_remedy(root))
     if marker is None:
         return "initialize", None
     integrity_error = _check_marker_integrity(marker, root)
     if integrity_error:
-        return "refuse", (
-            f"{integrity_error}; " + DAMAGED_LEDGER_REMEDY.format(path=ledger_path(root))
-        )
+        return "refuse", (f"{integrity_error}; " + damaged_ledger_remedy(root))
     if _marker_staleness(marker, now) is None:
         return "skip", None
     return "refresh", None
@@ -2126,6 +2232,11 @@ LIST_MAX_LIMIT = 500
 # and re-judges every row it is about to show.
 
 WITHHELD_CONCERN = "[withheld: protected]"
+# R1. A row whose provenance is absent or could not be evaluated is withheld
+# under its own marker: it is NOT known to be protected, and saying so would
+# be a claim we cannot make either. The two counts in the envelope keep the
+# two populations distinguishable.
+WITHHELD_UNEVALUATED = "[withheld: provenance not evaluated]"
 
 # BOUNDED READ, with the bound named. The index is consulted on every list
 # read, so an unbounded read here is a read-amplification the display boundary
@@ -2170,6 +2281,8 @@ def _protected_fold(root: Path | None = None) -> tuple[dict[str, dict], str | No
         text = path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as exc:
         return {}, f"protected_index_unreadable:{exc.__class__.__name__}"
+    from . import protected as protected_module
+
     records: list[dict] = []
     for i, line in enumerate(text.splitlines(), start=1):
         raw = line.strip()
@@ -2181,8 +2294,28 @@ def _protected_fold(root: Path | None = None) -> tuple[dict[str, dict], str | No
             return {}, f"protected_index_malformed:line {i}"
         if not isinstance(rec, dict):
             return {}, f"protected_index_malformed:line {i} is not an object"
+        # ── R2: STRUCTURE, NOT JUST SYNTAX ──────────────────────────────────
+        # `fold_protected` SILENTLY SKIPS a row whose action is missing or
+        # whose claim id is not a string — the right convention for a recall
+        # surface, and a fail-open here. The reviewer replaced a real
+        # designation with the valid JSON `{"claim_id": "<the same id>"}` and
+        # the fold came back EMPTY AND HEALTHY: no error, zero withheld, the
+        # designated body printed. A row that is valid JSON and uninterpretable
+        # as a designation is exactly as disqualifying as a parse failure —
+        # in both cases we cannot say what is designated.
+        action = rec.get("action")
+        if action not in protected_module.PROTECTED_ACTIONS:
+            return {}, (
+                f"protected_index_malformed:line {i} has no usable action "
+                f"(expected one of {list(protected_module.PROTECTED_ACTIONS)}, got {action!r})"
+            )
+        cid = rec.get("claim_id")
+        if not isinstance(cid, str) or not cid.strip():
+            return {}, (
+                f"protected_index_malformed:line {i} has no usable claim_id "
+                f"(expected a non-empty string, got {type(cid).__name__})"
+            )
         records.append(rec)
-    from . import protected as protected_module
 
     return protected_module.fold_protected(records), None
 
@@ -2200,15 +2333,23 @@ def withhold_protected_concerns(
 ) -> tuple[list[dict], int, int, str | None]:
     """(rows, withheld, unprovenanced, error). Never mutates its input rows.
 
-    ``unprovenanced`` is REPORTED, NOT WITHHELD, and the honesty is in the
-    name. A row with no ``origin.claim_id`` — every row written before this
-    release, and any honk that quotes something without citing it — cannot be
-    shown to be protected OR shown to be safe. Withholding all of them would
-    make the queue unreadable the moment the first designation exists (the
-    live index already holds four), so they are published with their count
-    beside them. THE RESIDUAL IS REAL AND IS NAMED HERE RATHER THAN PAPERED
-    OVER: a honk that quotes a protected record without carrying its claim id
-    is not caught by this gate.
+    A CONCERN IS SHOWN ONLY WHEN ITS PROVENANCE WAS EVALUATED AND CAME BACK
+    CLEAN. Everything else is withheld: no ``origin.claim_id``, or an index
+    this reader could not read. Round 3 published the unprovenanced ones with
+    a count beside them, on the reasoning that a blanket withhold would blank
+    the queue. The reviewer rejected that in one sentence — "counting
+    uncertainty does not contain the text already returned" — and demonstrated
+    it by putting a designated record's body in a honk that simply omitted the
+    claim id. The count was accurate and the body was still on the wire.
+
+    THE QUEUE STAYS ADDRESSABLE. Only ``concern`` is replaced; signal_id,
+    source, kind, opened_at, owner, state, reason, closed_by and origin all
+    survive, so a watch seat can still see that something is waiting and still
+    ack it. What it cannot do is read a body nobody has cleared.
+
+    The counts remain SEPARATE because the two populations are different
+    facts: ``withheld`` is "the index says this is designated", ``unprovenanced``
+    is "nothing here can say either way".
     """
     fold, error = _protected_fold(root)
     if error:
@@ -2222,17 +2363,17 @@ def withhold_protected_concerns(
             0,
             error,
         )
-    if not fold:
-        return rows, 0, 0, None
     out: list[dict] = []
     withheld = 0
     unprovenanced = 0
     for rec in rows:
         claim = _row_origin_claim(rec)
         if claim is None:
-            if rec.get("concern") is not None:
-                unprovenanced += 1
-            out.append(rec)
+            if rec.get("concern") is None:
+                out.append(rec)
+                continue
+            unprovenanced += 1
+            out.append(dict(rec, concern=WITHHELD_UNEVALUATED))
             continue
         if claim in fold:
             withheld += 1
@@ -2455,10 +2596,21 @@ def handle_signal_tool(
             # keeps the true concern — it is the record — but this response is
             # a display surface like any other, and review N1's exposure is a
             # body reaching a reader, not a body reaching the disk.
-            shown, withheld, _unprov, protected_error = withhold_protected_concerns([row], root)
-            payload: dict[str, Any] = {"ok": True, "row": shown[0]}
-            if withheld or protected_error:
-                payload["withheld_protected"] = withheld
+            shown, withheld, unprovenanced, protected_error = withhold_protected_concerns(
+                [row], root
+            )
+            # BOTH COUNTS, ALWAYS, ON BOTH SURFACES (R1). Round 3 carried
+            # `withheld_protected` here only when it was non-zero and dropped
+            # the unprovenanced count entirely, so the one response that
+            # returns a body carried the least information about whether that
+            # body had been cleared. A count that appears only when it is
+            # interesting is a count a reader learns to read as zero.
+            payload: dict[str, Any] = {
+                "ok": True,
+                "row": shown[0],
+                "withheld_protected": withheld,
+                "unprovenanced_concerns": unprovenanced,
+            }
             if protected_error:
                 payload["error"] = protected_error
             return json.dumps(payload)

@@ -413,26 +413,29 @@ class TestN1ProtectedTextNeverReachesListMode:
         assert out["signals"][0]["concern"] == sl.WITHHELD_CONCERN
         assert "protected_index_unbounded" in out["error"]
 
-    def test_an_absent_index_withholds_nothing(self, tmp_sovereign_root):
-        """The ordinary case stays cheap and stays readable. A boundary that
-        withholds everything by default gets removed for being useless."""
+    def test_an_absent_index_withholds_nothing_that_carries_provenance(self, tmp_sovereign_root):
+        """SUPERSEDED IN FORM BY R4-ROUND R1, KEPT IN SUBSTANCE. Round 3 used an
+        UNPROVENANCED honk here and asserted its body was shown; that is the
+        exposure R1 closes. The property this test exists for is unchanged and
+        still holds: with no designations at all, a concern whose provenance
+        CAN be evaluated is shown, so the boundary is a gate and not a blanket
+        denial."""
         root = tmp_sovereign_root
         _guardian_ok(root)
-        _honk_about(root, None, "an ordinary unrelated concern")
+        _honk_about(root, "c" * 64, "an ordinary unrelated concern")
         assert not sl.protected_index_path(root).exists()
         out = _list_honks(root)
-        assert out["signals"][0]["concern"] == (
-            "Review of claim None: an ordinary unrelated concern"
-        )
+        assert out["signals"][0]["concern"].endswith("an ordinary unrelated concern")
         assert out["withheld_protected"] == 0
         assert out["unprovenanced_concerns"] == 0
 
-    def test_an_unprovenanced_concern_is_counted_not_silently_passed(self, tmp_sovereign_root):
-        """THE NAMED RESIDUAL. A honk that quotes without citing carries no
-        claim id, so this gate cannot judge it either way. It is shown — a
-        blanket withhold would make the queue unreadable the moment the first
-        designation exists — and its count is published beside it under a name
-        that cannot be read as 'checked and clean'."""
+    def test_an_unprovenanced_concern_is_withheld_and_counted(self, tmp_sovereign_root):
+        """REVERSED BY R1, DELIBERATELY. Round 3 published these and counted
+        them, reasoning that a blanket withhold would blank the queue. The
+        reviewer answered in one sentence — "counting uncertainty does not
+        contain the text already returned" — and proved it by putting a
+        designated body in a honk that simply omitted the claim id. The count
+        was accurate and the body was still on the wire."""
         root = tmp_sovereign_root
         _guardian_ok(root)
         _designated_claim(root)
@@ -440,9 +443,12 @@ class TestN1ProtectedTextNeverReachesListMode:
         out = _list_honks(root)
         assert out["withheld_protected"] == 0
         assert out["unprovenanced_concerns"] == 1
-        assert out["signals"][0]["concern"] == (
-            "Review of claim None: quoted something without citing it"
-        )
+        assert out["signals"][0]["concern"] == sl.WITHHELD_UNEVALUATED
+        assert "quoted something without citing it" not in json.dumps(out)
+        # THE QUEUE STAYS ADDRESSABLE. Only the body is withheld.
+        row = out["signals"][0]
+        assert row["signal_id"] and row["source"] == "honk" and row["state"] == "open"
+        assert row["owner"] and row["opened_at"]
 
     def test_the_ack_response_withholds_too(self, tmp_sovereign_root, monkeypatch):
         """The second display boundary. `signal_ack` returns the row it just
@@ -586,8 +592,15 @@ class TestN2ARefreshNeverErasesTheDamage:
         error = sl.ensure_scanned(root, guardian_provider=lambda: {"issues": []})
         assert error is not None
         assert "ledger_truncated" in error
-        assert "a human moves the damaged ledger aside" in error
+        # WORDING REPLACED BY R8: round 3's "move the damaged ledger aside" was
+        # followed literally by the reviewer and landed in a SECOND refusal,
+        # because the certificate survived the move. The instruction now names
+        # both artifacts and a quarantine directory, and is followed end to end
+        # in test_the_advertised_recovery_actually_recovers below.
+        assert "quarantine" in error
         assert str(sl.ledger_path(root)) in error
+        assert str(sl.scan_marker_path(root)) in error
+        assert "Nothing is deleted" in error
 
     def test_the_refusal_is_not_cleared_by_reading_again(self, tmp_sovereign_root, monkeypatch):
         """It stays refused. A state that heals itself on the next read is the
@@ -609,16 +622,23 @@ class TestN2ARefreshNeverErasesTheDamage:
         assert sl.ensure_scanned(root, guardian_provider=lambda: {"issues": []}) is None
         assert sl.scan_marker_path(root).exists()
 
-    def test_a_zero_byte_marker_is_no_marker_rather_than_an_invalid_one(self, tmp_sovereign_root):
-        """The refresh lock flocks the marker path, so opening it for the lock
-        creates an empty file on a fresh root. That file must read as absent,
-        or the first ever read of a new store is an error."""
+    def test_a_zero_byte_certificate_is_invalid_not_absent(self, tmp_sovereign_root):
+        """REVERSED BY R4, DELIBERATELY. Round 3 read an empty certificate as
+        absent, because the refresh lock flocked that same path and creating it
+        for the lock would otherwise have made a fresh root's first read an
+        error. The lock is now a sidecar, so the entanglement is gone and the
+        two facts separate: no file is a fresh root, an empty file is a
+        certificate that was destroyed."""
         root = tmp_sovereign_root
         _guardian_ok(root)
         sl.scan_marker_path(root).parent.mkdir(parents=True, exist_ok=True)
         sl.scan_marker_path(root).write_text("")
-        assert sl._read_scan_marker(root) == (None, None)
-        assert sl.ensure_scanned(root, guardian_provider=lambda: {"issues": []}) is None
+        marker, error = sl._read_scan_marker(root)
+        assert marker is None
+        assert error and "marker_invalid" in error
+        refusal = sl.ensure_scanned(root, guardian_provider=lambda: {"issues": []})
+        assert refusal is not None and "marker_invalid" in refusal
+        assert sl.scan_marker_path(root).read_text() == "", "the read recertified it"
 
     def test_a_stale_marker_refreshes(self, tmp_sovereign_root):
         """The ordinary path. A refresh over a marker that AGREES with the
@@ -717,7 +737,10 @@ class TestN6TheRecordedRowCountIsReconciled:
         _damage(root, "rows")
         out = _read_all_three(root, monkeypatch)
         for reader, payload in out.items():
-            assert "ledger_rows_shrank" in (payload.get("error") or ""), reader
+            # RENAMED BY R5: the check is now an exact reconciliation against
+            # the certified byte prefix, not a shrinkage test, so the error
+            # says mismatch rather than shrank.
+            assert "ledger_rows_mismatch" in (payload.get("error") or ""), reader
             assert payload.get("total") is None, reader
 
     def test_a_legitimate_append_is_still_valid(self, tmp_sovereign_root):
@@ -1560,3 +1583,576 @@ class TestOneIdentityShapeAndNoReservedSeats:
         )
         with pytest.raises(PermissionError):
             sl.ack_signal(sl.signal_id_for("halt", "h.md"), "seat:daemon", "acted", "nope", root)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# ROUND 4 — the nine closures Astra required of 619e409. CLOSURES ONLY.
+# Each fixture is the reviewer's own, rebuilt from supplemental_probes.py.
+# ══════════════════════════════════════════════════════════════════════════
+
+
+class TestR1UncertainProvenanceWithholdsEverywhere:
+    """R1, P1. "Counting uncertainty does not contain the text already
+    returned." The reviewer put a designated body in a honk that omitted the
+    claim id: list mode counted it and printed it, and the ack response
+    printed it without even the count."""
+
+    def _honk(self, root, claim_id, body):
+        rec = {
+            "honk_id": "synthetic",
+            "timestamp": "2026-09-06T16:00:00Z",
+            "pattern": "fixture",
+            "observation": body,
+        }
+        if claim_id:
+            rec["claim_id"] = claim_id
+        _write_jsonl(root / "nape" / "honks.jsonl", [rec])
+
+    def _ack(self, root):
+        from sovereign_stack import dispatch_context as dc
+
+        token = dc.set_caller_seat("seat:fixture-reviewer")
+        try:
+            return json.loads(
+                sl.handle_signal_tool(
+                    "signal_ack",
+                    {
+                        "signal_id": sl.signal_id_for("honk", "synthetic"),
+                        "state": "acknowledged",
+                        "reason": "fixture review",
+                    },
+                    root=root,
+                )
+            )
+        finally:
+            dc.reset_caller_seat(token)
+
+    def test_an_unprovenanced_body_reaches_neither_surface(self, tmp_sovereign_root):
+        """The reviewer's `N1_unprovenanced`."""
+        root = tmp_sovereign_root
+        _guardian_ok(root)
+        _designated_claim(root)
+        self._honk(root, None, SYNTHETIC_BODY)
+        listed = _list_honks(root)
+        acked = self._ack(root)
+        assert SYNTHETIC_BODY not in json.dumps([listed, acked])
+        assert listed["unprovenanced_concerns"] == 1
+        assert acked["unprovenanced_concerns"] == 1
+
+    def test_a_legacy_row_is_reprovenanced_by_the_rescan(self, tmp_sovereign_root):
+        """The reviewer's `N1_legacy`: strip origin from the ledger the way
+        every pre-release row lacks it, then rescan. Ingestion was idempotent
+        on STATE and never restored provenance, so the row stayed exposed —
+        and under R1 it would have stayed blinded forever instead."""
+        root = tmp_sovereign_root
+        _guardian_ok(root)
+        cid = _designated_claim(root)
+        self._honk(root, cid, SYNTHETIC_BODY)
+        sl.scan_all(root, guardian_provider=lambda: {"issues": []})
+        path = sl.ledger_path(root)
+        rows = [json.loads(x) for x in path.read_text().splitlines() if x.strip()]
+        for row in rows:
+            row.pop("origin", None)
+        path.write_text("".join(json.dumps(r) + "\n" for r in rows))
+        assert sl.load_latest(root)[sl.signal_id_for("honk", "synthetic")].get("origin") is None
+
+        sl.scan_all(root, guardian_provider=lambda: {"issues": []})
+        restored = sl.load_latest(root)[sl.signal_id_for("honk", "synthetic")]
+        assert restored["origin"]["claim_id"] == cid
+        listed = _list_honks(root)
+        acked = self._ack(root)
+        assert SYNTHETIC_BODY not in json.dumps([listed, acked])
+        assert listed["withheld_protected"] == 1
+        assert acked["withheld_protected"] == 1
+
+    def test_the_backfill_does_not_touch_the_lifecycle(self, tmp_sovereign_root):
+        """A provenance write is not a lifecycle write. An append that quietly
+        reopened an acked signal would be N7 again."""
+        from sovereign_stack import dispatch_context as dc
+
+        root = tmp_sovereign_root
+        _guardian_ok(root)
+        self._honk(root, "d" * 64, "an ordinary concern")
+        sl.scan_all(root, guardian_provider=lambda: {"issues": []})
+        sid = sl.signal_id_for("honk", "synthetic")
+        token = dc.set_caller_seat("seat:fixture-reviewer")
+        try:
+            sl.handle_signal_tool(
+                "signal_ack",
+                {"signal_id": sid, "state": "acted", "reason": "handled"},
+                root=root,
+            )
+        finally:
+            dc.reset_caller_seat(token)
+        path = sl.ledger_path(root)
+        rows = [json.loads(x) for x in path.read_text().splitlines() if x.strip()]
+        for row in rows:
+            row.pop("origin", None)
+        path.write_text("".join(json.dumps(r) + "\n" for r in rows))
+        sl.scan_all(root, guardian_provider=lambda: {"issues": []})
+        after = sl.load_latest(root)[sid]
+        assert after["origin"]["claim_id"] == "d" * 64
+        assert after["state"] == "acted"
+        assert after["closed_by"] == "seat:fixture-reviewer"
+        assert after["reason"] == "handled"
+
+    def test_the_backfill_is_idempotent(self, tmp_sovereign_root):
+        """It fires only when it changes the provenance verdict. A rescan of a
+        healthy row must append nothing."""
+        root = tmp_sovereign_root
+        _guardian_ok(root)
+        self._honk(root, "e" * 64, "an ordinary concern")
+        sl.scan_all(root, guardian_provider=lambda: {"issues": []})
+        before = len(sl.ledger_path(root).read_text().splitlines())
+        sl.scan_all(root, guardian_provider=lambda: {"issues": []})
+        assert len(sl.ledger_path(root).read_text().splitlines()) == before
+
+    def test_both_counts_are_always_present_on_the_ack_response(self, tmp_sovereign_root):
+        """A count that appears only when it is interesting is a count a
+        reader learns to read as zero."""
+        root = tmp_sovereign_root
+        _guardian_ok(root)
+        self._honk(root, "f" * 64, "an ordinary concern")
+        _list_honks(root)
+        acked = self._ack(root)
+        assert acked["withheld_protected"] == 0
+        assert acked["unprovenanced_concerns"] == 0
+        assert acked["row"]["concern"] == "an ordinary concern"
+
+
+class TestR2AnUninterpretableDesignationWithholdsEverything:
+    """R2, P1. `fold_protected` SKIPS a row with no action or a non-string
+    claim id — right for a recall surface, fail-open here. The reviewer
+    replaced a real designation with `{"claim_id": "<same id>"}` and got an
+    empty, healthy index: no error, zero withheld, the body printed."""
+
+    def _prepare(self, root, replacement):
+        _guardian_ok(root)
+        cid = _designated_claim(root)
+        _honk_about(root, cid, SYNTHETIC_BODY)
+        _list_honks(root)
+        if replacement is not None:
+            _write_jsonl(sl.protected_index_path(root), replacement(cid))
+        return cid
+
+    @pytest.mark.parametrize(
+        "row",
+        [
+            {"claim_id": "CID"},
+            {"action": "protect"},
+            {"action": "sideways", "claim_id": "CID"},
+            {"action": "protect", "claim_id": 7},
+            {"action": "protect", "claim_id": "   "},
+            {"action": None, "claim_id": "CID"},
+        ],
+    )
+    def test_a_structurally_invalid_designation_is_an_error(self, tmp_sovereign_root, row):
+        root = tmp_sovereign_root
+        self._prepare(root, lambda cid: [{k: (cid if v == "CID" else v) for k, v in row.items()}])
+        out = _list_honks(root)
+        assert SYNTHETIC_BODY not in json.dumps(out)
+        assert out["signals"][0]["concern"] == sl.WITHHELD_CONCERN
+        assert "protected_index_malformed" in out["error"]
+        assert out["withheld_protected"] == 1
+
+    def test_the_ack_response_is_gated_by_the_same_failure(self, tmp_sovereign_root):
+        from sovereign_stack import dispatch_context as dc
+
+        root = tmp_sovereign_root
+        cid = self._prepare(root, lambda cid: [{"claim_id": cid}])
+        assert cid
+        token = dc.set_caller_seat("seat:fixture-reviewer")
+        try:
+            acked = json.loads(
+                sl.handle_signal_tool(
+                    "signal_ack",
+                    {
+                        "signal_id": sl.signal_id_for("honk", "about-designated-record"),
+                        "state": "acknowledged",
+                        "reason": "fixture review",
+                    },
+                    root=root,
+                )
+            )
+        finally:
+            dc.reset_caller_seat(token)
+        assert SYNTHETIC_BODY not in json.dumps(acked)
+        assert "protected_index_malformed" in acked["error"]
+
+    def test_a_valid_designation_still_folds(self, tmp_sovereign_root):
+        """POSITIVE CONTROL. The validator must not refuse the real thing —
+        `designate_protected` writes the shape this now requires."""
+        root = tmp_sovereign_root
+        self._prepare(root, None)
+        out = _list_honks(root)
+        assert out["error"] is None
+        assert out["withheld_protected"] == 1
+        assert out["signals"][0]["concern"] == sl.WITHHELD_CONCERN
+
+
+class TestR3APresentHeaderIsAlwaysValidated:
+    """R3, P2. `_first_header` returns b'' for absent AND for present-and-empty,
+    and round 3 treated both as "no header": the reviewer's empty-value session
+    reached connect_sse and acked as the SERVER."""
+
+    def test_an_empty_value_is_refused_not_treated_as_absent(self):
+        from sovereign_stack import sse_server
+
+        seat, refusal = sse_server.seat_from_scope(_sse_scope(headers=[(b"x-sovereign-seat", b"")]))
+        assert seat is None
+        assert refusal and "empty value" in refusal
+
+    def test_a_whitespace_value_is_refused(self):
+        from sovereign_stack import sse_server
+
+        seat, refusal = sse_server.seat_from_scope(
+            _sse_scope(headers=[(b"x-sovereign-seat", b"   ")])
+        )
+        assert seat is None and refusal
+
+    def test_an_empty_value_refuses_before_connect_sse(self, monkeypatch):
+        from sovereign_stack import sse_server
+
+        monkeypatch.setenv("SSE_ALLOW_UNAUTHENTICATED", "true")
+        monkeypatch.delenv("BRIDGE_TOKEN", raising=False)
+        opened = []
+        monkeypatch.setattr(
+            sse_server.sse, "connect_sse", lambda *a, **kw: opened.append(1), raising=True
+        )
+        sent = []
+
+        async def send(msg):
+            sent.append(msg)
+
+        async def receive():
+            return {"type": "http.request"}
+
+        asyncio.run(sse_server.app(_sse_scope(headers=[(b"x-sovereign-seat", b"")]), receive, send))
+        assert sent[0]["status"] == 400
+        assert not opened
+
+    def test_an_absent_header_still_falls_back(self):
+        """POSITIVE CONTROL. Absence is not a statement; every existing client
+        keeps working."""
+        from sovereign_stack import sse_server
+
+        assert sse_server.seat_from_scope(_sse_scope()) == (None, None)
+        assert sse_server.seat_from_scope(
+            _sse_scope(headers=[(b"authorization", b"Bearer x")])
+        ) == (None, None)
+
+
+class TestR4TheLockIsNotTheCertificate:
+    """R4, P2. Round 3 flocked the certificate, so creating the lock created
+    the certificate, so an EMPTY certificate had to read as absent — which made
+    a destroyed one indistinguishable from a fresh root."""
+
+    def test_the_lock_has_its_own_path(self):
+        root = Path("/tmp/fixture-root")
+        assert sl.scan_lock_path(root) != sl.scan_marker_path(root)
+        assert sl.scan_lock_path(root).name == "last_scan.lock"
+
+    def test_a_blank_existing_certificate_is_not_recertified(self, tmp_sovereign_root):
+        """The reviewer's `N2_blank_existing_marker`."""
+        root = tmp_sovereign_root
+        sid = _scanned_root(root)
+        marker = sl.scan_marker_path(root)
+        marker.write_text("")
+        out = sl.heartbeat_field(root, scan=True)
+        assert out["error"] and out["total"] is None
+        assert marker.read_text() == "", "the read reissued the certificate"
+        assert sid in sl.load_latest(root)
+
+    def test_both_files_truncated_is_an_error_not_a_healthy_zero(self, tmp_sovereign_root):
+        """The reviewer's `N2_blank_marker_with_ledger_loss`: `error:null,
+        ingestion:"ok", total:0` for a store whose signal was gone."""
+        root = tmp_sovereign_root
+        _scanned_root(root)
+        sl.scan_marker_path(root).write_text("")
+        sl.ledger_path(root).write_text("")
+        out = sl.heartbeat_field(root, scan=True)
+        assert out["error"]
+        assert out["total"] is None
+        assert out["ingestion"] != "ok"
+
+    def test_a_fresh_root_still_initializes(self, tmp_sovereign_root):
+        """POSITIVE CONTROL, and the reason round 3 read empty as absent. With
+        the lock on its own path, the first read of a store that has never been
+        scanned must still work."""
+        root = tmp_sovereign_root
+        _guardian_ok(root)
+        assert not sl.scan_marker_path(root).exists()
+        assert sl.ensure_scanned(root, guardian_provider=lambda: {"issues": []}) is None
+        assert sl.scan_marker_path(root).exists()
+        assert sl.heartbeat_field(root)["error"] is None
+
+    def test_the_lock_is_created_without_creating_a_certificate(self, tmp_sovereign_root):
+        root = tmp_sovereign_root
+        _guardian_ok(root)
+        with sl._refresh_lock(root):
+            assert sl.scan_lock_path(root).exists()
+            assert not sl.scan_marker_path(root).exists()
+
+
+class TestR5TheCertifiedPrefixRowCountIsExact:
+    """R5, P2. Round 3 counted the WHOLE file and refused only a shortfall, so
+    an understated count sailed through and a legitimate ack could push the
+    whole-file count past an overstated claim and mask it."""
+
+    def _certified(self, root):
+        _guardian_ok(root)
+        sid = sl.open_signal(
+            source="halt", native_id="fixture", produced_at="2026-09-01T00:00:00Z", root=root
+        )["signal_id"]
+        sl.scan_all(root, guardian_provider=lambda: {"issues": []})
+        return sid
+
+    def _restate(self, root, rows):
+        path = sl.scan_marker_path(root)
+        marker = json.loads(path.read_text())
+        marker["ledger_rows"] = rows
+        path.write_text(json.dumps(marker, sort_keys=True) + "\n")
+
+    def test_an_understated_row_count_is_refused(self, tmp_sovereign_root, monkeypatch):
+        """The reviewer's `N6_underreported_certified_rows`."""
+        root = tmp_sovereign_root
+        self._certified(root)
+        self._restate(root, 0)
+        for reader, payload in _read_all_three(root, monkeypatch).items():
+            assert "ledger_rows_mismatch" in (payload.get("error") or ""), reader
+            assert payload.get("total") is None, reader
+
+    def test_a_legitimate_append_cannot_mask_an_overstatement(
+        self, tmp_sovereign_root, monkeypatch
+    ):
+        """The reviewer's `N6_append_masks_prefix_row_contradiction`: claim two
+        rows for a one-row prefix, then ack. The whole-file count reached two
+        and the contradiction was accepted with total 0."""
+        root = tmp_sovereign_root
+        sid = self._certified(root)
+        self._restate(root, 2)
+        sl.ack_signal(sid, "seat:fixture-reviewer", "acted", "fixture", root)
+        for reader, payload in _read_all_three(root, monkeypatch).items():
+            assert "ledger_rows_mismatch" in (payload.get("error") or ""), reader
+            assert payload.get("total") is None, reader
+
+    def test_rows_appended_beyond_the_prefix_stay_legitimate(self, tmp_sovereign_root):
+        """POSITIVE CONTROL (law #3). The certificate speaks only about its own
+        prefix; an append-only ledger must stay checkable while it grows."""
+        root = tmp_sovereign_root
+        sid = self._certified(root)
+        sl.ack_signal(sid, "seat:fixture-reviewer", "acted", "fixture", root)
+        out = sl.heartbeat_field(root)
+        assert out["error"] is None
+        assert out["total"] == 0
+
+
+class TestR6TheListingChecksContainmentBeforeReading:
+    """R6, P2. The direct modes resolve their path; the LISTING opened every
+    file the glob returned. The reviewer replaced a watch file with a symlink
+    to an outside file and read its contents out of mode='status'."""
+
+    def test_a_symlink_out_of_the_store_is_not_read(self, tmp_sovereign_root, monkeypatch):
+        from sovereign_stack import post_fix_tools as pf
+
+        root = tmp_sovereign_root
+        watch = _make_watch(monkeypatch, root)
+        wid = watch["watch_id"]
+        inside = pf._watches_dir() / f"{wid}.json"
+        outside = root / "outside.json"
+        outside.write_text(json.dumps(dict(watch, fix_description="OUTSIDE_FIXTURE_MARKER")))
+        inside.unlink()
+        inside.symlink_to(outside)
+
+        listing = _pf_call(monkeypatch, root, "status")
+        assert "OUTSIDE_FIXTURE_MARKER" not in json.dumps(listing)
+        assert wid not in json.dumps(listing)
+        assert listing["count"] == 0
+        assert listing["skipped_uncontained"] == 1
+
+    def test_an_ordinary_listing_is_unaffected(self, tmp_sovereign_root, monkeypatch):
+        """POSITIVE CONTROL."""
+        root = tmp_sovereign_root
+        watch = _make_watch(monkeypatch, root)
+        listing = _pf_call(monkeypatch, root, "status")
+        assert listing["count"] == 1
+        assert listing["skipped_uncontained"] == 0
+        assert listing["watches"][0]["watch_id"] == watch["watch_id"]
+
+
+class TestR7OneAppendRespectsTheFileBound:
+    """R7, P3. The bound was checked BEFORE appending an unbounded render, so
+    one exception with a 2 MiB message produced a 2,097,902-byte file under a
+    1,048,576-byte cap. A bound checked before writing something unbounded is
+    not a bound."""
+
+    def test_a_huge_exception_does_not_break_the_cap(self, tmp_sovereign_root, monkeypatch):
+        """The reviewer's `N9_single_traceback_respects_byte_bound`."""
+        root = tmp_sovereign_root
+        _guardian_ok(root)
+
+        def boom(*a, **kw):
+            raise RuntimeError("X" * (2 * sl.DIAGNOSTICS_MAX_BYTES))
+
+        monkeypatch.setattr(sl, "scan_honks", boom)
+        sl.scan_all(root, guardian_provider=lambda: {"issues": []})
+        path = sl.diagnostics_path(root)
+        assert path.stat().st_size <= sl.DIAGNOSTICS_MAX_BYTES
+
+    def test_the_truncation_is_announced_in_the_entry(self, tmp_sovereign_root, monkeypatch):
+        """A silently clipped traceback reads as a complete one that ended
+        early."""
+        root = tmp_sovereign_root
+        _guardian_ok(root)
+
+        def boom(*a, **kw):
+            raise RuntimeError("Y" * (2 * sl.DIAGNOSTICS_ENTRY_MAX_BYTES))
+
+        monkeypatch.setattr(sl, "scan_honks", boom)
+        sl.scan_all(root, guardian_provider=lambda: {"issues": []})
+        text = sl.diagnostics_path(root).read_text()
+        assert "entry truncated at" in text
+        assert "Traceback (most recent call last)" in text
+
+    def test_repeated_huge_appends_still_respect_the_cap(self, tmp_sovereign_root, monkeypatch):
+        root = tmp_sovereign_root
+        _guardian_ok(root)
+
+        def boom(*a, **kw):
+            raise RuntimeError("Z" * (2 * sl.DIAGNOSTICS_MAX_BYTES))
+
+        monkeypatch.setattr(sl, "scan_honks", boom)
+        for _ in range(40):
+            sl.scan_all(root, guardian_provider=lambda: {"issues": []})
+        assert sl.diagnostics_path(root).stat().st_size <= sl.DIAGNOSTICS_MAX_BYTES
+
+    def test_an_ordinary_traceback_is_kept_whole(self, tmp_sovereign_root, monkeypatch):
+        """POSITIVE CONTROL. The cap must not clip the normal case."""
+        root = tmp_sovereign_root
+        _guardian_ok(root)
+
+        def boom(*a, **kw):
+            raise RuntimeError("fixture honk diagnosis token")
+
+        monkeypatch.setattr(sl, "scan_honks", boom)
+        sl.scan_all(root, guardian_provider=lambda: {"issues": []})
+        text = sl.diagnostics_path(root).read_text()
+        assert "fixture honk diagnosis token" in text
+        assert "entry truncated at" not in text
+
+
+class TestR8TheAdvertisedRecoveryActuallyRecovers:
+    """R8, P2. The reviewer followed round 3's instruction literally and landed
+    in a SECOND refusal: the certificate survived the move, so the next read
+    saw a valid certificate over an absent ledger and told the operator to move
+    a file that was no longer there."""
+
+    def test_following_the_instruction_reaches_initialization(self, tmp_sovereign_root):
+        """Follows the refusal's own text, on a temporary root, to a clean
+        start — and checks nothing was destroyed on the way."""
+        root = tmp_sovereign_root
+        sid = _scanned_root(root)
+        assert sid
+        sl.ledger_path(root).write_text("")
+        refusal = sl.ensure_scanned(root, guardian_provider=lambda: {"issues": []})
+        assert refusal and "quarantine" in refusal
+
+        stamp = "20260906T000000Z"
+        quarantine = sl.quarantine_dir(root, stamp)
+        quarantine.mkdir(parents=True, exist_ok=True)
+        moved = []
+        for artefact in (sl.ledger_path(root), sl.scan_marker_path(root), sl.scan_lock_path(root)):
+            if artefact.exists():
+                artefact.rename(quarantine / artefact.name)
+                moved.append(artefact.name)
+        assert "ledger.jsonl" in moved and "last_scan.json" in moved
+
+        assert sl.ensure_scanned(root, guardian_provider=lambda: {"issues": []}) is None
+        after = sl.heartbeat_field(root)
+        assert after["error"] is None
+        assert after["ingestion"] == "ok"
+        # RECEIPTS PRESERVED. Nothing was deleted; the evidence is still there.
+        assert (quarantine / "ledger.jsonl").exists()
+        assert (quarantine / "last_scan.json").exists()
+
+    def test_the_instruction_names_every_artefact_it_needs(self, tmp_sovereign_root):
+        root = tmp_sovereign_root
+        text = sl.damaged_ledger_remedy(root)
+        for artefact in (
+            sl.ledger_path(root),
+            sl.scan_marker_path(root),
+            sl.scan_lock_path(root),
+        ):
+            assert str(artefact) in text
+        assert str(sl.quarantine_dir(root)) in text
+        assert "Nothing is deleted" in text
+
+    def test_moving_only_the_ledger_still_refuses(self, tmp_sovereign_root):
+        """The round-3 instruction, followed exactly, and why it was wrong: the
+        surviving certificate keeps the store wedged."""
+        root = tmp_sovereign_root
+        _scanned_root(root)
+        sl.ledger_path(root).write_text("")
+        sl.ensure_scanned(root, guardian_provider=lambda: {"issues": []})
+        ledger = sl.ledger_path(root)
+        ledger.rename(ledger.with_name(ledger.name + ".damaged"))
+        assert sl.ensure_scanned(root, guardian_provider=lambda: {"issues": []}) is not None
+
+
+class TestR9AConfigurationErrorIsNotAHealthyIngestion:
+    """R9, P2. Round 3 put the configuration failure in `error` and left
+    `ingestion: "ok"` with a numeric total beside it."""
+
+    def _config(self, root, payload):
+        _guardian_ok(root)
+        sl.source_config_path(root).parent.mkdir(parents=True, exist_ok=True)
+        sl.source_config_path(root).write_text(json.dumps(payload))
+        sl.scan_all(root, guardian_provider=lambda: {"issues": []})
+        return json.loads(sl.handle_signal_tool("signals_summary", {}, root=root))
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {"sources": {"guardian": "disabled"}},
+            {"sources": {"guardain": "not_configured"}},
+            {"sources": {"guardian": 7}},
+            {"sources": []},
+            {"nope": {}},
+        ],
+    )
+    def test_an_invalid_declaration_is_config_error_with_a_null_total(
+        self, tmp_sovereign_root, payload
+    ):
+        out = self._config(tmp_sovereign_root, payload)
+        assert out["ingestion"] == "config_error"
+        assert out["total"] is None
+        assert out["total_configured"] is None
+        assert out["error"]
+
+    def test_the_unreadable_file_takes_the_same_path(self, tmp_sovereign_root):
+        root = tmp_sovereign_root
+        _guardian_ok(root)
+        sl.source_config_path(root).parent.mkdir(parents=True, exist_ok=True)
+        sl.source_config_path(root).write_text("{not json")
+        sl.scan_all(root, guardian_provider=lambda: {"issues": []})
+        field = sl.heartbeat_field(root)
+        assert field["ingestion"] == "config_error"
+        assert field["total"] is None
+        assert field["stale_24h"] is None and field["stale_7d"] is None
+
+    def test_a_valid_declaration_is_still_healthy(self, tmp_sovereign_root):
+        """POSITIVE CONTROL. A readable declaration must not take the error
+        path, and an absent one must leave all seven sources in scope."""
+        out = self._config(tmp_sovereign_root, {"sources": {"guardian": "not_configured"}})
+        assert out["ingestion"] != "config_error"
+        assert out["not_configured"] == ["guardian"]
+        assert out["total_configured"] == 0
+
+    def test_an_absent_declaration_is_still_healthy(self, tmp_sovereign_root):
+        root = tmp_sovereign_root
+        _guardian_ok(root)
+        sl.scan_all(root, guardian_provider=lambda: {"issues": []})
+        out = json.loads(sl.handle_signal_tool("signals_summary", {}, root=root))
+        assert out["ingestion"] == "ok"
+        assert out["total"] == 0
+        assert len(out["total_configured_scope"]) == len(sl.SOURCES)
