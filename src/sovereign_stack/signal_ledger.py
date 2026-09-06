@@ -187,6 +187,31 @@ def _text_or_none(value: Any, limit: int = 400) -> str | None:
     return text[:limit]
 
 
+def _origin(
+    source: str, native_id: str, *, claim_id: str | None = None, path: str | None = None
+) -> dict:
+    """Where this signal came from, carried on the row itself (review N1).
+
+    ``claim_id`` is the load-bearing one: it is the key the protected
+    designation index is folded by, so it is what lets a display boundary ask
+    "may I show this?" at read time. ``path`` is the source file, relative to
+    the sovereign root, so a human can find the record a row was minted from
+    even when it has no claim id.
+
+    Keys with no value are OMITTED rather than stored as null: a row that
+    never had a claim id and a row whose claim id we lost should not look the
+    same, and `"claim_id": null` reads as the second.
+    """
+    origin: dict[str, str] = {"source": source, "native_id": native_id}
+    text_claim = _text_or_none(claim_id, limit=200)
+    if text_claim:
+        origin["claim_id"] = text_claim
+    text_path = _text_or_none(path, limit=400)
+    if text_path:
+        origin["path"] = text_path
+    return origin
+
+
 def _validate_row(rec: Any) -> str | None:
     """None if the row is a usable ledger row, else why it is not.
 
@@ -221,6 +246,16 @@ def _validate_row(rec: Any) -> str | None:
     for optional in ("kind", "concern"):
         if optional in rec and rec[optional] is not None and not isinstance(rec[optional], str):
             return f"{optional} must be a string when present"
+    # ORIGIN IS OPTIONAL FOR THE SAME REASON kind/concern ARE. Every row
+    # written before 2026-09-06 lacks it, and a required field added late
+    # turns the whole existing ledger corrupt on the next read.
+    if "origin" in rec and rec["origin"] is not None:
+        origin = rec["origin"]
+        if not isinstance(origin, dict):
+            return "origin must be an object when present"
+        for key, value in origin.items():
+            if not isinstance(key, str) or (value is not None and not isinstance(value, str)):
+                return f"origin[{key!r}] must be a string or null"
     if state in CLOSE_STATES:
         reason = rec.get("reason")
         if not isinstance(reason, str) or not reason.strip():
@@ -574,6 +609,7 @@ def _row(
     updated_at: str,
     kind: str | None = None,
     concern: str | None = None,
+    origin: dict | None = None,
 ) -> dict:
     """One ledger row.
 
@@ -583,6 +619,15 @@ def _row(
     for the retired honk reader could not supply the identifier its own ack
     tool needs, let alone tell a watch seat what it was acking. A queue you
     cannot read is not a queue.
+
+    ``origin`` is the WHERE (review N1), added the same day: the source, the
+    native id, and the claim id or shard path the row was minted from. The
+    scanner used to discard the input record's ``claim_id`` the moment it had
+    copied the observation text, so a honk quoting a DESIGNATED PROTECTED
+    RECORD landed in the ledger as bare prose with nothing left to check it
+    against — and list mode published the body. Provenance is what lets the
+    designation be applied at READ time, against the index as it stands then,
+    rather than only at scan time against the index as it stood once.
 
     They are DELIBERATELY OPTIONAL and outside ``REQUIRED_ROW_FIELDS``: every
     row written before today lacks them, and a required field added late turns
@@ -604,6 +649,8 @@ def _row(
         row["kind"] = kind
     if concern is not None:
         row["concern"] = concern
+    if origin is not None:
+        row["origin"] = origin
     return row
 
 
@@ -616,6 +663,8 @@ def open_signal(
     root: Path | None = None,
     kind: str | None = None,
     concern: str | None = None,
+    origin_claim_id: str | None = None,
+    origin_path: str | None = None,
 ) -> dict | None:
     """Idempotent open: skip if a row already exists for this id.
 
@@ -654,6 +703,7 @@ def open_signal(
                 updated_at=now,
                 kind=_text_or_none(kind),
                 concern=_text_or_none(concern),
+                origin=_origin(source, native, claim_id=origin_claim_id, path=origin_path),
             ),
         )
 
@@ -750,8 +800,16 @@ def ack_signal(
             # the latest row wins, so a close that dropped `kind`/`concern`
             # would erase what the signal was ABOUT at the moment it was
             # acted on — leaving an audit trail of ids with no bodies.
+            #
+            # `origin` travels with them for a sharper reason: it is what the
+            # display boundary consults to decide whether the concern may be
+            # shown at all. A close that dropped it would turn an acked
+            # protected-derived signal into an unprovenanced one, i.e. the
+            # withholding would silently stop applying on exactly the rows a
+            # human has already looked at (review N1).
             kind=_text_or_none(prev.get("kind")),
             concern=_text_or_none(prev.get("concern")),
+            origin=prev.get("origin") if isinstance(prev.get("origin"), dict) else None,
         ),
         root,
     )
@@ -1088,6 +1146,12 @@ def scan_honks(root: Path, owner: str = "watch-2/3") -> ScanResult:
             # reader cannot tell a watch seat what it is being asked to ack.
             kind=_text_or_none(rec.get("pattern")),
             concern=_text_or_none(rec.get("observation")),
+            # THE CLAIM REFERENCE THE SCANNER USED TO THROW AWAY (review N1).
+            # A honk about a chronicle claim carries that claim's id; without
+            # it the observation reaches the ledger as anonymous prose and the
+            # protected designation has nothing to bind to.
+            origin_claim_id=_native_id_text(rec.get("claim_id")),
+            origin_path="nape/honks.jsonl",
         ):
             n += 1
         if hid in ack_ids:
@@ -1126,6 +1190,8 @@ def scan_watchman(root: Path, owner: str = "watch-2/3") -> ScanResult:
             root=root,
             kind="sweep",
             concern=_text_or_none(rec.get("summary") or rec.get("note")),
+            origin_claim_id=_native_id_text(rec.get("claim_id")),
+            origin_path="watchman/spool.jsonl",
         ):
             n += 1
     status = spool.status if spool.status != "absent" else "ok"
@@ -1164,6 +1230,8 @@ def scan_proposals(root: Path, owner: str = "watch-2/3") -> ScanResult:
                 root=root,
                 kind=_text_or_none(status) or "pending",
                 concern=_text_or_none(rec.get("tool") or rec.get("summary")),
+                origin_claim_id=_native_id_text(rec.get("claim_id")),
+                origin_path=f"{substrate}/pending_writes/{f.name}",
             ):
                 n += 1
             sid = signal_id_for("proposal", key)
@@ -1201,6 +1269,7 @@ def scan_halts(root: Path, owner: str = "watch-2/3") -> ScanResult:
             root=root,
             kind="halt",
             concern=_text_or_none(f.name),
+            origin_path=f"daemons/halts/{f.name}",
         ):
             n += 1
     return ScanResult(n, "ok")
@@ -1220,6 +1289,7 @@ def scan_decisions(root: Path, owner: str = "watch-2/3") -> ScanResult:
             root=root,
             kind="metabolize",
             concern=_text_or_none(f.name),
+            origin_path=f"decisions/{f.name}",
         ):
             n += 1
     return ScanResult(n, "ok")
@@ -1315,9 +1385,25 @@ def scan_guardian(root: Path, owner: str = "watch-2/3", provider=None) -> ScanRe
             root=root,
             kind="issue",
             concern=_text_or_none(native),
+            # No file: the guardian posture is a live probe of the box, so the
+            # honest provenance is the reader that produced it, not a path.
+            origin_path="guardian:dashboard_readers.read_guardian",
         ):
             n += 1
     return ScanResult(n, _degrade("ok", skipped), skipped)
+
+
+def _shard_rel(shard: Path, root: Path) -> str:
+    """The shard's path relative to <root>/chronicle/open_threads.
+
+    Relative, not absolute: an absolute path baked into a ledger row is the
+    `~/` ambiguity one layer down — it resolves only on the machine that wrote
+    it, and this ledger is meant to be readable wherever the store is.
+    """
+    try:
+        return str(shard.relative_to(Path(root) / "chronicle" / "open_threads"))
+    except ValueError:
+        return shard.name
 
 
 def _thread_native_id(rec: dict, shard: Path, index: int, rel: str | None = None) -> str:
@@ -1408,6 +1494,8 @@ def scan_threads(root: Path, owner: str = "watch-2/3") -> ScanResult:
             root=root,
             kind="open_thread",
             concern=_text_or_none(rec.get("question")),
+            origin_claim_id=_native_id_text(rec.get("claim_id")),
+            origin_path=f"chronicle/open_threads/{_shard_rel(shard, root)}",
         ):
             n += 1
         sid = signal_id_for("thread", native)
@@ -1443,6 +1531,12 @@ def scan_threads(root: Path, owner: str = "watch-2/3") -> ScanResult:
                     updated_at=_now(),
                     kind="open_thread",
                     concern=_text_or_none(rec.get("question")),
+                    origin=_origin(
+                        "thread",
+                        native,
+                        claim_id=_native_id_text(rec.get("claim_id")),
+                        path=f"chronicle/open_threads/{_shard_rel(shard, root)}",
+                    ),
                 ),
                 root,
             )
@@ -1665,6 +1759,138 @@ LIST_DEFAULT_LIMIT = 50
 LIST_MAX_LIMIT = 500
 
 
+# ── THE DISPLAY BOUNDARY FOR PROTECTED MATERIAL (review N1) ────────────────
+#
+# A honk about a DESIGNATED PROTECTED RECORD quoted that record's body into
+# its observation; the scanner copied the observation into the ledger as
+# `concern`; list mode returned it verbatim, with no stakes and no notice.
+# The reviewer built the whole chain from a synthetic record and read the body
+# straight out of `signals_summary(mode='list')`.
+#
+# THE WITHHOLDING IS AT READ TIME, NOT SCAN TIME, AND THAT IS THE DESIGN.
+# Designation happens whenever the human says so — usually AFTER the material
+# was written. A scan-time filter would honour only the designations that
+# existed the moment a row was minted, which is precisely the window this
+# house's protected layer exists to close. So every read re-folds the index
+# and re-judges every row it is about to show.
+
+WITHHELD_CONCERN = "[withheld: protected]"
+
+# BOUNDED READ, with the bound named. The index is consulted on every list
+# read, so an unbounded read here is a read-amplification the display boundary
+# cannot afford — and a file that has grown past this is a fact worth failing
+# on rather than truncating through. The live index is 2,275 bytes / 4 records
+# (measured 2026-09-06), so this is roughly three orders of magnitude of head
+# room.
+PROTECTED_INDEX_MAX_BYTES = 4 * 1024 * 1024
+
+
+def protected_index_path(root: Path | None = None) -> Path:
+    return _root(root) / "chronicle" / "protected.jsonl"
+
+
+def _protected_fold(root: Path | None = None) -> tuple[dict[str, dict], str | None]:
+    """(designation fold, error). THREE STATES, kept distinct on purpose.
+
+      * **absent** — nothing has ever been designated under this root. Empty
+        fold, no error, nothing withheld. This is the ordinary case and it
+        must stay cheap, or the boundary gets removed for being expensive.
+      * **unparseable / over the bound / unreadable** — we cannot say what is
+        designated, so we cannot say anything is safe to show. Returns an
+        error, and the caller withholds EVERY concern.
+      * **readable** — fold it and judge each row against it.
+
+    THIS READER IS STRICTER THAN ``protected.load_protected``, deliberately.
+    That one skips corrupt lines (the chronicle read convention, right for a
+    recall surface). Here a skipped line could be the very designation that
+    should have withheld the row we are about to print, so a malformed line
+    fails the whole read instead.
+    """
+    path = protected_index_path(root)
+    if not path.exists():
+        return {}, None
+    try:
+        size = path.stat().st_size
+        if size > PROTECTED_INDEX_MAX_BYTES:
+            return {}, (
+                f"protected_index_unbounded:{size} bytes exceeds the "
+                f"{PROTECTED_INDEX_MAX_BYTES}-byte read bound"
+            )
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        return {}, f"protected_index_unreadable:{exc.__class__.__name__}"
+    records: list[dict] = []
+    for i, line in enumerate(text.splitlines(), start=1):
+        raw = line.strip()
+        if not raw:
+            continue
+        try:
+            rec = json.loads(raw)
+        except json.JSONDecodeError:
+            return {}, f"protected_index_malformed:line {i}"
+        if not isinstance(rec, dict):
+            return {}, f"protected_index_malformed:line {i} is not an object"
+        records.append(rec)
+    from . import protected as protected_module
+
+    return protected_module.fold_protected(records), None
+
+
+def _row_origin_claim(rec: dict) -> str | None:
+    origin = rec.get("origin")
+    if not isinstance(origin, dict):
+        return None
+    claim = origin.get("claim_id")
+    return claim if isinstance(claim, str) and claim.strip() else None
+
+
+def withhold_protected_concerns(
+    rows: list[dict], root: Path | None = None
+) -> tuple[list[dict], int, int, str | None]:
+    """(rows, withheld, unprovenanced, error). Never mutates its input rows.
+
+    ``unprovenanced`` is REPORTED, NOT WITHHELD, and the honesty is in the
+    name. A row with no ``origin.claim_id`` — every row written before this
+    release, and any honk that quotes something without citing it — cannot be
+    shown to be protected OR shown to be safe. Withholding all of them would
+    make the queue unreadable the moment the first designation exists (the
+    live index already holds four), so they are published with their count
+    beside them. THE RESIDUAL IS REAL AND IS NAMED HERE RATHER THAN PAPERED
+    OVER: a honk that quotes a protected record without carrying its claim id
+    is not caught by this gate.
+    """
+    fold, error = _protected_fold(root)
+    if error:
+        # CANNOT READ THE INDEX -> CANNOT SHOW ANY BODY. Fail closed.
+        return (
+            [
+                dict(r, concern=WITHHELD_CONCERN if r.get("concern") is not None else None)
+                for r in rows
+            ],
+            sum(1 for r in rows if r.get("concern") is not None),
+            0,
+            error,
+        )
+    if not fold:
+        return rows, 0, 0, None
+    out: list[dict] = []
+    withheld = 0
+    unprovenanced = 0
+    for rec in rows:
+        claim = _row_origin_claim(rec)
+        if claim is None:
+            if rec.get("concern") is not None:
+                unprovenanced += 1
+            out.append(rec)
+            continue
+        if claim in fold:
+            withheld += 1
+            out.append(dict(rec, concern=WITHHELD_CONCERN))
+            continue
+        out.append(rec)
+    return out, withheld, unprovenanced, None
+
+
 def list_signals(
     root: Path | None = None,
     *,
@@ -1702,6 +1928,10 @@ def list_signals(
                 "concern": rec.get("concern"),
                 "reason": rec.get("reason"),
                 "closed_by": rec.get("closed_by"),
+                # PROVENANCE TRAVELS WITH THE ROW (review N1). It is what the
+                # display boundary judges the concern against, and it is what
+                # a human follows back to the record a row was minted from.
+                "origin": rec.get("origin"),
             }
         )
     rows.sort(key=lambda r: (r.get("opened_at") or "", r.get("signal_id") or ""))
@@ -1765,6 +1995,16 @@ def handle_signal_tool(
                     state=row_state,
                     limit=arguments.get("limit") or LIST_DEFAULT_LIMIT,
                 )
+                # THE DISPLAY BOUNDARY (review N1). Judged here, at the moment
+                # of showing, against the designation index as it stands NOW.
+                rows, withheld, unprovenanced, protected_error = withhold_protected_concerns(
+                    rows, root
+                )
+                list_error = field.get("error")
+                if protected_error:
+                    list_error = (
+                        f"{list_error}; {protected_error}" if list_error else protected_error
+                    )
                 return json.dumps(
                     {
                         "ok": True,
@@ -1772,7 +2012,7 @@ def handle_signal_tool(
                         # PARTIAL READS SAY SO. A non-null error beside ok:true
                         # means "these rows are real, and something else could
                         # not be measured" — never "all clear".
-                        "error": field.get("error"),
+                        "error": list_error,
                         "ingestion": field.get("ingestion"),
                         "scanned_at": field.get("scanned_at"),
                         "source": source_filter,
@@ -1780,6 +2020,13 @@ def handle_signal_tool(
                         "count": len(rows),
                         "corrupt_rows": field.get("corrupt_rows"),
                         "source_status": field.get("source_status"),
+                        # HOW MUCH OF WHAT YOU ARE LOOKING AT IS NOT SHOWN.
+                        # `withheld_protected` is the count the designation
+                        # index withheld; `unprovenanced_concerns` is the
+                        # count this gate could not judge either way, named so
+                        # it cannot be read as "checked and clean".
+                        "withheld_protected": withheld,
+                        "unprovenanced_concerns": unprovenanced,
                         "signals": rows,
                     }
                 )
@@ -1847,7 +2094,17 @@ def handle_signal_tool(
                     }
                 )
             row = ack_signal(sid, actor, state, reason, root=root)
-            return json.dumps({"ok": True, "row": row})
+            # THE RETURNED COPY IS GATED; THE LEDGER ROW IS NOT. The record
+            # keeps the true concern — it is the record — but this response is
+            # a display surface like any other, and review N1's exposure is a
+            # body reaching a reader, not a body reaching the disk.
+            shown, withheld, _unprov, protected_error = withhold_protected_concerns([row], root)
+            payload: dict[str, Any] = {"ok": True, "row": shown[0]}
+            if withheld or protected_error:
+                payload["withheld_protected"] = withheld
+            if protected_error:
+                payload["error"] = protected_error
+            return json.dumps(payload)
         return json.dumps({"ok": False, "error": f"unknown tool {name}"})
     except (ValueError, KeyError, PermissionError, LedgerUnreadable) as exc:
         return json.dumps({"ok": False, "error": str(exc)})
