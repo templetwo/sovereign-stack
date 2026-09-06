@@ -128,11 +128,20 @@ class TestToolIsRetiredButRetained:
     that prove it works are what make un-retiring a one-line edit instead of
     reviving code nothing has run in months."""
 
-    def test_not_published_and_the_call_names_the_replacement(self):
+    def test_not_published_and_the_refusal_names_what_was_lost(self):
+        """RECLASSIFIED 2026-09-06 from a fold to an outright retirement.
+
+        `handoff` was advertised as the replacement and is not one: called with
+        listing arguments it refuses "handoff note is empty", because it has no
+        history or list mode at all. The 2026-09-06 review executed both and
+        the refusal now says so rather than sending a caller to a tool that
+        cannot do the job.
+        """
         assert "handoff_archaeology" not in _tool_names()
-        assert server.RETIRED_TOOLS["handoff_archaeology"].replacement == "handoff"
-        with pytest.raises(ValueError, match="Use handoff instead"):
+        assert server.RETIRED_TOOLS["handoff_archaeology"].replacement is None
+        with pytest.raises(ValueError, match="It has no replacement") as exc:
             asyncio.run(server._dispatch_tool("handoff_archaeology", {}))
+        assert "no history or list mode" in str(exc.value)
 
     def test_the_retained_schema_still_exposes_its_parameters(self):
         """

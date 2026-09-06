@@ -798,15 +798,47 @@ POST_FIX_TOOLS: list[Tool] = [
     Tool(
         name="post_fix_verify",
         description=(
-            "Register a post-fix verification watch. Captures a named baseline of fix-relevant "
-            "probes and schedules re-samples to catch drift that passes immediate verification. "
-            "Emits a Nape honk if a later sample diverges from the baseline. Use after any fix "
-            "whose surface signal might shift (load-balancer drift, cache invalidation, "
-            "configuration re-read, flaky dependency). Probes support http / command / file_hash."
+            "The post-fix drift watch, whole lifecycle. mode='verify' (default) "
+            "registers a watch: captures a named baseline of fix-relevant probes and "
+            "schedules re-samples to catch drift that passes immediate verification, "
+            "honking on divergence. Probes support http / command / file_hash. "
+            "mode='status' inspects — no watch_id lists the active watches, a "
+            "watch_id returns that watch in full with baseline, samples and drift "
+            "history; add include_archived=true for completed and cancelled ones. "
+            "mode='resample' samples one watch now regardless of schedule. "
+            "mode='cancel' cancels and archives one, with a reason. The last three "
+            "replace watch_status / watch_resample / watch_cancel (retired "
+            "2026-09-06) — opening a watch you cannot then inspect or cancel is not "
+            "a lifecycle."
         ),
         inputSchema={
             "type": "object",
             "properties": {
+                "mode": {
+                    "type": "string",
+                    "enum": ["verify", "status", "resample", "cancel"],
+                    "default": "verify",
+                    "description": (
+                        "verify = create a watch (needs fix_description + probes). "
+                        "status = inspect. resample = sample now. cancel = cancel and "
+                        "archive (needs watch_id + reason)."
+                    ),
+                },
+                "watch_id": {
+                    "type": "string",
+                    "description": "status / resample / cancel. Omit on status to list all.",
+                },
+                "include_archived": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "mode='status' listing: include completed and cancelled.",
+                },
+                "reason": {"type": "string", "description": "mode='cancel'. Required."},
+                "force": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": "mode='resample'. Sample regardless of schedule.",
+                },
                 "fix_description": {
                     "type": "string",
                     "description": "What was fixed, in one line. Surfaces in honk observations.",
@@ -832,7 +864,14 @@ POST_FIX_TOOLS: list[Tool] = [
                     "description": f"Minutes-from-baseline at which to re-sample. Default {DEFAULT_SCHEDULE}.",
                 },
             },
-            "required": ["fix_description", "probes"],
+            # NO `required` BLOCK, AND THE WRITE-PATH INVARIANT MOVED INTO THE
+            # HANDLER RATHER THAN BEING DROPPED. The read/manage modes do not
+            # carry fix_description or probes, so a schema-level requirement
+            # would make them uncallable — but deleting the requirement without
+            # re-asserting it in code would trade a fold for a fail-open on the
+            # only write path here. mode='verify' still refuses a call missing
+            # either, and that refusal is tested. Same shape as the
+            # archive_exchange fold in 9c42290.
         },
     ),
     Tool(
@@ -897,6 +936,27 @@ async def handle_post_fix_tool(
     nape_daemon: Any = None,
 ) -> list[TextContent]:
     if name == "post_fix_verify":
+        # MODE ROUTING (review F9). The three watch_* names are retired and
+        # folded here; their handlers are unchanged and are reached through
+        # these modes, so the fold is a rename of the door, not a reimplement-
+        # ation of the room.
+        mode = str(arguments.get("mode") or "verify")
+        if mode not in ("verify", "status", "resample", "cancel"):
+            return [
+                TextContent(
+                    type="text",
+                    text=f"post_fix_verify: mode must be verify|status|resample|cancel, got {mode!r}",
+                )
+            ]
+        if mode != "verify":
+            folded = {
+                "status": "watch_status",
+                "resample": "watch_resample",
+                "cancel": "watch_cancel",
+            }[mode]
+            return await handle_post_fix_tool(
+                folded, arguments, session_id, nape_daemon=nape_daemon
+            )
         fix_description = (arguments.get("fix_description") or "").strip()
         probes = arguments.get("probes") or []
         if not fix_description:
@@ -958,7 +1018,9 @@ async def handle_post_fix_tool(
         watch_id = (arguments.get("watch_id") or "").strip()
         force = bool(arguments.get("force", True))
         if not watch_id:
-            return [TextContent(type="text", text="watch_resample requires watch_id")]
+            return [
+                TextContent(type="text", text="post_fix_verify(mode='resample') requires watch_id")
+            ]
         result = take_sample(watch_id, force=force, nape_daemon=nape_daemon)
         return [TextContent(type="text", text=json.dumps(result, indent=2))]
 
@@ -966,7 +1028,12 @@ async def handle_post_fix_tool(
         watch_id = (arguments.get("watch_id") or "").strip()
         reason = (arguments.get("reason") or "").strip()
         if not watch_id or not reason:
-            return [TextContent(type="text", text="watch_cancel requires watch_id and reason")]
+            return [
+                TextContent(
+                    type="text",
+                    text="post_fix_verify(mode='cancel') requires watch_id and reason",
+                )
+            ]
         result = cancel_watch(watch_id, reason)
         return [TextContent(type="text", text=json.dumps(result, indent=2))]
 

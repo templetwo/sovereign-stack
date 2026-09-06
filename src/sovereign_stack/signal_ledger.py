@@ -54,6 +54,33 @@ SOURCE_PRODUCER = {
 
 NTFY_ENV = "SIGNAL_LEDGER_NTFY"
 
+# ── THE FRESHNESS BOUND ─────────────────────────────────────────────────────
+#
+# A marker is a claim that a scan HAPPENED. It says nothing about when, unless
+# a reader is willing to call an old claim stale — and the branch as reviewed
+# was not: a legitimate marker stamped `scanned_at="2020-01-01T00:00:00Z"`
+# returned ingestion:"ok" with a straight face (review F1). "The last scan was
+# six years ago" and "the last scan was a minute ago" were the same health.
+#
+# The bound is WRITTEN INTO THE MARKER, not only read from here, so the reader
+# judges a scan by the contract its own writer declared rather than by whatever
+# this constant happens to be when the reader is deployed. Env override exists
+# so a slower scan cadence can declare itself without a code change.
+MARKER_MAX_AGE_ENV = "SIGNAL_LEDGER_MARKER_MAX_AGE"
+DEFAULT_MARKER_MAX_AGE_SECONDS = 3600
+
+
+def marker_max_age_seconds() -> int:
+    raw = os.environ.get(MARKER_MAX_AGE_ENV, "").strip()
+    if raw:
+        try:
+            value = int(raw)
+        except ValueError:
+            return DEFAULT_MARKER_MAX_AGE_SECONDS
+        if value > 0:
+            return value
+    return DEFAULT_MARKER_MAX_AGE_SECONDS
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
@@ -149,6 +176,16 @@ def _native_id_text(value: Any) -> str | None:
     return None
 
 
+def _text_or_none(value: Any, limit: int = 400) -> str | None:
+    """A short display string, or None. Never a repr of a non-string."""
+    if not isinstance(value, str):
+        return None
+    text = " ".join(value.split()).strip()
+    if not text:
+        return None
+    return text[:limit]
+
+
 def _validate_row(rec: Any) -> str | None:
     """None if the row is a usable ledger row, else why it is not.
 
@@ -180,6 +217,9 @@ def _validate_row(rec: Any) -> str | None:
         # permanently outside BOTH stale counts, so the oldest unacked thing
         # in the house is the one thing the staleness gauge cannot see.
         return "produced_at is not an ISO-8601 timestamp"
+    for optional in ("kind", "concern"):
+        if optional in rec and rec[optional] is not None and not isinstance(rec[optional], str):
+            return f"{optional} must be a string when present"
     if state in CLOSE_STATES:
         reason = rec.get("reason")
         if not isinstance(reason, str) or not reason.strip():
@@ -294,7 +334,30 @@ def load_latest(root: Path | None = None) -> dict[str, dict]:
 # the marker is validated like any other persisted row, and it is reconciled
 # against the ledger rather than trusted over it.
 
-MARKER_REQUIRED = ("scanned_at", "counts", "source_status")
+MARKER_REQUIRED = (
+    "scanned_at",
+    "counts",
+    "source_status",
+    # ── CUMULATIVE INTEGRITY EVIDENCE, added 2026-09-06 (review F1) ─────────
+    #
+    # The reviewed marker carried only per-scan deltas: `counts` is "opened by
+    # THIS scan". So an ordinary zero-delta rescan — the common case, nothing
+    # new — wrote counts of all zeros, and the reconciliation that was supposed
+    # to detect loss ("did the ledger shrink below what the scan claims?")
+    # became `0 > distinct`, which is false for every possible ledger. Truncate
+    # the ledger to zero bytes after that rescan and the heartbeat answered
+    # error:null, ingestion:"ok", total:0 for a ledger whose contents were gone.
+    # A detector whose sensitivity decays to zero on the ordinary path is not a
+    # detector.
+    #
+    # These three are about the WHOLE ledger as it stood when the scan
+    # finished, so they do not decay: they are re-verifiable against the file
+    # at any later read, by any reader, with no scan history.
+    "ledger_bytes",
+    "ledger_rows",
+    "ledger_sha256",
+    "max_age_seconds",
+)
 
 
 def _validate_marker(rec: Any) -> str | None:
@@ -319,6 +382,28 @@ def _validate_marker(rec: Any) -> str | None:
     for key, value in status.items():
         if not isinstance(key, str) or not isinstance(value, str) or not value.strip():
             return f"source_status[{key!r}] must be a non-empty string"
+    # EVERY SOURCE, OR IT IS NOT A COMPLETED SCAN. Review F1: `_validate_marker`
+    # accepted empty `counts` / `source_status` maps, and an empty map plus an
+    # empty ledger produces zero counts and no error — a marker that certifies
+    # a scan of nothing as a healthy scan of everything. `scan_all` always
+    # writes all seven sources, so a marker missing one did not come from a
+    # completed scan and must not be read as one.
+    missing_counts = [srcname for srcname in SOURCES if srcname not in counts]
+    if missing_counts:
+        return f"counts is not a completed scan: missing {missing_counts}"
+    missing_status = [srcname for srcname in SOURCES if srcname not in status]
+    if missing_status:
+        return f"source_status is not a completed scan: missing {missing_status}"
+    for field in ("ledger_bytes", "ledger_rows"):
+        value = rec.get(field)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            return f"{field} must be a non-negative integer"
+    sha = rec.get("ledger_sha256")
+    if not isinstance(sha, str) or len(sha) != 64:
+        return "ledger_sha256 must be a 64-character hex digest"
+    max_age = rec.get("max_age_seconds")
+    if isinstance(max_age, bool) or not isinstance(max_age, int) or max_age <= 0:
+        return "max_age_seconds must be a positive integer"
     return None
 
 
@@ -337,12 +422,74 @@ def _read_scan_marker(root: Path | None = None) -> tuple[dict | None, str | None
     return rec, None
 
 
+def _ledger_integrity(root: Path | None = None) -> tuple[int, int, str]:
+    """(bytes, non-blank rows, sha256 of exactly those bytes) for the ledger.
+
+    THE HASH IS OVER A PREFIX, AND THAT IS THE WHOLE DESIGN. The ledger is
+    append-only and a watch seat legitimately appends an ack a second after a
+    scan, so a whole-file digest recorded at scan time would mismatch on the
+    very next honest write and cry loss on every acknowledgement. What the scan
+    can certify is the file AS IT STOOD: the first ``ledger_bytes`` bytes
+    hashing to ``ledger_sha256``. A later read re-hashes exactly that prefix.
+    Appends are invisible to the check, which is correct; truncation and any
+    rewrite of history are not, which is the point.
+
+    A tail-only digest — the sha of the last row — was the tempting cheaper
+    version and does not work: it survives a file whose entire head was cut
+    away, which is the loss shape this exists to catch.
+    """
+    path = ledger_path(root)
+    if not path.exists():
+        return 0, 0, hashlib.sha256(b"").hexdigest()
+    data = path.read_bytes()
+    rows = sum(1 for line in data.decode("utf-8", "replace").splitlines() if line.strip())
+    return len(data), rows, hashlib.sha256(data).hexdigest()
+
+
+def _check_marker_integrity(marker: dict, root: Path | None = None) -> str | None:
+    """Re-verify the WHOLE ledger against a completed scan's snapshot.
+
+    Called on every read, not only after a scan that opened something — review
+    F1's reproduction is precisely a *zero-delta* rescan followed by a
+    truncation, i.e. the path where the old per-scan reconciliation had nothing
+    to say.
+    """
+    claimed_bytes = marker.get("ledger_bytes")
+    claimed_sha = marker.get("ledger_sha256")
+    path = ledger_path(root)
+    if not path.exists():
+        return "ledger_missing"
+    try:
+        data = path.read_bytes()
+    except OSError as exc:
+        return f"unreadable:{exc.__class__.__name__}"
+    if len(data) < claimed_bytes:
+        return f"ledger_truncated:marker certified {claimed_bytes} bytes, file holds {len(data)}"
+    prefix_sha = hashlib.sha256(data[:claimed_bytes]).hexdigest()
+    if prefix_sha != claimed_sha:
+        return (
+            "ledger_rewritten:the bytes the last scan certified no longer hash "
+            f"to {claimed_sha[:12]}…"
+        )
+    return None
+
+
+def _marker_staleness(marker: dict, now: datetime | None = None) -> str | None:
+    """None if the scan is inside its own declared freshness bound."""
+    scanned = _parse_dt(marker.get("scanned_at"))
+    if scanned is None:
+        return "scan_marker_unparseable"
+    bound = marker.get("max_age_seconds") or marker_max_age_seconds()
+    age = (now or datetime.now(timezone.utc)) - scanned
+    if age.total_seconds() > bound:
+        return (
+            f"scan_stale:last scan {int(age.total_seconds())}s ago exceeds the "
+            f"marker's own {bound}s freshness bound"
+        )
+    return None
+
+
 def _write_scan_marker(counts: dict, source_status: dict, root: Path | None = None) -> dict:
-    rec = {
-        "scanned_at": _now(),
-        "counts": counts,
-        "source_status": source_status,
-    }
     path = scan_marker_path(root)
     path.parent.mkdir(parents=True, exist_ok=True)
     # MATERIALISE THE LEDGER BEFORE THE MARKER EXISTS. Without this, a scan
@@ -355,6 +502,22 @@ def _write_scan_marker(counts: dict, source_status: dict, root: Path | None = No
     lpath.parent.mkdir(parents=True, exist_ok=True)
     if not lpath.exists():
         lpath.touch()
+    # MEASURE AFTER MATERIALISING, WRITE THE MARKER LAST. A scan that opened
+    # nothing legitimately leaves a zero-byte ledger, whose integrity evidence
+    # is (0, 0, sha256 of empty) — a real snapshot of a real empty file, not a
+    # special case. That is what keeps "scanned and empty" distinguishable from
+    # "scanned, then the ledger was lost": the latter has no file at all, and
+    # _check_marker_integrity calls it ledger_missing unconditionally.
+    ledger_bytes, ledger_rows, ledger_sha = _ledger_integrity(root)
+    rec = {
+        "scanned_at": _now(),
+        "counts": counts,
+        "source_status": source_status,
+        "ledger_bytes": ledger_bytes,
+        "ledger_rows": ledger_rows,
+        "ledger_sha256": ledger_sha,
+        "max_age_seconds": marker_max_age_seconds(),
+    }
     path.write_text(json.dumps(rec, sort_keys=True) + "\n", encoding="utf-8")
     return rec
 
@@ -408,8 +571,24 @@ def _row(
     closed_by: str | None,
     closed_at: str | None,
     updated_at: str,
+    kind: str | None = None,
+    concern: str | None = None,
 ) -> dict:
-    return {
+    """One ledger row.
+
+    ``kind`` and ``concern`` are the WHAT, added 2026-09-06 for the honk fold
+    (review F3). The reviewer's exact objection: the only surviving signal
+    reader returned aggregates with no ids and no bodies, so the replacement
+    for the retired honk reader could not supply the identifier its own ack
+    tool needs, let alone tell a watch seat what it was acking. A queue you
+    cannot read is not a queue.
+
+    They are DELIBERATELY OPTIONAL and outside ``REQUIRED_ROW_FIELDS``: every
+    row written before today lacks them, and a required field added late turns
+    the entire existing ledger corrupt on the next read — which is the failure
+    this module exists to prevent, self-inflicted.
+    """
+    row = {
         "signal_id": signal_id,
         "source": source,
         "produced_at": produced_at,
@@ -420,6 +599,11 @@ def _row(
         "closed_at": closed_at,
         "updated_at": updated_at,
     }
+    if kind is not None:
+        row["kind"] = kind
+    if concern is not None:
+        row["concern"] = concern
+    return row
 
 
 def open_signal(
@@ -429,6 +613,8 @@ def open_signal(
     produced_at: str,
     owner: str = "watch-2/3",
     root: Path | None = None,
+    kind: str | None = None,
+    concern: str | None = None,
 ) -> dict | None:
     """Idempotent open: skip if a row already exists for this id.
 
@@ -465,6 +651,8 @@ def open_signal(
                 closed_by=None,
                 closed_at=None,
                 updated_at=now,
+                kind=_text_or_none(kind),
+                concern=_text_or_none(concern),
             ),
         )
 
@@ -472,7 +660,32 @@ def open_signal(
 def _normalise_actor(actor: Any) -> str:
     if not isinstance(actor, str) or not actor.strip():
         raise ValueError("actor must be a non-empty string")
-    return actor.strip()
+    text = actor.strip()
+    # A NAMESPACE WITH NOTHING AFTER IT IS NOT AN IDENTITY. The reviewed
+    # dispatch built `f"seat:{spiral_state.session_id}"` unconditionally, so a
+    # missing session produced the literal closers "seat:None" and "seat:" and
+    # both were accepted as authorship (review F5). Refused here as well as at
+    # the dispatch, because this is the layer that writes the row.
+    if text.endswith(":") or text.casefold() in ("seat:none", "seat:null", "none", "null"):
+        raise ValueError(f"actor is not an identity: {actor!r}")
+    return text
+
+
+def _actor_identity(actor: str) -> str:
+    """The identity inside a namespaced actor label. ``seat:daemon`` -> ``daemon``.
+
+    THIS IS WHAT MAKES PRODUCER SEPARATION COMPARE LIKE WITH LIKE (review F5).
+    Producer labels are bare (``daemon``, ``nape``, ``watchman``); seat labels
+    are namespaced. Comparing the two whole strings meant `seat:daemon` never
+    equalled `daemon`, so the check could not refuse the one case it exists
+    for — the reviewer closed a halt as `seat:daemon` through the real
+    dispatcher with `ok:true`. Stripping one leading namespace before the
+    comparison is what makes the two comparable at all.
+    """
+    head, sep, tail = actor.partition(":")
+    if sep and tail.strip():
+        return tail.strip()
+    return actor
 
 
 def ack_signal(
@@ -513,8 +726,13 @@ def ack_signal(
     if not prev:
         raise KeyError(f"unknown signal_id {signal_id}")
     producer = SOURCE_PRODUCER.get(prev.get("source", ""), "")
-    if producer and actor.casefold() == producer.casefold():
-        raise PermissionError("producer cannot close its own signal")
+    if producer:
+        candidates = {actor.casefold(), _actor_identity(actor).casefold()}
+        if producer.casefold() in candidates:
+            raise PermissionError(
+                f"producer cannot close its own signal: {actor!r} is the "
+                f"{prev.get('source')!r} producer {producer!r}"
+            )
     now = _now()
     return _append(
         _row(
@@ -527,6 +745,12 @@ def ack_signal(
             closed_by=actor,
             closed_at=now,
             updated_at=now,
+            # CARRIED FORWARD, not re-derived. The ledger is append-only and
+            # the latest row wins, so a close that dropped `kind`/`concern`
+            # would erase what the signal was ABOUT at the moment it was
+            # acted on — leaving an audit trail of ids with no bodies.
+            kind=_text_or_none(prev.get("kind")),
+            concern=_text_or_none(prev.get("concern")),
         ),
         root,
     )
@@ -552,6 +776,11 @@ def _source_status(root: Path | None = None) -> tuple[dict[str, str], list[str]]
     is the whole of reviewer finding 3: an absent guardian became a healthy
     guardian zero on the heartbeat, so the panel that exists to notice a
     problem was quietest exactly when it could not see.
+
+    ``unknown`` — no marker at all, or a marker predating a source — is
+    UNMEASURED, not ok. It used to be waved through by the heartbeat's
+    ``not in ("ok", "unknown")`` test, which is how "nobody has ever scanned"
+    rendered as seven healthy zeros.
     """
     marker, _err = _read_scan_marker(root)
     declared = (marker or {}).get("source_status") or {}
@@ -561,6 +790,21 @@ def _source_status(root: Path | None = None) -> tuple[dict[str, str], list[str]]
 
 
 def summarize(root: Path | None = None, *, now: datetime | None = None) -> dict:
+    """Fold the ledger into counts — with NULLS where nothing was measured.
+
+    Review F2: this function returned numbers built only from the rows it
+    could read, and every consumer then published those numbers as the
+    answer. A source that could not be read, a source nothing had ever
+    scanned, and a source with genuinely nothing open all produced ``0``.
+    Anthony's contract for this field is "never report zero on error", and a
+    zero that means three different things cannot honour it.
+
+    So the nulls are produced HERE, at the fold, rather than patched on by
+    each caller. The reviewer found the tool result rebuilding its own numbers
+    from this function and discarding the heartbeat's nulls on the way out;
+    that is only possible while the honest shape lives downstream of the fold
+    instead of inside it.
+    """
     now = now or datetime.now(timezone.utc)
     state = load_state(root)
     latest = state.latest
@@ -590,25 +834,62 @@ def summarize(root: Path | None = None, *, now: datetime | None = None) -> dict:
             if age >= timedelta(days=1):
                 stale_24h += 1
                 by_source[src]["stale_24h"] += 1
+
+    # ── WHAT WAS NOT MEASURED, AND THEREFORE CANNOT BE COUNTED ─────────────
+    corrupt = state.corrupt_count
+    unmeasured = sorted(degraded)
+    for src, facts in by_source.items():
+        # A source whose read failed contributes an unknown number of open
+        # signals, not zero of them.
+        if source_status.get(src, "unknown") != "ok" or corrupt:
+            facts["open"] = None
+            facts["stale_24h"] = None
+            facts["stale_7d"] = None
+    # CORRUPT ROWS BLIND EVERY SOURCE, not just their own. A row rejected for
+    # `source must be one of ...` has no trustworthy source field to attribute
+    # the loss to — deciding which bucket it would have fallen in requires
+    # believing the row this validator just refused to believe.
+    blind = bool(unmeasured) or bool(corrupt)
     return {
-        "total": total,
-        "stale_24h": stale_24h,
-        "stale_7d": stale_7d,
+        "total": None if blind else total,
+        "stale_24h": None if blind else stale_24h,
+        "stale_7d": None if blind else stale_7d,
+        # THE FLOOR, NAMED AS A FLOOR. `total` is the honest answer to "how
+        # many open signals are there" and is null whenever that cannot be
+        # answered. These three are the answer to a different, narrower
+        # question — "how many did the rows I could read account for" — and
+        # they are only safe because their name says so. Publishing a floor
+        # under the name `total` is precisely the fail-open being closed here.
+        "open_measured": total,
+        "stale_24h_measured": stale_24h,
+        "stale_7d_measured": stale_7d,
         "by_source": by_source,
-        "corrupt_rows": state.corrupt_count,
+        "corrupt_rows": corrupt,
         "corrupt": state.corrupt[:10],
         "source_status": source_status,
         "sources_degraded": degraded,
+        "unmeasured": unmeasured,
     }
 
 
 def _blind_field(error: str, ingestion: str, scanned_at: str | None = None) -> dict:
-    """The shape for "we could not measure". Every count is None, never 0."""
+    """The shape for "we could not measure ANYTHING". Every count is None.
+
+    ``measured: False`` is the flag that separates this from a PARTIAL read.
+    They are different facts and the tool surface has to answer them
+    differently: a ledger that cannot be read at all is a refusal, while a
+    ledger that was read with one source unavailable still has rows a watch
+    seat must be able to list and ack — it just has no honest TOTAL. Collapsing
+    the two into one boolean is how "the guardian probe is down" would come to
+    mean "you may not see your honks".
+    """
     return {
         "error": error,
         "ingestion": ingestion,
         "scanned_at": scanned_at,
+        "measured": False,
         "total": None,
+        "by_source_detail": None,
         "stale_24h": None,
         "stale_7d": None,
         "by_source": None,
@@ -618,9 +899,16 @@ def _blind_field(error: str, ingestion: str, scanned_at: str | None = None) -> d
     }
 
 
-def heartbeat_field(root: Path | None = None) -> dict:
-    """Heartbeat/dashboard payload. Unreadable, unscanned, or partially
+def heartbeat_field(root: Path | None = None, *, scan: bool = False) -> dict:
+    """Heartbeat/dashboard payload. Unreadable, unscanned, stale, or partially
     corrupt is NEVER a healthy zero.
+
+    ``scan=True`` runs ingestion first (review F4: "ingestion must run on
+    read"). It is OPT-IN rather than the default because
+    ``dashboard_web.build_snapshot`` calls this on a 3-second console poll,
+    and a full source sweep on that clock would be a write amplification, not
+    a health check. The two callers the review named — the native heartbeat
+    tool and ``signals_summary`` — pass it.
 
     This function MUST NOT RAISE. ``dashboard_web.build_snapshot`` calls it
     with no section guard, so an exception here takes the whole console down
@@ -629,6 +917,19 @@ def heartbeat_field(root: Path | None = None) -> dict:
     is the reason the row validator can afford to be strict.
     """
     try:
+        if scan:
+            scan_error = ensure_scanned(root)
+            if scan_error:
+                # FIRST, BEFORE EVERY OTHER JUDGEMENT. The marker on disk may
+                # still be fresh and intact from the previous sweep, and
+                # serving its counts would publish the last successful scan's
+                # health as this one's — "stale but ok", the shape review F4
+                # names. Nothing downstream is trustworthy once ingestion has
+                # failed, so nothing downstream gets to speak.
+                marker_now, _ = _read_scan_marker(root)
+                return _blind_field(
+                    f"scan_failed:{scan_error}", "error", (marker_now or {}).get("scanned_at")
+                )
         path = ledger_path(root)
         marker, marker_error = _read_scan_marker(root)
         if marker_error:
@@ -642,40 +943,79 @@ def heartbeat_field(root: Path | None = None) -> dict:
                 # means the ledger was LOST, unconditionally — no count.
                 return _blind_field("ledger_missing", "error", marker.get("scanned_at"))
             return _blind_field("not_scanned", "never")
+        # LOAD BEFORE JUDGING THE MARKER. A malformed ledger is an ERROR
+        # whether or not a scan ever ran, and answering "not_scanned" for a
+        # file full of broken JSON tells the reader the wrong thing to go fix.
         state = load_state(root)
+        if marker is None:
+            # A ledger with no completed scan behind it. The rows are real, but
+            # nothing certifies that the SOURCES were read, so no count here is
+            # a measurement of the house — only of this file.
+            #
+            # corrupt_rows SURVIVES the blind return. It is a measured fact
+            # about the file we just parsed, and blanking it would hide a real
+            # defect behind a different one — the reader would see
+            # "not_scanned" and go run a scan, never learning that the ledger
+            # it was about to certify has unreadable rows in it.
+            unscanned = _blind_field("not_scanned", "never")
+            unscanned["corrupt_rows"] = state.corrupt_count
+            corrupt_error = state.error()
+            if corrupt_error:
+                unscanned["error"] = f"not_scanned; {corrupt_error}"
+            return unscanned
+
+        # ── THE MARKER IS RE-VERIFIED AGAINST THE WHOLE LEDGER, EVERY READ ──
+        # Not against the last scan's deltas. This is review F1: a zero-delta
+        # rescan used to disarm the only loss check there was.
+        integrity_error = _check_marker_integrity(marker, root)
+        if integrity_error:
+            return _blind_field(integrity_error, "error", marker.get("scanned_at"))
+        stale_error = _marker_staleness(marker)
+        if stale_error:
+            # STALE IS AN ERROR STATE, NOT A FOOTNOTE. A six-year-old marker
+            # returned ingestion:"ok" on the reviewed tip.
+            return _blind_field(stale_error, "stale", marker.get("scanned_at"))
         summary = summarize(root)
         error = None
-        ingestion = "ok" if marker else "direct"
-        if marker:
-            claimed = sum((marker.get("counts") or {}).values())
-            # Lower-bound reconciliation. counts are "opened by THIS scan",
-            # and the ledger accumulates across scans, so the ledger can only
-            # ever hold MORE distinct ids than one scan claims to have opened.
-            # Holding fewer is arithmetic proof that rows are gone.
-            distinct = len(state.latest) + state.corrupt_count
-            if claimed > distinct:
-                # The marker says the scan opened more signals than the
-                # ledger can account for. Rows went missing between the two.
-                error = f"ledger_shrank:marker claims {claimed} opened, ledger holds {distinct}"
-                ingestion = "error"
-            elif summary["sources_degraded"]:
-                ingestion = "degraded"
+        ingestion = "ok"
+        claimed = sum((marker.get("counts") or {}).values())
+        # Lower-bound reconciliation, KEPT as a second, independent check.
+        # counts are "opened by THIS scan", and the ledger accumulates across
+        # scans, so the ledger can only ever hold MORE distinct ids than one
+        # scan claims to have opened. Holding fewer is arithmetic proof that
+        # rows are gone. Weak on its own (see MARKER_REQUIRED) — but it costs
+        # nothing and catches a case the byte-prefix check cannot: rows lost
+        # from a ledger that was then re-grown to the same length.
+        distinct = len(state.latest) + state.corrupt_count
+        if claimed > distinct:
+            error = f"ledger_shrank:marker claims {claimed} opened, ledger holds {distinct}"
+            ingestion = "error"
+        elif summary["unmeasured"]:
+            ingestion = "degraded"
         corrupt_error = state.error()
         if corrupt_error:
-            # Counts still stand — the valid rows were folded and the corrupt
-            # ones never displaced them — but the field can never read clean.
             error = f"{error}; {corrupt_error}" if error else corrupt_error
+            ingestion = "error" if ingestion != "error" else ingestion
+        if summary["unmeasured"] and not error:
+            error = "unmeasured_sources:" + ",".join(summary["unmeasured"])
         return {
             "error": error,
             "ingestion": ingestion,
-            "scanned_at": (marker or {}).get("scanned_at"),
+            "scanned_at": marker.get("scanned_at"),
+            "measured": True,
+            # THE NULLS COME STRAIGHT FROM summarize(). Nothing here recomputes
+            # a count from rows it happens to hold — that recomputation is what
+            # the reviewer caught the tool surface doing.
             "total": summary["total"],
             "stale_24h": summary["stale_24h"],
             "stale_7d": summary["stale_7d"],
-            "by_source": {
-                k: (None if summary["source_status"].get(k) not in ("ok", "unknown") else v["open"])
-                for k, v in summary["by_source"].items()
-            },
+            "by_source": {k: v["open"] for k, v in summary["by_source"].items()},
+            # THE NESTED VIEW, CARRIED ON THE SAME FOLD. `signals_summary`
+            # needs stale windows and oldest_unacked per source; the reviewer
+            # caught it calling summarize() a second time to get them and
+            # publishing that second fold's raw numbers, which threw away every
+            # null computed here. One fold, both shapes, no way to diverge.
+            "by_source_detail": summary["by_source"],
             "corrupt_rows": summary["corrupt_rows"],
             "source_status": summary["source_status"],
             "sources_degraded": summary["sources_degraded"],
@@ -736,7 +1076,17 @@ def scan_honks(root: Path, owner: str = "watch-2/3") -> ScanResult:
             continue
         produced = rec.get("timestamp") or _now()
         if open_signal(
-            source="honk", native_id=hid, produced_at=str(produced), owner=owner, root=root
+            source="honk",
+            native_id=hid,
+            produced_at=str(produced),
+            owner=owner,
+            root=root,
+            # THE HONK FOLD'S PAYLOAD (review F3). `pattern` is what kind of
+            # drift Nape saw; `observation` is the concern in words. Without
+            # these two the ledger holds an id and a count, and the surviving
+            # reader cannot tell a watch seat what it is being asked to ack.
+            kind=_text_or_none(rec.get("pattern")),
+            concern=_text_or_none(rec.get("observation")),
         ):
             n += 1
         if hid in ack_ids:
@@ -768,7 +1118,13 @@ def scan_watchman(root: Path, owner: str = "watch-2/3") -> ScanResult:
             continue
         produced = rec.get("started_at") or rec.get("spooled_at") or _now()
         if open_signal(
-            source="watchman", native_id=sid, produced_at=str(produced), owner=owner, root=root
+            source="watchman",
+            native_id=sid,
+            produced_at=str(produced),
+            owner=owner,
+            root=root,
+            kind="sweep",
+            concern=_text_or_none(rec.get("summary") or rec.get("note")),
         ):
             n += 1
     status = spool.status if spool.status != "absent" else "ok"
@@ -805,6 +1161,8 @@ def scan_proposals(root: Path, owner: str = "watch-2/3") -> ScanResult:
                 produced_at=str(produced),
                 owner=owner,
                 root=root,
+                kind=_text_or_none(status) or "pending",
+                concern=_text_or_none(rec.get("tool") or rec.get("summary")),
             ):
                 n += 1
             sid = signal_id_for("proposal", key)
@@ -835,7 +1193,13 @@ def scan_halts(root: Path, owner: str = "watch-2/3") -> ScanResult:
         return ScanResult(0, "ok")
     for f in sorted(d.glob("*.md")):
         if open_signal(
-            source="halt", native_id=f.name, produced_at=_iso_from_mtime(f), owner=owner, root=root
+            source="halt",
+            native_id=f.name,
+            produced_at=_iso_from_mtime(f),
+            owner=owner,
+            root=root,
+            kind="halt",
+            concern=_text_or_none(f.name),
         ):
             n += 1
     return ScanResult(n, "ok")
@@ -853,6 +1217,8 @@ def scan_decisions(root: Path, owner: str = "watch-2/3") -> ScanResult:
             produced_at=_iso_from_mtime(f),
             owner=owner,
             root=root,
+            kind="metabolize",
+            concern=_text_or_none(f.name),
         ):
             n += 1
     return ScanResult(n, "ok")
@@ -941,7 +1307,13 @@ def scan_guardian(root: Path, owner: str = "watch-2/3", provider=None) -> ScanRe
             skipped += 1
             continue
         if open_signal(
-            source="guardian", native_id=native, produced_at=_now(), owner=owner, root=root
+            source="guardian",
+            native_id=native,
+            produced_at=_now(),
+            owner=owner,
+            root=root,
+            kind="issue",
+            concern=_text_or_none(native),
         ):
             n += 1
     return ScanResult(n, _degrade("ok", skipped), skipped)
@@ -964,45 +1336,120 @@ def _thread_native_id(rec: dict, shard: Path, index: int, rel: str | None = None
 
 
 def scan_threads(root: Path, owner: str = "watch-2/3") -> ScanResult:
-    """One signal per thread_id across nested non-hidden shards. Latest record wins."""
+    """One signal per thread id ACROSS every shard. Latest timestamp wins.
+
+    TWO DEFECTS FIXED HERE, and they are different animals.
+
+    F7 (cross-shard state). ``latest_by_id`` used to be re-created inside the
+    per-shard loop, so "latest record wins" held only WITHIN a shard: a thread
+    resolved in ``a.jsonl`` on August 1 and re-opened in ``b.jsonl`` on
+    September 1 was acted on by whichever shard the directory walk reached
+    last, and in the reviewer's fixture the obsolete August terminal state won
+    permanently — a rescan is idempotent, so nothing ever repaired it. THE
+    POLICY, stated once and applied before any ledger mutation: across all
+    shards, the record with the LATEST parseable ``timestamp`` is the thread's
+    state; ties fall back to walk order, which is stable under ``sorted``.
+    That is why this is now two passes. Deciding state while mutating is what
+    made the old bug expressible at all.
+
+    F2 (status propagation). The read status of each shard was dropped on the
+    floor — only ``bad_lines`` was accumulated — so a chmod-000 shard scanned
+    as ``thread:"ok"`` and the heartbeat reported a healthy zero for a source
+    it could not open. Every non-ok status is now carried into the marker.
+    """
     d = root / "chronicle" / "open_threads"
     if not d.is_dir():
         return ScanResult(0, "ok")
-    n = 0
     degraded = 0
+    unreadable: list[str] = []
+    # PASS 1 — decide, mutating nothing.
+    latest_by_id: dict[str, tuple[dict, Path, datetime | None]] = {}
     for f in iter_thread_shards(d):
         read = _read_source_jsonl(f)
         degraded += read.bad_lines
+        if read.status not in ("ok", "absent"):
+            try:
+                label = str(f.relative_to(d))
+            except ValueError:
+                label = str(f)
+            unreadable.append(f"{label}:{read.status}")
         try:
             rel = str(f.relative_to(d))
         except ValueError:
             rel = str(f)
-        latest_by_id: dict[str, tuple[dict, Path]] = {}
         for i, rec in enumerate(read.rows):
             native = _thread_native_id(rec, f, i, rel)
-            latest_by_id[native] = (rec, f)
-        for native, (rec, shard) in latest_by_id.items():
-            produced = rec.get("timestamp") or _iso_from_mtime(shard)
-            if open_signal(
-                source="thread",
-                native_id=native,
-                produced_at=str(produced),
-                owner=owner,
+            when = _parse_dt(rec.get("timestamp"))
+            prev = latest_by_id.get(native)
+            if prev is None:
+                latest_by_id[native] = (rec, f, when)
+                continue
+            _prev_rec, _prev_shard, prev_when = prev
+            # An unparseable timestamp never displaces a dated record; a dated
+            # record always displaces an undated one. Two undated records fall
+            # back to walk order (last wins), which is the old behaviour and
+            # the only ordering available.
+            if when is None and prev_when is not None:
+                continue
+            if when is not None and prev_when is not None and when < prev_when:
+                continue
+            latest_by_id[native] = (rec, f, when)
+
+    # PASS 2 — act on the decided state.
+    n = 0
+    for native, (rec, shard, _when) in latest_by_id.items():
+        produced = rec.get("timestamp") or _iso_from_mtime(shard)
+        if open_signal(
+            source="thread",
+            native_id=native,
+            produced_at=str(produced),
+            owner=owner,
+            root=root,
+            kind="open_thread",
+            concern=_text_or_none(rec.get("question")),
+        ):
+            n += 1
+        sid = signal_id_for("thread", native)
+        resolved = rec.get("resolved") is True or rec.get("status") == "resolved"
+        latest = load_latest(root).get(sid)
+        if not latest:
+            continue
+        if resolved and latest.get("state") == "open":
+            ack_signal(
+                sid,
+                actor="watch-2/3",
+                state="acted",
+                reason="thread resolved",
                 root=root,
-            ):
-                n += 1
-            if rec.get("resolved") is True or rec.get("status") == "resolved":
-                sid = signal_id_for("thread", native)
-                latest = load_latest(root).get(sid)
-                if latest and latest.get("state") == "open":
-                    ack_signal(
-                        sid,
-                        actor="watch-2/3",
-                        state="acted",
-                        reason="thread resolved",
-                        root=root,
-                    )
-    status = "ok" if not degraded else f"degraded:{degraded} unparseable lines"
+            )
+        elif not resolved and latest.get("state") != "open":
+            # THE HALF THE OLD CODE HAD NO WORD FOR. It could only ever close a
+            # signal, so once an obsolete terminal state landed there was no
+            # path back. A thread whose latest record across all shards is OPEN
+            # must not sit in the ledger as acted; re-open it, and say why in
+            # the row's own reason so the reversal is legible in the audit
+            # trail rather than looking like a duplicate.
+            _append(
+                _row(
+                    signal_id=sid,
+                    source="thread",
+                    produced_at=str(produced),
+                    owner=latest.get("owner") or owner,
+                    state="open",
+                    reason=None,
+                    closed_by=None,
+                    closed_at=None,
+                    updated_at=_now(),
+                    kind="open_thread",
+                    concern=_text_or_none(rec.get("question")),
+                ),
+                root,
+            )
+    status = "ok"
+    if unreadable:
+        status = "unreadable:" + "; ".join(sorted(unreadable)[:5])
+    elif degraded:
+        status = f"degraded:{degraded} unparseable lines"
     return ScanResult(n, status, degraded)
 
 
@@ -1039,6 +1486,52 @@ def scan_all(root: Path | None = None, owner: str = "watch-2/3", guardian_provid
         source_status[name] = result.status
     _write_scan_marker(counts, source_status, r)
     return {"counts": counts, "source_status": source_status}
+
+
+def ensure_scanned(
+    root: Path | None = None,
+    owner: str = "watch-2/3",
+    guardian_provider=None,
+    *,
+    now: datetime | None = None,
+) -> str | None:
+    """INGESTION ON READ. Returns None on success, an error string on failure.
+
+    Review F4: ``scan_all`` was labelled an "Owned ingestion path" in its own
+    docstring and was never called by anything — a library function nobody
+    invoked, so the counts every reader trusted were only ever as current as
+    the last time a human ran a scan by hand. Searches of src/, clients/,
+    scripts/, the bridge and LaunchAgents found no caller at all.
+
+    THE FIX IS NOT A DAEMON, DELIBERATELY. Installing a launchd worker is a
+    system change and Anthony's gate. What a release CAN own is that the two
+    surfaces a seat actually reads through — the native heartbeat and
+    ``signals_summary`` — refresh before they answer. Ingestion is then
+    guaranteed to be exactly as fresh as the last read, which for a watch
+    surface is the property that matters.
+
+    IT IS INCREMENTAL BY CONSTRUCTION, not by a flag: ``open_signal`` is
+    idempotent on the signal id, so a rescan of unchanged sources appends
+    nothing. The scan is skipped entirely while the existing marker is inside
+    its own freshness bound, so a burst of reads costs one sweep, not N.
+
+    A FAILURE IS RETURNED, NEVER SWALLOWED. ``heartbeat_field`` turns it into
+    an explicit error rather than serving the previous marker's counts, which
+    would be "stale but ok" — the exact shape the review named.
+    """
+    try:
+        marker, marker_error = _read_scan_marker(root)
+        if (
+            marker is not None
+            and not marker_error
+            and _marker_staleness(marker, now) is None
+            and _check_marker_integrity(marker, root) is None
+        ):
+            return None
+        scan_all(root, owner, guardian_provider)
+        return None
+    except Exception as exc:  # noqa: BLE001 — reported, not raised; see docstring
+        return f"{exc.__class__.__name__}: {exc}"
 
 
 # ── escalation (text only; send defaults OFF) ───────────────────────────────
@@ -1084,22 +1577,43 @@ SIGNAL_TOOLS = [
     Tool(
         name="signals_summary",
         description=(
-            "Read-only watch-seat signal ledger summary: unacked total, "
-            "stale_24h, stale_7d, per-source open counts, per-source "
-            "availability, and any corrupt ledger rows. An unreadable ledger, "
-            "an unscanned one, or a source that could not be measured returns "
-            "error / null, never a zero. Optional source filter — "
-            "source='honk' replaces nape_honks and nape_honks_with_history "
-            "(retired 2026-09-06)."
+            "The watch seat's queue. mode='summary' (default) returns unacked "
+            "total, stale_24h, stale_7d, per-source open counts and per-source "
+            "availability; mode='list' returns the SIGNALS THEMSELVES — "
+            "signal_id, source, kind, opened_at, owner, state and the concern "
+            "text — which is what you pass to signal_ack. Optional source "
+            "filter. Ingestion runs before the read, so the counts are current. "
+            "An unreadable ledger, an unscanned or stale one, or a source that "
+            "could not be measured returns error / null, never a zero. "
+            "signals_summary(mode='list', source='honk') replaces nape_honks "
+            "and nape_honks_with_history (retired 2026-09-06)."
         ),
         inputSchema={
             "type": "object",
             "properties": {
+                "mode": {
+                    "type": "string",
+                    "enum": ["summary", "list"],
+                    "default": "summary",
+                    "description": (
+                        "summary = counts. list = the individual open signals, "
+                        "with their ids and concern text."
+                    ),
+                },
                 "source": {
                     "type": "string",
                     "enum": list(SOURCES),
-                    "description": "Restrict the summary to one signal source.",
-                }
+                    "description": "Restrict to one signal source.",
+                },
+                "state": {
+                    "type": "string",
+                    "enum": list(STATES),
+                    "description": "mode='list' only. Defaults to open signals.",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "mode='list' only. Rows to return (default 50, max 500).",
+                },
             },
         },
     ),
@@ -1108,11 +1622,11 @@ SIGNAL_TOOLS = [
         description=(
             "Close or acknowledge one signal. state is acknowledged|acted|dismissed. "
             "acted and dismissed require a non-blank reason. closed_by is stamped "
-            "from the caller identity the SERVER resolved — there is no parameter "
-            "for it, because a closer you can type is a closer you can forge. The "
-            "producer of a source cannot close its own signal. Replaces "
-            "comms_acknowledge (retired 2026-09-06): acknowledging a signal is the "
-            "same act."
+            "from the caller identity the DISPATCH resolved — actor_seat is filled "
+            "in by the bridge from the verified seat identity, not composed by the "
+            "caller, and a call with no resolvable actor is refused rather than "
+            "stamped 'seat:None'. The producer of a source cannot close its own "
+            "signal. Get the signal_id from signals_summary(mode='list')."
         ),
         inputSchema={
             "type": "object",
@@ -1120,6 +1634,16 @@ SIGNAL_TOOLS = [
                 "signal_id": {"type": "string"},
                 "state": {"type": "string", "enum": list(CLOSE_STATES)},
                 "reason": {"type": "string"},
+                "actor_seat": {
+                    "type": "string",
+                    "description": (
+                        "THE BRIDGE FILLS THIS IN from the verified seat identity "
+                        "(same convention as source_instance on open_thread). A "
+                        "seat calling natively may omit it and the server resolves "
+                        "its own; a value here never overrides a dispatch-resolved "
+                        "identity, and an empty one is a refusal, not a default."
+                    ),
+                },
             },
             "required": ["signal_id", "state"],
         },
@@ -1127,7 +1651,61 @@ SIGNAL_TOOLS = [
 ]
 
 SIGNAL_TOOL_TIERS = {"signals_summary": "core", "signal_ack": "core"}
-SIGNAL_TOOL_INTENTS = {"signals_summary": "read", "signal_ack": "govern"}
+# INTENT: signal_ack is "write", NOT "govern" (HQ's ruling, 2026-09-06,
+# review F4). Acknowledging a signal is the watch seat's ordinary operational
+# act — the thing the seat exists to do. Anthony's governance list is laws,
+# policies, seat permissions, ring placement and deletes; a honk being marked
+# read is none of those. Classifying it govern was what left the designated
+# watch seat with no closure path at all: the canonical rings do not admit a
+# govern-intent tool and the bridge denies it to Studio seats.
+SIGNAL_TOOL_INTENTS = {"signals_summary": "read", "signal_ack": "write"}
+
+LIST_DEFAULT_LIMIT = 50
+LIST_MAX_LIMIT = 500
+
+
+def list_signals(
+    root: Path | None = None,
+    *,
+    source: str | None = None,
+    state: str = "open",
+    limit: int = LIST_DEFAULT_LIMIT,
+) -> list[dict]:
+    """The individual signals, oldest first. What a watch seat acks from.
+
+    Review F3: the honk fold pointed callers at a reader that returned
+    aggregates only — "no ids, no bodies" — so the replacement could not
+    supply the identifier that ``signal_ack`` (or the surviving ``nape_ack``)
+    requires, and a seat could see that three honks existed without being able
+    to see or close one. Counts are a dashboard; this is the queue.
+
+    Corrupt rows are NOT listed: a row that failed validation has no
+    trustworthy id to hand back. Their count travels in the envelope instead,
+    so a partial list can never read as a complete one.
+    """
+    ledger = load_state(root)
+    rows = []
+    for rec in ledger.latest.values():
+        if state and rec.get("state") != state:
+            continue
+        if source and rec.get("source") != source:
+            continue
+        rows.append(
+            {
+                "signal_id": rec.get("signal_id"),
+                "source": rec.get("source"),
+                "kind": rec.get("kind"),
+                "opened_at": rec.get("produced_at"),
+                "owner": rec.get("owner"),
+                "state": rec.get("state"),
+                "concern": rec.get("concern"),
+                "reason": rec.get("reason"),
+                "closed_by": rec.get("closed_by"),
+            }
+        )
+    rows.sort(key=lambda r: (r.get("opened_at") or "", r.get("signal_id") or ""))
+    bounded = max(1, min(int(limit or LIST_DEFAULT_LIMIT), LIST_MAX_LIMIT))
+    return rows[:bounded]
 
 
 def handle_signal_tool(
@@ -1147,27 +1725,83 @@ def handle_signal_tool(
     arguments = arguments or {}
     try:
         if name == "signals_summary":
-            field = heartbeat_field(root)
+            # INGESTION RUNS ON READ (F4). Cheap and idempotent; skipped
+            # entirely while the marker is inside its freshness bound.
+            field = heartbeat_field(root, scan=True)
             source_filter = arguments.get("source")
-            if field.get("error"):
+            if source_filter and source_filter not in SOURCES:
+                return json.dumps({"ok": False, "error": f"source must be one of {list(SOURCES)}"})
+            if not field.get("measured"):
+                # FULLY BLIND: no ledger, no scan, a stale or rewritten one.
+                # Fail closed and say why; there is nothing honest to list.
                 return json.dumps(
                     {
                         "ok": False,
                         "error": field["error"],
                         "ingestion": field.get("ingestion"),
+                        "scanned_at": field.get("scanned_at"),
                     }
                 )
-            summary = summarize(root)
-            if source_filter:
-                if source_filter not in SOURCES:
+            mode = str(arguments.get("mode") or "summary")
+            if mode not in ("summary", "list"):
+                return json.dumps({"ok": False, "error": "mode must be 'summary' or 'list'"})
+            if mode == "list":
+                row_state = str(arguments.get("state") or "open")
+                if row_state not in STATES:
                     return json.dumps(
-                        {"ok": False, "error": f"source must be one of {list(SOURCES)}"}
+                        {"ok": False, "error": f"state must be one of {list(STATES)}"}
                     )
-                summary["by_source"] = {source_filter: summary["by_source"][source_filter]}
-                summary["source_status"] = {
-                    source_filter: summary["source_status"].get(source_filter, "unknown")
+                rows = list_signals(
+                    root,
+                    source=source_filter,
+                    state=row_state,
+                    limit=arguments.get("limit") or LIST_DEFAULT_LIMIT,
+                )
+                return json.dumps(
+                    {
+                        "ok": True,
+                        "mode": "list",
+                        # PARTIAL READS SAY SO. A non-null error beside ok:true
+                        # means "these rows are real, and something else could
+                        # not be measured" — never "all clear".
+                        "error": field.get("error"),
+                        "ingestion": field.get("ingestion"),
+                        "scanned_at": field.get("scanned_at"),
+                        "source": source_filter,
+                        "state": row_state,
+                        "count": len(rows),
+                        "corrupt_rows": field.get("corrupt_rows"),
+                        "source_status": field.get("source_status"),
+                        "signals": rows,
+                    }
+                )
+            # SUMMARY IS THE HEARTBEAT FIELD ITSELF, not a re-fold. The reviewer
+            # caught this branch calling summarize() again and publishing its
+            # raw numbers, which threw away every null the heartbeat had just
+            # computed: an unavailable guardian and a malformed honk source
+            # came back ok:true with source open:0.
+            payload = {
+                "ok": True,
+                "mode": "summary",
+                "error": field.get("error"),
+                "ingestion": field.get("ingestion"),
+                "scanned_at": field.get("scanned_at"),
+                "total": field.get("total"),
+                "stale_24h": field.get("stale_24h"),
+                "stale_7d": field.get("stale_7d"),
+                "by_source": field.get("by_source_detail"),
+                "corrupt_rows": field.get("corrupt_rows"),
+                "source_status": field.get("source_status"),
+                "sources_degraded": field.get("sources_degraded"),
+            }
+            if source_filter:
+                payload["by_source"] = {
+                    source_filter: (field.get("by_source_detail") or {}).get(source_filter)
                 }
-            return json.dumps({"ok": True, "ingestion": field.get("ingestion"), **summary})
+                payload["source_status"] = {
+                    source_filter: (field.get("source_status") or {}).get(source_filter, "unknown")
+                }
+            return json.dumps(payload)
         if name == "signal_ack":
             sid = str(arguments.get("signal_id") or "").strip()
             state = str(arguments.get("state") or "").strip()

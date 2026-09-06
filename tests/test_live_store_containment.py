@@ -364,3 +364,67 @@ class TestTheSpiralStateIsNeverSavedLive:
         assert not str(Path(server.SPIRAL_STATE_PATH).resolve()).startswith(
             str(LIVE_SOVEREIGN.resolve())
         )
+
+
+class TestTheSignalLedgerNeverTouchesTheLiveStore:
+    """The newest surface, guarded in the same commit that created it.
+
+    The 2026-09-06 release wires ingestion into the READ (review F4): the
+    native ``heartbeat`` tool and ``signals_summary`` call
+    ``heartbeat_field(scan=True)``, which runs seven source sweeps and writes
+    an append-only ledger. The native heartbeat passes ``root=None``, which
+    resolves to ``default_sovereign_root()`` — Anthony's real ~/.sovereign,
+    where ``signals/ledger.jsonl`` does not exist at all. Unguarded, the fix
+    for "ingestion never runs" would have had every heartbeat test in this
+    suite sweep his live chronicle and mint that file.
+    """
+
+    def test_the_module_default_root_is_not_the_live_one(self):
+        from sovereign_stack import signal_ledger as sl
+
+        assert not str(Path(sl._root()).resolve()).startswith(str(LIVE_SOVEREIGN.resolve()))
+
+    def test_the_unpatched_default_really_is_the_live_root(self):
+        """The falsifier's premise: provenance.default_sovereign_root, which is
+        what signal_ledger imports, resolves to the live store."""
+        from sovereign_stack.provenance import default_sovereign_root
+
+        assert str(default_sovereign_root().resolve()) == str(LIVE_SOVEREIGN.resolve())
+
+    def test_a_ledger_append_aimed_at_the_live_store_is_refused(self):
+        from sovereign_stack import signal_ledger as sl
+
+        with pytest.raises(AssertionError, match="AIMED THE SIGNAL LEDGER"):
+            sl._append({"signal_id": "x"}, LIVE_SOVEREIGN)
+
+    def test_a_scan_marker_aimed_at_the_live_store_is_refused(self):
+        from sovereign_stack import signal_ledger as sl
+
+        with pytest.raises(AssertionError, match="AIMED THE SIGNAL SCAN MARKER"):
+            sl._write_scan_marker({}, {}, LIVE_SOVEREIGN)
+
+    def test_the_native_heartbeat_scans_the_sink_not_the_live_store(self):
+        """THE REACHABLE PATH. Dispatch the real heartbeat tool — which is what
+        now calls scan_all — and show the ledger it created is in the sink."""
+        import asyncio
+
+        from sovereign_stack import server
+        from sovereign_stack import signal_ledger as sl
+
+        result = asyncio.run(server._dispatch_tool("heartbeat", {}))
+        payload = json.loads(result[0].text)
+        assert "unacked_signals" in payload
+        assert not (LIVE_SOVEREIGN / "signals" / "ledger.jsonl").exists(), (
+            "the native heartbeat's scan_all minted a ledger in Anthony's live store"
+        )
+        assert not str(sl.ledger_path().resolve()).startswith(str(LIVE_SOVEREIGN.resolve()))
+
+    def test_a_tmp_rooted_scan_still_works(self, tmp_path):
+        """Positive control: a gate, not a blanket denial."""
+        from sovereign_stack import signal_ledger as sl
+
+        (tmp_path / "daemons" / "halts").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "daemons" / "halts" / "h.md").write_text("halt\n", encoding="utf-8")
+        out = sl.scan_all(tmp_path)
+        assert out["counts"]["halt"] == 1
+        assert sl.ledger_path(tmp_path).exists()

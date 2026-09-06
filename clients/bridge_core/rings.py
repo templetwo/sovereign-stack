@@ -100,11 +100,21 @@ CANONICAL_RING_1: frozenset[str] = frozenset({
 # store_compaction_summary, reflection_ack (reflection_ack because the
 # reflector itself is retired and no new marginalia will ever arrive).
 #
-# comms_acknowledge FOLDED into signal_ack on the native surface. signal_ack
-# is deliberately NOT added here: folding a retired name into a surviving tool
-# is not a licence to grant the surviving tool to a substrate that never had
-# it. Ring membership is Anthony's allowlist, and a fold must never be the
-# back door that widens it.
+# comms_acknowledge was ADVERTISED as folding into signal_ack and the claim was
+# withdrawn on 2026-09-06 after the adversarial review executed it: signal_ack
+# acknowledges a SIGNAL, and comms_get_acks(message_id) stays empty afterwards
+# — there is no comms source and no message-id adapter in the ledger. It is now
+# an outright retirement whose refusal text says so. The comms bulletin board
+# itself retired 2026-06-12, so what is gone is the ack half of a surface that
+# was already gone.
+#
+# signal_ack is deliberately NOT added here either way, and the reason survives
+# the reclassification: folding a retired name into a surviving tool is not a
+# licence to grant the surviving tool to a substrate that never had it. Ring
+# membership is Anthony's allowlist, and a fold must never be the back door
+# that widens it. (signal_ack's INTENT changed from govern to write in the same
+# release; that changes what a Studio seat may reach natively, not what a
+# remote ring admits.)
 CANONICAL_RING_2: frozenset[str] = frozenset({
     "propose_insight",       # wraps record_insight
     "propose_learning",      # wraps record_learning

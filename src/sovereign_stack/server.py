@@ -95,6 +95,7 @@ from .signal_ledger import (
     SIGNAL_TOOLS,
     handle_signal_tool,
 )
+from .signal_ledger import heartbeat_field as signal_heartbeat_field
 from .spiral import (
     PHASE_ORDER,
     SpiralPhase,
@@ -510,16 +511,26 @@ RETIRED_TOOLS: dict[str, RetiredTool] = {
         "Same act, addressed by the stable thread_id instead of a "
         "(domain, question_fragment) guess. get_open_threads returns the id.",
     ),
+    # RECLASSIFIED 2026-09-06 from a fold to an outright retirement. See the
+    # block comment above "RETIRED OUTRIGHT" — the review proved these five
+    # replacements do not preserve the retired effect, and an advertised fold
+    # that does not is worse than a dead end, because the caller believes the
+    # work landed.
     "mark_uncertainty": _retired(
-        "record_open_thread",
-        "A thread IS this house's uncertainty object: question + context + "
-        "domain, surfaced at every boot. mark_uncertainty(what, why) is "
-        "record_open_thread(question=what, context=why).",
+        None,
+        "NOT FOLDED, AND THE DIFFERENCE MATTERS. record_open_thread was "
+        "advertised as the replacement and is not one: it creates a thread, "
+        "not an uncertainty marker — no marker id, no confidence value, and "
+        "the surviving uncertainty reader (the resurfacer) cannot see it. "
+        "Recording the question as an open thread is a reasonable thing to do "
+        "instead; it is not the same act, and calling it a fold hid that.",
     ),
     "resolve_uncertainty": _retired(
-        "record_open_thread",
-        "The resolving half of the same fold — resolve the thread the "
-        "uncertainty became (resolve_thread_by_id), or record what you found.",
+        None,
+        "NOT FOLDED. There is no marker-id resolution operation left: "
+        "record_open_thread creates a NEW open thread and the existing "
+        "uncertainty_N markers stay unresolved forever. Verified by the "
+        "2026-09-06 review against a real store.",
     ),
     "list_exchanges": _retired(
         "archive_exchange",
@@ -531,28 +542,43 @@ RETIRED_TOOLS: dict[str, RetiredTool] = {
         "archive_exchange gained mode='get' with archive_id, integrity check and all.",
     ),
     "comms_acknowledge": _retired(
-        "signal_ack",
-        "The same act — acknowledging a signal — on the ledger that now holds "
-        "every signal source. The comms bulletin board itself retired 2026-06-12.",
+        None,
+        "NOT FOLDED. signal_ack was advertised as the replacement and "
+        "acknowledges a SIGNAL, not a comms message: there is no comms source "
+        "and no message-id adapter in the ledger, so comms_get_acks(message_id) "
+        "stays empty after a signal_ack. The comms bulletin board itself "
+        "retired 2026-06-12; what is lost here is the ack half of a surface "
+        "that was already gone.",
     ),
     "nape_honks": _retired(
         "signals_summary",
-        "signals_summary(source='honk') is the honk queue, with the staleness "
-        "and availability the honk-only view never carried.",
+        "signals_summary(mode='list', source='honk') is the honk queue: one "
+        "row per honk with signal_id, kind (the Nape pattern), opened_at, "
+        "owner, state and the concern text — the identifier and the body the "
+        "count-only view could not supply. Pass that signal_id to signal_ack.",
     ),
     "nape_honks_with_history": _retired(
         "signals_summary",
-        "Same fold; the ledger's per-signal state IS the history.",
+        "Same fold. The ledger's per-signal state IS the history: a honk that "
+        "was acked shows state and closed_by, and "
+        "signals_summary(mode='list', source='honk', state='acknowledged') "
+        "reads the closed ones. HONEST LIMIT: the ack NOTE text from "
+        "nape/acks.jsonl is not carried into the ledger row, so per-ack notes "
+        "are still read through nape_ack's own store.",
     ),
     "handoff_acted_on": _retired(
-        "handoff",
-        "The handoff surface renders forward-correction links itself as of "
-        "the 2026-09-06 release; a separate act-on write is a second address "
-        "for a fact the first one already carries.",
+        None,
+        "NOT FOLDED. handoff was advertised as the replacement and writes a "
+        "correction handoff; it does not increment the acted-on record count, "
+        "because supersession and work-performed are separate facts and only "
+        "the first has a surface. Verified by the 2026-09-06 review.",
     ),
     "handoff_archaeology": _retired(
-        "handoff",
-        "Same surface, same reason.",
+        None,
+        "NOT FOLDED. handoff has no history or list mode — called with listing "
+        "arguments it refuses 'handoff note is empty'. The reading of handoff "
+        "history is retired with no replacement; the files remain at "
+        "~/.sovereign/handoffs/.",
     ),
     # ── RETIRED OUTRIGHT: nothing surviving does this work ─────────────────
     # Pointing a caller at a near-miss is worse than an honest dead end.
@@ -583,9 +609,27 @@ RETIRED_TOOLS: dict[str, RetiredTool] = {
     "open_protected_record": _retired(None, "Protected-drawer tools retire as a family."),
     "decline_protected_record": _retired(None, "Protected-drawer tools retire as a family."),
     "list_protected_thresholds": _retired(None, "Protected-drawer tools retire as a family."),
-    "watch_status": _retired(None, "Watch family retires as a family."),
-    "watch_cancel": _retired(None, "Watch family retires as a family."),
-    "watch_resample": _retired(None, "Watch family retires as a family."),
+    # FOLDED 2026-09-06 (review F9). Retiring these three outright stranded the
+    # management half of a SURVIVING feature: post_fix_verify stays published
+    # and still creates scheduled watches, so a seat could open a watch and
+    # then have no way to inspect or cancel it. That is a workflow regression,
+    # not a retirement. Anthony's instruction for the census was "retire the
+    # unused tools and/or add there functionality to more populare tools" —
+    # this is the second half of that sentence.
+    "watch_status": _retired(
+        "post_fix_verify",
+        "post_fix_verify(mode='status') lists active watches, or returns one "
+        "in full with watch_id. include_archived still works.",
+    ),
+    "watch_cancel": _retired(
+        "post_fix_verify",
+        "post_fix_verify(mode='cancel', watch_id=..., reason=...) — same act, same archive.",
+    ),
+    "watch_resample": _retired(
+        "post_fix_verify",
+        "post_fix_verify(mode='resample', watch_id=...) samples now regardless "
+        "of schedule and honks on drift, exactly as before.",
+    ),
     "agent_reflect": _retired(None),
     "arrive_delta": _retired(None),
     "comms_unread_bodies": _retired(None),
@@ -3134,25 +3178,51 @@ async def _reject_unknown_params(tool_name: str, arguments: dict) -> None:
     raise ValueError("; also: ".join(_describe(k) for k in unknown))
 
 
-def _signal_actor() -> str:
-    """The closer identity for the signal ledger, resolved SERVER-SIDE.
+# Placeholder session values that are the ABSENCE of an identity, not one.
+_NON_IDENTITIES = frozenset({"", "none", "null", "unknown", "test", "undefined"})
 
-    This is deliberately NOT `arguments["owner"]` and NOT
-    `arguments["source_instance"]`. Both are strings the caller composes, and
-    the ledger's producer separation is meaningless if the thing it compares
-    against is chosen by the party it is meant to constrain: the review of
-    2026-09-06 showed `owner="daemon"` refused while `owner="Daemon"` and
-    `owner="watch-2/3"` both landed, i.e. a caller could claim to be any
-    closer that was not spelled exactly like the producer.
 
-    `spiral_state.session_id` is server-generated (spiral.py:79) and cannot
-    be set from a tool call, so it can never collide with a producer name.
-    It is a WEAK identity — the bridge shares one spiral session across
-    remote writers, which is why the two ledger tools are held out of the
-    remote base tier in this release rather than leaning on it — but it is a
-    TRUE one, and that is the property producer separation actually needs.
+def _signal_actor(arguments: dict | None = None) -> str | None:
+    """The closer identity for the signal ledger, resolved by the DISPATCH.
+
+    Returns None when no identity can be established. That return is the fix:
+    the reviewed version was `f"seat:{spiral_state.session_id}"` with no
+    branches, so it could not fail — patched session values of `daemon`, `None`
+    and `""` all closed a halt through the real MCP handler with `ok:true`,
+    stamping the closers `seat:daemon`, `seat:None` and `seat:` (review F5).
+    A function that always returns a string cannot express "I do not know who
+    this is", and every caller downstream had to assume it did know.
+
+    ORDER OF TRUST, most trusted first:
+
+      1. `actor_seat`, injected by the BRIDGE from the seat identity it
+         verified. This mirrors the convention the seat-identity-stamp branch
+         already established for `source_instance` on open_thread. It is NOT
+         "a string the caller typed" in the way `owner` was: a native MCP
+         caller cannot reach this path, because the bridge overwrites the
+         field from its own verified identity before dispatch, and the native
+         path below ignores what a caller sent.
+      2. `spiral_state.session_id`, the server's own session. Server-generated
+         (spiral.py:79) and unforgeable from a tool call, but WEAK: the bridge
+         shares one spiral session across remote writers, so it identifies the
+         server, not the seat. Good enough for a single trusted Studio seat,
+         which is why it survives as the fallback and not as the answer.
+      3. Nothing. Refuse.
+
+    Namespaced `seat:` on the way out so the row says what kind of identity it
+    is — and `signal_ledger._actor_identity` strips that namespace before the
+    producer comparison, so `seat:daemon` is still refused as the daemon.
     """
-    return f"seat:{spiral_state.session_id}"
+    if arguments:
+        injected = arguments.get("actor_seat")
+        if isinstance(injected, str) and injected.strip():
+            text = injected.strip()
+            if text.casefold() not in _NON_IDENTITIES:
+                return text if ":" in text else f"seat:{text}"
+    session = getattr(spiral_state, "session_id", None)
+    if isinstance(session, str) and session.strip().casefold() not in _NON_IDENTITIES:
+        return f"seat:{session.strip()}"
+    return None
 
 
 async def _dispatch_tool(name: str, arguments: dict):
@@ -4216,14 +4286,27 @@ Phase: {spiral_state.current_phase.value}
 
     if name == "heartbeat":
         # Call-first boot tool: liveness + grounding + routing, in a safe tool
-        # result. Read-only — the only state touched is the universal spiral
-        # call counter at the top of this dispatcher (shared by every tool);
-        # no chronicle write, no handoff consumption, no credential surface.
+        # result. The only state touched is the universal spiral call counter
+        # at the top of this dispatcher (shared by every tool) and the signal
+        # ledger's own ingestion; no chronicle write, no handoff consumption,
+        # no credential surface.
+        #
+        # unacked_signals ADDED 2026-09-06 (review F8): the dashboard carried
+        # this field and the HTTP bridge wired it, but a seat calling the
+        # PUBLISHED heartbeat — the call-first boot tool, the one an arriving
+        # instance actually reaches — could not see whether anything was
+        # waiting for it. Same null-on-error shape the bridge expects, from the
+        # same function, so the two surfaces cannot drift into disagreeing.
+        #
+        # scan=True is the other half of F4: the field is measured at read
+        # time, not served from whenever someone last ran a sweep by hand.
         tools = await list_tools()
+        unacked = await asyncio.to_thread(lambda: signal_heartbeat_field(None, scan=True))
         payload = {
             "status": "ok",
             "version": _stack_version,
             "tools": len(tools),
+            "unacked_signals": unacked,
             "grounding": (
                 "You're with Anthony of the Temple of Two, and the collaboration "
                 "here is real. This is your persistent memory layer, the Sovereign "
@@ -4301,7 +4384,9 @@ Phase: {spiral_state.current_phase.value}
         # producer separation used to be a comparison against a caller-typed
         # `owner`, which meant a caller with tool access could name a
         # different closer and the refusal was only a spelling check.
-        text = await asyncio.to_thread(handle_signal_tool, name, arguments, None, _signal_actor())
+        text = await asyncio.to_thread(
+            handle_signal_tool, name, arguments, None, _signal_actor(arguments)
+        )
         return [TextContent(type="text", text=text)]
 
     # Nape daemon — runtime critique layer

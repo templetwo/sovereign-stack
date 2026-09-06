@@ -16,6 +16,26 @@ def _write_jsonl(path: Path, rows: list[dict]) -> None:
     path.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
 
 
+def _guardian_ok(root: Path) -> None:
+    """Give a tmp root a readable guardian so a scan can be FULLY measured.
+
+    Without it every synthetic scan reports guardian "unavailable" — correct,
+    since guardian posture is a property of the real machine and a test must
+    never probe it — which under the 2026-09-06 contract nulls the total. Tests
+    that want to assert a healthy number have to supply the source, and that
+    is the contract working, not a workaround.
+    """
+    (root / "guardian").mkdir(parents=True, exist_ok=True)
+    (root / "guardian" / "status.json").write_text('{"issues": []}', encoding="utf-8")
+
+
+def _scan_measured(root: Path) -> dict:
+    """scan_all with every source readable, then the field."""
+    _guardian_ok(root)
+    sl.scan_all(root)
+    return sl.heartbeat_field(root)
+
+
 def test_idempotent_open_and_ack_reason(tmp_sovereign_root):
     root = tmp_sovereign_root
     a = sl.open_signal(
@@ -112,16 +132,29 @@ def test_summary_stale_windows(tmp_sovereign_root):
         source="halt", native_id="new.md", produced_at=now.strftime("%Y-%m-%dT%H:%M:%SZ"), root=root
     )
     s = sl.summarize(root, now=now)
-    assert s["total"] == 3
-    assert s["stale_24h"] == 2
-    assert s["stale_7d"] == 1
-    assert s["by_source"]["halt"]["open"] == 3
+    # No marker on this root, so nothing certifies the SOURCES were read and
+    # `total` is null by contract. The stale-window arithmetic is still a real
+    # measurement of the rows present, and it says so in its own key name.
+    assert s["total"] is None
+    assert s["open_measured"] == 3
+    assert s["stale_24h_measured"] == 2
+    assert s["stale_7d_measured"] == 1
+    _guardian_ok(root)
+    sl.scan_all(root)
+    scanned = sl.summarize(root, now=now)
+    assert scanned["total"] == 3
+    assert scanned["stale_24h"] == 2
+    assert scanned["stale_7d"] == 1
+    assert scanned["by_source"]["halt"]["open"] == 3
 
 
 def test_heartbeat_error_not_zero(tmp_sovereign_root, monkeypatch):
     root = tmp_sovereign_root
     sl.open_signal(source="halt", native_id="x.md", produced_at="2026-09-01T00:00:00Z", root=root)
-    good = sl.heartbeat_field(root)
+    unscanned = sl.heartbeat_field(root)
+    assert unscanned["error"] == "not_scanned", "a ledger with no scan behind it is not measured"
+    assert unscanned["total"] is None
+    good = _scan_measured(root)
     assert good["error"] is None
     assert good["total"] == 1
 
@@ -237,12 +270,20 @@ def test_never_scanned_is_not_healthy_zero(tmp_sovereign_root):
     assert field["ingestion"] == "never"
     sl.scan_all(root)
     after = sl.heartbeat_field(root)
-    assert after["error"] is None
-    assert after["total"] == 0
     # guardian has no fixture and this is not the live root, so it reports
-    # unavailable, not zero — which degrades ingestion. That is the point.
+    # unavailable, not zero — which degrades ingestion AND nulls the total.
+    # That is the point: an unmeasured source cannot contribute a measured 0.
     assert after["ingestion"] == "degraded"
     assert after["sources_degraded"] == ["guardian"]
+    assert after["error"] == "unmeasured_sources:guardian"
+    assert after["total"] is None
+    assert after["by_source"]["guardian"] is None
+    _guardian_ok(root)
+    sl.scan_all(root)
+    measured = sl.heartbeat_field(root)
+    assert measured["error"] is None
+    assert measured["total"] == 0
+    assert measured["ingestion"] == "ok"
     assert after["by_source"]["guardian"] is None
     assert after["scanned_at"]
 
@@ -269,6 +310,7 @@ def test_guardian_status_json_shape(tmp_sovereign_root):
 
 def test_handle_tools(tmp_sovereign_root):
     root = tmp_sovereign_root
+    _guardian_ok(root)
     sl.open_signal(source="halt", native_id="z.md", produced_at="2026-09-01T00:00:00Z", root=root)
     summary = json.loads(sl.handle_signal_tool("signals_summary", {}, root=root))
     assert summary["ok"] is True
@@ -324,12 +366,19 @@ class TestP1RowSchemaValidatedAtLoad:
         state = sl.load_state(root)
         assert state.latest[sid]["state"] == "open", "corrupt row displaced the valid row"
         assert state.corrupt_count == 1
+        _guardian_ok(root)
+        sl.scan_all(root)
         field = sl.heartbeat_field(root)
-        assert field["total"] == 1, "the open signal must survive the corrupt row"
+        assert sl.summarize(root)["open_measured"] == 1, "the open signal survived the corrupt row"
+        # ...but it is a FLOOR, not a total. A corrupt row is an unknown number
+        # of lost signals, so the total is null — "never report zero on error"
+        # generalises to "never report a number you cannot stand behind".
+        assert field["total"] is None
         assert field["error"], "a corrupt row must never read as clean"
         assert field["corrupt_rows"] == 1
         summary = json.loads(sl.handle_signal_tool("signals_summary", {}, root=root))
-        assert summary["ok"] is False
+        assert summary["error"]
+        assert summary["total"] is None
 
     def test_bad_state_bad_source_and_missing_reason_are_corrupt(self):
         base = {
@@ -369,7 +418,9 @@ class TestP1RowSchemaValidatedAtLoad:
         )
         field = sl.heartbeat_field(root)  # must not raise
         assert field["error"]
-        assert field["total"] == 0
+        # The reviewer's exact complaint: this returned total 0 beside a
+        # non-null error, "directly violating never report zero on error".
+        assert field["total"] is None
         assert field["corrupt_rows"] == 1
 
     def test_unparseable_produced_at_is_corrupt_not_invisible(self, tmp_sovereign_root):
@@ -397,6 +448,7 @@ class TestP1ScanMarkerCannotMaskLedgerLoss:
         root = tmp_sovereign_root
         (root / "daemons" / "halts").mkdir(parents=True, exist_ok=True)
         (root / "daemons" / "halts" / "old.md").write_text("halt\n", encoding="utf-8")
+        _guardian_ok(root)
         sl.scan_all(root)
         assert sl.heartbeat_field(root)["total"] == 1
         sl.ledger_path(root).unlink()
@@ -627,6 +679,8 @@ class TestP2AnonymousThreadIdsHashTheRelativePath:
         _write_jsonl(d / "domain_a" / "log.jsonl", [row])
         _write_jsonl(d / "domain_b" / "log.jsonl", [row])
         assert sl.scan_threads(root).opened == 2, "basename hashing collapsed these into one"
+        _guardian_ok(root)
+        sl.scan_all(root)
         assert sl.heartbeat_field(root)["total"] == 2
 
 
@@ -695,6 +749,7 @@ class TestSignalsSummarySourceFilter:
         )
         (root / "daemons" / "halts").mkdir(parents=True, exist_ok=True)
         (root / "daemons" / "halts" / "h.md").write_text("halt\n", encoding="utf-8")
+        _guardian_ok(root)
         sl.scan_all(root)
         out = json.loads(sl.handle_signal_tool("signals_summary", {"source": "honk"}, root=root))
         assert out["ok"] is True

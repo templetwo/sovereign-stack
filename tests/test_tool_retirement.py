@@ -88,17 +88,31 @@ CENSUS_48 = [
     "watch_status",
 ]
 
+# THE FOLD LIST AFTER THE 2026-09-06 REVIEW, which cut it from ten to five and
+# then added three back for a different reason.
+#
+# REMOVED (mark_uncertainty, resolve_uncertainty, comms_acknowledge,
+# handoff_acted_on, handoff_archaeology): the review executed each replacement
+# against a real temporary store and showed it did not preserve the retired
+# effect — the uncertainty markers stay unresolved, comms_get_acks stays empty
+# after a signal_ack, the acted-on count does not move, and handoff has no
+# history mode. They are now outright retirements whose refusal text NAMES what
+# was lost. A fold is a claim about behaviour; an untrue one is worse than a
+# dead end, because the caller believes the work landed.
+#
+# ADDED (watch_status, watch_resample, watch_cancel): these were retired
+# outright and that stranded the management half of a SURVIVING feature —
+# post_fix_verify still creates watches, so a seat could open one and never
+# inspect or cancel it. Folded into post_fix_verify's new mode argument.
 FOLDS = {
     "resolve_thread": "resolve_thread_by_id",
-    "mark_uncertainty": "record_open_thread",
-    "resolve_uncertainty": "record_open_thread",
     "list_exchanges": "archive_exchange",
     "recall_exchange": "archive_exchange",
-    "comms_acknowledge": "signal_ack",
     "nape_honks": "signals_summary",
     "nape_honks_with_history": "signals_summary",
-    "handoff_acted_on": "handoff",
-    "handoff_archaeology": "handoff",
+    "watch_status": "post_fix_verify",
+    "watch_resample": "post_fix_verify",
+    "watch_cancel": "post_fix_verify",
 }
 
 

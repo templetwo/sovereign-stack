@@ -58,13 +58,14 @@ from unittest.mock import MagicMock
 
 import pytest
 
-# ── AUTOUSE GUARD 1 of 5: the live-audit tripwire ───────────────────────────
+# ── AUTOUSE GUARD 1 of 6: the live-audit tripwire ───────────────────────────
 #
 # COUNT UPDATED 2026-09-06 (was "1 of 4", and "1 of 2" before that). Three more
 # guards were added in the middle of this file, each in its own labelled block
 # exactly as the note below asks: the scribe containment, the nape autohook
-# containment, and the spiral-state containment. Five autouse guards now, all
-# protecting the same thing from different write paths.
+# containment, the spiral-state containment, and the signal-ledger containment.
+# Six autouse guards now, all protecting the same thing from different write
+# paths.
 #
 # DELIBERATELY PLACED HERE, ABOVE THE FIXTURES, NOT APPENDED AT THE END.
 # feat/console-v2-reskin adds its own autouse guard (probe containment) at the
@@ -496,6 +497,70 @@ def _spiral_state_never_writes_live(
 
     monkeypatch.setattr(_server, "save_spiral_state", _guarded_save)
     monkeypatch.setattr(_server, "SPIRAL_STATE_PATH", _spiral_tmp_state_path)
+
+
+# ── AUTOUSE GUARD (own labelled block) ──────────────────────────────────────
+#      THE SIGNAL LEDGER NEVER SCANS OR WRITES THE OPERATOR'S LIVE STORE
+#
+# NEW SURFACE, ADDED THE SAME DAY AS THE THING IT GUARDS. The 2026-09-06
+# release wires ingestion INTO THE READ (review F4): the native `heartbeat`
+# tool and `signals_summary` now call `heartbeat_field(scan=True)`, which runs
+# `scan_all` — seven source sweeps and an append-only ledger write. The native
+# heartbeat passes `root=None`, which resolves to `default_sovereign_root()`,
+# which is the operator's real ~/.sovereign.
+#
+# So a fix for "ingestion never runs" would, unguarded, have made every
+# heartbeat test in this suite sweep Anthony's live chronicle and mint
+# ~/.sovereign/signals/ledger.jsonl — a file that does not exist on that
+# machine today. The guard is written in the same commit as the feature
+# precisely because the feature is what creates the exposure; discovering it
+# in a review afterwards is the pattern this file already documents three
+# times over.
+#
+# TWO LIMBS, as everywhere else in this file:
+#   - REDIRECT `signal_ledger.default_sovereign_root` (imported by VALUE into
+#     that module, so patching provenance.py would not move it) to a
+#     session-scoped tmp root. Tests that pass an explicit root are unaffected;
+#     tests that reach the root=None default land in the sink and keep
+#     exercising the real scanner.
+#   - REFUSE at the two writers every ledger mutation funnels through,
+#     `_append` and `_write_scan_marker`, so any call still aimed at the live
+#     store fails BY TEST NAME rather than appending.
+
+
+@pytest.fixture(scope="session")
+def _signals_tmp_root(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    root = tmp_path_factory.mktemp("signal-ledger-sink")
+    (root / "signals").mkdir(parents=True, exist_ok=True)
+    return root
+
+
+@pytest.fixture(autouse=True)
+def _signal_ledger_never_touches_live(
+    monkeypatch: pytest.MonkeyPatch, _signals_tmp_root: Path
+) -> None:
+    from sovereign_stack import signal_ledger as _sl
+
+    signals_hint = (
+        "signal_ledger._root() falls back to default_sovereign_root() when the "
+        "caller passes root=None — pass an explicit tmp root, or rebind "
+        "sovereign_stack.signal_ledger.default_sovereign_root."
+    )
+
+    _orig_append = _sl._append
+    _orig_marker = _sl._write_scan_marker
+
+    def _guarded_append(row, root=None):
+        _refuse_live_root("THE SIGNAL LEDGER", _sl.ledger_path(root), signals_hint)
+        return _orig_append(row, root)
+
+    def _guarded_marker(counts, source_status, root=None):
+        _refuse_live_root("THE SIGNAL SCAN MARKER", _sl.scan_marker_path(root), signals_hint)
+        return _orig_marker(counts, source_status, root)
+
+    monkeypatch.setattr(_sl, "default_sovereign_root", lambda: _signals_tmp_root)
+    monkeypatch.setattr(_sl, "_append", _guarded_append)
+    monkeypatch.setattr(_sl, "_write_scan_marker", _guarded_marker)
 
 
 # ── The dashboard's two external probes never leave the test process ────────
