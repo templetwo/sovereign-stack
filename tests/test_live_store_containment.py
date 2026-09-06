@@ -289,3 +289,78 @@ class TestTheNapeAutohookIsRedirectedAndRefused:
         rows = (tmp_path / "nape" / "observations.jsonl").read_text().splitlines()
         assert len(rows) == 1
         assert json.loads(rows[0])["tool_name"] == "record_insight"
+
+
+class TestTheSpiralStateIsNeverSavedLive:
+    """The third instance of the import-time-binding shape, and the widest one.
+
+    ``server.py:116`` binds ``SPIRAL_STATE_PATH`` from ``DEFAULT_ROOT`` at
+    import, and ``_dispatch_registered_tool`` calls ``save_spiral_state`` on
+    EVERY dispatch before any branch matches — so every test that reaches the
+    dispatcher wrote Anthony's live ``~/.sovereign/spiral_state.json``. The
+    2026-09-06 adversarial review's full-suite log carries **139**
+    ``PermissionError`` lines naming that exact file; they were refused only
+    because that run happened to be sandboxed.
+    """
+
+    def test_the_module_path_is_not_the_live_one(self):
+        server = pytest.importorskip("sovereign_stack.server")
+        resolved = Path(server.SPIRAL_STATE_PATH).resolve()
+        assert not str(resolved).startswith(str(LIVE_SOVEREIGN.resolve())), (
+            f"server.SPIRAL_STATE_PATH is {resolved} — every dispatched tool "
+            "call in this suite is saving spiral state into Anthony's live store"
+        )
+
+    def test_the_live_path_is_what_it_would_be_without_the_guard(self):
+        """The falsifier's premise, same shape as the nape one: DEFAULT_ROOT
+        really is the live store, so an unredirected binding really would
+        write there. Without this the test above could pass for the wrong
+        reason."""
+        server = pytest.importorskip("sovereign_stack.server")
+        assert str(Path(server.DEFAULT_ROOT).resolve()) == str(LIVE_SOVEREIGN.resolve())
+        assert str(Path(server.DEFAULT_ROOT) / "spiral_state.json") == str(
+            LIVE_SOVEREIGN / "spiral_state.json"
+        )
+
+    def test_a_save_aimed_at_the_live_store_is_refused(self):
+        server = pytest.importorskip("sovereign_stack.server")
+        with pytest.raises(AssertionError, match="AIMED THE SPIRAL STATE"):
+            server.save_spiral_state(server.spiral_state, LIVE_SOVEREIGN / "spiral_state.json")
+
+    def test_the_refusal_names_the_binding_to_rebind(self):
+        server = pytest.importorskip("sovereign_stack.server")
+        with pytest.raises(AssertionError) as excinfo:
+            server.save_spiral_state(server.spiral_state, LIVE_SOVEREIGN / "spiral_state.json")
+        assert "sovereign_stack.server.SPIRAL_STATE_PATH" in str(excinfo.value)
+        assert "AT MODULE IMPORT" in str(excinfo.value)
+
+    def test_the_guard_is_on_the_name_the_caller_resolves(self):
+        """server.py does ``from .spiral import save_spiral_state``, so a guard
+        patched onto ``spiral.save_spiral_state`` would leave the caller
+        untouched. Pinned, because getting this wrong produces a guard that
+        passes its own tests and protects nothing."""
+        from sovereign_stack import server, spiral
+
+        assert server.save_spiral_state is not spiral.save_spiral_state
+
+    def test_a_redirected_save_still_writes(self, tmp_path):
+        """Positive control: a gate, not a blanket denial."""
+        from sovereign_stack.spiral import SpiralState
+
+        server = pytest.importorskip("sovereign_stack.server")
+        dest = tmp_path / "spiral_state.json"
+        server.save_spiral_state(SpiralState(), dest)
+        assert json.loads(dest.read_text())["session_id"]
+
+    def test_a_real_dispatch_lands_off_the_live_store(self):
+        """THE REACHABLE PATH, not a hypothetical: dispatch one real tool and
+        show the spiral write went to the tmp sink. This is the call shape the
+        139 refusals came from."""
+        import asyncio
+
+        server = pytest.importorskip("sovereign_stack.server")
+        asyncio.run(server._dispatch_tool("heartbeat", {}))
+        assert Path(server.SPIRAL_STATE_PATH).exists()
+        assert not str(Path(server.SPIRAL_STATE_PATH).resolve()).startswith(
+            str(LIVE_SOVEREIGN.resolve())
+        )

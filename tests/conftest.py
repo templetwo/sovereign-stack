@@ -58,12 +58,13 @@ from unittest.mock import MagicMock
 
 import pytest
 
-# ── AUTOUSE GUARD 1 of 4: the live-audit tripwire ───────────────────────────
+# ── AUTOUSE GUARD 1 of 5: the live-audit tripwire ───────────────────────────
 #
-# COUNT UPDATED 2026-09-05 (was "1 of 2"). Two more guards were added in the
-# middle of this file, each in its own labelled block exactly as the note below
-# asks: the scribe containment and the nape autohook containment. Four autouse
-# guards now, all protecting the same thing from different write paths.
+# COUNT UPDATED 2026-09-06 (was "1 of 4", and "1 of 2" before that). Three more
+# guards were added in the middle of this file, each in its own labelled block
+# exactly as the note below asks: the scribe containment, the nape autohook
+# containment, and the spiral-state containment. Five autouse guards now, all
+# protecting the same thing from different write paths.
 #
 # DELIBERATELY PLACED HERE, ABOVE THE FIXTURES, NOT APPENDED AT THE END.
 # feat/console-v2-reskin adds its own autouse guard (probe containment) at the
@@ -422,6 +423,79 @@ def _nape_never_writes_live(monkeypatch: pytest.MonkeyPatch, _nape_tmp_root: Pat
 
     monkeypatch.setattr(_nape, "_append_jsonl", _guarded_append)
     monkeypatch.setattr(_server, "nape_daemon", _nape.NapeDaemon(root=str(_nape_tmp_root)))
+
+
+# ── AUTOUSE GUARD (own labelled block, per the note at the top of this file) ─
+#        THE SPIRAL STATE IS NEVER SAVED INTO THE OPERATOR'S LIVE STORE
+#
+# THE THIRD INSTANCE OF THE SAME SHAPE, and the one that reached the most tests.
+# `server.py:116` binds `SPIRAL_STATE_PATH = Path(DEFAULT_ROOT) / "spiral_state
+# .json"` AT IMPORT, and `_dispatch_registered_tool` calls
+# `save_spiral_state(spiral_state, SPIRAL_STATE_PATH)` on EVERY dispatch, before
+# any branch matches. So every test in the suite that reaches the dispatcher —
+# arrival, heartbeat, reflector, retirement, the new open_thread author test —
+# wrote Anthony's live ~/.sovereign/spiral_state.json.
+#
+# MEASURED, not inferred: the 2026-09-06 adversarial review's full-suite log
+# contains 139 `PermissionError` lines naming
+# /Users/tony_studio/.sovereign/spiral_state.json. Those writes were REFUSED
+# only because that reviewer ran under a sandbox that denied them. An
+# unrestricted run has no such barrier — the count is the reach of the defect,
+# not the damage it did that day.
+#
+# WHY EVERY EXISTING DEFENCE MISSED IT, and it is the same sentence three
+# guards up: `tmp_sovereign_root` sets SOVEREIGN_ROOT, which server.py read ONCE
+# at import; the individual test files that DO isolate it (test_nape_autohook,
+# test_server_handler_fixes, test_contract_walker, _phase4_fixture) each rebind
+# `server.SPIRAL_STATE_PATH` by hand, which is exactly the evidence that a
+# per-file fix leaves every other file exposed.
+#
+# TWO LIMBS, redirect and refuse, for the reason the nape block states:
+#   - REDIRECT `server.SPIRAL_STATE_PATH` to a session-scoped tmp file, so
+#     dispatch-driven tests keep exercising the real writer and simply land
+#     elsewhere. No test needs changing and none is skipped. Session-scoped
+#     because the spiral counter is telemetry no test asserts across tests —
+#     the tests that DO care about spiral state rebind the path themselves and
+#     keep working, since monkeypatch restores the live value after them, not
+#     during.
+#   - REFUSE inside `save_spiral_state` itself, so ANY call still aimed at the
+#     live root fails BY TEST NAME instead of writing. Patched on
+#     `sovereign_stack.server.save_spiral_state` and NOT on `spiral.py`'s,
+#     because server.py does `from .spiral import save_spiral_state` — a
+#     from-import copies the function object, so patching the source module
+#     would leave the caller untouched. That is the audit-chain lesson at the
+#     top of this file, third time.
+#
+# The redirect alone would be assumed rather than falsifiable; the refuse limb
+# is what makes it a receipt. Both are demonstrated able to fail in
+# tests/test_live_store_containment.py.
+
+
+@pytest.fixture(scope="session")
+def _spiral_tmp_state_path(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """One tmp spiral_state.json for the whole run."""
+    return tmp_path_factory.mktemp("spiral-state-sink") / "spiral_state.json"
+
+
+@pytest.fixture(autouse=True)
+def _spiral_state_never_writes_live(
+    monkeypatch: pytest.MonkeyPatch, _spiral_tmp_state_path: Path
+) -> None:
+    import sovereign_stack.server as _server
+
+    _orig_save = _server.save_spiral_state
+    spiral_hint = (
+        "server.SPIRAL_STATE_PATH is built from DEFAULT_ROOT at import "
+        f"({_IMPORT_TIME_BINDING_HINT}) — rebind "
+        "sovereign_stack.server.SPIRAL_STATE_PATH itself."
+    )
+
+    def _guarded_save(state, path):
+        _refuse_live_root("THE SPIRAL STATE", Path(path), spiral_hint)
+        return _orig_save(state, path)
+
+    monkeypatch.setattr(_server, "save_spiral_state", _guarded_save)
+    monkeypatch.setattr(_server, "SPIRAL_STATE_PATH", _spiral_tmp_state_path)
 
 
 # ── The dashboard's two external probes never leave the test process ────────

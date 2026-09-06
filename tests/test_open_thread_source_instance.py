@@ -77,7 +77,17 @@ def test_schema_declares_source_instance():
 def test_dispatch_forwards_source_instance(monkeypatch, tmp_path):
     """THE fail-open this file exists for: a declared property that the
     dispatch never passes on. Asserted on the argument the storage layer
-    actually received, not on the tool's ok-shaped response."""
+    actually received, not on the tool's ok-shaped response.
+
+    ISOLATION: this stubs the memory writer but calls the REAL dispatcher, and
+    ``_dispatch_registered_tool`` saves spiral state before any branch matches
+    — so as first written it aimed a write at the operator's live
+    ``~/.sovereign/spiral_state.json`` and never reached its assertion (the
+    2026-09-06 review, F6). The suite-wide ``_spiral_state_never_writes_live``
+    autouse fixture in tests/conftest.py now redirects that write and refuses
+    the live root by test name; nothing here has to opt in, which is the point
+    of putting it there rather than in this file.
+    """
     seen = {}
 
     def fake(question, context, domain, session_id, **kwargs):
