@@ -9,6 +9,79 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### The reader does not choose who it is, and does not repair what it found
+
+A second independent review of the release candidate rejected it again, on
+nine further findings — five release-blocking. The pattern under all five is
+the same one this file already documents twice: a surface that answers
+confidently about something it did not establish.
+
+**A caller can no longer name its own closer.** `signal_ack` took an
+`actor_seat` argument, published as "the bridge fills this in". A parameter
+the server reads is reachable by every caller of the server, and the review
+closed a signal as an arbitrary seat through an ordinary MCP request. Identity
+now travels out of band in `sovereign_stack.dispatch_context.CALLER_SEAT` — set
+by the native server from its own spiral session at dispatch entry, or by the
+bridge in-process from the seat its kernel verified, and never overwritten by
+the weaker of the two. `actor`, `actor_seat`, `owner`, `closed_by` and
+`source_seat` are REFUSED by name rather than ignored: from the caller's side
+an ignored argument and an honoured one look identical, which is how a comment
+saying native input was ignored survived over a dispatch that read it.
+
+**A honk about a protected record no longer prints its body.** The scanner
+copied a honk's observation into the ledger and threw away the claim reference
+that came with it, so `signals_summary(mode='list')` returned the text of a
+designated record with no stakes and no notice. Every row now carries `origin`
+— source, native id, and the claim id or source-relative path it was minted
+from — and both display boundaries consult `chronicle/protected.jsonl` at READ
+time, replacing a designated row's concern with `[withheld: protected]` and
+publishing a `withheld_protected` count. Read time, not scan time: designation
+normally happens after the material was written. An index that will not parse
+withholds everything with an error; an absent index withholds nothing. Rows
+whose origin cannot resolve are shown and counted separately as
+`unprovenanced_concerns`, because a blanket withhold would blank the queue and
+because the residual deserves a name rather than a silence.
+
+**A read no longer repairs the damage it was supposed to report.** Ingestion
+checked marker integrity only to decide whether to skip scanning; on a
+mismatch it scanned, and a scan writes a new marker certifying whatever the
+file now holds. Truncate the ledger and both public readers answered
+`error: null, ingestion: "ok", total: 0`. Integrity is now judged BEFORE
+anything is rewritten, and the four cases that were one `else: scan_all` are
+four: skip, initialize, refresh, refuse. A refusal leaves the marker
+byte-identical, does not clear itself on the next read, and names the file a
+human must move aside. A refresh lock means concurrent readers run one sweep.
+The freshness interval (3600 s) is documented where the design is: a
+15-minute poller does not rescan every 15 minutes.
+
+**Watch ids name files inside the watch store, or they are refused.** An id of
+`../outside` let the newly published status / resample / cancel modes read,
+mutate and delete a file one directory up, writing its "archive" copy outside
+the archive. Ids match `^pfw_[A-Za-z0-9_.-]+$`, and the resolved path's parent
+must EQUAL the active or archive directory — equality, because "somewhere
+under watches/" is true of the mislocated write that was the bug, and because
+a symlink inside the store has a perfectly valid-looking id. The id stored
+inside a record is checked against the file it came from; a listing never
+hands back an id the helpers would refuse.
+
+**The remaining four.** The `ledger_shrank` branch — the one with arithmetic
+proof that rows are missing — published a count; it returns null now, per
+source as well as in total. `ledger_rows` was in the marker contract and never
+reconciled; it is checked, strictly on shrinkage, because the ledger is
+append-only and an honest ack makes the file longer. The cross-shard repair
+reopened human acknowledgements on unchanged sources; reopening now needs a
+close this module wrote itself, or a real later source record. The spiral
+containment guard moved from a patched name into the writer's own body, so
+every binding of it is covered rather than the one that was patched.
+
+**Also:** scanner tracebacks are kept in a 1 MB-bounded
+`signals/diagnostics.log` while the public error stays a string; a source can
+be declared `not_configured` in `signals/sources.json` — declared by a human,
+never inferred from a missing file or an exception — which leaves `total` null
+and gives the narrower `total_configured` an explicit scope beside it; and the
+`resolve_uncertainty` retirement notice no longer claims more than follows
+from retiring a tool.
+
 ### The signal ledger measures, or it says null
 
 The 2026-09-06 adversarial review of the release candidate rejected it on
