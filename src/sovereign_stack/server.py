@@ -967,7 +967,12 @@ async def list_tools():
                 description=(
                     "Write a handoff note for the next instance. Intent for the future, not a record "
                     "of the past. Size-limited to ~2KB — longer thoughts belong in record_insight. "
-                    "Surfaced exactly once by where_did_i_leave_off, then archived (not deleted)."
+                    "Surfaced by where_did_i_leave_off to every seat that has not yet SIGNED it — "
+                    "reading signs it for you alone and hides it from nobody; only an explicit "
+                    "retire() clears it for everyone (signature ledger, 2026-08-31). The previous "
+                    "wording here — 'surfaced exactly once, then archived' — described the "
+                    "consumed_at behaviour that ledger replaced, and stayed on the tool "
+                    "description after the code changed."
                 ),
                 inputSchema={
                     "type": "object",

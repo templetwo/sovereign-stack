@@ -244,9 +244,26 @@ class HandoffEngine:
         correction pointed at the wrong record is worse than no link: it moves
         the CORRECTED BY banner onto an innocent handoff.
 
-        Raises ValueError if the reference resolves to nothing on disk.
+        Raises ValueError if the reference resolves to nothing on disk, or is
+        not a string at all — see the type check below.
         """
-        cleaned = (ref or "").strip()
+        # TYPE-CHECKED, and the reason is a real caller, not defensiveness:
+        # record_insight's `supersedes` in this same codebase is a
+        # ``list[str]`` (memory.py:1069). A caller who knows that sibling API
+        # will reasonably send ``supersedes=["<id>"]`` here. Without this,
+        # ``(ref or "").strip()`` raises AttributeError on a truthy list —
+        # which the dispatch's ``except ValueError`` (server.py) does not
+        # catch, so the caller gets a traceback instead of a refusal that
+        # tells them what to do. The REST path does not validate against the
+        # inputSchema, so declaring "type": "string" does not close this.
+        if not isinstance(ref, str):
+            raise ValueError(
+                f"supersedes must be a single handoff id (a string), got "
+                f"{type(ref).__name__}. Note that record_insight's supersedes "
+                "takes a LIST and this one does not: a handoff corrects one "
+                "predecessor, so pass the id by itself."
+            )
+        cleaned = ref.strip()
         if not cleaned:
             raise ValueError(
                 "supersedes was provided but names nothing — pass a handoff id "
@@ -258,7 +275,7 @@ class HandoffEngine:
         if not name.endswith(".json"):
             name += ".json"
         candidate = self.root / name
-        if candidate.name != name or not candidate.is_file():
+        if not candidate.is_file():
             raise ValueError(
                 f"supersedes={ref!r} does not name a handoff in this store "
                 f"(looked for {name!r} in {self.root}). Refusing the write: a "

@@ -80,6 +80,22 @@ class TestSupersedesArgument:
         with pytest.raises(ValueError, match="does not name a handoff in this store"):
             _write(engine, "correction", supersedes="20260101T000000_000000_ghost_general_abcdef")
 
+    def test_list_shaped_reference_is_refused_with_a_readable_error(self, engine):
+        """record_insight's `supersedes` is a list[str] (memory.py:1069) and
+        this one is not, so a caller who knows the sibling API will send a
+        list here. Before the type check that raised AttributeError, which
+        server.py's `except ValueError` does not catch — the caller got a
+        traceback where a refusal belonged. The REST path does not validate
+        against the inputSchema, so "type": "string" does not close it."""
+        first = _write(engine, "original")
+        with pytest.raises(ValueError, match="must be a single handoff id"):
+            _write(engine, "correction", supersedes=[_id(first)])
+
+    def test_non_string_references_are_refused_not_crashed(self, engine):
+        for bad in (123, {"id": "x"}, object()):
+            with pytest.raises(ValueError, match="must be a single handoff id"):
+                _write(engine, "correction", supersedes=bad)
+
     def test_rejected_supersedes_writes_no_file(self, engine):
         """Fail CLOSED. Validation happens before the write, so a bad
         correction link costs nothing and leaves no orphan behind — the
