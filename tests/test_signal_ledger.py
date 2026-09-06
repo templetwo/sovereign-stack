@@ -171,6 +171,98 @@ def test_halt_decision_guardian_adapters(tmp_sovereign_root):
     assert latest[sl.signal_id_for("guardian", "Ollama bound on all interfaces")]["state"] == "open"
 
 
+def test_thread_shard_folds_each_id_and_skips_hidden(tmp_sovereign_root):
+    """3/3 P1: one domain shard holds many thread_ids; recs[-1] undercounted."""
+    root = tmp_sovereign_root
+    shard = root / "chronicle" / "open_threads" / "golden-lattice.jsonl"
+    shard.parent.mkdir(parents=True, exist_ok=True)
+    _write_jsonl(
+        shard,
+        [
+            {"thread_id": "A", "resolved": False, "timestamp": "2026-09-01T00:00:00Z"},
+            {"thread_id": "B", "resolved": True, "timestamp": "2026-09-01T01:00:00Z"},
+        ],
+    )
+    nested = (
+        root / "chronicle" / "open_threads" / "tech-debt,compaction,auto-detection" / "log.jsonl"
+    )
+    nested.parent.mkdir(parents=True, exist_ok=True)
+    _write_jsonl(
+        nested,
+        [{"thread_id": "nested-1", "resolved": False, "timestamp": "2026-09-01T02:00:00Z"}],
+    )
+    hidden = root / "chronicle" / "open_threads" / ".bak-20260502" / "gone.jsonl"
+    hidden.parent.mkdir(parents=True, exist_ok=True)
+    _write_jsonl(
+        hidden,
+        [{"thread_id": "hidden", "resolved": False, "timestamp": "2026-09-01T03:00:00Z"}],
+    )
+    assert sl.scan_threads(root) == 3
+    latest = sl.load_latest(root)
+    assert latest[sl.signal_id_for("thread", "A")]["state"] == "open"
+    assert latest[sl.signal_id_for("thread", "B")]["state"] == "acted"
+    assert latest[sl.signal_id_for("thread", "nested-1")]["state"] == "open"
+    assert sl.signal_id_for("thread", "hidden") not in latest
+
+
+def test_malformed_ledger_is_error_not_zero(tmp_sovereign_root):
+    root = tmp_sovereign_root
+    path = sl.ledger_path(root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("{broken json}\n", encoding="utf-8")
+    bad = sl.heartbeat_field(root)
+    assert bad["error"]
+    assert bad["total"] is None
+    assert bad["ingestion"] == "error"
+
+    path.write_bytes(b"\xff\xfe\x00not-utf8")
+    enc = sl.heartbeat_field(root)
+    assert enc["error"]
+    assert enc["total"] is None
+
+    path.unlink()
+    sl.open_signal(source="halt", native_id="ok.md", produced_at="2026-09-01T00:00:00Z", root=root)
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write('{"signal_id":"truncated"\n')
+    tail = sl.heartbeat_field(root)
+    assert tail["error"]
+    assert tail["total"] is None
+
+
+def test_never_scanned_is_not_healthy_zero(tmp_sovereign_root):
+    root = tmp_sovereign_root
+    field = sl.heartbeat_field(root)
+    assert field["error"] == "not_scanned"
+    assert field["total"] is None
+    assert field["ingestion"] == "never"
+    sl.scan_all(root)
+    after = sl.heartbeat_field(root)
+    assert after["error"] is None
+    assert after["total"] == 0
+    assert after["ingestion"] == "ok"
+    assert after["scanned_at"]
+
+
+def test_guardian_status_json_shape(tmp_sovereign_root):
+    root = tmp_sovereign_root
+    (root / "guardian").mkdir(parents=True, exist_ok=True)
+    (root / "guardian" / "status.json").write_text(
+        json.dumps(
+            {
+                "source": "guardian_tools._evaluate_status",
+                "health_score": 60,
+                "issues": ["Ollama bound on all interfaces", "No issues detected"],
+                "issue_count": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert sl.scan_guardian(root) == 1
+    latest = sl.load_latest(root)
+    assert latest[sl.signal_id_for("guardian", "Ollama bound on all interfaces")]["state"] == "open"
+    assert sl.signal_id_for("guardian", "No issues detected") not in latest
+
+
 def test_handle_tools(tmp_sovereign_root):
     root = tmp_sovereign_root
     sl.open_signal(source="halt", native_id="z.md", produced_at="2026-09-01T00:00:00Z", root=root)
