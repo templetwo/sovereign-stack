@@ -23,8 +23,19 @@ WHO MAY SET IT, exhaustively:
   * **The native MCP server**, from its OWN spiral session, at dispatch entry.
     Server-side, before any tool body runs. The session id is minted by
     ``spiral.py`` at server start; a tool caller cannot reach it or change it.
-  * **The bridge**, IN-PROCESS, from the seat identity its kernel already
-    verified for the request, immediately around the tool call it makes.
+  * **The SSE transport**, from the ``X-Sovereign-Seat`` request header on a
+    LOOPBACK connect to the plain native ``/sse``, established for the whole
+    session before ``server.run``. See ``sse_server.seat_from_scope``.
+
+CORRECTED 2026-09-06 BY THE BRIDGE BUILD, and the correction is the reason the
+transport half exists at all: **the bridge does NOT dispatch in-process.** It
+opens an SSE session against the sovereign-sse process per call
+(``bridge.py:550``, ``sse_client(MCP_SSE_URL, headers=...)``), so a ContextVar
+it sets lives in the bridge's process and never reaches a tool handler. With
+only the in-process path, every bridge seat would have fallen through to the
+server's own spiral session — one shared identity stamped as the closer for
+every remote seat, which is exactly the defect N3 names, relocated. A
+ContextVar cannot cross a socket; a header can.
 
 WHO MAY NOT: anybody holding a tool argument. This is the whole point.
 ``signal_ack`` REFUSES the arguments ``actor``, ``actor_seat``, ``owner``,
@@ -76,6 +87,16 @@ REFUSED_IDENTITY_ARGUMENTS: tuple[str, ...] = (
     "closed_by",
     "source_seat",
 )
+
+
+# HOW AN OUT-OF-PROCESS CALLER GETS ITS IDENTITY IN HERE. Named in this module
+# rather than in the transport, because it is part of the contract, and because
+# `sse_server` imports `server` — so `server` cannot import `sse_server` back to
+# ask. The transport half lives in `sse_server.SEAT_HEADER`, which is this
+# string's header form, and the native `heartbeat` publishes this value as
+# `caller_identity_channel` so a bridge can tell a stack that carries seat
+# identity from one that does not before it admits a seat-attributed write.
+CALLER_IDENTITY_CHANNEL = "x-sovereign-seat-sse-header"
 
 
 def set_caller_seat(seat: str) -> contextvars.Token:

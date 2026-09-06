@@ -6,11 +6,13 @@ Runs alongside stdio server for local Claude Code access.
 """
 
 import asyncio
+import contextlib
 import hashlib
 import hmac
 import json
 import logging
 import os
+import re
 import secrets
 import sys
 import threading
@@ -23,11 +25,14 @@ from uuid import UUID
 import uvicorn
 from mcp.server.sse import SseServerTransport
 from starlette.applications import Starlette
+from starlette.exceptions import HTTPException
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
 # Import the existing sovereign-stack server
+from .dispatch_context import CALLER_IDENTITY_CHANNEL as _CALLER_IDENTITY_CHANNEL
+from .dispatch_context import reset_caller_seat, set_caller_seat
 from .server import server as sovereign_server
 
 # Optional: OpenAI bridge filtered endpoint.
@@ -180,6 +185,100 @@ async def health(request: Request) -> JSONResponse:
     return JSONResponse({"status": "healthy", "service": "sovereign-stack-sse", "version": "1.0.0"})
 
 
+# ── SEAT IDENTITY ON THE WIRE (review N3, transport half) ──────────────────
+#
+# THE FACT THAT MAKES THIS NECESSARY: the bridge does NOT dispatch in-process.
+# It opens an SSE session against THIS process per call
+# (`bridge.py:550`, `sse_client(MCP_SSE_URL, headers=...)`), so a ContextVar
+# the bridge sets lives in the bridge's process and never reaches a tool
+# handler here. Without a transport carrier, every bridge seat would fall back
+# to the server's own spiral session — one shared identity stamped as the
+# closer for every remote seat, which is the finding N3 exists to close
+# wearing different clothes.
+#
+# So the identity rides ONE request header on the session that carries the
+# tool calls, and is established for the whole of `sovereign_server.run`.
+#
+# THE FOUR CONDITIONS, none of them optional:
+#   * PLAIN NATIVE `/sse` ONLY. `/openai/sse` and `/grok/sse` are ring-filtered
+#     substrate doors reached by remote OAuth clients; a caller-supplied seat
+#     there is exactly the "caller names its own closer" defect, one door over.
+#     The header is not read on those paths at all.
+#   * LOOPBACK ONLY. The tunnel terminates elsewhere and forwards, so a
+#     non-loopback peer is a remote client that reached the native door — it
+#     does not get to assert an identity, whatever its bearer token says.
+#   * SHAPE. `^[a-z0-9][a-z0-9-]{2,63}$`: a seat name, not a sentence, not a
+#     namespace, not something that could be mistaken for a path or an
+#     injection. `:` is excluded, so a header can never forge a namespaced
+#     identity the server would otherwise have minted itself.
+#   * A MALFORMED VALUE REFUSES THE CONNECTION. It does not fall back to the
+#     server identity — a client that tried to say who it was and got it wrong
+#     must not be silently answered as somebody else. That is the whole
+#     fail-open family this release is closing.
+#
+# NO HEADER AT ALL is a different case and is not an error: the session runs
+# with the context unset, and the dispatch falls back to the server's own
+# spiral session exactly as before. Native Claude Code seats and every
+# existing client keep working untouched.
+
+SEAT_HEADER = b"x-sovereign-seat"
+SEAT_VALUE_RE = re.compile(r"^[a-z0-9][a-z0-9-]{2,63}$")
+# Re-exported from dispatch_context so the header form and the advertised
+# channel name cannot drift apart in two files.
+CALLER_IDENTITY_CHANNEL = _CALLER_IDENTITY_CHANNEL
+_LOOPBACK_PEERS = frozenset({"127.0.0.1", "::1", "localhost"})
+
+
+def _is_loopback_peer(scope: dict) -> bool:
+    client = scope.get("client")
+    host = client[0] if isinstance(client, (tuple, list)) and client else client
+    return isinstance(host, str) and host.strip() in _LOOPBACK_PEERS
+
+
+def seat_from_scope(scope: dict) -> tuple[str | None, str | None]:
+    """(seat, refusal). Both None means "no header — proceed unbound".
+
+    Split out from the route so it is testable without a socket, and so the
+    two places that serve `/sse` (this module's ASGI router and the Starlette
+    route below) cannot drift apart on the rules.
+    """
+    raw = _first_header(scope, SEAT_HEADER)
+    if not raw:
+        return None, None
+    if scope.get("path") != "/sse":
+        # Not read on the substrate doors. Ignored, not refused: those clients
+        # never agreed to this convention and must not be broken by sending a
+        # header some proxy added.
+        return None, None
+    if not _is_loopback_peer(scope):
+        return None, (
+            "X-Sovereign-Seat is accepted only from a loopback peer; this "
+            f"connection is from {scope.get('client')!r}"
+        )
+    value = raw.decode("utf-8", errors="replace").strip()
+    if not SEAT_VALUE_RE.match(value):
+        return None, (
+            f"X-Sovereign-Seat {value!r} is refused: a seat name matches {SEAT_VALUE_RE.pattern}"
+        )
+    return value, None
+
+
+@contextlib.contextmanager
+def caller_seat_for_session(scope: dict):
+    """Hold the seat identity for the life of one SSE session.
+
+    Set BEFORE `sovereign_server.run` so every tool dispatched on the session
+    inherits it, and reset in a finally so it cannot outlive the session.
+    """
+    seat, _refusal = seat_from_scope(scope)
+    token = set_caller_seat(seat) if seat else None
+    try:
+        yield seat
+    finally:
+        if token is not None:
+            reset_caller_seat(token)
+
+
 # SSE endpoint - holds connection open for server-sent events
 async def handle_sse(request: Request):
     """
@@ -187,16 +286,22 @@ async def handle_sse(request: Request):
     """
     logger.info(f"New SSE connection from {request.client}")
 
-    async with sse.connect_sse(request.scope, request.receive, request._send) as (
-        read_stream,
-        write_stream,
-    ):
-        await sovereign_server.run(
+    _seat, refusal = seat_from_scope(request.scope)
+    if refusal:
+        logger.warning("Refused /sse connect: %s", refusal)
+        raise HTTPException(status_code=400, detail=refusal)
+
+    with caller_seat_for_session(request.scope):
+        async with sse.connect_sse(request.scope, request.receive, request._send) as (
             read_stream,
             write_stream,
-            sovereign_server.create_initialization_options(),
-            raise_exceptions=True,
-        )
+        ):
+            await sovereign_server.run(
+                read_stream,
+                write_stream,
+                sovereign_server.create_initialization_options(),
+                raise_exceptions=True,
+            )
 
 
 # ── Native SSE auth ───────────────────────────────────────────────────────────
@@ -370,6 +475,24 @@ def _bridge_auth_ok(scope: dict) -> bool:
     if auth.startswith("Bearer "):
         return hmac.compare_digest(auth[7:].strip(), expected)
     return False
+
+
+async def _send_400(send, detail: str) -> None:
+    """A malformed request is a 400, not a 401. The credential was fine; what
+    the client SAID about itself was not, and telling it "Unauthorized" would
+    send it off to fix the wrong thing."""
+    body = json.dumps({"error": "Bad Request", "detail": detail}).encode()
+    await send(
+        {
+            "type": "http.response.start",
+            "status": 400,
+            "headers": [
+                (b"content-type", b"application/json"),
+                (b"content-length", str(len(body)).encode()),
+            ],
+        }
+    )
+    await send({"type": "http.response.body", "body": body})
 
 
 async def _send_401(send, detail: str = "Valid Bearer token required for /openai/sse") -> None:
@@ -732,14 +855,24 @@ class SovereignAsgiMiddleware:
                     "Credential required for /sse: Authorization: Bearer <token> or ?token=<token>",
                 )
                 return
-            logger.info(f"New SSE connection from {scope.get('client')}")
-            async with sse.connect_sse(scope, receive, send) as (read_stream, write_stream):
-                await sovereign_server.run(
-                    read_stream,
-                    write_stream,
-                    sovereign_server.create_initialization_options(),
-                    raise_exceptions=True,
-                )
+            _seat, seat_refusal = seat_from_scope(scope)
+            if seat_refusal:
+                # A CLIENT THAT TRIED TO SAY WHO IT WAS AND GOT IT WRONG IS
+                # REFUSED, not answered as somebody else.
+                logger.warning("Rejected /sse connect: %s", seat_refusal)
+                await _send_400(send, seat_refusal)
+                return
+            logger.info(
+                "New SSE connection from %s (seat=%s)", scope.get("client"), _seat or "unbound"
+            )
+            with caller_seat_for_session(scope):
+                async with sse.connect_sse(scope, receive, send) as (read_stream, write_stream):
+                    await sovereign_server.run(
+                        read_stream,
+                        write_stream,
+                        sovereign_server.create_initialization_options(),
+                        raise_exceptions=True,
+                    )
         elif _BRIDGE_ENABLED and path == "/openai/sse" and method == "GET":
             _gate = _verify_at_door(
                 scope, expected_substrate="chatgpt-openai-bridge", transport="sse"

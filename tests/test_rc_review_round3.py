@@ -1202,3 +1202,207 @@ class TestTheRetirementNoticeIsBounded:
         assert "NOT FOLDED" in error
         assert "It has no replacement." in error
         assert "does not resolve an existing uncertainty_N marker" in error
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# N3, TRANSPORT HALF — the bridge does NOT dispatch in-process.
+#
+# HQ, 2026-09-06, from the parallel bridge build: bridge.py:550 opens an SSE
+# session per call (`sse_client(MCP_SSE_URL, headers=...)`), so a ContextVar
+# the bridge sets never reaches a handler here, and the in-process fallback
+# would stamp the SHARED spiral session on every seat's ack. A ContextVar
+# cannot cross a socket; a header can.
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def _sse_scope(headers=None, path="/sse", client=("127.0.0.1", 12345)):
+    return {
+        "type": "http",
+        "path": path,
+        "method": "GET",
+        "headers": headers or [],
+        "query_string": b"",
+        "client": client,
+    }
+
+
+class TestTheSeatHeaderCarriesIdentityAcrossTheSocket:
+    def test_a_loopback_header_binds_the_seat_for_a_signal_ack_on_that_session(
+        self, tmp_sovereign_root, monkeypatch
+    ):
+        """THE WHOLE POINT: a tool dispatched inside the session's context is
+        stamped with the seat the header named, not the server's session."""
+        from sovereign_stack import sse_server
+
+        root = tmp_sovereign_root
+        monkeypatch.setattr(sl, "default_sovereign_root", lambda: root)
+        _guardian_ok(root)
+        _a_halt(root, "x.md")
+        sl.scan_all(root)
+        monkeypatch.setattr(server.spiral_state, "session_id", "one-shared-spiral-session")
+
+        scope = _sse_scope(headers=[(b"x-sovereign-seat", b"hq-studio")])
+        with sse_server.caller_seat_for_session(scope) as seat:
+            assert seat == "hq-studio"
+            out = _dispatch(
+                "signal_ack",
+                {
+                    "signal_id": sl.signal_id_for("halt", "x.md"),
+                    "state": "acted",
+                    "reason": "closed",
+                },
+            )
+        assert out["ok"] is True
+        assert out["row"]["closed_by"] == "hq-studio"
+        assert "one-shared-spiral-session" not in out["row"]["closed_by"]
+
+    def test_no_header_falls_back_to_the_native_spiral_identity(
+        self, tmp_sovereign_root, monkeypatch
+    ):
+        """Every existing client keeps working. An absent header is not an
+        error; it is the case that was always there."""
+        from sovereign_stack import sse_server
+
+        root = tmp_sovereign_root
+        monkeypatch.setattr(sl, "default_sovereign_root", lambda: root)
+        _guardian_ok(root)
+        _a_halt(root, "x.md")
+        sl.scan_all(root)
+        monkeypatch.setattr(server.spiral_state, "session_id", "native-session")
+
+        scope = _sse_scope()
+        assert sse_server.seat_from_scope(scope) == (None, None)
+        with sse_server.caller_seat_for_session(scope) as seat:
+            assert seat is None
+            out = _dispatch(
+                "signal_ack",
+                {
+                    "signal_id": sl.signal_id_for("halt", "x.md"),
+                    "state": "acted",
+                    "reason": "closed",
+                },
+            )
+        assert out["row"]["closed_by"] == "seat:native-session"
+
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            b"HQ-Studio",
+            b"hq studio",
+            b"seat:hq",
+            b"a",
+            b"../etc",
+            b"hq/studio",
+            b"-leading",
+            b"x" * 80,
+        ],
+    )
+    def test_a_malformed_header_refuses_the_connection(self, bad):
+        """It does NOT fall back. A client that tried to say who it was and
+        got it wrong must not be silently answered as somebody else — that is
+        the fail-open family this whole release is closing."""
+        from sovereign_stack import sse_server
+
+        seat, refusal = sse_server.seat_from_scope(_sse_scope(headers=[(b"x-sovereign-seat", bad)]))
+        assert seat is None
+        assert refusal and "X-Sovereign-Seat" in refusal
+
+    def test_a_non_loopback_peer_may_not_assert_a_seat(self):
+        """The tunnel terminates elsewhere and forwards, so a non-loopback
+        peer is a remote client at the native door. A bearer token proves it
+        may call; it does not prove who it is."""
+        from sovereign_stack import sse_server
+
+        seat, refusal = sse_server.seat_from_scope(
+            _sse_scope(headers=[(b"x-sovereign-seat", b"hq-studio")], client=("203.0.113.9", 443))
+        )
+        assert seat is None
+        assert refusal and "loopback" in refusal
+
+    @pytest.mark.parametrize("path", ["/openai/sse", "/grok/sse"])
+    def test_the_header_is_not_read_on_the_substrate_doors(self, path):
+        """Ring-filtered doors reached by remote OAuth clients. A
+        caller-supplied seat there is N3 one door over. Ignored rather than
+        refused: those clients never agreed to this convention."""
+        from sovereign_stack import sse_server
+
+        assert sse_server.seat_from_scope(
+            _sse_scope(headers=[(b"x-sovereign-seat", b"hq-studio")], path=path)
+        ) == (None, None)
+
+    def test_the_route_refuses_before_it_opens_the_session(self, monkeypatch):
+        """Through the REAL ASGI router branch, not the helper: a malformed
+        header must 400 without ever reaching connect_sse."""
+        from sovereign_stack import sse_server
+
+        monkeypatch.setenv("SSE_ALLOW_UNAUTHENTICATED", "true")
+        monkeypatch.delenv("BRIDGE_TOKEN", raising=False)
+        opened = []
+        monkeypatch.setattr(
+            sse_server.sse, "connect_sse", lambda *a, **kw: opened.append(1), raising=True
+        )
+        sent = []
+
+        async def send(msg):
+            sent.append(msg)
+
+        async def receive():
+            return {"type": "http.request"}
+
+        asyncio.run(
+            sse_server.app(_sse_scope(headers=[(b"x-sovereign-seat", b"BAD SEAT")]), receive, send)
+        )
+        assert sent[0]["status"] == 400
+        assert not opened, "the session was opened before the header was judged"
+
+    def test_the_route_establishes_the_seat_before_server_run(self, monkeypatch):
+        """Through the REAL ASGI router branch: the identity must be live by
+        the time `sovereign_server.run` starts, or the first tool call on the
+        session is unbound."""
+        import contextlib as _contextlib
+
+        from sovereign_stack import dispatch_context as dc
+        from sovereign_stack import sse_server
+
+        monkeypatch.setenv("SSE_ALLOW_UNAUTHENTICATED", "true")
+        monkeypatch.delenv("BRIDGE_TOKEN", raising=False)
+
+        @_contextlib.asynccontextmanager
+        async def fake_connect(*a, **kw):
+            yield (None, None)
+
+        seen = []
+
+        async def fake_run(*a, **kw):
+            seen.append(dc.CALLER_SEAT.get())
+
+        monkeypatch.setattr(sse_server.sse, "connect_sse", fake_connect)
+        monkeypatch.setattr(sse_server.sovereign_server, "run", fake_run)
+
+        async def send(msg):
+            return None
+
+        async def receive():
+            return {"type": "http.request"}
+
+        asyncio.run(
+            sse_server.app(
+                _sse_scope(headers=[(b"x-sovereign-seat", b"grok-build")]), receive, send
+            )
+        )
+        assert seen == ["grok-build"]
+        assert dc.CALLER_SEAT.get() is None, "the session's seat outlived the session"
+
+    def test_the_heartbeat_advertises_the_identity_channel(self, tmp_sovereign_root, monkeypatch):
+        """The bridge reads this before admitting a seat-attributed write. An
+        older stack answers WITHOUT the field, and that absence is the
+        bridge's signal to refuse rather than let every seat close as the
+        shared server session."""
+        from sovereign_stack import sse_server
+
+        monkeypatch.setattr(sl, "default_sovereign_root", lambda: tmp_sovereign_root)
+        _guardian_ok(tmp_sovereign_root)
+        out = _dispatch("heartbeat", {})
+        assert out["caller_identity_channel"] == "x-sovereign-seat-sse-header"
+        assert out["caller_identity_channel"] == sse_server.CALLER_IDENTITY_CHANNEL
+        assert sse_server.SEAT_HEADER == b"x-sovereign-seat"
