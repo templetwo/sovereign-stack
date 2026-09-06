@@ -497,6 +497,19 @@ def _spiral_state_never_writes_live(
 
     monkeypatch.setattr(_server, "save_spiral_state", _guarded_save)
     monkeypatch.setattr(_server, "SPIRAL_STATE_PATH", _spiral_tmp_state_path)
+    # THIRD LIMB, ADDED FOR REVIEW N8. The two above are patches on NAMES, and
+    # a from-import copies the function object, so they cover the server's
+    # binding and leave `spiral.save_spiral_state` — the same writer, reached
+    # by its original name — unguarded. The reviewer called the server binding
+    # (refused) and the original binding (wrote) in one fixture and got both
+    # answers. `spiral.WRITE_GUARD` sits INSIDE the function body, so it is on
+    # the common writer boundary and covers every binding there will ever be.
+    import sovereign_stack.spiral as _spiral
+
+    def _refuse_spiral_destination(path: Path) -> None:
+        _refuse_live_root("THE SPIRAL STATE", Path(path), spiral_hint)
+
+    monkeypatch.setattr(_spiral, "WRITE_GUARD", _refuse_spiral_destination)
 
 
 # ── AUTOUSE GUARD (own labelled block) ──────────────────────────────────────
@@ -558,9 +571,21 @@ def _signal_ledger_never_touches_live(
         _refuse_live_root("THE SIGNAL SCAN MARKER", _sl.scan_marker_path(root), signals_hint)
         return _orig_marker(counts, source_status, root)
 
+    # THIRD WRITER, ADDED WITH THE FEATURE THAT CREATED IT (review N9).
+    # `_log_diagnostic` writes tracebacks to <root>/signals/diagnostics.log on
+    # the READ path, so a scanner exception in any test would otherwise mint a
+    # new file in the operator's live store. Two guarded writers and one
+    # unguarded one is the shape this whole file exists to prevent.
+    _orig_diag = _sl._log_diagnostic
+
+    def _guarded_diagnostic(root, label, exc):
+        _refuse_live_root("THE SIGNAL DIAGNOSTICS LOG", _sl.diagnostics_path(root), signals_hint)
+        return _orig_diag(root, label, exc)
+
     monkeypatch.setattr(_sl, "default_sovereign_root", lambda: _signals_tmp_root)
     monkeypatch.setattr(_sl, "_append", _guarded_append)
     monkeypatch.setattr(_sl, "_write_scan_marker", _guarded_marker)
+    monkeypatch.setattr(_sl, "_log_diagnostic", _guarded_diagnostic)
 
 
 # ── The dashboard's two external probes never leave the test process ────────

@@ -528,10 +528,19 @@ RETIRED_TOOLS: dict[str, RetiredTool] = {
     ),
     "resolve_uncertainty": _retired(
         None,
+        # WORDING TIGHTENED 2026-09-06 (round-2 review, judgment 3). It read
+        # "markers stay unresolved forever", which overstates what follows
+        # from retiring a tool: the log and the resurfacer are untouched, so a
+        # marker can still be resolved by editing the store or by an
+        # un-retirement. What is actually gone is the OPERATION. The review's
+        # "real store" was also a temporary store, so that word is dropped
+        # rather than left standing as a claim about production.
         "NOT FOLDED. There is no marker-id resolution operation left: "
-        "record_open_thread creates a NEW open thread and the existing "
-        "uncertainty_N markers stay unresolved forever. Verified by the "
-        "2026-09-06 review against a real store.",
+        "record_open_thread creates a NEW open thread and does not resolve an "
+        "existing uncertainty_N marker, so through the tool surface those "
+        "markers stay unresolved. The uncertainty log and the resurfacer are "
+        "unchanged; what is lost is the way to close a marker by id. "
+        "Reproduced by the 2026-09-06 review on a temporary store.",
     ),
     "list_exchanges": _retired(
         "archive_exchange",

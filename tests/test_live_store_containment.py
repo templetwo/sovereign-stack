@@ -428,3 +428,81 @@ class TestTheSignalLedgerNeverTouchesTheLiveStore:
         out = sl.scan_all(tmp_path)
         assert out["counts"]["halt"] == 1
         assert sl.ledger_path(tmp_path).exists()
+
+
+# ── N8 (review round 2, 2026-09-06) ─────────────────────────────────────────
+#
+#   "tests/conftest.py:498 patches only server.save_spiral_state;
+#    src/sovereign_stack/spiral.py:300 still opens its supplied path for
+#    writing. The actual fixture, with its live-root sentinel rebound to a
+#    temporary simulated live root, refuses the server call but permits the
+#    original module call and creates the simulated live state file."
+#
+# The reviewer's own probe, rebuilt: run the REAL autouse fixture against a
+# simulated live root, then call BOTH bindings and require both to refuse.
+# Nothing here goes near the operator's actual spiral_state.json.
+
+
+class TestN8EveryBindingOfTheSpiralWriterIsGuarded:
+    def _armed(self, monkeypatch, tmp_path):
+        """Arm the real fixture with a SIMULATED live root, and hand back the
+        destination inside it. `_LIVE_SOVEREIGN` is read by name at call time,
+        so rebinding it is what makes this falsifiable without touching the
+        real store."""
+        import sovereign_stack.server as _server
+        import tests.conftest as conf
+
+        fake_live = tmp_path / "simulated-live"
+        fake_live.mkdir()
+        dest = fake_live / "spiral_state.json"
+        sink = tmp_path / "sink.json"
+        monkeypatch.setattr(conf, "_LIVE_SOVEREIGN", fake_live.resolve())
+        monkeypatch.setattr(_server, "SPIRAL_STATE_PATH", dest)
+        conf._spiral_state_never_writes_live.__wrapped__(monkeypatch, sink)
+        return dest, sink
+
+    def test_the_original_module_binding_is_refused_too(self, monkeypatch, tmp_path):
+        from sovereign_stack import spiral
+
+        dest, _sink = self._armed(monkeypatch, tmp_path)
+        with pytest.raises(AssertionError):
+            spiral.save_spiral_state(spiral.SpiralState(), dest)
+        assert not dest.exists(), "the simulated live file was written"
+
+    def test_the_server_binding_is_still_refused(self, monkeypatch, tmp_path):
+        """The limb that already worked has to keep working — the guard moved
+        inward, it did not move away."""
+        import sovereign_stack.server as _server
+        from sovereign_stack import spiral
+
+        dest, _sink = self._armed(monkeypatch, tmp_path)
+        with pytest.raises(AssertionError):
+            _server.save_spiral_state(spiral.SpiralState(), dest)
+        assert not dest.exists()
+
+    def test_the_redirect_limb_is_untouched(self, monkeypatch, tmp_path):
+        import sovereign_stack.server as _server
+
+        _dest, sink = self._armed(monkeypatch, tmp_path)
+        assert sink == _server.SPIRAL_STATE_PATH
+
+    def test_an_ordinary_destination_still_writes(self, monkeypatch, tmp_path):
+        """POSITIVE CONTROL. A guard that refuses everything is not
+        containment, it is a broken writer."""
+        from sovereign_stack import spiral
+
+        _dest, sink = self._armed(monkeypatch, tmp_path)
+        spiral.save_spiral_state(spiral.SpiralState(), sink)
+        assert json.loads(sink.read_text())["session_id"]
+
+    def test_the_guard_is_off_by_default_in_production(self):
+        """The hook must be inert unless a harness arms it, and it must not
+        know what 'the live store' is — that knowledge belongs to whoever is
+        doing the containing."""
+        import importlib
+
+        import sovereign_stack.spiral as spiral
+
+        source = importlib.import_module("sovereign_stack.spiral")
+        assert "WRITE_GUARD = None" in Path(source.__file__).read_text()
+        assert callable(spiral.WRITE_GUARD) or spiral.WRITE_GUARD is None

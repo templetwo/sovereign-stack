@@ -968,3 +968,237 @@ class TestN4TheWatchStoreIsContained:
         with pytest.raises(pf.WatchIdRefused):
             pf.save_watch(dict(watch, watch_id="../outside"))
         assert not (root / "post_fix" / "outside.json").exists()
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# N7 — an unchanged unresolved thread must not reopen its acknowledged
+#      signal. P2. Introduced by the F7 repair.
+#
+#   "signal_ledger.py:1425 treats every non-open ledger state as a stale
+#    resolution whenever the source thread is unresolved. Scan, acknowledge
+#    with reason and closer, scan the identical source again: state becomes
+#    open, and reason/closer/closed_at become null in the latest row."
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def _a_thread(root: Path, *, resolved: bool = False, ts: str = "2026-09-01T00:00:00Z") -> str:
+    _write_jsonl(
+        root / "chronicle" / "open_threads" / "a.jsonl",
+        [
+            {
+                "thread_id": "fixture-thread",
+                "question": "Synthetic ordinary thread",
+                "timestamp": ts,
+                "resolved": resolved,
+            }
+        ],
+    )
+    return sl.signal_id_for("thread", "fixture-thread")
+
+
+class TestN7AnAcknowledgementIsNotAStaleResolution:
+    def test_a_rescan_of_an_unchanged_source_preserves_the_ack(self, tmp_sovereign_root):
+        """THE REVIEWER'S `f7_unchanged_thread_preserves_ack`."""
+        root = tmp_sovereign_root
+        sid = _a_thread(root)
+        sl.scan_threads(root)
+        sl.ack_signal(sid, "fixture-seat", "acknowledged", "read and tracked", root)
+        before = sl.load_latest(root)[sid]
+        sl.scan_threads(root)
+        after = sl.load_latest(root)[sid]
+        assert after["state"] == "acknowledged"
+        assert after["closed_by"] == before["closed_by"] == "fixture-seat"
+        assert after["reason"] == before["reason"] == "read and tracked"
+        assert after["closed_at"] == before["closed_at"]
+
+    def test_an_actual_later_source_record_does_reopen_it(self, tmp_sovereign_root):
+        """The reversal is not forbidden, it is CONDITIONED. A source record
+        dated after the acknowledgement is a real later transition and reopens
+        the signal — otherwise the fix would just be F7 undone."""
+        root = tmp_sovereign_root
+        sid = _a_thread(root)
+        sl.scan_threads(root)
+        sl.ack_signal(sid, "fixture-seat", "acknowledged", "read and tracked", root)
+        _a_thread(root, ts="2099-01-01T00:00:00Z")
+        sl.scan_threads(root)
+        assert sl.load_latest(root)[sid]["state"] == "open"
+
+    def test_a_scanner_written_close_is_still_reversible(self, tmp_sovereign_root):
+        """Source resolution and human acknowledgment are different facts.
+        This module's OWN close is a restatement of the source, so a later
+        source record may freely restate it back — which is F7, and it must
+        keep working."""
+        root = tmp_sovereign_root
+        sid = _a_thread(root, resolved=True)
+        sl.scan_threads(root)
+        closed = sl.load_latest(root)[sid]
+        assert closed["state"] == "acted"
+        assert closed["closed_by"] in sl.SOURCE_DERIVED_CLOSERS
+        _a_thread(root, resolved=False)
+        sl.scan_threads(root)
+        assert sl.load_latest(root)[sid]["state"] == "open"
+
+    def test_an_undatable_source_leaves_the_ack_standing(self, tmp_sovereign_root):
+        """A reversal we cannot justify is not a reversal. With no parseable
+        source timestamp there is no later transition to point at."""
+        root = tmp_sovereign_root
+        sid = _a_thread(root)
+        sl.scan_threads(root)
+        sl.ack_signal(sid, "fixture-seat", "acted", "handled", root)
+        _write_jsonl(
+            root / "chronicle" / "open_threads" / "a.jsonl",
+            [
+                {
+                    "thread_id": "fixture-thread",
+                    "question": "Synthetic ordinary thread",
+                    "timestamp": "not-a-date",
+                    "resolved": False,
+                }
+            ],
+        )
+        rows_before = len(sl.ledger_path(root).read_text().splitlines())
+        sl.scan_threads(root)
+        assert sl.load_latest(root)[sid]["state"] == "acted"
+        # AND NOTHING WAS WRITTEN AT ALL. `d6d3b82` appended a reopen row with
+        # `produced_at="not-a-date"`, which `_validate_row` then rejected — so
+        # the state looked preserved while the ledger had gained a CORRUPT row
+        # that blinds every source count. Preserved-by-refusal is not the same
+        # as preserved.
+        assert len(sl.ledger_path(root).read_text().splitlines()) == rows_before
+        assert sl.load_state(root).corrupt_count == 0
+
+    def test_the_earlier_acknowledgment_survives_in_the_history_either_way(
+        self, tmp_sovereign_root
+    ):
+        """POSITIVE CONTROL. The ledger is append-only: even the legitimate
+        reopen must leave the ack readable in the history, not erased."""
+        root = tmp_sovereign_root
+        sid = _a_thread(root)
+        sl.scan_threads(root)
+        sl.ack_signal(sid, "fixture-seat", "acknowledged", "read and tracked", root)
+        _a_thread(root, ts="2099-01-01T00:00:00Z")
+        sl.scan_threads(root)
+        rows = [json.loads(x) for x in sl.ledger_path(root).read_text().splitlines() if x.strip()]
+        mine = [r for r in rows if r.get("signal_id") == sid]
+        assert any(r["state"] == "acknowledged" and r["closed_by"] == "fixture-seat" for r in mine)
+        assert mine[-1]["state"] == "open"
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# N9 — a scanner failure keeps its traceback somewhere. P3.
+#
+#   "Neither logs the traceback. The independent exception fixtures capture no
+#    logging output and find no traceback in produced files. Exception text is
+#    useful partial diagnosis; it is not a traceback."
+# ══════════════════════════════════════════════════════════════════════════
+
+
+class TestN9ScannerFailuresKeepTheirTraceback:
+    def test_a_whole_scanner_failure_writes_a_traceback(self, tmp_sovereign_root, monkeypatch):
+        root = tmp_sovereign_root
+        _guardian_ok(root)
+
+        def boom(*a, **kw):
+            raise RuntimeError("fixture scanner diagnosis token")
+
+        monkeypatch.setattr(sl, "scan_all", boom)
+        field = sl.heartbeat_field(root, scan=True)
+        assert field["total"] is None
+        assert "fixture scanner diagnosis token" in field["error"]
+        # THE PUBLIC ERROR STAYS A STRING. `heartbeat_field` must not raise —
+        # dashboard_web.build_snapshot calls it with no section guard.
+        assert isinstance(field["error"], str)
+        assert "Traceback (most recent call last)" not in field["error"]
+        log = sl.diagnostics_path(root).read_text()
+        assert "Traceback (most recent call last)" in log
+        assert "fixture scanner diagnosis token" in log
+        assert "ensure_scanned" in log
+
+    def test_a_single_source_failure_writes_a_traceback(self, tmp_sovereign_root, monkeypatch):
+        root = tmp_sovereign_root
+        _guardian_ok(root)
+
+        def boom(*a, **kw):
+            raise RuntimeError("fixture honk diagnosis token")
+
+        monkeypatch.setattr(sl, "scan_honks", boom)
+        result = sl.scan_all(root, guardian_provider=lambda: {"issues": []})
+        assert result["source_status"]["honk"].startswith("failed:RuntimeError")
+        log = sl.diagnostics_path(root).read_text()
+        assert "Traceback (most recent call last)" in log
+        assert "fixture honk diagnosis token" in log
+        assert "'honk'" in log
+
+    def test_the_other_sources_still_measured(self, tmp_sovereign_root, monkeypatch):
+        """POSITIVE CONTROL. Logging the traceback must not change the
+        isolation the marker already had."""
+        root = tmp_sovereign_root
+        _guardian_ok(root)
+
+        def boom(*a, **kw):
+            raise RuntimeError("fixture honk diagnosis token")
+
+        monkeypatch.setattr(sl, "scan_honks", boom)
+        result = sl.scan_all(root, guardian_provider=lambda: {"issues": []})
+        assert result["source_status"]["guardian"] == "ok"
+
+    def test_the_log_is_bounded(self, tmp_sovereign_root, monkeypatch):
+        """An exception firing on a 3-second console poll must not fill a
+        disk."""
+        root = tmp_sovereign_root
+        _guardian_ok(root)
+        path = sl.diagnostics_path(root)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("x" * (sl.DIAGNOSTICS_MAX_BYTES + 4096))
+
+        def boom(*a, **kw):
+            raise RuntimeError("fixture honk diagnosis token")
+
+        monkeypatch.setattr(sl, "scan_honks", boom)
+        sl.scan_all(root, guardian_provider=lambda: {"issues": []})
+        text = path.read_text()
+        assert path.stat().st_size < sl.DIAGNOSTICS_MAX_BYTES
+        assert "truncated at" in text, "a fresh file must not read as a quiet one"
+        assert "fixture honk diagnosis token" in text
+
+    def test_a_broken_diagnostics_path_never_breaks_the_read(self, tmp_sovereign_root, monkeypatch):
+        """This runs inside the handler for something that already went wrong.
+        A diagnostic that turns a degraded read into a broken one is worse
+        than a missing diagnostic."""
+        root = tmp_sovereign_root
+        _guardian_ok(root)
+        monkeypatch.setattr(
+            sl, "diagnostics_path", lambda r=None: Path("/nonexistent-volume/x/y.log")
+        )
+
+        def boom(*a, **kw):
+            raise RuntimeError("fixture honk diagnosis token")
+
+        monkeypatch.setattr(sl, "scan_honks", boom)
+        result = sl.scan_all(root, guardian_provider=lambda: {"issues": []})
+        assert result["source_status"]["honk"].startswith("failed:RuntimeError")
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Astra's judgment (3) — the retirement notice claims only what follows.
+# ══════════════════════════════════════════════════════════════════════════
+
+
+class TestTheRetirementNoticeIsBounded:
+    def test_resolve_uncertainty_no_longer_overstates_the_consequence(self):
+        """ "'markers stay unresolved forever' overstates what follows from
+        removing a tool when underlying files/APIs remain, and the review's
+        'real store' was a temporary store, not production." """
+        error = server.retired_tool_error("resolve_uncertainty")
+        assert "unresolved forever" not in error
+        assert "against a real store" not in error
+        assert "through the tool surface those markers stay unresolved" in error
+        assert "temporary store" in error
+
+    def test_it_still_says_the_capability_is_gone(self):
+        """The softening must not walk back the functional distinction — that
+        was the whole finding the reclassification closed."""
+        error = server.retired_tool_error("resolve_uncertainty")
+        assert "NOT FOLDED" in error
+        assert "It has no replacement." in error
+        assert "does not resolve an existing uncertainty_N marker" in error

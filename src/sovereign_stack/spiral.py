@@ -295,8 +295,31 @@ class SpiralMiddleware:
 # =============================================================================
 
 
+# ── THE COMMON WRITER BOUNDARY (review N8) ─────────────────────────────────
+#
+# `server.py` does `from .spiral import save_spiral_state`, and a from-import
+# copies the FUNCTION OBJECT. So patching one name leaves the other callable:
+# the suite's containment fixture patched `server.save_spiral_state` only, and
+# the reviewer showed that `spiral.save_spiral_state` still opened its given
+# path and wrote. Two bindings, one guard — and a guard on a binding can only
+# ever cover that binding.
+#
+# THE GUARD THEREFORE LIVES IN THE FUNCTION BODY, which is the one thing both
+# names resolve to. `WRITE_GUARD` is None in production and this is a single
+# identity check per save; a test sets it to a callable that raises on a
+# destination it refuses, and every binding — present or future, imported by
+# value or by module — is covered by construction.
+#
+# It is a hook, not a hard-coded path, on purpose: this module must not know
+# what "the live store" is. The knowledge of which destination is forbidden
+# belongs to the harness that is doing the containing.
+WRITE_GUARD = None
+
+
 def save_spiral_state(state: SpiralState, path: Path) -> None:
     """Save spiral state for session continuity."""
+    if WRITE_GUARD is not None:
+        WRITE_GUARD(Path(path))
     with open(path, "w") as f:
         json.dump(state.to_dict(), f, indent=2)
 

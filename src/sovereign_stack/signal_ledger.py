@@ -37,6 +37,7 @@ import fcntl
 import hashlib
 import json
 import os
+import traceback
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -1572,6 +1573,47 @@ def _thread_native_id(rec: dict, shard: Path, index: int, rel: str | None = None
     return f"anon:{hashlib.sha256(raw.encode()).hexdigest()[:16]}"
 
 
+# ── WHO CLOSED IT DECIDES WHETHER A SCAN MAY REOPEN IT (review N7) ─────────
+#
+# The F7 repair taught `scan_threads` to reopen a signal whose source record
+# is unresolved. It then reopened EVERY non-open signal on every rescan of an
+# unchanged source — including one a human had just acknowledged, blanking
+# reason/closed_by/closed_at on the latest row. "The thread is still open" and
+# "nobody has looked at this" are different facts, and the second one is the
+# only thing an acknowledgement ever claimed.
+#
+# These are the closers THIS MODULE writes itself, from source state. A close
+# by one of them is a restatement of the source, so a later source record may
+# freely restate it back. Anything else is somebody's acknowledgement, and
+# reversing it needs an ACTUAL later source transition — a source timestamp
+# newer than the moment of the ack.
+#
+# RESIDUAL, NAMED: a caller reaching `ack_signal` directly with the literal
+# string "watch-2/3" would have their ack treated as source-derived. The tool
+# surface cannot produce it — dispatch identities are namespaced `seat:` —
+# but a direct library call could.
+SOURCE_DERIVED_CLOSERS = frozenset({"watch-2/3", "drain", "nape-ack"})
+
+
+def _may_reopen(latest: dict, source_produced_at: str) -> bool:
+    """True when a scan is allowed to reopen this terminal row."""
+    closer = latest.get("closed_by")
+    if isinstance(closer, str) and closer.strip() in SOURCE_DERIVED_CLOSERS:
+        return True
+    # A HUMAN (or a seat) CLOSED THIS. Reopen only on a real later transition.
+    # NOT "the source is newer than the row" — the scanner's own close stamps
+    # closed_at=now while a legitimate source record is dated in the past, so
+    # that test would forbid every honest cross-shard repair F7 exists for.
+    # The question is narrower: did the SOURCE change after the ack?
+    closed_at = _parse_dt(latest.get("closed_at"))
+    when = _parse_dt(source_produced_at)
+    if closed_at is None or when is None:
+        # Cannot establish a later transition. Leave the acknowledgement
+        # standing: a reversal we cannot justify is not a reversal.
+        return False
+    return when > closed_at
+
+
 def scan_threads(root: Path, owner: str = "watch-2/3") -> ScanResult:
     """One signal per thread id ACROSS every shard. Latest timestamp wins.
 
@@ -1661,13 +1703,16 @@ def scan_threads(root: Path, owner: str = "watch-2/3") -> ScanResult:
                 reason="thread resolved",
                 root=root,
             )
-        elif not resolved and latest.get("state") != "open":
+        elif not resolved and latest.get("state") != "open" and _may_reopen(latest, produced):
             # THE HALF THE OLD CODE HAD NO WORD FOR. It could only ever close a
             # signal, so once an obsolete terminal state landed there was no
             # path back. A thread whose latest record across all shards is OPEN
             # must not sit in the ledger as acted; re-open it, and say why in
             # the row's own reason so the reversal is legible in the audit
             # trail rather than looking like a duplicate.
+            #
+            # `_may_reopen` is review N7: the F7 repair reversed HUMAN
+            # acknowledgements too, on an unchanged source.
             _append(
                 _row(
                     signal_id=sid,
@@ -1696,6 +1741,57 @@ def scan_threads(root: Path, owner: str = "watch-2/3") -> ScanResult:
     elif degraded:
         status = f"degraded:{degraded} unparseable lines"
     return ScanResult(n, status, degraded)
+
+
+# ── SCANNER DIAGNOSTICS (review N9) ────────────────────────────────────────
+#
+# "signal_ledger.py:1481 converts per-source exceptions to strings in the
+# marker; :1533 does the same for whole-scanner exceptions in the response.
+# Neither logs the traceback. Exception text is useful partial diagnosis; it
+# is not a traceback."
+#
+# The public error STAYS A STRING and stays exactly as it was. `heartbeat_field`
+# must not raise — `dashboard_web.build_snapshot` calls it with no section
+# guard — so a genuine scanner bug can only surface there as text, and a
+# reader of that text has the class and the message and no idea which line
+# produced them. The traceback goes to a local, bounded file instead, which
+# costs the public surface nothing.
+
+DIAGNOSTICS_MAX_BYTES = 1024 * 1024
+
+
+def diagnostics_path(root: Path | None = None) -> Path:
+    return _root(root) / "signals" / "diagnostics.log"
+
+
+def _log_diagnostic(root: Path | None, label: str, exc: BaseException) -> None:
+    """Append one traceback, truncating the file at DIAGNOSTICS_MAX_BYTES.
+
+    SWALLOWS ITS OWN FAILURES, deliberately and narrowly: this runs on the
+    READ path, inside the handler for something that already went wrong. A
+    diagnostic that turns a degraded read into a broken one is worse than a
+    missing diagnostic. The public error is unaffected either way.
+
+    Truncate-and-restart rather than rotate: the bound exists so an exception
+    firing on every 3-second console poll cannot fill a disk, and a rotation
+    scheme is a second thing to get wrong for a file nothing reads on a
+    schedule. The truncation stamps a line saying it happened, so a reader
+    never mistakes a fresh file for a quiet one.
+    """
+    try:
+        path = diagnostics_path(root)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists() and path.stat().st_size > DIAGNOSTICS_MAX_BYTES:
+            path.write_text(
+                f"--- {_now()} truncated at {DIAGNOSTICS_MAX_BYTES} bytes; "
+                "earlier diagnostics discarded\n",
+                encoding="utf-8",
+            )
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(f"--- {_now()} {label}\n")
+            fh.write("".join(traceback.format_exception(type(exc), exc, exc.__traceback__)))
+    except Exception:  # noqa: BLE001 — see the docstring
+        return
 
 
 def scan_all(root: Path | None = None, owner: str = "watch-2/3", guardian_provider=None) -> dict:
@@ -1736,6 +1832,7 @@ def scan_all(root: Path | None = None, owner: str = "watch-2/3", guardian_provid
         except Exception as exc:  # noqa: BLE001 — one bad source must not blind the rest
             counts[name] = 0
             source_status[name] = f"failed:{exc.__class__.__name__}: {exc}"
+            _log_diagnostic(r, f"source {name!r} raised during scan_all", exc)
             continue
         counts[name] = result.opened
         source_status[name] = result.status
@@ -1879,6 +1976,7 @@ def ensure_scanned(
             scan_all(root, owner, guardian_provider)
         return None
     except Exception as exc:  # noqa: BLE001 — reported, not raised; see docstring
+        _log_diagnostic(root, "ingestion raised during ensure_scanned", exc)
         return f"{exc.__class__.__name__}: {exc}"
 
 
