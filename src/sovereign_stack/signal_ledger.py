@@ -5,6 +5,29 @@ Latest row per signal_id wins. Never deletes. Fail-closed: an unreadable
 ledger is an ERROR on the heartbeat field, never a zero count.
 
 Do not enable ntfy from this module; SIGNAL_LEDGER_NTFY defaults off.
+
+THE FRESHNESS INTERVAL IS 3600 SECONDS, and it is the ingestion cadence of
+this whole subsystem — state it when you describe the design, because a
+reader who does not know it will assume every read sweeps every source.
+``ensure_scanned`` runs a source sweep only when the marker on disk is older
+than ``DEFAULT_MARKER_MAX_AGE_SECONDS`` (override
+``SIGNAL_LEDGER_MARKER_MAX_AGE``), so a burst of reads costs one sweep and a
+15-minute poller does NOT rescan every 15 minutes — under defaults the sweep
+is about hourly, with exact boundary timing set by the read schedule. The
+bound each scan was judged against is written into the marker itself, so a
+reader judges a scan by the contract its own writer declared.
+
+CONCURRENT READERS DO ONE SCAN, not N. The refresh takes an exclusive flock
+on the marker path and re-checks under it. Lock order is one-directional and
+must stay that way: MARKER LOCK -> ledger appends (``_append_lock``) ->
+marker write. Never take the marker lock while holding a ledger append.
+
+AND A DAMAGED LEDGER IS NEVER REPAIRED BY RESCANNING IT (review N2). A refresh
+writes a new marker, and a new marker certifies whatever the file now holds —
+so a refresh over a truncated ledger destroys the only evidence that anything
+was lost. Integrity is therefore checked BEFORE any refresh, and a failure
+returns an error and leaves the marker exactly where it is, until a human
+moves the damaged ledger aside.
 """
 
 from __future__ import annotations
@@ -449,7 +472,19 @@ def _read_scan_marker(root: Path | None = None) -> tuple[dict | None, str | None
     if not path.exists():
         return None, None
     try:
-        rec = json.loads(path.read_text(encoding="utf-8"))
+        raw = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        return None, f"marker_unreadable:{exc.__class__.__name__}"
+    if not raw.strip():
+        # A ZERO-BYTE MARKER IS NO MARKER, and saying so is load-bearing: the
+        # refresh lock flocks THIS path, and opening it for the lock creates
+        # an empty file on a root that has never been scanned. Reading that as
+        # "marker_invalid" would make the first ever read of a fresh store an
+        # error. It certifies nothing either way, so "absent" is also the
+        # honest reading — an empty file makes no claim.
+        return None, None
+    try:
+        rec = json.loads(raw)
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         return None, f"marker_unreadable:{exc.__class__.__name__}"
     reason = _validate_marker(rec)
@@ -492,6 +527,7 @@ def _check_marker_integrity(marker: dict, root: Path | None = None) -> str | Non
     """
     claimed_bytes = marker.get("ledger_bytes")
     claimed_sha = marker.get("ledger_sha256")
+    claimed_rows = marker.get("ledger_rows")
     path = ledger_path(root)
     if not path.exists():
         return "ledger_missing"
@@ -507,6 +543,25 @@ def _check_marker_integrity(marker: dict, root: Path | None = None) -> str | Non
             "ledger_rewritten:the bytes the last scan certified no longer hash "
             f"to {claimed_sha[:12]}…"
         )
+    # ── ledger_rows IS PART OF THE CONTRACT, SO IT GETS CHECKED (review N6) ─
+    # `_validate_marker` only asked that it be a non-negative integer, so a
+    # marker claiming 21 rows over a one-row ledger stayed healthy through all
+    # three readers. A field advertised as cumulative evidence and never
+    # reconciled is worse than an absent one: it reads as a second check and
+    # is not one. Either check it or drop it from MARKER_REQUIRED; this checks
+    # it.
+    #
+    # STRICTLY LESS-THAN, NEVER EQUALITY. The ledger is append-only and a
+    # watch seat legitimately acks a second after a scan, so `actual > claimed`
+    # is the ordinary honest case. Only a SHRINK is loss.
+    if isinstance(claimed_rows, int) and not isinstance(claimed_rows, bool):
+        actual_rows = sum(
+            1 for line in data.decode("utf-8", "replace").splitlines() if line.strip()
+        )
+        if actual_rows < claimed_rows:
+            return (
+                f"ledger_rows_shrank:marker certified {claimed_rows} rows, file holds {actual_rows}"
+            )
     return None
 
 
@@ -828,6 +883,56 @@ def _parse_dt(raw: str | None) -> datetime | None:
         return None
 
 
+# ── CONFIGURATION AFFIRMS APPLICABILITY; ABSENCE NEVER DOES ────────────────
+#
+# Review judgment (2): "explicitly not configured should be distinguishable
+# from configured but unreadable... Configuration must affirm applicability;
+# missing files, None, exceptions, or permission failures must never be used
+# to infer 'not configured'."
+#
+# THAT SENTENCE IS THE WHOLE DESIGN, AND IT RUNS IN ONE DIRECTION ONLY. A
+# source is applicable unless a human has WRITTEN DOWN that it is not. An
+# absent config file means every source is in scope. An unreadable one means
+# we do not know what was declared — which excuses nothing and is reported as
+# an error, because the alternative is a corrupt file quietly shrinking the
+# denominator.
+#
+# Shape of <root>/signals/sources.json:
+#     {"sources": {"guardian": "not_configured", "proposal": "configured"}}
+
+SOURCE_CONFIG_FILENAME = "sources.json"
+NOT_CONFIGURED = "not_configured"
+
+
+def source_config_path(root: Path | None = None) -> Path:
+    return _root(root) / "signals" / SOURCE_CONFIG_FILENAME
+
+
+def _declared_not_configured(root: Path | None = None) -> tuple[set[str], str | None]:
+    """(sources a human declared inapplicable, error). Absent file -> empty set."""
+    path = source_config_path(root)
+    if not path.exists():
+        return set(), None
+    try:
+        rec = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        return set(), f"source_config_unreadable:{exc.__class__.__name__}"
+    if not isinstance(rec, dict) or not isinstance(rec.get("sources"), dict):
+        return set(), "source_config_malformed:expected {'sources': {name: status}}"
+    declared = set()
+    for name, value in rec["sources"].items():
+        if name not in SOURCES:
+            return set(), f"source_config_malformed:{name!r} is not a source"
+        if value == NOT_CONFIGURED:
+            declared.add(name)
+        elif value != "configured":
+            return set(), (
+                f"source_config_malformed:{name!r} must be 'configured' or "
+                f"{NOT_CONFIGURED!r}, got {value!r}"
+            )
+    return declared, None
+
+
 def _source_status(root: Path | None = None) -> tuple[dict[str, str], list[str]]:
     """(status per source, sources that are NOT reporting a measured count).
 
@@ -897,6 +1002,15 @@ def summarize(root: Path | None = None, *, now: datetime | None = None) -> dict:
     # ── WHAT WAS NOT MEASURED, AND THEREFORE CANNOT BE COUNTED ─────────────
     corrupt = state.corrupt_count
     unmeasured = sorted(degraded)
+    # WHAT IS IN SCOPE AT ALL, which is a different question (judgment 2).
+    # `not_configured` is still UNMEASURED — it contributes an unknown number
+    # of open signals to `total`, not zero of them — so `total` stays null.
+    # `total_configured` answers the narrower question and says, in
+    # `total_configured_scope`, exactly which sources it covers.
+    not_configured = sorted(s for s in SOURCES if source_status.get(s) == NOT_CONFIGURED)
+    _declared, config_error = _declared_not_configured(root)
+    configured = [s for s in SOURCES if source_status.get(s) != NOT_CONFIGURED]
+    configured_blind = bool(corrupt) or any(source_status.get(s) != "ok" for s in configured)
     for src, facts in by_source.items():
         # A source whose read failed contributes an unknown number of open
         # signals, not zero of them.
@@ -909,8 +1023,23 @@ def summarize(root: Path | None = None, *, now: datetime | None = None) -> dict:
     # the loss to — deciding which bucket it would have fallen in requires
     # believing the row this validator just refused to believe.
     blind = bool(unmeasured) or bool(corrupt)
+    total_configured = None
+    if not configured_blind:
+        total_configured = sum(
+            rec.get("state") == "open" and rec.get("source") in configured
+            for rec in latest.values()
+        )
     return {
         "total": None if blind else total,
+        # THE CONFIGURED-SCOPE AGGREGATE, WITH ITS SCOPE ATTACHED. A number
+        # whose denominator is invisible is the fail-open one level up: it
+        # looks like `total` and means something narrower. A configured source
+        # that FAILED still nulls it — not-configured and could-not-read are
+        # different facts and only the first one shrinks the scope.
+        "total_configured": None if config_error else total_configured,
+        "total_configured_scope": configured,
+        "not_configured": not_configured,
+        "config_error": config_error,
         "stale_24h": None if blind else stale_24h,
         "stale_7d": None if blind else stale_7d,
         # THE FLOOR, NAMED AS A FLOOR. `total` is the honest answer to "how
@@ -948,6 +1077,9 @@ def _blind_field(error: str, ingestion: str, scanned_at: str | None = None) -> d
         "scanned_at": scanned_at,
         "measured": False,
         "total": None,
+        "total_configured": None,
+        "total_configured_scope": None,
+        "not_configured": None,
         "by_source_detail": None,
         "stale_24h": None,
         "stale_7d": None,
@@ -1037,7 +1169,7 @@ def heartbeat_field(root: Path | None = None, *, scan: bool = False) -> dict:
         summary = summarize(root)
         error = None
         ingestion = "ok"
-        claimed = sum((marker.get("counts") or {}).values())
+        claimed = sum(v for v in (marker.get("counts") or {}).values() if isinstance(v, int))
         # Lower-bound reconciliation, KEPT as a second, independent check.
         # counts are "opened by THIS scan", and the ledger accumulates across
         # scans, so the ledger can only ever hold MORE distinct ids than one
@@ -1046,7 +1178,8 @@ def heartbeat_field(root: Path | None = None, *, scan: bool = False) -> dict:
         # nothing and catches a case the byte-prefix check cannot: rows lost
         # from a ledger that was then re-grown to the same length.
         distinct = len(state.latest) + state.corrupt_count
-        if claimed > distinct:
+        shrank = claimed > distinct
+        if shrank:
             error = f"ledger_shrank:marker claims {claimed} opened, ledger holds {distinct}"
             ingestion = "error"
         elif summary["unmeasured"]:
@@ -1057,6 +1190,20 @@ def heartbeat_field(root: Path | None = None, *, scan: bool = False) -> dict:
             ingestion = "error" if ingestion != "error" else ingestion
         if summary["unmeasured"] and not error:
             error = "unmeasured_sources:" + ",".join(summary["unmeasured"])
+        if summary.get("config_error"):
+            error = f"{error}; {summary['config_error']}" if error else summary["config_error"]
+        # ── N5: THE ledger_shrank BRANCH RETURNS NULL LIKE EVERY OTHER ONE ──
+        # It used to set `error` and then copy the numeric total out of the
+        # fold unchanged, so the one branch that has ARITHMETIC PROOF that
+        # rows are missing was also the one that still published a count. A
+        # marker claiming more opened signals than the ledger holds makes
+        # every aggregate over that ledger untrustworthy, not just the total —
+        # the missing rows have no source to subtract them from either.
+        by_source_open = {k: v["open"] for k, v in summary["by_source"].items()}
+        by_source_detail = summary["by_source"]
+        if shrank:
+            by_source_open = dict.fromkeys(by_source_open)
+            by_source_detail = {k: dict.fromkeys(v) for k, v in summary["by_source"].items()}
         return {
             "error": error,
             "ingestion": ingestion,
@@ -1065,16 +1212,19 @@ def heartbeat_field(root: Path | None = None, *, scan: bool = False) -> dict:
             # THE NULLS COME STRAIGHT FROM summarize(). Nothing here recomputes
             # a count from rows it happens to hold — that recomputation is what
             # the reviewer caught the tool surface doing.
-            "total": summary["total"],
-            "stale_24h": summary["stale_24h"],
-            "stale_7d": summary["stale_7d"],
-            "by_source": {k: v["open"] for k, v in summary["by_source"].items()},
+            "total": None if shrank else summary["total"],
+            "total_configured": None if shrank else summary["total_configured"],
+            "total_configured_scope": summary["total_configured_scope"],
+            "not_configured": summary["not_configured"],
+            "stale_24h": None if shrank else summary["stale_24h"],
+            "stale_7d": None if shrank else summary["stale_7d"],
+            "by_source": by_source_open,
             # THE NESTED VIEW, CARRIED ON THE SAME FOLD. `signals_summary`
             # needs stale windows and oldest_unacked per source; the reviewer
             # caught it calling summarize() a second time to get them and
             # publishing that second fold's raw numbers, which threw away every
             # null computed here. One fold, both shapes, no way to diverge.
-            "by_source_detail": summary["by_source"],
+            "by_source_detail": by_source_detail,
             "corrupt_rows": summary["corrupt_rows"],
             "source_status": summary["source_status"],
             "sources_degraded": summary["sources_degraded"],
@@ -1570,7 +1720,17 @@ def scan_all(root: Path | None = None, owner: str = "watch-2/3", guardian_provid
     )
     counts: dict[str, int] = {}
     source_status: dict[str, str] = {}
+    # DECLARED INAPPLICABLE, NOT INFERRED (judgment 2). Only an explicit
+    # human-written declaration in signals/sources.json takes a source out of
+    # scope. A missing file, a probe returning None, or a scanner raising
+    # never lands here — those are `unavailable` and `failed:`, which are
+    # measurement failures and must stay loud.
+    declared_off, config_error = _declared_not_configured(r)
     for name, fn in scanners:
+        if name in declared_off:
+            counts[name] = 0
+            source_status[name] = NOT_CONFIGURED
+            continue
         try:
             result = fn()
         except Exception as exc:  # noqa: BLE001 — one bad source must not blind the rest
@@ -1579,8 +1739,88 @@ def scan_all(root: Path | None = None, owner: str = "watch-2/3", guardian_provid
             continue
         counts[name] = result.opened
         source_status[name] = result.status
+    # An unreadable declaration EXCUSES NOTHING: `_declared_not_configured`
+    # returned an empty set, so every source stayed in scope and was scanned.
+    # The error itself is surfaced at READ time by `summarize`, against the
+    # file as it stands then, rather than frozen into this marker.
+    del config_error
     _write_scan_marker(counts, source_status, r)
     return {"counts": counts, "source_status": source_status}
+
+
+@contextlib.contextmanager
+def _refresh_lock(root: Path | None = None):
+    """Exclusive flock on the MARKER path, held across the whole refresh.
+
+    Review judgment (1): "use a refresh lock if multiple callers may arrive
+    together." Without it, two readers whose marker has just gone stale each
+    decide to scan, each sweeps seven sources, and each writes a marker — the
+    second certifying a ledger the first was still appending to.
+
+    LOCK ORDER IS ONE-DIRECTIONAL AND MUST STAY THAT WAY: this lock, then the
+    ledger appends `scan_all` makes through `_append_lock`, then the marker
+    write. Never take this lock while holding a ledger append; that inversion
+    is a deadlock between two scanners.
+
+    Opening the marker path for the lock CREATES it when absent. That empty
+    file is why `_read_scan_marker` treats a zero-byte marker as no marker at
+    all — see the comment there.
+    """
+    path = scan_marker_path(root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a+", encoding="utf-8") as fh:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        try:
+            yield fh
+        finally:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+
+
+DAMAGED_LEDGER_REMEDY = (
+    "a rescan would overwrite the marker and erase the evidence, so ingestion "
+    "is refused until a human moves the damaged ledger aside (mv {path} "
+    "{path}.damaged) and lets the next read start a clean one"
+)
+
+
+def _refresh_decision(root: Path | None, *, now: datetime | None = None) -> tuple[str, str | None]:
+    """(decision, error). Decision is 'skip', 'initialize', 'refresh' or 'refuse'.
+
+    THE FOUR CASES THE REVIEWED CODE COLLAPSED INTO ONE `else: scan_all`
+    (review N2), and they are four different facts:
+
+      * **skip** — a valid marker, inside its freshness bound, whose ledger
+        still matches what it certified. Nothing to do.
+      * **initialize** — no marker at all. Nothing is being overwritten
+        because nothing has been claimed; scanning is how this root starts.
+      * **refresh** — a valid marker whose ledger still matches, gone stale.
+        The ordinary path. A refresh here overwrites a marker that agrees
+        with the file, so it destroys no evidence.
+      * **refuse** — the certified ledger no longer matches the certificate,
+        or the certificate itself will not parse. A refresh here is the
+        evidence-erasure the reviewer reproduced: heartbeat and summary both
+        returned `error:null, ingestion:"ok", total:0` for a ledger whose
+        contents had been truncated away, because the read had already
+        rewritten the marker before anything could report the loss.
+    """
+    marker, marker_error = _read_scan_marker(root)
+    if marker_error:
+        # A CERTIFICATE WE CANNOT READ IS NOT A LICENCE TO ISSUE A NEW ONE.
+        # Rescanning would replace it, and the replacement would certify
+        # whatever the ledger now holds — the same erasure one door over.
+        return "refuse", (
+            f"{marker_error}; " + DAMAGED_LEDGER_REMEDY.format(path=scan_marker_path(root))
+        )
+    if marker is None:
+        return "initialize", None
+    integrity_error = _check_marker_integrity(marker, root)
+    if integrity_error:
+        return "refuse", (
+            f"{integrity_error}; " + DAMAGED_LEDGER_REMEDY.format(path=ledger_path(root))
+        )
+    if _marker_staleness(marker, now) is None:
+        return "skip", None
+    return "refresh", None
 
 
 def ensure_scanned(
@@ -1608,22 +1848,35 @@ def ensure_scanned(
     IT IS INCREMENTAL BY CONSTRUCTION, not by a flag: ``open_signal`` is
     idempotent on the signal id, so a rescan of unchanged sources appends
     nothing. The scan is skipped entirely while the existing marker is inside
-    its own freshness bound, so a burst of reads costs one sweep, not N.
+    its own freshness bound (3600 s by default — see the module docstring), so
+    a burst of reads costs one sweep, not N.
+
+    INTEGRITY IS JUDGED BEFORE ANYTHING IS REWRITTEN (review N2). A damaged
+    ledger is REFUSED, not refreshed, and the refusal survives every
+    subsequent read until a human intervenes — because the only way for this
+    function to "fix" that state is to overwrite the evidence of it.
 
     A FAILURE IS RETURNED, NEVER SWALLOWED. ``heartbeat_field`` turns it into
     an explicit error rather than serving the previous marker's counts, which
     would be "stale but ok" — the exact shape the review named.
     """
     try:
-        marker, marker_error = _read_scan_marker(root)
-        if (
-            marker is not None
-            and not marker_error
-            and _marker_staleness(marker, now) is None
-            and _check_marker_integrity(marker, root) is None
-        ):
+        decision, error = _refresh_decision(root, now=now)
+        if decision == "skip":
             return None
-        scan_all(root, owner, guardian_provider)
+        if decision == "refuse":
+            return error
+        with _refresh_lock(root):
+            # RE-DECIDE UNDER THE LOCK. Another reader may have completed the
+            # very scan we queued behind; scanning again would be the second
+            # sweep this lock exists to prevent. It also re-runs the integrity
+            # check, so a ledger damaged while we waited is still refused.
+            decision, error = _refresh_decision(root, now=now)
+            if decision == "skip":
+                return None
+            if decision == "refuse":
+                return error
+            scan_all(root, owner, guardian_provider)
         return None
     except Exception as exc:  # noqa: BLE001 — reported, not raised; see docstring
         return f"{exc.__class__.__name__}: {exc}"
@@ -2042,6 +2295,12 @@ def handle_signal_tool(
                 "ingestion": field.get("ingestion"),
                 "scanned_at": field.get("scanned_at"),
                 "total": field.get("total"),
+                # SCOPE TRAVELS WITH THE NARROWER NUMBER, always. Publishing
+                # `total_configured` without saying what it covers is how a
+                # partial count comes to be read as a whole one.
+                "total_configured": field.get("total_configured"),
+                "total_configured_scope": field.get("total_configured_scope"),
+                "not_configured": field.get("not_configured"),
                 "stale_24h": field.get("stale_24h"),
                 "stale_7d": field.get("stale_7d"),
                 "by_source": field.get("by_source_detail"),

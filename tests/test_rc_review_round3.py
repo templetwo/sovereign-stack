@@ -500,3 +500,308 @@ class TestN1ProtectedTextNeverReachesListMode:
         )
         assert closed["signals"][0]["concern"] == sl.WITHHELD_CONCERN
         assert SYNTHETIC_BODY not in json.dumps(closed)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# N2 / N5 / N6 — a read never repairs the evidence, and every error branch
+#                returns null. P1, P1, P2.
+#
+#   "signal_ledger.py:1523 checks marker integrity only to decide whether to
+#    skip scanning; on mismatch it calls scan_all at :1531, which writes a new
+#    marker. Both return error:null, ingestion:'ok', total:0; the original
+#    signal is gone and the marker has been replaced."
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def _scanned_root(root: Path) -> str:
+    """One open signal and two completed scans — the reviewer's `damaged`
+    fixture up to the point of damage."""
+    _guardian_ok(root)
+    sl.open_signal(
+        source="halt", native_id="fixture", produced_at="2026-08-01T00:00:00Z", root=root
+    )
+    sl.scan_all(root, guardian_provider=lambda: {"issues": []})
+    sl.scan_all(root, guardian_provider=lambda: {"issues": []})
+    return sl.signal_id_for("halt", "fixture")
+
+
+def _read_all_three(root: Path, monkeypatch) -> dict[str, dict]:
+    """The reviewer read every damage through all three readers, because the
+    passive one was already honest and the two PUBLIC ones were not."""
+    monkeypatch.setattr(sl, "default_sovereign_root", lambda: root)
+    passive = sl.heartbeat_field(root)
+    native = _dispatch("heartbeat", {})["unacked_signals"]
+    summary = json.loads(sl.handle_signal_tool("signals_summary", {}, root=root))
+    return {"passive": passive, "native": native, "summary": summary}
+
+
+def _damage(root: Path, kind: str) -> None:
+    mpath = sl.scan_marker_path(root)
+    marker = json.loads(mpath.read_text())
+    if kind == "truncated":
+        sl.ledger_path(root).write_text("")
+        return
+    if kind == "missing":
+        sl.ledger_path(root).unlink()
+        return
+    if kind == "bytes":
+        marker["ledger_bytes"] += 20
+    elif kind == "hash":
+        marker["ledger_sha256"] = "0" * 64
+    elif kind == "rows":
+        marker["ledger_rows"] += 20
+    elif kind == "counts":
+        marker["counts"]["halt"] += 20
+    mpath.write_text(json.dumps(marker, sort_keys=True) + "\n")
+
+
+class TestN2ARefreshNeverErasesTheDamage:
+    @pytest.mark.parametrize("kind", ["truncated", "missing", "bytes", "hash"])
+    def test_every_reader_reports_the_damage(self, tmp_sovereign_root, monkeypatch, kind):
+        root = tmp_sovereign_root
+        _scanned_root(root)
+        _damage(root, kind)
+        before = sl.scan_marker_path(root).read_text()
+        out = _read_all_three(root, monkeypatch)
+        for reader, payload in out.items():
+            assert payload.get("error"), f"{reader} reported no error"
+            assert payload.get("total") is None, f"{reader} published a total"
+        assert sl.scan_marker_path(root).read_text() == before, "the read replaced the marker"
+
+    def test_the_summary_refuses_rather_than_listing_from_a_damaged_ledger(
+        self, tmp_sovereign_root, monkeypatch
+    ):
+        root = tmp_sovereign_root
+        _scanned_root(root)
+        _damage(root, "truncated")
+        out = _read_all_three(root, monkeypatch)["summary"]
+        assert out["ok"] is False
+
+    def test_the_refusal_says_what_a_human_must_do(self, tmp_sovereign_root):
+        """A fail-closed state a reader cannot get out of is a wedge unless the
+        error says who unwedges it and how."""
+        root = tmp_sovereign_root
+        _scanned_root(root)
+        _damage(root, "truncated")
+        error = sl.ensure_scanned(root, guardian_provider=lambda: {"issues": []})
+        assert error is not None
+        assert "ledger_truncated" in error
+        assert "a human moves the damaged ledger aside" in error
+        assert str(sl.ledger_path(root)) in error
+
+    def test_the_refusal_is_not_cleared_by_reading_again(self, tmp_sovereign_root, monkeypatch):
+        """It stays refused. A state that heals itself on the next read is the
+        erasure with a delay."""
+        root = tmp_sovereign_root
+        _scanned_root(root)
+        _damage(root, "truncated")
+        for _ in range(3):
+            out = _read_all_three(root, monkeypatch)
+            assert out["native"]["error"]
+            assert out["native"]["total"] is None
+
+    def test_a_never_scanned_root_initializes(self, tmp_sovereign_root):
+        """The case that must NOT be refused: nothing is being overwritten
+        because nothing has been claimed."""
+        root = tmp_sovereign_root
+        _guardian_ok(root)
+        assert not sl.scan_marker_path(root).exists()
+        assert sl.ensure_scanned(root, guardian_provider=lambda: {"issues": []}) is None
+        assert sl.scan_marker_path(root).exists()
+
+    def test_a_zero_byte_marker_is_no_marker_rather_than_an_invalid_one(self, tmp_sovereign_root):
+        """The refresh lock flocks the marker path, so opening it for the lock
+        creates an empty file on a fresh root. That file must read as absent,
+        or the first ever read of a new store is an error."""
+        root = tmp_sovereign_root
+        _guardian_ok(root)
+        sl.scan_marker_path(root).parent.mkdir(parents=True, exist_ok=True)
+        sl.scan_marker_path(root).write_text("")
+        assert sl._read_scan_marker(root) == (None, None)
+        assert sl.ensure_scanned(root, guardian_provider=lambda: {"issues": []}) is None
+
+    def test_a_stale_marker_refreshes(self, tmp_sovereign_root):
+        """The ordinary path. A refresh over a marker that AGREES with the
+        file destroys no evidence, so it is allowed."""
+        root = tmp_sovereign_root
+        _scanned_root(root)
+        mpath = sl.scan_marker_path(root)
+        marker = json.loads(mpath.read_text())
+        marker["scanned_at"] = "2020-01-01T00:00:00.000Z"
+        mpath.write_text(json.dumps(marker, sort_keys=True) + "\n")
+        assert sl.ensure_scanned(root, guardian_provider=lambda: {"issues": []}) is None
+        refreshed = json.loads(mpath.read_text())
+        assert refreshed["scanned_at"] != "2020-01-01T00:00:00.000Z"
+
+    def test_an_unparseable_marker_is_refused_not_replaced(self, tmp_sovereign_root):
+        root = tmp_sovereign_root
+        _scanned_root(root)
+        mpath = sl.scan_marker_path(root)
+        mpath.write_text('{"bogus": true}\n')
+        before = mpath.read_text()
+        error = sl.ensure_scanned(root, guardian_provider=lambda: {"issues": []})
+        assert error is not None and "marker_invalid" in error
+        assert mpath.read_text() == before
+
+    def test_two_concurrent_readers_run_one_scan(self, tmp_sovereign_root, monkeypatch):
+        """Review judgment (1): 'use a refresh lock if multiple callers may
+        arrive together.' Without it both readers sweep and both write a
+        marker, the second certifying a ledger the first was still appending
+        to."""
+        import threading
+        import time
+
+        root = tmp_sovereign_root
+        _guardian_ok(root)
+        calls: list[int] = []
+        real = sl.scan_all
+
+        def counted(*a, **kw):
+            calls.append(1)
+            time.sleep(0.15)
+            return real(*a, **kw)
+
+        monkeypatch.setattr(sl, "scan_all", counted)
+        threads = [
+            threading.Thread(
+                target=sl.ensure_scanned,
+                args=(root,),
+                kwargs={"guardian_provider": lambda: {"issues": []}},
+            )
+            for _ in range(2)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+        assert not any(t.is_alive() for t in threads), "the lock deadlocked"
+        assert len(calls) == 1, f"{len(calls)} sweeps for two concurrent readers"
+
+
+class TestN5TheShrankBranchReturnsNull:
+    def test_a_marker_claiming_more_than_the_ledger_holds_nulls_the_total(
+        self, tmp_sovereign_root, monkeypatch
+    ):
+        """`:990` set ledger_shrank and `:1009` copied the numeric total
+        through unchanged — the ONE branch with arithmetic proof that rows are
+        missing was also the one that still published a count."""
+        root = tmp_sovereign_root
+        _scanned_root(root)
+        _damage(root, "counts")
+        out = _read_all_three(root, monkeypatch)
+        for reader, payload in out.items():
+            assert "ledger_shrank" in (payload.get("error") or ""), reader
+            assert payload.get("total") is None, f"{reader} published a total"
+
+    def test_the_per_source_counts_are_nulled_too(self, tmp_sovereign_root, monkeypatch):
+        """The missing rows have no source to subtract them from either, so
+        the per-source view is exactly as untrustworthy as the total."""
+        root = tmp_sovereign_root
+        _scanned_root(root)
+        _damage(root, "counts")
+        field = _read_all_three(root, monkeypatch)["passive"]
+        assert field["stale_24h"] is None and field["stale_7d"] is None
+        assert set(field["by_source"].values()) == {None}
+        assert all(
+            v is None for facts in field["by_source_detail"].values() for v in facts.values()
+        )
+
+
+class TestN6TheRecordedRowCountIsReconciled:
+    def test_a_row_count_that_shrank_is_caught(self, tmp_sovereign_root, monkeypatch):
+        """`_validate_marker` only asked that ledger_rows be a non-negative
+        integer; nothing ever compared it to the file. A marker claiming 21
+        rows over a one-row ledger stayed healthy through all three readers."""
+        root = tmp_sovereign_root
+        _scanned_root(root)
+        _damage(root, "rows")
+        out = _read_all_three(root, monkeypatch)
+        for reader, payload in out.items():
+            assert "ledger_rows_shrank" in (payload.get("error") or ""), reader
+            assert payload.get("total") is None, reader
+
+    def test_a_legitimate_append_is_still_valid(self, tmp_sovereign_root):
+        """POSITIVE CONTROL (experimental law #3). The ledger is append-only
+        and a watch seat legitimately acks a second after a scan, so
+        `actual > claimed` is the ordinary honest case. Reconciling on
+        equality instead of shrinkage would fire on every acknowledgement."""
+        root = tmp_sovereign_root
+        sid = _scanned_root(root)
+        sl.ack_signal(sid, "seat:watch-2-3", "acted", "handled", root)
+        field = sl.heartbeat_field(root)
+        assert field["error"] is None
+        assert field["total"] == 0
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Astra's judgment (2) — not_configured is DECLARED, never inferred.
+# ══════════════════════════════════════════════════════════════════════════
+
+
+class TestNotConfiguredIsDeclaredNeverInferred:
+    def test_an_unavailable_source_is_not_reported_as_unconfigured(self, tmp_sovereign_root):
+        """The whole point. A guardian probe that returns None is a
+        MEASUREMENT FAILURE and must stay loud; reading it as 'not applicable
+        here' is F2 wearing a new label."""
+        root = tmp_sovereign_root
+        sl.scan_all(root, guardian_provider=lambda: None)
+        field = sl.heartbeat_field(root)
+        assert field["source_status"]["guardian"] == "unavailable"
+        assert field["not_configured"] == []
+        assert field["total"] is None
+
+    def test_a_declared_source_is_out_of_scope_but_total_still_says_null(self, tmp_sovereign_root):
+        """`total` promises all seven sources. A source out of scope is still
+        UNMEASURED against that promise, so `total` stays null and the
+        narrower number gets its own name."""
+        root = tmp_sovereign_root
+        _guardian_ok(root)
+        sl.source_config_path(root).parent.mkdir(parents=True, exist_ok=True)
+        sl.source_config_path(root).write_text(
+            json.dumps({"sources": {"guardian": "not_configured"}})
+        )
+        sl.open_signal(
+            source="halt", native_id="h.md", produced_at="2026-08-01T00:00:00Z", root=root
+        )
+        sl.scan_all(root, guardian_provider=lambda: None)
+        field = sl.heartbeat_field(root)
+        assert field["source_status"]["guardian"] == "not_configured"
+        assert field["not_configured"] == ["guardian"]
+        assert field["total"] is None
+        assert field["total_configured"] == 1
+        assert "guardian" not in field["total_configured_scope"]
+        assert len(field["total_configured_scope"]) == len(sl.SOURCES) - 1
+
+    def test_a_configured_source_that_failed_still_nulls_the_configured_total(
+        self, tmp_sovereign_root
+    ):
+        """Astra: 'A configured failed source still makes its required
+        aggregate null.' Not-configured and could-not-read are different
+        facts, and only the first one shrinks the scope."""
+        root = tmp_sovereign_root
+        sl.source_config_path(root).parent.mkdir(parents=True, exist_ok=True)
+        sl.source_config_path(root).write_text(json.dumps({"sources": {"halt": "not_configured"}}))
+        sl.scan_all(root, guardian_provider=lambda: None)
+        field = sl.heartbeat_field(root)
+        assert field["not_configured"] == ["halt"]
+        assert field["total_configured"] is None
+        assert field["total"] is None
+
+    def test_an_unreadable_declaration_excuses_nothing(self, tmp_sovereign_root):
+        root = tmp_sovereign_root
+        _guardian_ok(root)
+        sl.source_config_path(root).parent.mkdir(parents=True, exist_ok=True)
+        sl.source_config_path(root).write_text("{not json")
+        sl.scan_all(root, guardian_provider=lambda: {"issues": []})
+        field = sl.heartbeat_field(root)
+        assert field["not_configured"] == []
+        assert field["total_configured"] is None
+        assert "source_config_unreadable" in field["error"]
+
+    def test_the_scope_travels_with_the_number_on_the_tool_surface(self, tmp_sovereign_root):
+        root = tmp_sovereign_root
+        _guardian_ok(root)
+        sl.scan_all(root, guardian_provider=lambda: {"issues": []})
+        out = json.loads(sl.handle_signal_tool("signals_summary", {}, root=root))
+        assert out["total_configured_scope"] == list(sl.SOURCES)
+        assert out["not_configured"] == []
