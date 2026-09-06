@@ -78,6 +78,58 @@ def _validate_reader_identity(consumed_by: str, *, field: str = "consumed_by") -
     return cleaned
 
 
+def _validate_author_identity(source_instance: str) -> str:
+    """Reject empty / placeholder AUTHOR identities on the write path.
+
+    The mirror of ``_validate_reader_identity``, one side of the record over.
+    The reader half has refused a placeholder since 2026-08-01; the writer half
+    kept substituting the literal string "unknown" (handoff.py write(), and
+    server.py's ``arguments.get("source_instance", "unknown")`` default), so an
+    anonymous handoff looked exactly like a signed one on every surface that
+    renders it.
+
+    Measured on the live store 2026-09-05 before this guard landed: 78 of 320
+    handoffs (24%) carry source_instance "unknown", 4 of them inside the newest
+    25 — the gap a gpt-6-astra (Codex) audit surfaced the same night. The
+    ownerless records are NOT evenly spread: 2026-04 16, 05 15, 06 27, 07 6,
+    08 13, 09 1. The trend is the argument for closing it now — the habit is
+    nearly gone, so the guard costs almost nothing and stops the last of it.
+
+    WHY A HARD REFUSAL IS SAFE HERE, checked rather than assumed: every
+    automated writer already names itself. The only two call sites that reach
+    HandoffEngine.write are server.py's ``handoff`` and ``close_session``
+    dispatches, both driven by a seat that can name itself; the Ring-2 bridge
+    drain fills source_instance from the proposal envelope
+    (clients/bridge_core/dispatch.py:35 — ``args.pop("source_instance", None)
+    or substrate``, so a substrate name is always present, and
+    pending_writes.py:86 rejects an empty one at proposal time); and
+    ~/sovereign-bridge writes no handoffs at all (its watchman only COUNTS
+    them, watchman_sweep.py:346). Nothing automated depends on "unknown".
+
+    Raises ValueError rather than defaulting: the note travels back to the
+    caller inside the error, so a refused handoff is refused loudly and can be
+    rewritten with a name — the opposite of the anonymous record, which
+    succeeds and then cannot tell any future reader whose claim it is.
+    """
+    cleaned = (source_instance or "").strip()
+    if not cleaned:
+        raise ValueError(
+            "source_instance is required — refusing to write a handoff nobody "
+            "signed. A handoff is a CLAIM from one seat to the next, and an "
+            "unattributed claim cannot be weighed. Name the seat that is "
+            "leaving this note."
+        )
+    if cleaned.lower() in NON_IDENTIFYING_CONSUMERS:
+        raise ValueError(
+            f"source_instance={cleaned!r} does not identify an author — refusing "
+            "to write the handoff. This placeholder previously made an "
+            "anonymous handoff indistinguishable from a signed one on every "
+            "surface that renders it (78 of 320 live records, 2026-09-05); "
+            "pass the real seat name instead."
+        )
+    return cleaned
+
+
 def _refuse_live_store_during_tests(root: Path) -> None:
     """Defense in depth: a pytest run must never be able to mutate the real
     ~/.sovereign store, no matter which module-level singleton it inherited.
@@ -118,6 +170,59 @@ def _slug(s: str, max_len: int = 40) -> str:
     return s[:max_len].strip("_") or "thread"
 
 
+def _build_forward_index(records: list[dict]) -> dict[str, list[dict]]:
+    """Invert the ``supersedes`` back-pointers into a forward index.
+
+    THE GAP THIS CLOSES (gpt-6-astra / Codex audit, 2026-09-05, confirmed from
+    disk): a handoff record had seven fields and no correction linkage at all,
+    so an older handoff that a later one had already corrected still read as
+    current on every surface. The live specimen: ``20260902T112749_*`` says
+    "hq_module_audit exit 0"; ``20260902T112841_*``, 52 seconds later, corrects
+    it to exit 1. Nothing connected them, and a reader arriving at the first
+    one had no way to learn the second existed.
+
+    Stub fields only (id, timestamp, author, thread). The corrector's NOTE is
+    deliberately not copied in: a cached copy of another record's body is the
+    stale-mirror mistake SOP #4 names — point at the source, do not mirror it.
+    """
+    index: dict[str, list[dict]] = {}
+    for rec in records:
+        target = (rec.get("supersedes") or "").strip()
+        if not target:
+            continue
+        index.setdefault(target, []).append(
+            {
+                "handoff_id": Path(rec.get("_path", "")).name,
+                "timestamp": rec.get("timestamp", ""),
+                "source_instance": rec.get("source_instance", ""),
+                "thread": rec.get("thread", ""),
+            }
+        )
+    for stubs in index.values():
+        stubs.sort(key=lambda r: r.get("timestamp", ""), reverse=True)
+    return index
+
+
+def _annotate_forward_links(records: list[dict]) -> list[dict]:
+    """Attach ``_corrected_by`` to any record a later handoff supersedes.
+
+    Applied at the single READ chokepoint (``_load_all``) rather than at each
+    of the surfaces, so the boot door, handoff_archaeology and
+    reflexive_surface all inherit it and cannot drift apart. Underscore-
+    prefixed like ``_path``, and set only when a correction exists: records
+    nobody corrected come back byte-identical to before, so nothing that
+    round-trips a record can widen the on-disk shape.
+    """
+    index = _build_forward_index(records)
+    if not index:
+        return records
+    for rec in records:
+        stubs = index.get(Path(rec.get("_path", "")).name)
+        if stubs:
+            rec["_corrected_by"] = stubs
+    return records
+
+
 class HandoffEngine:
     """Intent-layer memory for instance-to-instance handoff."""
 
@@ -125,13 +230,67 @@ class HandoffEngine:
         self.root = Path(root) / "handoffs"
         self.root.mkdir(parents=True, exist_ok=True)
 
+    def resolve_handoff_id(self, ref: str) -> str:
+        """Turn a caller-supplied handoff reference into the store's own id.
+
+        The canonical id is the FILENAME (``_handoff_id``, the same identity
+        the signature ledger keys on). Accepted, all resolved to that one id:
+        a full path, a bare filename, or the filename stem without ``.json``
+        (which is how a handoff gets named in prose — the audit that prompted
+        this feature cited ``20260902T112749_*``).
+
+        Deliberately EXACT, never a glob. A prefix match would let
+        ``20260902T1127`` silently pick whichever file sorted first, and a
+        correction pointed at the wrong record is worse than no link: it moves
+        the CORRECTED BY banner onto an innocent handoff.
+
+        Raises ValueError if the reference resolves to nothing on disk.
+        """
+        cleaned = (ref or "").strip()
+        if not cleaned:
+            raise ValueError(
+                "supersedes was provided but names nothing — pass a handoff id "
+                "(the filename, with or without .json) or omit the argument. "
+                "An empty correction link is refused rather than dropped: a "
+                "dropped one reports success on a correction that never landed."
+            )
+        name = self._handoff_id(cleaned)
+        if not name.endswith(".json"):
+            name += ".json"
+        candidate = self.root / name
+        if candidate.name != name or not candidate.is_file():
+            raise ValueError(
+                f"supersedes={ref!r} does not name a handoff in this store "
+                f"(looked for {name!r} in {self.root}). Refusing the write: a "
+                "correction link that points at nothing renders as no link at "
+                "all, which is exactly the silent-drop this field exists to "
+                "end. List candidates with handoff_archaeology()."
+            )
+        return name
+
     def write(
-        self, note: str, source_instance: str, source_session_id: str, thread: str = "general"
+        self,
+        note: str,
+        source_instance: str,
+        source_session_id: str,
+        thread: str = "general",
+        supersedes: str | None = None,
     ) -> dict:
         """
         Write a handoff note for the next instance.
 
-        Returns the stored record. Raises ValueError if note exceeds size limit.
+        Args:
+            supersedes: Optional id of an EARLIER handoff this one corrects.
+                Stored on the NEW record only — the superseded file is never
+                touched (house rule: corrections supersede, never erase). The
+                forward link is then computed at read time by ``_load_all``,
+                so the old record starts rendering "CORRECTED BY <id>" without
+                anything having been rewritten. Validated against the store;
+                a reference that resolves to nothing is refused.
+
+        Returns the stored record. Raises ValueError if the note exceeds the
+        size limit, is empty, if source_instance names no author, or if
+        supersedes names no existing handoff.
         """
         _refuse_live_store_during_tests(self.root)
         note = (note or "").strip()
@@ -141,17 +300,28 @@ class HandoffEngine:
             raise ValueError(
                 f"handoff note exceeds {HANDOFF_MAX_BYTES} bytes — record as insight instead"
             )
+        source_instance = _validate_author_identity(source_instance)
+        # Resolved BEFORE the file is written, so a bad link costs nothing and
+        # leaves nothing behind. Writing first and validating after would leave
+        # an orphan record on disk every time a correction reference was wrong.
+        superseded_id = self.resolve_handoff_id(supersedes) if supersedes is not None else None
 
         ts = datetime.now()
         record = {
             "timestamp": ts.isoformat(),
-            "source_instance": source_instance or "unknown",
+            "source_instance": source_instance,
             "source_session_id": source_session_id or "unknown",
             "thread": thread or "general",
             "note": note,
             "consumed_at": None,
             "consumed_by": None,
         }
+        # Key present ONLY when a correction actually happened. An always-present
+        # "supersedes": null would change the on-disk shape of every record for
+        # the sake of the rare one, and the seven-field shape is what the
+        # 2026-09-05 audit measured against.
+        if superseded_id is not None:
+            record["supersedes"] = superseded_id
 
         # Microsecond precision + short content hash: prevents filename
         # collisions when multiple handoffs are written from the same
@@ -180,7 +350,17 @@ class HandoffEngine:
                 records.append(data)
             except (OSError, json.JSONDecodeError):
                 continue
-        return records
+        return _annotate_forward_links(records)
+
+    def supersession_index(self) -> dict[str, list[dict]]:
+        """``{superseded_handoff_id: [corrector stubs, newest first]}``.
+
+        Computed from the records themselves on every call. There is no index
+        file and no new state to keep in sync — the backward link on the new
+        record IS the index, read the other way round. Deleting a corrector
+        removes the link; nothing can go stale.
+        """
+        return _build_forward_index(self._load_all())
 
     def unconsumed(self, thread: str | None = None, limit: int = 20) -> list[dict]:
         """Return handoffs that have not yet been surfaced to a reader."""
@@ -571,13 +751,42 @@ def format_handoff_for_surface(record: dict) -> str:
     """
     Attribution-framed rendering. This is the epistemic-hygiene move:
     the new instance reads this as someone else's claim, not as its own intent.
+
+    Renders the correction linkage in BOTH directions, which is the whole
+    point of computing a forward index: the superseding record says what it
+    supersedes, and — the half that was missing entirely — the superseded
+    record carries a CORRECTED BY banner ABOVE its note, so a reader cannot
+    reach the stale claim without first meeting the correction. Below the note
+    would be too late; the reader has already believed it by then.
     """
     src = record.get("source_instance", "unknown")
     sid = record.get("source_session_id", "unknown")
     ts = record.get("timestamp", "unknown")
     thread = record.get("thread", "general")
     note = record.get("note", "")
-    return (
-        f"• [thread: {thread}] Previous instance {src} (session {sid}, {ts}) left this note:\n"
-        f'    "{note}"'
-    )
+
+    lines = [f"• [thread: {thread}] Previous instance {src} (session {sid}, {ts}) left this note:"]
+
+    # Between the attribution line and the note, never after it: the banner has
+    # to be read before the claim it qualifies, and it has to stay attached to
+    # its own bullet rather than floating above the previous record's.
+    corrections = record.get("_corrected_by") or []
+    for stub in corrections:
+        lines.append(
+            f"    ⚠ CORRECTED BY {stub.get('handoff_id', '?')} "
+            f"({stub.get('timestamp', 'unknown')})"
+            + (f" — {stub['source_instance']}" if stub.get("source_instance") else "")
+        )
+    if corrections:
+        lines.append(
+            f"    ({len(corrections)} later handoff(s) correct this one. Read them before "
+            "acting on the note below — it stands as written, not as current.)"
+        )
+
+    lines.append(f'    "{note}"')
+
+    superseded = (record.get("supersedes") or "").strip()
+    if superseded:
+        lines.append(f"    supersedes {superseded}")
+
+    return "\n".join(lines)
