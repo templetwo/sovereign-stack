@@ -228,24 +228,92 @@ def _append_event(event: dict[str, Any]) -> None:
         f.write(json.dumps(event) + "\n")
 
 
+# =============================================================================
+# WATCH ID CONTAINMENT  (review N4, 2026-09-06 — fail CLOSED)
+# =============================================================================
+#
+# WHAT WAS WRONG. `_watch_path` joined an unvalidated id straight onto the
+# watches directory, and every helper trusted the result. The three modes
+# published in this release (status / resample / cancel) reach those helpers
+# from a tool argument, so a watch id of `../outside` read, mutated and then
+# DELETED `<root>/post_fix/outside.json`, and wrote its "archive" copy to
+# `<root>/post_fix/watches/outside.json` — outside the archive directory
+# entirely. `nested/item` was accepted the same way. The reviewer reproduced
+# all four against synthetic files.
+#
+# TWO LIMBS, AND BOTH ARE LOAD-BEARING.
+#   1. SHAPE. The id must match `^pfw_[A-Za-z0-9_.-]+$` — the shape
+#      `_new_watch_id` mints. No separators, so `nested/item` never gets as
+#      far as a path.
+#   2. RESOLVED LOCATION. The shape alone is NOT enough and it would be easy
+#      to believe it is: `pfw_..` matches that regex. So the built path is
+#      resolved and its parent must EQUAL the active or archive directory it
+#      was supposed to land in. Equality, not "is underneath": a check for
+#      "somewhere under watches/" passes for anything inside archive/ and
+#      would have missed the mislocated archive write, which is the specific
+#      thing that went wrong.
+#
+# AND THE ID STORED INSIDE THE RECORD IS VALIDATED TOO, because the helper
+# that archives a watch reads `watch["watch_id"]` back out of the loaded file
+# to decide where to write it. A file whose contents disagree with its own
+# filename is refused rather than believed.
+
+WATCH_ID_RE = re.compile(r"^pfw_[A-Za-z0-9_.-]+$")
+
+
+class WatchIdRefused(ValueError):
+    """A watch id that does not name a file inside the watch store."""
+
+
+def _validate_watch_id(watch_id: Any, *, where: str = "watch_id") -> str:
+    if not isinstance(watch_id, str) or not watch_id.strip():
+        raise WatchIdRefused(f"{where} must be a non-empty string")
+    text = watch_id.strip()
+    if not WATCH_ID_RE.match(text):
+        raise WatchIdRefused(
+            f"{where} {watch_id!r} is refused: watch ids match "
+            f"{WATCH_ID_RE.pattern} — no separators, no traversal"
+        )
+    return text
+
+
 def _watch_path(watch_id: str, archived: bool = False) -> Path:
+    """The file for this watch, or a refusal. Never a path outside the store."""
+    text = _validate_watch_id(watch_id)
     base = _archive_dir() if archived else _watches_dir()
-    return base / f"{watch_id}.json"
+    candidate = (base / f"{text}.json").resolve()
+    # THE SECOND LIMB. `pfw_..` satisfies the regex; only resolution catches it.
+    if candidate.parent != base.resolve():
+        raise WatchIdRefused(f"watch_id {watch_id!r} resolves to {candidate}, outside {base}")
+    return candidate
 
 
 def load_watch(watch_id: str) -> dict[str, Any] | None:
-    """Load an active or archived watch by id. Returns None if not found."""
+    """Load an active or archived watch by id. Returns None if not found.
+
+    Raises WatchIdRefused for an id that does not address the store, or for a
+    record whose stored `watch_id` disagrees with the file it was read from —
+    the latter is what let a valid-shaped record sitting at
+    `<root>/post_fix/outside.json` steer every later write.
+    """
     for archived in (False, True):
         p = _watch_path(watch_id, archived=archived)
         if p.exists():
-            return json.loads(p.read_text())
+            watch = json.loads(p.read_text())
+            stored = watch.get("watch_id") if isinstance(watch, dict) else None
+            if _validate_watch_id(stored, where="stored watch_id") != _validate_watch_id(watch_id):
+                raise WatchIdRefused(
+                    f"watch at {p.name} stores watch_id {stored!r}; a record that "
+                    "disagrees with its own filename is refused, not followed"
+                )
+            return watch
     return None
 
 
 def save_watch(watch: dict[str, Any]) -> None:
     """Persist a watch. Archived watches move to archive/; active stay in watches/."""
     _ensure_dirs()
-    watch_id = watch["watch_id"]
+    watch_id = _validate_watch_id(watch.get("watch_id"), where="stored watch_id")
     status = watch.get("status", "active")
     active_path = _watch_path(watch_id, archived=False)
     archive_path = _watch_path(watch_id, archived=True)
@@ -275,6 +343,18 @@ def list_watches(status: str | None = None) -> list[dict[str, Any]]:
             try:
                 w = json.loads(p.read_text())
             except (json.JSONDecodeError, OSError):
+                continue
+            # A LISTING IS A HANDLE FACTORY. Every id printed here comes back
+            # as a `watch_id` argument on status/resample/cancel, so a record
+            # whose stored id does not address this store must not be listed —
+            # publishing it would hand a caller an id the helpers then refuse,
+            # or worse, one they would have followed.
+            if not isinstance(w, dict):
+                continue
+            stored = w.get("watch_id")
+            if not isinstance(stored, str) or not WATCH_ID_RE.match(stored):
+                continue
+            if f"{stored}.json" != p.name:
                 continue
             if status in (None, "active", "all"):
                 if status == "all" or w.get("status") == "active":
@@ -929,6 +1009,21 @@ POST_FIX_TOOLS: list[Tool] = [
 # =============================================================================
 
 
+def _watch_id_refusal(exc: WatchIdRefused) -> list[TextContent]:
+    """A refusal is a RESULT with `refused: true`, never an ok-shaped reply.
+
+    It must not carry `status: cancelled` / `force_sampled` / a `watch_id`
+    echo, because those are exactly the fields the reviewer read to conclude
+    the traversal had SUCCEEDED.
+    """
+    return [
+        TextContent(
+            type="text",
+            text=json.dumps({"refused": True, "ok": False, "reason": str(exc)}, indent=2),
+        )
+    ]
+
+
 async def handle_post_fix_tool(
     name: str,
     arguments: dict[str, Any],
@@ -996,7 +1091,10 @@ async def handle_post_fix_tool(
         watch_id = (arguments.get("watch_id") or "").strip()
         include_archived = bool(arguments.get("include_archived"))
         if watch_id:
-            watch = load_watch(watch_id)
+            try:
+                watch = load_watch(watch_id)
+            except WatchIdRefused as exc:
+                return _watch_id_refusal(exc)
             if watch is None:
                 return [TextContent(type="text", text=f"watch not found: {watch_id}")]
             return [TextContent(type="text", text=json.dumps(watch, indent=2))]
@@ -1021,7 +1119,10 @@ async def handle_post_fix_tool(
             return [
                 TextContent(type="text", text="post_fix_verify(mode='resample') requires watch_id")
             ]
-        result = take_sample(watch_id, force=force, nape_daemon=nape_daemon)
+        try:
+            result = take_sample(watch_id, force=force, nape_daemon=nape_daemon)
+        except WatchIdRefused as exc:
+            return _watch_id_refusal(exc)
         return [TextContent(type="text", text=json.dumps(result, indent=2))]
 
     if name == "watch_cancel":
@@ -1034,7 +1135,10 @@ async def handle_post_fix_tool(
                     text="post_fix_verify(mode='cancel') requires watch_id and reason",
                 )
             ]
-        result = cancel_watch(watch_id, reason)
+        try:
+            result = cancel_watch(watch_id, reason)
+        except WatchIdRefused as exc:
+            return _watch_id_refusal(exc)
         return [TextContent(type="text", text=json.dumps(result, indent=2))]
 
     return [TextContent(type="text", text=f"unknown post_fix tool: {name}")]

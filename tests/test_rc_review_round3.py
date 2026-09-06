@@ -805,3 +805,166 @@ class TestNotConfiguredIsDeclaredNeverInferred:
         out = json.loads(sl.handle_signal_tool("signals_summary", {}, root=root))
         assert out["total_configured_scope"] == list(sl.SOURCES)
         assert out["not_configured"] == []
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# N4 — watch management accepts paths and cancels outside its store. P1.
+#
+#   "post_fix_tools.py:231 joins unvalidated IDs; :239 reads the resulting
+#    path; :248 trusts the ID inside the loaded record; :253 writes and :256
+#    unlinks. With a valid-shaped watch at <root>/post_fix/outside.json
+#    carrying watch_id='../outside', status discloses it, resample mutates it,
+#    and cancel deletes it after writing the mislocated archive."
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def _pf_call(monkeypatch, root: Path, mode: str, **args) -> dict:
+    from sovereign_stack import post_fix_tools as pf
+
+    monkeypatch.setattr(pf, "_root", lambda: root)
+    text = asyncio.run(
+        pf.handle_post_fix_tool("post_fix_verify", {"mode": mode, **args}, "fixture-session")
+    )[0].text
+    try:
+        return json.loads(text)
+    except ValueError:
+        return {"text": text}
+
+
+def _make_watch(monkeypatch, root: Path) -> dict:
+    from sovereign_stack import post_fix_tools as pf
+
+    monkeypatch.setattr(pf, "_root", lambda: root)
+    target = root / "probe.txt"
+    target.write_text("fixture baseline")
+    return pf.create_watch(
+        "review fixture",
+        [],
+        [{"name": "fixture-file", "type": "file_hash", "path": str(target)}],
+        session_id="fixture-session",
+    )
+
+
+class TestN4TheWatchStoreIsContained:
+    def test_the_ordinary_lifecycle_still_works(self, tmp_sovereign_root, monkeypatch):
+        """POSITIVE CONTROL FIRST. A containment check that also breaks the
+        legitimate path is not a fix; the reviewer's valid-id lifecycle
+        (`d_watch_modes_valid_lifecycle`) has to stay green."""
+        root = tmp_sovereign_root
+        watch = _make_watch(monkeypatch, root)
+        wid = watch["watch_id"]
+        assert _pf_call(monkeypatch, root, "status", watch_id=wid)["watch_id"] == wid
+        assert _pf_call(monkeypatch, root, "status")["count"] == 1
+        assert _pf_call(monkeypatch, root, "resample", watch_id=wid)["status"] == "force_sampled"
+        assert (
+            _pf_call(monkeypatch, root, "cancel", watch_id=wid, reason="done")["status"]
+            == "cancelled"
+        )
+        assert (root / "post_fix" / "watches" / "archive" / f"{wid}.json").exists()
+
+    @pytest.mark.parametrize("mode", ["status", "resample", "cancel"])
+    def test_a_parent_traversal_is_refused_and_nothing_outside_moves(
+        self, tmp_sovereign_root, monkeypatch, mode
+    ):
+        """THE REVIEWER'S FIXTURE. A valid-shaped record parked one directory
+        up, addressed as `../outside`."""
+        root = tmp_sovereign_root
+        watch = _make_watch(monkeypatch, root)
+        watch["watch_id"] = "../outside"
+        outside = root / "post_fix" / "outside.json"
+        outside.parent.mkdir(parents=True, exist_ok=True)
+        outside.write_text(json.dumps(watch))
+        before = outside.read_text()
+
+        out = _pf_call(monkeypatch, root, mode, watch_id="../outside", reason="fixture")
+        assert out.get("refused") is True
+        assert out.get("status") not in ("force_sampled", "sampled", "cancelled")
+        assert out.get("watch_id") != "../outside"
+        assert outside.exists(), "the file outside the store was deleted"
+        assert outside.read_text() == before, "the file outside the store was mutated"
+        assert not (root / "post_fix" / "watches" / "outside.json").exists()
+
+    def test_a_nested_separator_is_refused(self, tmp_sovereign_root, monkeypatch):
+        root = tmp_sovereign_root
+        watch = _make_watch(monkeypatch, root)
+        watch["watch_id"] = "nested/item"
+        nested = root / "post_fix" / "watches" / "nested" / "item.json"
+        nested.parent.mkdir(parents=True, exist_ok=True)
+        nested.write_text(json.dumps(watch))
+        out = _pf_call(monkeypatch, root, "status", watch_id="nested/item")
+        assert out.get("refused") is True
+        assert out.get("watch_id") != "nested/item"
+
+    def test_a_symlink_out_of_the_store_is_caught_by_path_resolution(
+        self, tmp_sovereign_root, monkeypatch
+    ):
+        """THE SECOND LIMB, PROVEN. A symlink inside the store points out of
+        it, and its id is perfectly shape-valid — the regex cannot see through
+        a filename. Only resolving the path and demanding its parent EQUAL the
+        store directory catches this.
+
+        (Stated precisely so nobody over-reads the regex: `pfw_..` also
+        matches the pattern, but `.json` is appended, so it names the ordinary
+        file `pfw_...json` INSIDE the store and escapes nothing. The symlink
+        is the case where shape and location genuinely disagree.)"""
+        from sovereign_stack import post_fix_tools as pf
+
+        root = tmp_sovereign_root
+        _make_watch(monkeypatch, root)
+        assert pf.WATCH_ID_RE.match("pfw_..")
+        assert pf._watch_path("pfw_..").parent == pf._watches_dir().resolve()
+
+        outside = root / "post_fix" / "outside.json"
+        outside.write_text("{}")
+        (pf._watches_dir() / "pfw_link.json").symlink_to(outside)
+        assert pf.WATCH_ID_RE.match("pfw_link")
+        with pytest.raises(pf.WatchIdRefused) as caught:
+            pf._watch_path("pfw_link")
+        assert "outside" in str(caught.value)
+
+    def test_a_stored_id_that_disagrees_with_its_filename_is_refused(
+        self, tmp_sovereign_root, monkeypatch
+    ):
+        """The record steers the archive write, so a file whose contents
+        disagree with its own name is refused rather than believed."""
+        from sovereign_stack import post_fix_tools as pf
+
+        root = tmp_sovereign_root
+        watch = _make_watch(monkeypatch, root)
+        wid = watch["watch_id"]
+        path = root / "post_fix" / "watches" / f"{wid}.json"
+        watch["watch_id"] = "pfw_somewhere_else"
+        path.write_text(json.dumps(watch))
+        with pytest.raises(pf.WatchIdRefused):
+            pf.load_watch(wid)
+        out = _pf_call(monkeypatch, root, "cancel", watch_id=wid, reason="fixture")
+        assert out.get("refused") is True
+        assert path.exists(), "a refused record was deleted anyway"
+
+    def test_a_listing_never_hands_back_an_id_it_would_refuse(
+        self, tmp_sovereign_root, monkeypatch
+    ):
+        """A listing is a handle factory: every id it prints comes back as a
+        `watch_id` argument."""
+        from sovereign_stack import post_fix_tools as pf
+
+        root = tmp_sovereign_root
+        watch = _make_watch(monkeypatch, root)
+        rogue = dict(watch, watch_id="../outside")
+        (root / "post_fix" / "watches" / "pfw_rogue.json").write_text(json.dumps(rogue))
+        listing = _pf_call(monkeypatch, root, "status")
+        ids = [w["watch_id"] for w in listing["watches"]]
+        assert ids == [watch["watch_id"]]
+        for wid in ids:
+            assert pf._watch_path(wid)
+
+    def test_the_writer_refuses_a_record_that_would_land_outside(
+        self, tmp_sovereign_root, monkeypatch
+    ):
+        from sovereign_stack import post_fix_tools as pf
+
+        root = tmp_sovereign_root
+        watch = _make_watch(monkeypatch, root)
+        with pytest.raises(pf.WatchIdRefused):
+            pf.save_watch(dict(watch, watch_id="../outside"))
+        assert not (root / "post_fix" / "outside.json").exists()
