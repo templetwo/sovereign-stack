@@ -223,6 +223,35 @@ async def health(request: Request) -> JSONResponse:
 
 SEAT_HEADER = b"x-sovereign-seat"
 SEAT_VALUE_RE = re.compile(r"^[a-z0-9][a-z0-9-]{2,63}$")
+SEAT_NAMESPACE = "seat:"
+
+
+def reserved_seat_names() -> frozenset[str]:
+    """Names a header may not claim, DERIVED from the ledger, never retyped.
+
+    HQ close (b), from round 3's finding 1. Two families, both of which mean
+    something specific inside the ledger and neither of which is a seat:
+
+      * ``SOURCE_DERIVED_CLOSERS`` — the labels the SCANNER writes when it
+        closes a signal from source state. ``signal_ledger._may_reopen`` treats
+        a close by one of these as a restatement of the source and therefore
+        freely reversible, so a seat wearing one would have its HUMAN
+        acknowledgement silently reversed by the next scan.
+      * ``SOURCE_PRODUCER`` values — the producer of each source, which
+        ``ack_signal`` refuses as a closer. A connect that could only ever
+        produce PermissionErrors is better refused at the door, where the
+        reason is legible, than at the write, where it reads as a bug.
+
+    COMPUTED FROM THE LEDGER'S OWN CONSTANTS ON EVERY CALL. A retyped copy
+    would drift the first time either set gains a member, and the drift would
+    be silent and would re-open exactly the hole this closes.
+    """
+    from .signal_ledger import SOURCE_DERIVED_CLOSERS, SOURCE_PRODUCER
+
+    names = {*SOURCE_DERIVED_CLOSERS, *SOURCE_PRODUCER.values()}
+    return frozenset(n.strip().casefold() for n in names if isinstance(n, str) and n.strip())
+
+
 # Re-exported from dispatch_context so the header form and the advertised
 # channel name cannot drift apart in two files.
 CALLER_IDENTITY_CHANNEL = _CALLER_IDENTITY_CHANNEL
@@ -260,7 +289,25 @@ def seat_from_scope(scope: dict) -> tuple[str | None, str | None]:
         return None, (
             f"X-Sovereign-Seat {value!r} is refused: a seat name matches {SEAT_VALUE_RE.pattern}"
         )
-    return value, None
+    if value.casefold() in reserved_seat_names():
+        return None, (
+            f"X-Sovereign-Seat {value!r} is refused: it collides with a reserved "
+            "ledger label (a scanner-written closer or a source producer), which "
+            "would make a human acknowledgement by this seat reversible by a "
+            "scan, or unwritable at all"
+        )
+    # ONE IDENTITY SHAPE, EVERYWHERE (HQ close (a), round 3 finding 2). The
+    # native fallback stamps `seat:<spiral session>`; a header seat is
+    # namespaced here so `closed_by` has exactly one form no matter which door
+    # the identity came through. THE BRIDGE STILL SENDS THE BARE NAME — the
+    # header shape is unchanged and nothing moves on its side; the namespace is
+    # the stack's, applied at the boundary where the stack takes custody of the
+    # identity.
+    #
+    # It also makes the producer comparison behave the way it does for every
+    # other identity: `signal_ledger._actor_identity` strips one namespace
+    # before comparing, so a namespaced seat is judged on its bare name.
+    return SEAT_NAMESPACE + value, None
 
 
 @contextlib.contextmanager

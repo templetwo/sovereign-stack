@@ -1243,7 +1243,7 @@ class TestTheSeatHeaderCarriesIdentityAcrossTheSocket:
 
         scope = _sse_scope(headers=[(b"x-sovereign-seat", b"hq-studio")])
         with sse_server.caller_seat_for_session(scope) as seat:
-            assert seat == "hq-studio"
+            assert seat == "seat:hq-studio"
             out = _dispatch(
                 "signal_ack",
                 {
@@ -1253,7 +1253,7 @@ class TestTheSeatHeaderCarriesIdentityAcrossTheSocket:
                 },
             )
         assert out["ok"] is True
-        assert out["row"]["closed_by"] == "hq-studio"
+        assert out["row"]["closed_by"] == "seat:hq-studio"
         assert "one-shared-spiral-session" not in out["row"]["closed_by"]
 
     def test_no_header_falls_back_to_the_native_spiral_identity(
@@ -1390,7 +1390,7 @@ class TestTheSeatHeaderCarriesIdentityAcrossTheSocket:
                 _sse_scope(headers=[(b"x-sovereign-seat", b"grok-build")]), receive, send
             )
         )
-        assert seen == ["grok-build"]
+        assert seen == ["seat:grok-build"]
         assert dc.CALLER_SEAT.get() is None, "the session's seat outlived the session"
 
     def test_the_heartbeat_advertises_the_identity_channel(self, tmp_sovereign_root, monkeypatch):
@@ -1406,3 +1406,157 @@ class TestTheSeatHeaderCarriesIdentityAcrossTheSocket:
         assert out["caller_identity_channel"] == "x-sovereign-seat-sse-header"
         assert out["caller_identity_channel"] == sse_server.CALLER_IDENTITY_CHANNEL
         assert sse_server.SEAT_HEADER == b"x-sovereign-seat"
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# HQ closes on round 3's own findings 1 and 2, 2026-09-06.
+#
+#   (a) ONE identity shape: a header-borne seat is stamped "seat:<name>"
+#       exactly like the native fallback, so closed_by has one form
+#       everywhere. The bridge keeps sending the bare name.
+#   (b) The header validator refuses any value colliding with
+#       SOURCE_DERIVED_CLOSERS or the producer labels, with a 400 naming the
+#       collision. The shape rule is otherwise unchanged.
+# ══════════════════════════════════════════════════════════════════════════
+
+
+class TestOneIdentityShapeAndNoReservedSeats:
+    def test_a_header_seat_is_namespaced_like_the_native_one(self):
+        """Round 3 shipped the bare header value into `closed_by` while the
+        native fallback shipped `seat:<session>` — two shapes in one column.
+        The bridge's side is unchanged: it still sends the bare name, and the
+        stack namespaces it at the boundary where it takes custody."""
+        from sovereign_stack import sse_server
+
+        seat, refusal = sse_server.seat_from_scope(
+            _sse_scope(headers=[(b"x-sovereign-seat", b"hq-studio")])
+        )
+        assert refusal is None
+        assert seat == "seat:hq-studio"
+        assert seat.startswith(sse_server.SEAT_NAMESPACE)
+
+    def test_both_doors_produce_the_same_shape(self, tmp_sovereign_root, monkeypatch):
+        """The property stated as a property: whichever door the identity came
+        through, `closed_by` has one form."""
+        from sovereign_stack import sse_server
+
+        root = tmp_sovereign_root
+        monkeypatch.setattr(sl, "default_sovereign_root", lambda: root)
+        _guardian_ok(root)
+        _a_halt(root, "a.md")
+        _a_halt(root, "b.md")
+        sl.scan_all(root)
+        monkeypatch.setattr(server.spiral_state, "session_id", "native-session")
+
+        native = _dispatch(
+            "signal_ack",
+            {"signal_id": sl.signal_id_for("halt", "a.md"), "state": "acted", "reason": "x"},
+        )
+        with sse_server.caller_seat_for_session(
+            _sse_scope(headers=[(b"x-sovereign-seat", b"grok-build")])
+        ):
+            header = _dispatch(
+                "signal_ack",
+                {"signal_id": sl.signal_id_for("halt", "b.md"), "state": "acted", "reason": "x"},
+            )
+        shapes = {native["row"]["closed_by"], header["row"]["closed_by"]}
+        assert shapes == {"seat:native-session", "seat:grok-build"}
+        assert all(c.startswith("seat:") for c in shapes)
+        assert all(c.count(":") == 1 for c in shapes)
+
+    def test_the_reserved_set_is_derived_from_the_ledger_not_retyped(self):
+        """A retyped copy drifts the first time either ledger set gains a
+        member, and the drift is silent."""
+        from sovereign_stack import sse_server
+
+        reserved = sse_server.reserved_seat_names()
+        assert {c.casefold() for c in sl.SOURCE_DERIVED_CLOSERS} <= reserved
+        assert {p.casefold() for p in sl.SOURCE_PRODUCER.values()} <= reserved
+        assert {"drain", "nape-ack", "daemon", "nape", "watchman", "bridge"} <= reserved
+
+    @pytest.mark.parametrize(
+        "reserved",
+        ["drain", "nape-ack", "daemon", "nape", "watchman", "bridge", "metabolize", "chronicle"],
+    )
+    def test_a_reserved_name_is_refused_and_the_reason_names_the_collision(self, reserved):
+        """`drain` and `nape-ack` are the sharp two: round 3's `_may_reopen`
+        treats a close by either as source-derived, so a seat wearing one
+        would have its human acknowledgement reversed by the next scan. The
+        producer labels are refused at the door rather than at the write,
+        where a PermissionError reads as a bug."""
+        from sovereign_stack import sse_server
+
+        seat, refusal = sse_server.seat_from_scope(
+            _sse_scope(headers=[(b"x-sovereign-seat", reserved.encode())])
+        )
+        assert seat is None
+        assert refusal is not None
+        assert reserved in refusal
+        assert "collides with a reserved" in refusal
+
+    def test_the_collision_check_is_case_insensitive(self):
+        """`_may_reopen` and the producer check both casefold, so an uppercase
+        spelling is the same collision."""
+        from sovereign_stack import sse_server
+
+        seat, refusal = sse_server.seat_from_scope(
+            _sse_scope(headers=[(b"x-sovereign-seat", b"drain")])
+        )
+        assert seat is None and refusal
+        # The shape rule rejects uppercase before the collision check ever
+        # runs, so the two rules together leave no spelling of a reserved name
+        # accepted. Both refusals, neither an acceptance.
+        upper_seat, upper_refusal = sse_server.seat_from_scope(
+            _sse_scope(headers=[(b"x-sovereign-seat", b"DRAIN")])
+        )
+        assert upper_seat is None and upper_refusal
+
+    def test_a_reserved_name_refuses_the_connection_through_the_real_route(self, monkeypatch):
+        from sovereign_stack import sse_server
+
+        monkeypatch.setenv("SSE_ALLOW_UNAUTHENTICATED", "true")
+        monkeypatch.delenv("BRIDGE_TOKEN", raising=False)
+        opened = []
+        monkeypatch.setattr(
+            sse_server.sse, "connect_sse", lambda *a, **kw: opened.append(1), raising=True
+        )
+        sent = []
+
+        async def send(msg):
+            sent.append(msg)
+
+        async def receive():
+            return {"type": "http.request"}
+
+        asyncio.run(
+            sse_server.app(_sse_scope(headers=[(b"x-sovereign-seat", b"drain")]), receive, send)
+        )
+        assert sent[0]["status"] == 400
+        body = json.loads(sent[1]["body"])
+        assert "drain" in body["detail"]
+        assert not opened
+
+    def test_an_ordinary_seat_name_is_still_accepted(self):
+        """POSITIVE CONTROL. A denylist that refuses the legitimate case is
+        not a gate."""
+        from sovereign_stack import sse_server
+
+        for ok in (b"hq-studio", b"grok-build", b"codex-astra", b"watch-2-3"):
+            seat, refusal = sse_server.seat_from_scope(
+                _sse_scope(headers=[(b"x-sovereign-seat", ok)])
+            )
+            assert refusal is None, ok
+            assert seat == "seat:" + ok.decode()
+
+    def test_a_namespaced_seat_is_still_judged_on_its_bare_name_by_the_producer_check(
+        self, tmp_sovereign_root
+    ):
+        """The namespace must not become a way around producer separation.
+        `_actor_identity` strips one namespace before comparing, so
+        `seat:daemon` is still the daemon — belt to the door's braces."""
+        root = tmp_sovereign_root
+        sl.open_signal(
+            source="halt", native_id="h.md", produced_at="2026-09-01T00:00:00Z", root=root
+        )
+        with pytest.raises(PermissionError):
+            sl.ack_signal(sl.signal_id_for("halt", "h.md"), "seat:daemon", "acted", "nope", root)
