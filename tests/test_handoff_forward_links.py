@@ -329,7 +329,10 @@ class TestBootDoorShowsTheCorrection:
             supersedes=_id(first),
         )
 
-        payload = json.loads(fx.run_door(root, "handoff_archaeology", {"limit": 50}))
+        # handoff_archaeology was retired (unpublished) 2026-09-06 and
+        # folded into the handoff surface. Its implementation — and the
+        # forward-link rendering this test guards — is retained.
+        payload = json.loads(fx.run_door(root, "handoff_archaeology", {"limit": 50}, retired=True))
         by_id = {Path(r["_path"]).name: r for r in payload["records"]}
         assert by_id[_id(second)]["supersedes"] == _id(first)
         assert [s["handoff_id"] for s in by_id[_id(first)]["_corrected_by"]] == [_id(second)]

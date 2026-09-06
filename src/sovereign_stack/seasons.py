@@ -1034,7 +1034,7 @@ SEASON_TOOLS = [
             "re-verify, unreceipted sentinels, pin-loss, sentinel-vs-boot-budget), "
             "(5) dormant domains / fragmentation. Every candidate line carries a "
             "ready-to-paste tool call. This pass changes nothing — act via "
-            "supersede_insight / link_threads / set_policy."
+            "supersede_insight / set_policy."
         ),
         inputSchema={
             "type": "object",

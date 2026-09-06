@@ -67,14 +67,22 @@ SESSION_ID = "contract-walker-session"
 # reasonless entries. An honest skip list beats a flaky suite.
 # ---------------------------------------------------------------------------
 
+# RETIRED 2026-09-06: synthesize_now, guardian_scan, guardian_report,
+# guardian_baseline and stack_write_check left the PUBLISHED registry in the
+# same release (never called in the 30-day census). The walker reads
+# list_tools(), so their triples are gone and a skip entry for them is stale
+# by this file's own accounting rule. Their implementations are retained and
+# un-retiring one restores its triples — at which point it will need its skip
+# line back, which is why the reasons are kept here as comments rather than
+# deleted outright.
+#   synthesize_now  — SynthesisDaemon.run() invokes a local LLM
+#   guardian_scan   — shells out to lsof; the live listener set varies
+#   guardian_report — shells out to lsof for live listener counts
+#   guardian_baseline — gathers live ports/processes/network via subprocess
+#   stack_write_check — live write-path probe across running services
 SKIP: dict[str, str] = {
     "where_did_i_leave_off": "spawns the per-boot Haiku scribe and consumes handoffs/lineage",
-    "synthesize_now": "SynthesisDaemon.run() invokes a local LLM (network/subprocess)",
-    "guardian_scan": "shells out to lsof; the live listener set varies between calls",
-    "guardian_report": "shells out to lsof for live listener counts",
-    "guardian_baseline": "gathers live ports/processes/network via subprocess",
     "connectivity_status": "urllib probes against live service endpoints",
-    "stack_write_check": "live write-path probe across running services",
     "context_retrieve": "recency-weighted relevance scores drift between the two probe calls and reorder near-tied entries (float-normalization can't stabilize order); the default-of-5 equivalence is pinned deterministically under fixed data by test_context_retrieve_determinism.py::test_omitting_limit_matches_schema_default_of_five",
 }
 
@@ -521,9 +529,16 @@ class TestWalkerAccounting:
         alongside the new tool, the same way the skip list is curated.
         """
         assert len(ALL_TRIPLES) == len(RUNNABLE_TRIPLES) + len(SKIPPED_TRIPLES)
-        assert len(RUNNABLE_TRIPLES) >= 50, (
+        # FLOOR LOWERED 50 -> 45 ON 2026-09-06, consciously, with the reason:
+        # the published registry went 100 -> 52 in the tool retirement, so the
+        # walk got smaller because the SURFACE got smaller, not because the
+        # walker stopped walking. Coverage of the surviving surface is what
+        # this floor is for; it must still be loud if the walker itself
+        # regresses, so it sits just under the post-retirement count rather
+        # than being deleted. Re-raise it when the registry grows again.
+        assert len(RUNNABLE_TRIPLES) >= 45, (
             f"Only {len(RUNNABLE_TRIPLES)} (tool,param) cases run — the walker "
-            f"lost coverage (expected at least 50)."
+            f"lost coverage (expected at least 45)."
         )
         assert len(SKIPPED_TRIPLES) <= 15, (
             f"{len(SKIPPED_TRIPLES)} cases skipped — the skip list is growing; "

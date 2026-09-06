@@ -40,7 +40,12 @@ SECRET_EMOTION = "zzloss"
 
 def _dispatch(tool: str, args: dict | None = None) -> str:
     async def _run():
-        result = await server._dispatch_tool(tool, args or {})
+        # The three consent-gate tools were RETIRED (unpublished) on
+        # 2026-09-06 — never called in the 30-day census. Their
+        # implementations are untouched, and this file still guards them:
+        # _dispatch_registered_tool is the retained body behind the
+        # retirement gate, so un-retiring cannot revive dead code.
+        result = await server._dispatch_registered_tool(tool, args or {})
         return result[0].text
 
     return asyncio.run(_run())
@@ -199,7 +204,15 @@ class TestDesignateNotExposed:
         tools = asyncio.new_event_loop().run_until_complete(server.list_tools())
         names = {t.name for t in tools}
         assert "designate_protected" not in names
-        # The three consent-gate tools ARE registered.
-        assert "list_protected_thresholds" in names
-        assert "open_protected_record" in names
-        assert "decline_protected_record" in names
+        # The three consent-gate tools were retired (unpublished) 2026-09-06.
+        # designate_protected was never exposed and still is not; the point of
+        # this test is that the two reasons for absence are different, and the
+        # retirement is the only one that is recorded and reversible.
+        for name in (
+            "list_protected_thresholds",
+            "open_protected_record",
+            "decline_protected_record",
+        ):
+            assert name not in names
+            assert name in server.RETIRED_TOOLS
+        assert "designate_protected" not in server.RETIRED_TOOLS

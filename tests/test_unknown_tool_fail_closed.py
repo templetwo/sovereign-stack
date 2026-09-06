@@ -166,7 +166,11 @@ class TestKnownToolStillSucceeds:
 
     def test_known_tool_returns_success_envelope(self):
         with _sandbox("test-known-control") as (srv, _):
-            result = _run(_call_through_framework(srv, "derive", {"paths": []}))
+            # `derive` was the control here until it was retired 2026-09-06;
+            # a retired name now errors, which would make this control assert
+            # the opposite of its point. spiral_status is live, read-only and
+            # argument-free.
+            result = _run(_call_through_framework(srv, "spiral_status", {}))
 
             assert result.isError is False
             assert getattr(result, "isError", False) is False  # bridge → ok:true
@@ -185,7 +189,10 @@ class TestKnownToolStillSucceeds:
         from sovereign_stack import server as srv
 
         registered = {t.name for t in _run(srv.list_tools())}
-        body = inspect.getsource(srv._dispatch_tool)
+        # The dispatch BODY, not the retirement gate that fronts it — the
+        # gate is a two-line function and would report every live tool as
+        # unmatched.
+        body = inspect.getsource(srv._dispatch_registered_tool)
 
         covered = set(re.findall(r'name\s*==\s*["\']([^"\']+)["\']', body))
         for group in re.findall(r"name\s+in\s+[\(\[]([^\)\]]*)[\)\]]", body):

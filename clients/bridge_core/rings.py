@@ -65,7 +65,12 @@ CANONICAL_RING_1: frozenset[str] = frozenset({
     "triage_threads",
     "thread_get_touches",
     # Comms read
-    "comms_unread_bodies",
+    # comms_unread_bodies RETIRED (unpublished) 2026-09-06 — never called in
+    # the 30-day census. Dropped from the allowlist rather than left dangling:
+    # a ring entry naming a tool the registry no longer publishes is a grant
+    # that cannot be exercised, and the projection layer says so out loud
+    # ("the allowlist is stale, not the read"). Removing it NARROWS this
+    # surface, which is the only direction a retirement may move a ring map.
     "comms_recall",
     "comms_channels",
     "comms_get_acks",
@@ -91,14 +96,20 @@ CANONICAL_RING_1: frozenset[str] = frozenset({
 
 
 # ── Ring 2 — governed write proposals ─────────────────────────────────────────
+# RETIRED 2026-09-06 and dropped from this map: comms_acknowledge,
+# store_compaction_summary, reflection_ack (reflection_ack because the
+# reflector itself is retired and no new marginalia will ever arrive).
+#
+# comms_acknowledge FOLDED into signal_ack on the native surface. signal_ack
+# is deliberately NOT added here: folding a retired name into a surviving tool
+# is not a licence to grant the surviving tool to a substrate that never had
+# it. Ring membership is Anthony's allowlist, and a fold must never be the
+# back door that widens it.
 CANONICAL_RING_2: frozenset[str] = frozenset({
     "propose_insight",       # wraps record_insight
     "propose_learning",      # wraps record_learning
     "record_open_thread",
-    "comms_acknowledge",
     "handoff",
-    "store_compaction_summary",
-    "reflection_ack",
     "self_model",            # update direction only
     "end_bridge_session",    # wraps close_session
     "thread_touch",
@@ -111,10 +122,7 @@ CANONICAL_COMMIT_TARGETS: dict[str, str] = {
     "propose_insight": "record_insight",
     "propose_learning": "record_learning",
     "record_open_thread": "record_open_thread",
-    "comms_acknowledge": "comms_acknowledge",
     "handoff": "handoff",
-    "store_compaction_summary": "store_compaction_summary",
-    "reflection_ack": "reflection_ack",
     "self_model": "self_model",
     "end_bridge_session": "close_session",
     "thread_touch": "thread_touch",

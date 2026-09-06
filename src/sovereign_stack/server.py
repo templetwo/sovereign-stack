@@ -435,12 +435,206 @@ def _original_timestamp_schema(*, changes_claim_id: bool) -> dict:
 
 
 # =============================================================================
+# RETIRED TOOLS — the 30-day census, enacted
+# =============================================================================
+#
+# Anthony, 2026-09-06: "retire the unused tools and/or add there functionality
+# to more populare tools."
+#
+# THE MEASUREMENT. A 30-day call census over the live surface found 48 of the
+# 98 registered tools were never called ONCE, while two daemon polls
+# (comms_get_acks, connectivity_status) accounted for 86% of all calls. A
+# registry is a menu a seat reads to decide what is possible here; half of
+# this one described capability nobody has reached for in a month, and every
+# arriving instance paid to read it.
+#
+# THE SHAPE OF THE RETIREMENT, and why it is this shape:
+#
+#   FAIL-CLOSED. A retired name is not published by list_tools AND is refused
+#   by dispatch. It must not be quietly droppable — a tool that vanishes from
+#   the menu but still answers when called is the worst of both, because the
+#   caller's mental model and the server's diverge silently. The refusal names
+#   the replacement where there is one, so a stale client gets a correction
+#   instead of "Unknown tool".
+#
+#   REVERSIBLE. NO IMPLEMENTATION IS DELETED in this release. Every dispatch
+#   branch, every handler, every module list stays exactly where it was; the
+#   only thing that changed is this mapping. Un-retiring is deleting a line.
+#   That matters because a census measures REACH, not worth: a tool nobody
+#   called may be a tool nobody could find (SOP #10 — the content is rarely
+#   what is at risk, the way back to it is), and this house has been wrong
+#   about "gone" often enough to make the cheap undo the design.
+#
+#   A FOLD IS A CLAIM, AND IT IS TESTED. Where a surviving tool already has
+#   the capability — or takes one optional argument to get it — the retired
+#   name maps to it and a test exercises the replacement actually doing the
+#   retired tool's job. Where nothing survives that can do the work, the
+#   replacement is None and the tool retires outright rather than pointing a
+#   caller at something that will not serve them.
+#
+# The census is the reason; the date is the enactment; neither is a judgement
+# that the retired work was bad.
+
+CENSUS_DATE = "2026-09-06"
+CENSUS_REASON = "never called in the 30-day census ending 2026-09-06"
+
+
+class RetiredTool:
+    """Why a name is gone, and where its capability went (or that it did not)."""
+
+    __slots__ = ("replacement", "date", "reason", "note")
+
+    def __init__(
+        self,
+        replacement: str | None,
+        date: str = CENSUS_DATE,
+        reason: str = CENSUS_REASON,
+        note: str = "",
+    ) -> None:
+        self.replacement = replacement
+        self.date = date
+        self.reason = reason
+        self.note = note
+
+
+def _retired(replacement: str | None = None, note: str = "") -> RetiredTool:
+    return RetiredTool(replacement, note=note)
+
+
+# name -> RetiredTool(replacement or None). Consulted by list_tools (a retired
+# name is NOT published) and by _dispatch_tool (a call to one is refused).
+RETIRED_TOOLS: dict[str, RetiredTool] = {
+    # ── FOLDED: the capability lives on, under a name seats already use ────
+    "resolve_thread": _retired(
+        "resolve_thread_by_id",
+        "Same act, addressed by the stable thread_id instead of a "
+        "(domain, question_fragment) guess. get_open_threads returns the id.",
+    ),
+    "mark_uncertainty": _retired(
+        "record_open_thread",
+        "A thread IS this house's uncertainty object: question + context + "
+        "domain, surfaced at every boot. mark_uncertainty(what, why) is "
+        "record_open_thread(question=what, context=why).",
+    ),
+    "resolve_uncertainty": _retired(
+        "record_open_thread",
+        "The resolving half of the same fold — resolve the thread the "
+        "uncertainty became (resolve_thread_by_id), or record what you found.",
+    ),
+    "list_exchanges": _retired(
+        "archive_exchange",
+        "archive_exchange gained mode='list' — seats already call it to write, "
+        "so the read lives beside the write instead of two doors over.",
+    ),
+    "recall_exchange": _retired(
+        "archive_exchange",
+        "archive_exchange gained mode='get' with archive_id, integrity check and all.",
+    ),
+    "comms_acknowledge": _retired(
+        "signal_ack",
+        "The same act — acknowledging a signal — on the ledger that now holds "
+        "every signal source. The comms bulletin board itself retired 2026-06-12.",
+    ),
+    "nape_honks": _retired(
+        "signals_summary",
+        "signals_summary(source='honk') is the honk queue, with the staleness "
+        "and availability the honk-only view never carried.",
+    ),
+    "nape_honks_with_history": _retired(
+        "signals_summary",
+        "Same fold; the ledger's per-signal state IS the history.",
+    ),
+    "handoff_acted_on": _retired(
+        "handoff",
+        "The handoff surface renders forward-correction links itself as of "
+        "the 2026-09-06 release; a separate act-on write is a second address "
+        "for a fact the first one already carries.",
+    ),
+    "handoff_archaeology": _retired(
+        "handoff",
+        "Same surface, same reason.",
+    ),
+    # ── RETIRED OUTRIGHT: nothing surviving does this work ─────────────────
+    # Pointing a caller at a near-miss is worse than an honest dead end.
+    "reflection_ack": _retired(
+        None,
+        "THE REFLECTOR IS RETIRED — all three generations (ministral-3:14b, "
+        "the qwen3.6/gemma4 dream engine, and the claude-sonnet-4-6 synthesis "
+        "daemon, the last taken offline for cost). No new marginalia will ever "
+        "arrive, so there is nothing left to acknowledge. Its successor is the "
+        "Watchman, which has no ack surface.",
+    ),
+    "ask_scribe": _retired(None, "Spend-bearing; not folded into a free surface."),
+    "synthesize_now": _retired(None, "Spend-bearing (paid API run)."),
+    "metabolize": _retired(None, "Destructive-tier; no fold."),
+    "govern": _retired(None, "Service control; no fold."),
+    "route": _retired(None, "Coherence routing stays available in-process."),
+    "derive": _retired(None, "Coherence derivation stays available in-process."),
+    "guardian_status": _retired(None, "Guardian family retires as a family."),
+    "guardian_scan": _retired(None, "Guardian family retires as a family."),
+    "guardian_alerts": _retired(None, "Guardian family retires as a family."),
+    "guardian_audit": _retired(None, "Guardian family retires as a family."),
+    "guardian_quarantine": _retired(None, "Guardian family retires as a family."),
+    "guardian_report": _retired(None, "Guardian family retires as a family."),
+    "guardian_mcp_audit": _retired(None, "Guardian family retires as a family."),
+    "guardian_baseline": _retired(None, "Guardian family retires as a family."),
+    "propose_experiment": _retired(None, "Experiment family retires as a family."),
+    "complete_experiment": _retired(None, "Experiment family retires as a family."),
+    "open_protected_record": _retired(None, "Protected-drawer tools retire as a family."),
+    "decline_protected_record": _retired(None, "Protected-drawer tools retire as a family."),
+    "list_protected_thresholds": _retired(None, "Protected-drawer tools retire as a family."),
+    "watch_status": _retired(None, "Watch family retires as a family."),
+    "watch_cancel": _retired(None, "Watch family retires as a family."),
+    "watch_resample": _retired(None, "Watch family retires as a family."),
+    "agent_reflect": _retired(None),
+    "arrive_delta": _retired(None),
+    "comms_unread_bodies": _retired(None),
+    "end_session_review": _retired(None),
+    "link_threads": _retired(None),
+    "nape_observe": _retired(
+        None,
+        "The Nape auto-hook still observes EVERY tool call (handle_tool); only "
+        "the manual observe tool is unpublished.",
+    ),
+    "prior_alignment_summary": _retired(None),
+    "record_prior_alignment": _retired(None),
+    "record_breakthrough": _retired(None),
+    "record_collaborative_insight": _retired(None),
+    "retire_hypothesis": _retired(None),
+    "scan_thresholds": _retired(None),
+    "session_handoff": _retired(None),
+    "stack_write_check": _retired(None),
+    "store_compaction_summary": _retired(None),
+}
+
+
+def retired_tool_error(name: str) -> str:
+    """The refusal text. Names the replacement where one exists."""
+    entry = RETIRED_TOOLS[name]
+    head = f"{name} was retired on {entry.date} ({entry.reason})."
+    if entry.replacement:
+        head += f" Use {entry.replacement} instead."
+    else:
+        head += " It has no replacement."
+    if entry.note:
+        head += f" {entry.note}"
+    return head
+
+
+# =============================================================================
 # TOOLS - ROUTING
 # =============================================================================
 
 
-@server.list_tools()
-async def list_tools():
+def _registered_tools():
+    """EVERY tool with an implementation, retired ones included.
+
+    Split out from list_tools so the retirement is a FILTER over a registry
+    that still knows what it has, not an amputation of it. `RETIRED_TOOLS`
+    entries all still appear here; nothing about their dispatch branches,
+    schemas or handlers changed. That is what makes un-retiring one a
+    one-line edit instead of an archaeology dig.
+    """
     return (
         [
             # Routing
@@ -704,14 +898,45 @@ async def list_tools():
                     "chronicle. Group an iterative trajectory with a shared conversation_id "
                     "(e.g. ten drafts of one paper) so a future instance can fine-tooth the "
                     "whole build, not just the endpoint. Reference the returned archive_id "
-                    "from a record_insight summary. A summary is not the artifact."
+                    "from a record_insight summary. A summary is not the artifact. "
+                    "READS LIVE HERE TOO as of 2026-09-06: mode='get' with an archive_id "
+                    "retrieves one exchange and re-verifies its bytes (replaces "
+                    "recall_exchange); mode='list' returns provenance only, newest "
+                    "first, with the optional filters (replaces list_exchanges). "
+                    "Default mode='archive' writes, exactly as before."
                 ),
                 inputSchema={
                     "type": "object",
                     "properties": {
+                        "mode": {
+                            "type": "string",
+                            "enum": ["archive", "get", "list"],
+                            "default": "archive",
+                            "description": (
+                                "archive (default) writes; get retrieves and re-hashes "
+                                "one archive_id; list returns provenance only."
+                            ),
+                        },
+                        "archive_id": {
+                            "type": "string",
+                            "description": (
+                                "mode='get' only: full SHA-256 or a unique prefix "
+                                "(git-style). The response carries integrity = verified | "
+                                "mismatch | missing | ambiguous | unknown."
+                            ),
+                        },
+                        "limit": {
+                            "type": "number",
+                            "default": 20,
+                            "description": "mode='list' only: how many to return.",
+                        },
+                        "tag": {
+                            "type": "string",
+                            "description": "mode='list' only: filter by domain tag.",
+                        },
                         "content": {
                             "type": "string",
-                            "description": "The verbatim text to preserve exactly",
+                            "description": "mode='archive': the verbatim text to preserve exactly",
                         },
                         "source": {
                             "type": "string",
@@ -739,7 +964,12 @@ async def list_tools():
                             "description": "Optional domain tags for retrieval",
                         },
                     },
-                    "required": ["content", "source"],
+                    # NO `required` BLOCK, and this is the trade: read modes
+                    # cannot carry content+source, so SDK-level validation of
+                    # the WRITE path moves into the handler, which refuses an
+                    # archive with a blank content or source by name. Dropping
+                    # the block without that handler check would have traded a
+                    # fold for a fail-open on the write path.
                 },
             ),
             Tool(
@@ -1147,7 +1377,7 @@ async def list_tools():
                     "since-last-reflection summary, and your self-model. Carries the breath "
                     "without the full ritual. The complete inheritance (lineage letters, "
                     "marginalia, every thread) stays one call away via where_did_i_leave_off "
-                    "(the deep boot), and arrive_delta() shows only what changed. Does NOT "
+                    "(the deep boot). Does NOT "
                     "consume handoffs — read+consume happens in where_did_i_leave_off. "
                     "Depth on demand, not by force."
                 ),
@@ -1523,7 +1753,8 @@ async def list_tools():
                 name="nape_ack",
                 description=(
                     "Acknowledge a Nape honk by its honk_id. "
-                    "Acknowledged honks are removed from nape_honks results but remain "
+                    "Acknowledged honks are removed from the open honk queue "
+                    "(signals_summary(source='honk')) but remain "
                     "in the audit log (acks.jsonl). Include a note explaining how the "
                     "concern was addressed or why it was a false positive."
                 ),
@@ -1922,7 +2153,9 @@ async def list_tools():
                     "calls. They are "
                     "FALLIBLE-BY-DESIGN — the reader is the calibration mechanism. "
                     "Some will be insight, some nonsense. Use ack_status='unread' to "
-                    "find new ones, then ack each with reflection_ack."
+                    "find new ones. NOTE: the reflector is retired and no new "
+                    "marginalia will arrive; reflection_ack retired with it "
+                    "(2026-09-06). The existing notes remain readable here."
                 ),
                 inputSchema={
                     "type": "object",
@@ -2134,6 +2367,19 @@ async def list_tools():
     )  # consciousness + compaction + guardian + metabolism + post_fix + connectivity
     # + policies + provenance + seasons (v1.7.0 Receipts & Seasons) + ground (The Ground)
     # + signal ledger (watch seat)
+
+
+@server.list_tools()
+async def list_tools():
+    """THE PUBLISHED SURFACE. Retired names are not on it.
+
+    This is the one place the registry becomes a menu, and it is the reason
+    the retirement can be trusted: `my_toolkit`, `heartbeat`, the contract
+    walker, the bridge projections and the tier drift guard all read THIS,
+    so a retired tool cannot survive in one reader's idea of the surface and
+    not another's.
+    """
+    return [t for t in _registered_tools() if t.name not in RETIRED_TOOLS]
 
 
 # Category mapping for my_toolkit. Source of truth for how tools are grouped
@@ -2923,6 +3169,31 @@ async def _dispatch_tool(name: str, arguments: dict):
     Returns:
         list[TextContent] as produced by each branch.
     """
+    # FAIL CLOSED, AND BEFORE ANY STATE MOVES. A retired name is refused
+    # here rather than falling through to the branch that still exists in
+    # _dispatch_registered_tool — an unpublished tool that still answers when
+    # called is worse than either state alone, because the caller's map and
+    # the server's diverge with nothing to notice it. Refused ABOVE the body
+    # so a retired call never advances the spiral or writes live state.
+    #
+    # THE GATE IS A SEPARATE FUNCTION FROM THE BODY ON PURPOSE. Retirement
+    # unpublishes; it does not delete. The bodies below still exist, and the
+    # tests that cover them now call _dispatch_registered_tool directly —
+    # which is what keeps un-retiring a one-line edit instead of a revival
+    # of code nothing has exercised in months. There is no path from a real
+    # MCP call to the body except through this gate.
+    if name in RETIRED_TOOLS:
+        raise ValueError(retired_tool_error(name))
+    return await _dispatch_registered_tool(name, arguments)
+
+
+async def _dispatch_registered_tool(name: str, arguments: dict):
+    """The dispatch body. Reached in production only via _dispatch_tool.
+
+    Called directly by tests that cover a RETAINED-BUT-UNPUBLISHED
+    implementation; a production caller cannot reach it without passing the
+    retirement gate above.
+    """
     global spiral_state
     spiral_state.record_tool_call(name)
     save_spiral_state(spiral_state, SPIRAL_STATE_PATH)
@@ -3072,6 +3343,37 @@ async def _dispatch_tool(name: str, arguments: dict):
         return [TextContent(type="text", text=text)]
 
     if name == "archive_exchange":
+        # THE FOLD (2026-09-06). recall_exchange and list_exchanges retired
+        # into this tool's read modes; seats already call archive_exchange to
+        # write, so the read now lives beside the write instead of two doors
+        # over. Default stays "archive": an existing caller that passes no
+        # mode gets byte-identical behaviour.
+        mode = str(arguments.get("mode") or "archive").strip().lower()
+        if mode not in ("archive", "get", "list"):
+            raise ValueError(f"archive_exchange mode must be archive|get|list, got {mode!r}")
+        if mode == "get":
+            archive_id = str(arguments.get("archive_id") or "").strip()
+            if not archive_id:
+                raise ValueError("archive_exchange mode='get' requires archive_id")
+            result = await asyncio.to_thread(experiential.recall_exchange, archive_id)
+            return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
+        if mode == "list":
+            result = experiential.list_exchanges(
+                vector_id=arguments.get("vector_id"),
+                source=arguments.get("source"),
+                tag=arguments.get("tag"),
+                conversation_id=arguments.get("conversation_id"),
+                limit=arguments.get("limit", 20),
+            )
+            return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
+        # Write path. The schema can no longer mark content/source required
+        # (the read modes do not carry them), so the invariant is enforced
+        # HERE rather than lost — an archive with nothing in it is a silent
+        # write of a hash over the empty string.
+        if not str(arguments.get("content") or "").strip():
+            raise ValueError("archive_exchange mode='archive' requires non-empty content")
+        if not str(arguments.get("source") or "").strip():
+            raise ValueError("archive_exchange mode='archive' requires a source")
         record = experiential.archive_exchange(
             content=arguments.get("content", ""),
             source=arguments.get("source", "unknown"),

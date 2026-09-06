@@ -247,13 +247,21 @@ def _patched_singletons(root: Path):
         yield
 
 
-def run_door(root: Path, name: str, arguments: dict) -> str:
-    """Run one door via the real dispatcher against the fixture root."""
-    from sovereign_stack.server import _dispatch_tool
+def run_door(root: Path, name: str, arguments: dict, *, retired: bool = False) -> str:
+    """Run one door via the real dispatcher against the fixture root.
+
+    ``retired=True`` runs the RETAINED BODY behind the retirement gate, for a
+    tool unpublished on 2026-09-06 whose implementation is deliberately kept.
+    The gate itself is covered separately (tests/test_tool_retirement.py); a
+    production caller has no route past it.
+    """
+    from sovereign_stack.server import _dispatch_registered_tool, _dispatch_tool
+
+    door = _dispatch_registered_tool if retired else _dispatch_tool
 
     async def _run():
         with _patched_singletons(root):
-            result = await _dispatch_tool(name, arguments)
+            result = await door(name, arguments)
         return result[0].text
 
     return asyncio.run(_run())

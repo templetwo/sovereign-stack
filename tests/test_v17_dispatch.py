@@ -26,7 +26,11 @@ def isolated(tmp_path, monkeypatch):
 
 
 async def _call(srv, name, arguments):
-    result = await srv._dispatch_tool(name, arguments)
+    # link_threads was RETIRED (unpublished) 2026-09-06; the rest of this
+    # file's tools are live. _dispatch_registered_tool is the retained body
+    # behind the retirement gate, so the v1.7.0 dispatch regressions this
+    # file pins stay pinned for every tool in it.
+    result = await srv._dispatch_registered_tool(name, arguments)
     assert result and result[0].type == "text"
     return result[0].text
 

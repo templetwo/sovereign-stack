@@ -487,7 +487,11 @@ class TestHandoffActedOnToolSurfaceChange:
             r = srv_mod.handoff_engine.write("note", "predecessor", "s1", "general")
             with pytest.raises(ValueError, match="does not identify a reader"):
                 _run(
-                    srv_mod._dispatch_tool(
+                    # handoff_acted_on was RETIRED (unpublished) 2026-09-06 and
+                    # folded into the handoff surface, which renders forward
+                    # links itself. The implementation is retained, so this
+                    # guard runs against the body behind the retirement gate.
+                    srv_mod._dispatch_registered_tool(
                         "handoff_acted_on",
                         {
                             "handoff_path": r["_path"],
@@ -504,7 +508,7 @@ class TestHandoffActedOnToolSurfaceChange:
         with _isolated_server("acted-on-control-test") as (srv_mod, tmp_root):
             r = srv_mod.handoff_engine.write("note", "predecessor", "s1", "general")
             result = _run(
-                srv_mod._dispatch_tool(
+                srv_mod._dispatch_registered_tool(
                     "handoff_acted_on",
                     {
                         "handoff_path": r["_path"],

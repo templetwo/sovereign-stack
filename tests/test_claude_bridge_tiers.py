@@ -92,10 +92,19 @@ class TestRegistryDriftGuard:
             "(new tools default to step-up at runtime until classified), or "
             "add it to HELD_UNCLASSIFIED with the reason and the date."
         )
-        ghosts = sorted(frozen - names)
+        # A RETIRED tool is classified-but-unpublished ON PURPOSE, and the
+        # classification is deliberately kept: the retirement of 2026-09-06
+        # unpublished 48 names without deleting a single implementation, and
+        # leaving their tiers in place is what keeps un-retiring a one-line
+        # edit. Anything classified, unpublished AND unretired is still a
+        # ghost and still fails here.
+        from sovereign_stack.server import RETIRED_TOOLS
+
+        ghosts = sorted(frozen - names - set(RETIRED_TOOLS))
         assert not ghosts, (
             f"tier sets classify tools the registry no longer publishes: {ghosts}. "
-            "Drop them from the frozen sets."
+            "Drop them from the frozen sets, or record the retirement in "
+            "server.RETIRED_TOOLS."
         )
         held_but_absent = sorted(HELD_UNCLASSIFIED - names)
         assert not held_but_absent, (

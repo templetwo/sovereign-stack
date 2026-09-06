@@ -31,6 +31,21 @@ def _dispatch(tool: str, args: dict | None = None) -> str:
     return asyncio.run(_run())
 
 
+def _dispatch_retained(tool: str, args: dict | None = None) -> str:
+    """Same, for a tool RETIRED (unpublished) on 2026-09-06.
+
+    arrive_delta was never called in the 30-day census. Its implementation is
+    untouched — only its publication changed — so these tests keep covering it
+    through the dispatch body that sits behind the retirement gate.
+    """
+
+    async def _run():
+        result = await server._dispatch_registered_tool(tool, args or {})
+        return result[0].text
+
+    return asyncio.run(_run())
+
+
 def _tool_names() -> set[str]:
     tools = asyncio.new_event_loop().run_until_complete(server.list_tools())
     return {t.name for t in tools}
@@ -84,23 +99,23 @@ class TestArriveThinBoot:
 
 class TestArriveDelta:
     def test_returns_nonempty_text(self):
-        text = _dispatch("arrive_delta", {"source_instance": "test-delta"})
+        text = _dispatch_retained("arrive_delta", {"source_instance": "test-delta"})
         assert isinstance(text, str)
         assert text.strip()
 
     def test_core_sections_present(self):
-        text = _dispatch("arrive_delta")
+        text = _dispatch_retained("arrive_delta")
         assert "ARRIVE_DELTA" in text
         assert "what changed since you last looked" in text
         assert "━━━ NEW ACTIVITY" in text
         assert "━━━ HANDOFFS WAITING" in text
 
     def test_reference_point_line(self):
-        text = _dispatch("arrive_delta")
+        text = _dispatch_retained("arrive_delta")
         assert "Reference point:" in text
 
     def test_points_back_to_other_modes(self):
-        text = _dispatch("arrive_delta")
+        text = _dispatch_retained("arrive_delta")
         assert "where_did_i_leave_off()" in text
         assert "arrive()" in text
 
@@ -137,7 +152,7 @@ class TestArriveDoesNotConsumeHandoffs:
         monkeypatch.setattr(server, "handoff_engine", engine)
         assert len(engine.unconsumed()) == 1
 
-        _dispatch("arrive_delta", {"source_instance": "test"})
+        _dispatch_retained("arrive_delta", {"source_instance": "test"})
 
         assert len(engine.unconsumed()) == 1, "arrive_delta() must NOT consume handoffs"
 
@@ -149,12 +164,16 @@ class TestProgressiveBootRegistration:
     def test_new_tools_registered(self):
         names = _tool_names()
         assert "arrive" in names
-        assert "arrive_delta" in names
+        assert "arrive_delta" not in names, "retired 2026-09-06 — unpublished"
+        assert "arrive_delta" in server.RETIRED_TOOLS
 
     def test_new_tools_are_essential_tier(self):
         assert server.TOOL_TIERS["arrive"] == server.TIER_ESSENTIAL
         # Demoted 2026-06-12 toolkit curation: "what changed since you LAST
         # looked" is definitionally not a first-session tool.
+        # The tier entry is deliberately LEFT IN PLACE across the
+        # retirement: the classification is what makes un-retiring a
+        # one-line edit, and RETIRED_TOOLS is what keeps it off the menu.
         assert server.TOOL_TIERS["arrive_delta"] == server.TIER_CORE
 
     def test_new_tools_have_orient_intent(self):
@@ -168,4 +187,5 @@ class TestProgressiveBootRegistration:
     def test_tier_registry_has_no_ghosts_for_new_tools(self):
         # Every tier-registered name must be a real registered tool.
         names = _tool_names()
-        assert "arrive" in names and "arrive_delta" in names
+        assert "arrive" in names
+        assert "arrive_delta" not in names  # retired 2026-09-06
