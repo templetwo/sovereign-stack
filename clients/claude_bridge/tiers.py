@@ -115,6 +115,13 @@ BASE_TOOLS: frozenset[str] = frozenset(
         "nape_observe",
         "nape_honks",
         "nape_ack",
+        # Signal ledger (mesh-20260905 watch seat). Read + governed close;
+        # same shape as nape_ack (append-only state change, no deletion,
+        # no policy mutation, no service control). Unclassified, these
+        # would fail-closed to step-up — classify them so a remote seat
+        # can read the watch surface without a tap, matching nape.
+        "signals_summary",
+        "signal_ack",
         "record_prior_alignment",
         "prior_alignment_summary",
         "nape_honks_with_history",

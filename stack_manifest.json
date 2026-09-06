@@ -1,9 +1,9 @@
 {
   "manifest_schema_version": 1,
   "version": "1.21.0",
-  "source_commit": "4fce63819210e0cbdec08b7ca67d7ebaeae510f4",
+  "source_commit": "c82ceb2ac10abf11be4e81badbcadef11fffb9e1",
   "working_tree_dirty": true,
-  "tools_count": 98,
+  "tools_count": 100,
   "tools": [
     "agent_reflect",
     "archive_exchange",
@@ -87,6 +87,8 @@
     "self_model",
     "session_handoff",
     "set_policy",
+    "signal_ack",
+    "signals_summary",
     "spiral_inherit",
     "spiral_reflect",
     "spiral_status",

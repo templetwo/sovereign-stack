@@ -58,6 +58,7 @@ LEGACY_KEYS = [
     "halts_count",
     "decisions_count",
     "unacked_honks",
+    "unacked_signals",
     "listener_stale",
     "latest",
     "feed",
