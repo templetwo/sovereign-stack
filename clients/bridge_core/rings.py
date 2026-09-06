@@ -65,7 +65,12 @@ CANONICAL_RING_1: frozenset[str] = frozenset({
     "triage_threads",
     "thread_get_touches",
     # Comms read
-    "comms_unread_bodies",
+    # comms_unread_bodies RETIRED (unpublished) 2026-09-06 — never called in
+    # the 30-day census. Dropped from the allowlist rather than left dangling:
+    # a ring entry naming a tool the registry no longer publishes is a grant
+    # that cannot be exercised, and the projection layer says so out loud
+    # ("the allowlist is stale, not the read"). Removing it NARROWS this
+    # surface, which is the only direction a retirement may move a ring map.
     "comms_recall",
     "comms_channels",
     "comms_get_acks",
@@ -91,14 +96,30 @@ CANONICAL_RING_1: frozenset[str] = frozenset({
 
 
 # ── Ring 2 — governed write proposals ─────────────────────────────────────────
+# RETIRED 2026-09-06 and dropped from this map: comms_acknowledge,
+# store_compaction_summary, reflection_ack (reflection_ack because the
+# reflector itself is retired and no new marginalia will ever arrive).
+#
+# comms_acknowledge was ADVERTISED as folding into signal_ack and the claim was
+# withdrawn on 2026-09-06 after the adversarial review executed it: signal_ack
+# acknowledges a SIGNAL, and comms_get_acks(message_id) stays empty afterwards
+# — there is no comms source and no message-id adapter in the ledger. It is now
+# an outright retirement whose refusal text says so. The comms bulletin board
+# itself retired 2026-06-12, so what is gone is the ack half of a surface that
+# was already gone.
+#
+# signal_ack is deliberately NOT added here either way, and the reason survives
+# the reclassification: folding a retired name into a surviving tool is not a
+# licence to grant the surviving tool to a substrate that never had it. Ring
+# membership is Anthony's allowlist, and a fold must never be the back door
+# that widens it. (signal_ack's INTENT changed from govern to write in the same
+# release; that changes what a Studio seat may reach natively, not what a
+# remote ring admits.)
 CANONICAL_RING_2: frozenset[str] = frozenset({
     "propose_insight",       # wraps record_insight
     "propose_learning",      # wraps record_learning
     "record_open_thread",
-    "comms_acknowledge",
     "handoff",
-    "store_compaction_summary",
-    "reflection_ack",
     "self_model",            # update direction only
     "end_bridge_session",    # wraps close_session
     "thread_touch",
@@ -111,10 +132,7 @@ CANONICAL_COMMIT_TARGETS: dict[str, str] = {
     "propose_insight": "record_insight",
     "propose_learning": "record_learning",
     "record_open_thread": "record_open_thread",
-    "comms_acknowledge": "comms_acknowledge",
     "handoff": "handoff",
-    "store_compaction_summary": "store_compaction_summary",
-    "reflection_ack": "reflection_ack",
     "self_model": "self_model",
     "end_bridge_session": "close_session",
     "thread_touch": "thread_touch",

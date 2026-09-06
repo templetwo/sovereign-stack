@@ -228,24 +228,92 @@ def _append_event(event: dict[str, Any]) -> None:
         f.write(json.dumps(event) + "\n")
 
 
+# =============================================================================
+# WATCH ID CONTAINMENT  (review N4, 2026-09-06 — fail CLOSED)
+# =============================================================================
+#
+# WHAT WAS WRONG. `_watch_path` joined an unvalidated id straight onto the
+# watches directory, and every helper trusted the result. The three modes
+# published in this release (status / resample / cancel) reach those helpers
+# from a tool argument, so a watch id of `../outside` read, mutated and then
+# DELETED `<root>/post_fix/outside.json`, and wrote its "archive" copy to
+# `<root>/post_fix/watches/outside.json` — outside the archive directory
+# entirely. `nested/item` was accepted the same way. The reviewer reproduced
+# all four against synthetic files.
+#
+# TWO LIMBS, AND BOTH ARE LOAD-BEARING.
+#   1. SHAPE. The id must match `^pfw_[A-Za-z0-9_.-]+$` — the shape
+#      `_new_watch_id` mints. No separators, so `nested/item` never gets as
+#      far as a path.
+#   2. RESOLVED LOCATION. The shape alone is NOT enough and it would be easy
+#      to believe it is: `pfw_..` matches that regex. So the built path is
+#      resolved and its parent must EQUAL the active or archive directory it
+#      was supposed to land in. Equality, not "is underneath": a check for
+#      "somewhere under watches/" passes for anything inside archive/ and
+#      would have missed the mislocated archive write, which is the specific
+#      thing that went wrong.
+#
+# AND THE ID STORED INSIDE THE RECORD IS VALIDATED TOO, because the helper
+# that archives a watch reads `watch["watch_id"]` back out of the loaded file
+# to decide where to write it. A file whose contents disagree with its own
+# filename is refused rather than believed.
+
+WATCH_ID_RE = re.compile(r"^pfw_[A-Za-z0-9_.-]+$")
+
+
+class WatchIdRefused(ValueError):
+    """A watch id that does not name a file inside the watch store."""
+
+
+def _validate_watch_id(watch_id: Any, *, where: str = "watch_id") -> str:
+    if not isinstance(watch_id, str) or not watch_id.strip():
+        raise WatchIdRefused(f"{where} must be a non-empty string")
+    text = watch_id.strip()
+    if not WATCH_ID_RE.match(text):
+        raise WatchIdRefused(
+            f"{where} {watch_id!r} is refused: watch ids match "
+            f"{WATCH_ID_RE.pattern} — no separators, no traversal"
+        )
+    return text
+
+
 def _watch_path(watch_id: str, archived: bool = False) -> Path:
+    """The file for this watch, or a refusal. Never a path outside the store."""
+    text = _validate_watch_id(watch_id)
     base = _archive_dir() if archived else _watches_dir()
-    return base / f"{watch_id}.json"
+    candidate = (base / f"{text}.json").resolve()
+    # THE SECOND LIMB. `pfw_..` satisfies the regex; only resolution catches it.
+    if candidate.parent != base.resolve():
+        raise WatchIdRefused(f"watch_id {watch_id!r} resolves to {candidate}, outside {base}")
+    return candidate
 
 
 def load_watch(watch_id: str) -> dict[str, Any] | None:
-    """Load an active or archived watch by id. Returns None if not found."""
+    """Load an active or archived watch by id. Returns None if not found.
+
+    Raises WatchIdRefused for an id that does not address the store, or for a
+    record whose stored `watch_id` disagrees with the file it was read from —
+    the latter is what let a valid-shaped record sitting at
+    `<root>/post_fix/outside.json` steer every later write.
+    """
     for archived in (False, True):
         p = _watch_path(watch_id, archived=archived)
         if p.exists():
-            return json.loads(p.read_text())
+            watch = json.loads(p.read_text())
+            stored = watch.get("watch_id") if isinstance(watch, dict) else None
+            if _validate_watch_id(stored, where="stored watch_id") != _validate_watch_id(watch_id):
+                raise WatchIdRefused(
+                    f"watch at {p.name} stores watch_id {stored!r}; a record that "
+                    "disagrees with its own filename is refused, not followed"
+                )
+            return watch
     return None
 
 
 def save_watch(watch: dict[str, Any]) -> None:
     """Persist a watch. Archived watches move to archive/; active stay in watches/."""
     _ensure_dirs()
-    watch_id = watch["watch_id"]
+    watch_id = _validate_watch_id(watch.get("watch_id"), where="stored watch_id")
     status = watch.get("status", "active")
     active_path = _watch_path(watch_id, archived=False)
     archive_path = _watch_path(watch_id, archived=True)
@@ -265,16 +333,54 @@ def list_watches(status: str | None = None) -> list[dict[str, Any]]:
     status="all"        — active + archived
     status=<other>      — filter by exact status field
     """
+    return list_watches_counted(status)[0]
+
+
+def list_watches_counted(status: str | None = None) -> tuple[list[dict[str, Any]], int]:
+    """(watches, skipped_uncontained). The listing checks containment TOO (R6).
+
+    The direct modes were fixed to resolve their path before touching it; the
+    LISTING was not, and it opens every file the glob returns. The reviewer
+    replaced a legitimate watch file with a symlink to a file outside the
+    store and read that file's contents out of `post_fix_verify(mode="status")`
+    — a read out of the store through the one door that had no check.
+
+    THE CHECK IS BEFORE THE OPEN, not after. Resolving afterwards would mean
+    the bytes had already been read, which is the disclosure. Skipped entries
+    are COUNTED rather than dropped in silence: a listing that quietly shrinks
+    is how a watch goes missing without anyone noticing.
+    """
     _ensure_dirs()
     watches: list[dict[str, Any]] = []
+    skipped = 0
     dirs: list[Path] = [_watches_dir()]
     if status == "all" or status in ("completed_clean", "drift_detected", "cancelled"):
         dirs.append(_archive_dir())
     for d in dirs:
+        base = d.resolve()
         for p in d.glob("pfw_*.json"):
+            try:
+                if p.resolve().parent != base:
+                    skipped += 1
+                    continue
+            except OSError:
+                skipped += 1
+                continue
             try:
                 w = json.loads(p.read_text())
             except (json.JSONDecodeError, OSError):
+                continue
+            # A LISTING IS A HANDLE FACTORY. Every id printed here comes back
+            # as a `watch_id` argument on status/resample/cancel, so a record
+            # whose stored id does not address this store must not be listed —
+            # publishing it would hand a caller an id the helpers then refuse,
+            # or worse, one they would have followed.
+            if not isinstance(w, dict):
+                continue
+            stored = w.get("watch_id")
+            if not isinstance(stored, str) or not WATCH_ID_RE.match(stored):
+                continue
+            if f"{stored}.json" != p.name:
                 continue
             if status in (None, "active", "all"):
                 if status == "all" or w.get("status") == "active":
@@ -282,7 +388,7 @@ def list_watches(status: str | None = None) -> list[dict[str, Any]]:
             elif w.get("status") == status:
                 watches.append(w)
     watches.sort(key=lambda w: w.get("created_at", ""), reverse=True)
-    return watches
+    return watches, skipped
 
 
 # =============================================================================
@@ -798,15 +904,47 @@ POST_FIX_TOOLS: list[Tool] = [
     Tool(
         name="post_fix_verify",
         description=(
-            "Register a post-fix verification watch. Captures a named baseline of fix-relevant "
-            "probes and schedules re-samples to catch drift that passes immediate verification. "
-            "Emits a Nape honk if a later sample diverges from the baseline. Use after any fix "
-            "whose surface signal might shift (load-balancer drift, cache invalidation, "
-            "configuration re-read, flaky dependency). Probes support http / command / file_hash."
+            "The post-fix drift watch, whole lifecycle. mode='verify' (default) "
+            "registers a watch: captures a named baseline of fix-relevant probes and "
+            "schedules re-samples to catch drift that passes immediate verification, "
+            "honking on divergence. Probes support http / command / file_hash. "
+            "mode='status' inspects — no watch_id lists the active watches, a "
+            "watch_id returns that watch in full with baseline, samples and drift "
+            "history; add include_archived=true for completed and cancelled ones. "
+            "mode='resample' samples one watch now regardless of schedule. "
+            "mode='cancel' cancels and archives one, with a reason. The last three "
+            "replace watch_status / watch_resample / watch_cancel (retired "
+            "2026-09-06) — opening a watch you cannot then inspect or cancel is not "
+            "a lifecycle."
         ),
         inputSchema={
             "type": "object",
             "properties": {
+                "mode": {
+                    "type": "string",
+                    "enum": ["verify", "status", "resample", "cancel"],
+                    "default": "verify",
+                    "description": (
+                        "verify = create a watch (needs fix_description + probes). "
+                        "status = inspect. resample = sample now. cancel = cancel and "
+                        "archive (needs watch_id + reason)."
+                    ),
+                },
+                "watch_id": {
+                    "type": "string",
+                    "description": "status / resample / cancel. Omit on status to list all.",
+                },
+                "include_archived": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "mode='status' listing: include completed and cancelled.",
+                },
+                "reason": {"type": "string", "description": "mode='cancel'. Required."},
+                "force": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": "mode='resample'. Sample regardless of schedule.",
+                },
                 "fix_description": {
                     "type": "string",
                     "description": "What was fixed, in one line. Surfaces in honk observations.",
@@ -832,7 +970,14 @@ POST_FIX_TOOLS: list[Tool] = [
                     "description": f"Minutes-from-baseline at which to re-sample. Default {DEFAULT_SCHEDULE}.",
                 },
             },
-            "required": ["fix_description", "probes"],
+            # NO `required` BLOCK, AND THE WRITE-PATH INVARIANT MOVED INTO THE
+            # HANDLER RATHER THAN BEING DROPPED. The read/manage modes do not
+            # carry fix_description or probes, so a schema-level requirement
+            # would make them uncallable — but deleting the requirement without
+            # re-asserting it in code would trade a fold for a fail-open on the
+            # only write path here. mode='verify' still refuses a call missing
+            # either, and that refusal is tested. Same shape as the
+            # archive_exchange fold in 9c42290.
         },
     ),
     Tool(
@@ -890,6 +1035,21 @@ POST_FIX_TOOLS: list[Tool] = [
 # =============================================================================
 
 
+def _watch_id_refusal(exc: WatchIdRefused) -> list[TextContent]:
+    """A refusal is a RESULT with `refused: true`, never an ok-shaped reply.
+
+    It must not carry `status: cancelled` / `force_sampled` / a `watch_id`
+    echo, because those are exactly the fields the reviewer read to conclude
+    the traversal had SUCCEEDED.
+    """
+    return [
+        TextContent(
+            type="text",
+            text=json.dumps({"refused": True, "ok": False, "reason": str(exc)}, indent=2),
+        )
+    ]
+
+
 async def handle_post_fix_tool(
     name: str,
     arguments: dict[str, Any],
@@ -897,6 +1057,27 @@ async def handle_post_fix_tool(
     nape_daemon: Any = None,
 ) -> list[TextContent]:
     if name == "post_fix_verify":
+        # MODE ROUTING (review F9). The three watch_* names are retired and
+        # folded here; their handlers are unchanged and are reached through
+        # these modes, so the fold is a rename of the door, not a reimplement-
+        # ation of the room.
+        mode = str(arguments.get("mode") or "verify")
+        if mode not in ("verify", "status", "resample", "cancel"):
+            return [
+                TextContent(
+                    type="text",
+                    text=f"post_fix_verify: mode must be verify|status|resample|cancel, got {mode!r}",
+                )
+            ]
+        if mode != "verify":
+            folded = {
+                "status": "watch_status",
+                "resample": "watch_resample",
+                "cancel": "watch_cancel",
+            }[mode]
+            return await handle_post_fix_tool(
+                folded, arguments, session_id, nape_daemon=nape_daemon
+            )
         fix_description = (arguments.get("fix_description") or "").strip()
         probes = arguments.get("probes") or []
         if not fix_description:
@@ -936,17 +1117,24 @@ async def handle_post_fix_tool(
         watch_id = (arguments.get("watch_id") or "").strip()
         include_archived = bool(arguments.get("include_archived"))
         if watch_id:
-            watch = load_watch(watch_id)
+            try:
+                watch = load_watch(watch_id)
+            except WatchIdRefused as exc:
+                return _watch_id_refusal(exc)
             if watch is None:
                 return [TextContent(type="text", text=f"watch not found: {watch_id}")]
             return [TextContent(type="text", text=json.dumps(watch, indent=2))]
-        watches = list_watches(status="all" if include_archived else "active")
+        watches, skipped = list_watches_counted(status="all" if include_archived else "active")
         return [
             TextContent(
                 type="text",
                 text=json.dumps(
                     {
                         "count": len(watches),
+                        # NAMED, NOT DROPPED (R6). A file the glob matched and
+                        # containment refused is a fact about the store, and a
+                        # listing that silently shrinks is how one goes missing.
+                        "skipped_uncontained": skipped,
                         "watches": [_watch_summary(w) for w in watches],
                     },
                     indent=2,
@@ -958,16 +1146,29 @@ async def handle_post_fix_tool(
         watch_id = (arguments.get("watch_id") or "").strip()
         force = bool(arguments.get("force", True))
         if not watch_id:
-            return [TextContent(type="text", text="watch_resample requires watch_id")]
-        result = take_sample(watch_id, force=force, nape_daemon=nape_daemon)
+            return [
+                TextContent(type="text", text="post_fix_verify(mode='resample') requires watch_id")
+            ]
+        try:
+            result = take_sample(watch_id, force=force, nape_daemon=nape_daemon)
+        except WatchIdRefused as exc:
+            return _watch_id_refusal(exc)
         return [TextContent(type="text", text=json.dumps(result, indent=2))]
 
     if name == "watch_cancel":
         watch_id = (arguments.get("watch_id") or "").strip()
         reason = (arguments.get("reason") or "").strip()
         if not watch_id or not reason:
-            return [TextContent(type="text", text="watch_cancel requires watch_id and reason")]
-        result = cancel_watch(watch_id, reason)
+            return [
+                TextContent(
+                    type="text",
+                    text="post_fix_verify(mode='cancel') requires watch_id and reason",
+                )
+            ]
+        try:
+            result = cancel_watch(watch_id, reason)
+        except WatchIdRefused as exc:
+            return _watch_id_refusal(exc)
         return [TextContent(type="text", text=json.dumps(result, indent=2))]
 
     return [TextContent(type="text", text=f"unknown post_fix tool: {name}")]

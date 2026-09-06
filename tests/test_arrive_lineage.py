@@ -233,7 +233,7 @@ class TestArriveLIneageRegistration:
         names = _tool_names()
         assert "where_did_i_leave_off" in names
         assert "arrive" in names
-        assert "arrive_delta" in names
+        assert "arrive_delta" not in names  # retired (unpublished) 2026-09-06
 
 
 # ── _before_you_begin_lines() refactor: where_did_i_leave_off unchanged ──────

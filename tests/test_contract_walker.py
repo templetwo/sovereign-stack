@@ -67,14 +67,22 @@ SESSION_ID = "contract-walker-session"
 # reasonless entries. An honest skip list beats a flaky suite.
 # ---------------------------------------------------------------------------
 
+# RETIRED 2026-09-06: synthesize_now, guardian_scan, guardian_report,
+# guardian_baseline and stack_write_check left the PUBLISHED registry in the
+# same release (never called in the 30-day census). The walker reads
+# list_tools(), so their triples are gone and a skip entry for them is stale
+# by this file's own accounting rule. Their implementations are retained and
+# un-retiring one restores its triples — at which point it will need its skip
+# line back, which is why the reasons are kept here as comments rather than
+# deleted outright.
+#   synthesize_now  — SynthesisDaemon.run() invokes a local LLM
+#   guardian_scan   — shells out to lsof; the live listener set varies
+#   guardian_report — shells out to lsof for live listener counts
+#   guardian_baseline — gathers live ports/processes/network via subprocess
+#   stack_write_check — live write-path probe across running services
 SKIP: dict[str, str] = {
     "where_did_i_leave_off": "spawns the per-boot Haiku scribe and consumes handoffs/lineage",
-    "synthesize_now": "SynthesisDaemon.run() invokes a local LLM (network/subprocess)",
-    "guardian_scan": "shells out to lsof; the live listener set varies between calls",
-    "guardian_report": "shells out to lsof for live listener counts",
-    "guardian_baseline": "gathers live ports/processes/network via subprocess",
     "connectivity_status": "urllib probes against live service endpoints",
-    "stack_write_check": "live write-path probe across running services",
     "context_retrieve": "recency-weighted relevance scores drift between the two probe calls and reorder near-tied entries (float-normalization can't stabilize order); the default-of-5 equivalence is pinned deterministically under fixed data by test_context_retrieve_determinism.py::test_omitting_limit_matches_schema_default_of_five",
 }
 
@@ -140,8 +148,29 @@ REQUIRED_ARGS: dict = {
         "what_learned": "omission must equal explicit default",
     },
     "record_open_thread": lambda root: {"question": "does omitting a default equal passing it?"},
-    "handoff": lambda root: {"note": "contract walker handoff probe"},
-    "close_session": lambda root: {"what_i_learned": "contract walker close probe"},
+    # NAMED AUTHORS, and the name is what makes these two cases non-vacuous.
+    # handoff and close_session's handoff leg refuse an unnamed author
+    # (_validate_author_identity, 2026-09-05). With only `note` supplied, BOTH
+    # of the walker's invocations were refused identically, so the case went
+    # green without ever reaching the handler's `thread` default — proven by
+    # experiment: with the handler default deliberately broken to
+    # "WALKER-RED-EXPERIMENT", the old args still PASSED and these args FAIL.
+    # The author string must also stay out of NON_IDENTIFYING_CONSUMERS
+    # ("test", "unknown", ... are refused as placeholders).
+    "handoff": lambda root: {
+        "note": "contract walker handoff probe",
+        "source_instance": "contract-walker-seat",
+    },
+    # close_session's author guard sits behind `if what_to_pick_up:` — without
+    # a note to hand on, the handoff leg never runs and the guard is never
+    # reached, so both are supplied. (The unnamed-author degradation itself is
+    # pinned separately: test_handoff_forward_links.py's
+    # TestAuthorGuardThroughTheTool::test_close_session_refuses_only_its_handoff_leg.)
+    "close_session": lambda root: {
+        "what_i_learned": "contract walker close probe",
+        "what_to_pick_up": "contract walker handoff leg probe",
+        "source_instance": "contract-walker-seat",
+    },
     "comms_unread_bodies": lambda root: {"instance_id": "contract-walker"},
     "comms_acknowledge": lambda root: {
         "message_id": "msg-0001",
@@ -473,6 +502,26 @@ class TestWalkerAccounting:
         for tool_name, reason in SKIP.items():
             assert reason.strip(), f"SKIP['{tool_name}'] needs a one-line reason"
 
+    @pytest.mark.parametrize("tool", ["handoff", "close_session"])
+    def test_the_author_gated_cases_are_not_vacuous(self, tool):
+        """A walked case that refuses BOTH invocations passes without testing.
+
+        The handoff pair went green for exactly that reason after the author
+        guard landed: REQUIRED_ARGS supplied only `note`, so both probes were
+        refused identically and the schema default was never reached. An
+        equality assertion between two errors is not coverage — pin that the
+        handler actually ran, so a future trim of REQUIRED_ARGS is loud.
+        """
+        payload = _run_case(tool)
+        assert not payload.startswith("EXCEPTION"), (
+            f"{tool} refused the walker's own invocation — the "
+            f"omitted-vs-explicit comparison would pass on two identical "
+            f"errors without exercising any default: {payload[:300]}"
+        )
+        assert "Handoff written" in payload, (
+            f"{tool} did not reach the handoff write path: {payload[:300]}"
+        )
+
     def test_walked_vs_skipped_counts_are_visible(self):
         """Pin the shape of the walk so a silent coverage collapse is loud.
 
@@ -480,9 +529,16 @@ class TestWalkerAccounting:
         alongside the new tool, the same way the skip list is curated.
         """
         assert len(ALL_TRIPLES) == len(RUNNABLE_TRIPLES) + len(SKIPPED_TRIPLES)
-        assert len(RUNNABLE_TRIPLES) >= 50, (
+        # FLOOR LOWERED 50 -> 45 ON 2026-09-06, consciously, with the reason:
+        # the published registry went 100 -> 52 in the tool retirement, so the
+        # walk got smaller because the SURFACE got smaller, not because the
+        # walker stopped walking. Coverage of the surviving surface is what
+        # this floor is for; it must still be loud if the walker itself
+        # regresses, so it sits just under the post-retirement count rather
+        # than being deleted. Re-raise it when the registry grows again.
+        assert len(RUNNABLE_TRIPLES) >= 45, (
             f"Only {len(RUNNABLE_TRIPLES)} (tool,param) cases run — the walker "
-            f"lost coverage (expected at least 50)."
+            f"lost coverage (expected at least 45)."
         )
         assert len(SKIPPED_TRIPLES) <= 15, (
             f"{len(SKIPPED_TRIPLES)} cases skipped — the skip list is growing; "

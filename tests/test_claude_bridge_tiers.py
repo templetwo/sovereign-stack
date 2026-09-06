@@ -69,15 +69,44 @@ class TestClassify:
 
 class TestRegistryDriftGuard:
     def test_frozen_sets_match_live_registry(self):
+        """Every live tool is classified, OR explicitly held at a human's gate.
+
+        The guard used to assert plain set equality. That is the right shape
+        while every live tool is classified, and it stops being right the
+        moment a tool is deliberately left unclassified: equality cannot tell
+        "held, on purpose, with a reason written down" from "somebody forgot",
+        and the only way to make it pass is to classify the tool — i.e. the
+        guard would push the exact widening the hold exists to prevent.
+        HELD_UNCLASSIFIED is the declaration; classify() still returns
+        step-up for its members, so nothing is granted by being named here.
+        """
+        from claude_bridge.tiers import HELD_UNCLASSIFIED
+
         names = {t.name for t in asyncio.run(list_tools())}
         frozen = DESTRUCTIVE_TOOLS | BASE_TOOLS
-        added = sorted(names - frozen)
-        removed = sorted(frozen - names)
-        assert names == frozen, (
+        unclassified = sorted(names - frozen - HELD_UNCLASSIFIED)
+        assert not unclassified, (
             "Native tool registry drifted from the frozen tier sets in "
-            f"clients/claude_bridge/tiers.py: added={added} removed={removed}. "
-            "A tool was added to (or removed from) the native registry — "
-            "classify each added tool into BASE_TOOLS or DESTRUCTIVE_TOOLS "
-            "(new tools default to step-up at runtime until classified) and "
-            "drop removed tools from the frozen sets."
+            f"clients/claude_bridge/tiers.py: added={unclassified}. "
+            "Classify each added tool into BASE_TOOLS or DESTRUCTIVE_TOOLS "
+            "(new tools default to step-up at runtime until classified), or "
+            "add it to HELD_UNCLASSIFIED with the reason and the date."
+        )
+        # A RETIRED tool is classified-but-unpublished ON PURPOSE, and the
+        # classification is deliberately kept: the retirement of 2026-09-06
+        # unpublished 48 names without deleting a single implementation, and
+        # leaving their tiers in place is what keeps un-retiring a one-line
+        # edit. Anything classified, unpublished AND unretired is still a
+        # ghost and still fails here.
+        from sovereign_stack.server import RETIRED_TOOLS
+
+        ghosts = sorted(frozen - names - set(RETIRED_TOOLS))
+        assert not ghosts, (
+            f"tier sets classify tools the registry no longer publishes: {ghosts}. "
+            "Drop them from the frozen sets, or record the retirement in "
+            "server.RETIRED_TOOLS."
+        )
+        held_but_absent = sorted(HELD_UNCLASSIFIED - names)
+        assert not held_but_absent, (
+            f"HELD_UNCLASSIFIED names tools that are not live: {held_but_absent}"
         )

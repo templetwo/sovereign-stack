@@ -5,7 +5,7 @@ End-to-end tests for the three reflector MCP handlers added 2026-04-26:
   * reflection_ack — confirm/engage/discard a reflection
   * synthesize_now — manual trigger of the synthesis daemon
 
-These tests exercise the dispatch layer (_dispatch_tool) on top of the
+These tests exercise the dispatch layer (_dispatch_registered_tool) on top of the
 helpers in reflections.py and daemons/synthesis_daemon.py — handler-level
 coverage that catches arg-coercion and JSON-serialization bugs the unit
 tests for the helpers would not.
@@ -29,10 +29,10 @@ import pytest
 
 def _dispatch(name: str, arguments: dict) -> str:
     """Run an MCP tool dispatch and return the assembled text result."""
-    from sovereign_stack.server import _dispatch_tool
+    from sovereign_stack.server import _dispatch_registered_tool
 
     async def _run():
-        result = await _dispatch_tool(name, arguments)
+        result = await _dispatch_registered_tool(name, arguments)
         return result[0].text
 
     return asyncio.run(_run())

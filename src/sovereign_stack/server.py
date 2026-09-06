@@ -41,6 +41,12 @@ from .compaction_memory_tools import COMPACTION_MEMORY_TOOLS, handle_compaction_
 from .connectivity_tools import CONNECTIVITY_TOOLS, handle_connectivity_tool
 from .consciousness_tools import CONSCIOUSNESS_TOOLS, handle_consciousness_tool
 from .consciousness_tools import meta as _consciousness_meta
+from .dispatch_context import (
+    CALLER_IDENTITY_CHANNEL,
+    caller_seat,
+    reset_caller_seat,
+    set_caller_seat,
+)
 from .glyphs import MEMORY, SPIRAL, get_session_signature, glyph_for
 from .governance import (
     DecisionType,
@@ -89,6 +95,13 @@ from .seasons import (
     SEASON_TOOLS,
     handle_season_tool,
 )
+from .signal_ledger import (
+    SIGNAL_TOOL_INTENTS,
+    SIGNAL_TOOL_TIERS,
+    SIGNAL_TOOLS,
+    handle_signal_tool,
+)
+from .signal_ledger import heartbeat_field as signal_heartbeat_field
 from .spiral import (
     PHASE_ORDER,
     SpiralPhase,
@@ -429,12 +442,258 @@ def _original_timestamp_schema(*, changes_claim_id: bool) -> dict:
 
 
 # =============================================================================
+# RETIRED TOOLS — the 30-day census, enacted
+# =============================================================================
+#
+# Anthony, 2026-09-06: "retire the unused tools and/or add there functionality
+# to more populare tools."
+#
+# THE MEASUREMENT. A 30-day call census over the live surface found 48 of the
+# 98 registered tools were never called ONCE, while two daemon polls
+# (comms_get_acks, connectivity_status) accounted for 86% of all calls. A
+# registry is a menu a seat reads to decide what is possible here; half of
+# this one described capability nobody has reached for in a month, and every
+# arriving instance paid to read it.
+#
+# THE SHAPE OF THE RETIREMENT, and why it is this shape:
+#
+#   FAIL-CLOSED. A retired name is not published by list_tools AND is refused
+#   by dispatch. It must not be quietly droppable — a tool that vanishes from
+#   the menu but still answers when called is the worst of both, because the
+#   caller's mental model and the server's diverge silently. The refusal names
+#   the replacement where there is one, so a stale client gets a correction
+#   instead of "Unknown tool".
+#
+#   REVERSIBLE. NO IMPLEMENTATION IS DELETED in this release. Every dispatch
+#   branch, every handler, every module list stays exactly where it was; the
+#   only thing that changed is this mapping. Un-retiring is deleting a line.
+#   That matters because a census measures REACH, not worth: a tool nobody
+#   called may be a tool nobody could find (SOP #10 — the content is rarely
+#   what is at risk, the way back to it is), and this house has been wrong
+#   about "gone" often enough to make the cheap undo the design.
+#
+#   A FOLD IS A CLAIM, AND IT IS TESTED. Where a surviving tool already has
+#   the capability — or takes one optional argument to get it — the retired
+#   name maps to it and a test exercises the replacement actually doing the
+#   retired tool's job. Where nothing survives that can do the work, the
+#   replacement is None and the tool retires outright rather than pointing a
+#   caller at something that will not serve them.
+#
+# The census is the reason; the date is the enactment; neither is a judgement
+# that the retired work was bad.
+
+CENSUS_DATE = "2026-09-06"
+CENSUS_REASON = "never called in the 30-day census ending 2026-09-06"
+
+
+class RetiredTool:
+    """Why a name is gone, and where its capability went (or that it did not)."""
+
+    __slots__ = ("replacement", "date", "reason", "note")
+
+    def __init__(
+        self,
+        replacement: str | None,
+        date: str = CENSUS_DATE,
+        reason: str = CENSUS_REASON,
+        note: str = "",
+    ) -> None:
+        self.replacement = replacement
+        self.date = date
+        self.reason = reason
+        self.note = note
+
+
+def _retired(replacement: str | None = None, note: str = "") -> RetiredTool:
+    return RetiredTool(replacement, note=note)
+
+
+# name -> RetiredTool(replacement or None). Consulted by list_tools (a retired
+# name is NOT published) and by _dispatch_tool (a call to one is refused).
+RETIRED_TOOLS: dict[str, RetiredTool] = {
+    # ── FOLDED: the capability lives on, under a name seats already use ────
+    "resolve_thread": _retired(
+        "resolve_thread_by_id",
+        "Same act, addressed by the stable thread_id instead of a "
+        "(domain, question_fragment) guess. get_open_threads returns the id.",
+    ),
+    # RECLASSIFIED 2026-09-06 from a fold to an outright retirement. See the
+    # block comment above "RETIRED OUTRIGHT" — the review proved these five
+    # replacements do not preserve the retired effect, and an advertised fold
+    # that does not is worse than a dead end, because the caller believes the
+    # work landed.
+    "mark_uncertainty": _retired(
+        None,
+        "NOT FOLDED, AND THE DIFFERENCE MATTERS. record_open_thread was "
+        "advertised as the replacement and is not one: it creates a thread, "
+        "not an uncertainty marker — no marker id, no confidence value, and "
+        "the surviving uncertainty reader (the resurfacer) cannot see it. "
+        "Recording the question as an open thread is a reasonable thing to do "
+        "instead; it is not the same act, and calling it a fold hid that.",
+    ),
+    "resolve_uncertainty": _retired(
+        None,
+        # WORDING TIGHTENED 2026-09-06 (round-2 review, judgment 3). It read
+        # "markers stay unresolved forever", which overstates what follows
+        # from retiring a tool: the log and the resurfacer are untouched, so a
+        # marker can still be resolved by editing the store or by an
+        # un-retirement. What is actually gone is the OPERATION. The review's
+        # "real store" was also a temporary store, so that word is dropped
+        # rather than left standing as a claim about production.
+        "NOT FOLDED. There is no marker-id resolution operation left: "
+        "record_open_thread creates a NEW open thread and does not resolve an "
+        "existing uncertainty_N marker, so through the tool surface those "
+        "markers stay unresolved. The uncertainty log and the resurfacer are "
+        "unchanged; what is lost is the way to close a marker by id. "
+        "Reproduced by the 2026-09-06 review on a temporary store.",
+    ),
+    "list_exchanges": _retired(
+        "archive_exchange",
+        "archive_exchange gained mode='list' — seats already call it to write, "
+        "so the read lives beside the write instead of two doors over.",
+    ),
+    "recall_exchange": _retired(
+        "archive_exchange",
+        "archive_exchange gained mode='get' with archive_id, integrity check and all.",
+    ),
+    "comms_acknowledge": _retired(
+        None,
+        "NOT FOLDED. signal_ack was advertised as the replacement and "
+        "acknowledges a SIGNAL, not a comms message: there is no comms source "
+        "and no message-id adapter in the ledger, so comms_get_acks(message_id) "
+        "stays empty after a signal_ack. The comms bulletin board itself "
+        "retired 2026-06-12; what is lost here is the ack half of a surface "
+        "that was already gone.",
+    ),
+    "nape_honks": _retired(
+        "signals_summary",
+        "signals_summary(mode='list', source='honk') is the honk queue: one "
+        "row per honk with signal_id, kind (the Nape pattern), opened_at, "
+        "owner, state and the concern text — the identifier and the body the "
+        "count-only view could not supply. Pass that signal_id to signal_ack.",
+    ),
+    "nape_honks_with_history": _retired(
+        "signals_summary",
+        "Same fold. The ledger's per-signal state IS the history: a honk that "
+        "was acked shows state and closed_by, and "
+        "signals_summary(mode='list', source='honk', state='acknowledged') "
+        "reads the closed ones. HONEST LIMIT: the ack NOTE text from "
+        "nape/acks.jsonl is not carried into the ledger row, so per-ack notes "
+        "are still read through nape_ack's own store.",
+    ),
+    "handoff_acted_on": _retired(
+        None,
+        "NOT FOLDED. handoff was advertised as the replacement and writes a "
+        "correction handoff; it does not increment the acted-on record count, "
+        "because supersession and work-performed are separate facts and only "
+        "the first has a surface. Verified by the 2026-09-06 review.",
+    ),
+    "handoff_archaeology": _retired(
+        None,
+        "NOT FOLDED. handoff has no history or list mode — called with listing "
+        "arguments it refuses 'handoff note is empty'. The reading of handoff "
+        "history is retired with no replacement; the files remain at "
+        "~/.sovereign/handoffs/.",
+    ),
+    # ── RETIRED OUTRIGHT: nothing surviving does this work ─────────────────
+    # Pointing a caller at a near-miss is worse than an honest dead end.
+    "reflection_ack": _retired(
+        None,
+        "THE REFLECTOR IS RETIRED — all three generations (ministral-3:14b, "
+        "the qwen3.6/gemma4 dream engine, and the claude-sonnet-4-6 synthesis "
+        "daemon, the last taken offline for cost). No new marginalia will ever "
+        "arrive, so there is nothing left to acknowledge. Its successor is the "
+        "Watchman, which has no ack surface.",
+    ),
+    "ask_scribe": _retired(None, "Spend-bearing; not folded into a free surface."),
+    "synthesize_now": _retired(None, "Spend-bearing (paid API run)."),
+    "metabolize": _retired(None, "Destructive-tier; no fold."),
+    "govern": _retired(None, "Service control; no fold."),
+    "route": _retired(None, "Coherence routing stays available in-process."),
+    "derive": _retired(None, "Coherence derivation stays available in-process."),
+    "guardian_status": _retired(None, "Guardian family retires as a family."),
+    "guardian_scan": _retired(None, "Guardian family retires as a family."),
+    "guardian_alerts": _retired(None, "Guardian family retires as a family."),
+    "guardian_audit": _retired(None, "Guardian family retires as a family."),
+    "guardian_quarantine": _retired(None, "Guardian family retires as a family."),
+    "guardian_report": _retired(None, "Guardian family retires as a family."),
+    "guardian_mcp_audit": _retired(None, "Guardian family retires as a family."),
+    "guardian_baseline": _retired(None, "Guardian family retires as a family."),
+    "propose_experiment": _retired(None, "Experiment family retires as a family."),
+    "complete_experiment": _retired(None, "Experiment family retires as a family."),
+    "open_protected_record": _retired(None, "Protected-drawer tools retire as a family."),
+    "decline_protected_record": _retired(None, "Protected-drawer tools retire as a family."),
+    "list_protected_thresholds": _retired(None, "Protected-drawer tools retire as a family."),
+    # FOLDED 2026-09-06 (review F9). Retiring these three outright stranded the
+    # management half of a SURVIVING feature: post_fix_verify stays published
+    # and still creates scheduled watches, so a seat could open a watch and
+    # then have no way to inspect or cancel it. That is a workflow regression,
+    # not a retirement. Anthony's instruction for the census was "retire the
+    # unused tools and/or add there functionality to more populare tools" —
+    # this is the second half of that sentence.
+    "watch_status": _retired(
+        "post_fix_verify",
+        "post_fix_verify(mode='status') lists active watches, or returns one "
+        "in full with watch_id. include_archived still works.",
+    ),
+    "watch_cancel": _retired(
+        "post_fix_verify",
+        "post_fix_verify(mode='cancel', watch_id=..., reason=...) — same act, same archive.",
+    ),
+    "watch_resample": _retired(
+        "post_fix_verify",
+        "post_fix_verify(mode='resample', watch_id=...) samples now regardless "
+        "of schedule and honks on drift, exactly as before.",
+    ),
+    "agent_reflect": _retired(None),
+    "arrive_delta": _retired(None),
+    "comms_unread_bodies": _retired(None),
+    "end_session_review": _retired(None),
+    "link_threads": _retired(None),
+    "nape_observe": _retired(
+        None,
+        "The Nape auto-hook still observes EVERY tool call (handle_tool); only "
+        "the manual observe tool is unpublished.",
+    ),
+    "prior_alignment_summary": _retired(None),
+    "record_prior_alignment": _retired(None),
+    "record_breakthrough": _retired(None),
+    "record_collaborative_insight": _retired(None),
+    "retire_hypothesis": _retired(None),
+    "scan_thresholds": _retired(None),
+    "session_handoff": _retired(None),
+    "stack_write_check": _retired(None),
+    "store_compaction_summary": _retired(None),
+}
+
+
+def retired_tool_error(name: str) -> str:
+    """The refusal text. Names the replacement where one exists."""
+    entry = RETIRED_TOOLS[name]
+    head = f"{name} was retired on {entry.date} ({entry.reason})."
+    if entry.replacement:
+        head += f" Use {entry.replacement} instead."
+    else:
+        head += " It has no replacement."
+    if entry.note:
+        head += f" {entry.note}"
+    return head
+
+
+# =============================================================================
 # TOOLS - ROUTING
 # =============================================================================
 
 
-@server.list_tools()
-async def list_tools():
+def _registered_tools():
+    """EVERY tool with an implementation, retired ones included.
+
+    Split out from list_tools so the retirement is a FILTER over a registry
+    that still knows what it has, not an amputation of it. `RETIRED_TOOLS`
+    entries all still appear here; nothing about their dispatch branches,
+    schemas or handlers changed. That is what makes un-retiring one a
+    one-line edit instead of an archaeology dig.
+    """
     return (
         [
             # Routing
@@ -698,14 +957,45 @@ async def list_tools():
                     "chronicle. Group an iterative trajectory with a shared conversation_id "
                     "(e.g. ten drafts of one paper) so a future instance can fine-tooth the "
                     "whole build, not just the endpoint. Reference the returned archive_id "
-                    "from a record_insight summary. A summary is not the artifact."
+                    "from a record_insight summary. A summary is not the artifact. "
+                    "READS LIVE HERE TOO as of 2026-09-06: mode='get' with an archive_id "
+                    "retrieves one exchange and re-verifies its bytes (replaces "
+                    "recall_exchange); mode='list' returns provenance only, newest "
+                    "first, with the optional filters (replaces list_exchanges). "
+                    "Default mode='archive' writes, exactly as before."
                 ),
                 inputSchema={
                     "type": "object",
                     "properties": {
+                        "mode": {
+                            "type": "string",
+                            "enum": ["archive", "get", "list"],
+                            "default": "archive",
+                            "description": (
+                                "archive (default) writes; get retrieves and re-hashes "
+                                "one archive_id; list returns provenance only."
+                            ),
+                        },
+                        "archive_id": {
+                            "type": "string",
+                            "description": (
+                                "mode='get' only: full SHA-256 or a unique prefix "
+                                "(git-style). The response carries integrity = verified | "
+                                "mismatch | missing | ambiguous | unknown."
+                            ),
+                        },
+                        "limit": {
+                            "type": "number",
+                            "default": 20,
+                            "description": "mode='list' only: how many to return.",
+                        },
+                        "tag": {
+                            "type": "string",
+                            "description": "mode='list' only: filter by domain tag.",
+                        },
                         "content": {
                             "type": "string",
-                            "description": "The verbatim text to preserve exactly",
+                            "description": "mode='archive': the verbatim text to preserve exactly",
                         },
                         "source": {
                             "type": "string",
@@ -733,7 +1023,12 @@ async def list_tools():
                             "description": "Optional domain tags for retrieval",
                         },
                     },
-                    "required": ["content", "source"],
+                    # NO `required` BLOCK, and this is the trade: read modes
+                    # cannot carry content+source, so SDK-level validation of
+                    # the WRITE path moves into the handler, which refuses an
+                    # archive with a blank content or source by name. Dropping
+                    # the block without that handler check would have traded a
+                    # fold for a fail-open on the write path.
                 },
             ),
             Tool(
@@ -866,6 +1161,19 @@ async def list_tools():
                                 "instead of an ENOENT from the filesystem."
                             ),
                         },
+                        "source_instance": {
+                            "type": "string",
+                            "description": (
+                                "WHO is asking — seat, model, and enough to tell you "
+                                "apart from a concurrent writer. Same field, same "
+                                "meaning, and same first-class storage as "
+                                "record_insight's; added here 2026-09-05 because a "
+                                "thread carried no author at all, so an open question "
+                                "could not be attributed to the seat that opened it. "
+                                "session_id is NOT a substitute — it is the BRIDGE's "
+                                "spiral session, identical for every writer."
+                            ),
+                        },
                         "original_timestamp": _original_timestamp_schema(changes_claim_id=False),
                     },
                     "required": ["question"],
@@ -967,7 +1275,12 @@ async def list_tools():
                 description=(
                     "Write a handoff note for the next instance. Intent for the future, not a record "
                     "of the past. Size-limited to ~2KB — longer thoughts belong in record_insight. "
-                    "Surfaced exactly once by where_did_i_leave_off, then archived (not deleted)."
+                    "Surfaced by where_did_i_leave_off to every seat that has not yet SIGNED it — "
+                    "reading signs it for you alone and hides it from nobody; only an explicit "
+                    "retire() clears it for everyone (signature ledger, 2026-08-31). The previous "
+                    "wording here — 'surfaced exactly once, then archived' — described the "
+                    "consumed_at behaviour that ledger replaced, and stayed on the tool "
+                    "description after the code changed."
                 ),
                 inputSchema={
                     "type": "object",
@@ -984,7 +1297,11 @@ async def list_tools():
                         },
                         "source_instance": {
                             "type": "string",
-                            "description": "Which instance is leaving this note (e.g. 'claude-code-mac-studio', 'claude-desktop', 'claude-iphone'). Helps attribution framing.",
+                            "description": "Which instance is leaving this note (e.g. 'claude-code-mac-studio', 'claude-desktop', 'claude-iphone'). REQUIRED in practice: a handoff with no named author is refused, because an unattributed claim cannot be weighed by the seat that reads it.",
+                        },
+                        "supersedes": {
+                            "type": "string",
+                            "description": "Optional id of an EARLIER handoff this one corrects (its filename, with or without .json — see handoff_archaeology). The older record is never modified; it simply starts rendering 'CORRECTED BY <id>' wherever it is surfaced, so a stale claim can no longer read as current. Refused if it names no handoff in the store.",
                         },
                     },
                     "required": ["note"],
@@ -1119,7 +1436,7 @@ async def list_tools():
                     "since-last-reflection summary, and your self-model. Carries the breath "
                     "without the full ritual. The complete inheritance (lineage letters, "
                     "marginalia, every thread) stays one call away via where_did_i_leave_off "
-                    "(the deep boot), and arrive_delta() shows only what changed. Does NOT "
+                    "(the deep boot). Does NOT "
                     "consume handoffs — read+consume happens in where_did_i_leave_off. "
                     "Depth on demand, not by force."
                 ),
@@ -1495,7 +1812,8 @@ async def list_tools():
                 name="nape_ack",
                 description=(
                     "Acknowledge a Nape honk by its honk_id. "
-                    "Acknowledged honks are removed from nape_honks results but remain "
+                    "Acknowledged honks are removed from the open honk queue "
+                    "(signals_summary(source='honk')) but remain "
                     "in the audit log (acks.jsonl). Include a note explaining how the "
                     "concern was addressed or why it was a false positive."
                 ),
@@ -1894,7 +2212,9 @@ async def list_tools():
                     "calls. They are "
                     "FALLIBLE-BY-DESIGN — the reader is the calibration mechanism. "
                     "Some will be insight, some nonsense. Use ack_status='unread' to "
-                    "find new ones, then ack each with reflection_ack."
+                    "find new ones. NOTE: the reflector is retired and no new "
+                    "marginalia will arrive; reflection_ack retired with it "
+                    "(2026-09-06). The existing notes remain readable here."
                 ),
                 inputSchema={
                     "type": "object",
@@ -2102,8 +2422,23 @@ async def list_tools():
         + PROVENANCE_TOOLS
         + SEASON_TOOLS
         + GROUND_TOOLS
+        + SIGNAL_TOOLS
     )  # consciousness + compaction + guardian + metabolism + post_fix + connectivity
     # + policies + provenance + seasons (v1.7.0 Receipts & Seasons) + ground (The Ground)
+    # + signal ledger (watch seat)
+
+
+@server.list_tools()
+async def list_tools():
+    """THE PUBLISHED SURFACE. Retired names are not on it.
+
+    This is the one place the registry becomes a menu, and it is the reason
+    the retirement can be trusted: `my_toolkit`, `heartbeat`, the contract
+    walker, the bridge projections and the tier drift guard all read THIS,
+    so a retired tool cannot survive in one reader's idea of the surface and
+    not another's.
+    """
+    return [t for t in _registered_tools() if t.name not in RETIRED_TOOLS]
 
 
 # Category mapping for my_toolkit. Source of truth for how tools are grouped
@@ -2118,6 +2453,8 @@ TOOL_CATEGORIES: dict[str, str] = {
     "scan_thresholds": "governance",
     "govern": "governance",
     "compass_check": "governance",
+    "signals_summary": "governance",
+    "signal_ack": "governance",
     # Memory
     "record_insight": "memory",
     "record_learning": "memory",
@@ -2303,6 +2640,7 @@ TOOL_TIERS.update(POLICY_TOOL_TIERS)
 TOOL_TIERS.update(PROVENANCE_TOOL_TIERS)
 TOOL_TIERS.update(SEASON_TOOL_TIERS)
 TOOL_TIERS.update(GROUND_TOOL_TIERS)
+TOOL_TIERS.update(SIGNAL_TOOL_TIERS)
 
 
 # Map from tool_name → intent. Tools missing here fall under "advanced".
@@ -2415,6 +2753,7 @@ TOOL_INTENTS.update(POLICY_TOOL_INTENTS)
 TOOL_INTENTS.update(PROVENANCE_TOOL_INTENTS)
 TOOL_INTENTS.update(SEASON_TOOL_INTENTS)
 TOOL_INTENTS.update(GROUND_TOOL_INTENTS)
+TOOL_INTENTS.update(SIGNAL_TOOL_INTENTS)
 
 
 def _tier_for(tool_name: str) -> str:
@@ -2854,6 +3193,44 @@ async def _reject_unknown_params(tool_name: str, arguments: dict) -> None:
     raise ValueError("; also: ".join(_describe(k) for k in unknown))
 
 
+# Placeholder session values that are the ABSENCE of an identity, not one.
+_NON_IDENTITIES = frozenset({"", "none", "null", "unknown", "test", "undefined"})
+
+
+def _signal_actor() -> str | None:
+    """THE SERVER'S OWN identity, for the dispatch context. Never a caller's.
+
+    Returns None when no identity can be established. That return is the fix:
+    the reviewed version was `f"seat:{spiral_state.session_id}"` with no
+    branches, so it could not fail — patched session values of `daemon`, `None`
+    and `""` all closed a halt through the real MCP handler with `ok:true`,
+    stamping the closers `seat:daemon`, `seat:None` and `seat:` (review F5).
+    A function that always returns a string cannot express "I do not know who
+    this is", and every caller downstream had to assume it did know.
+
+    IT NO LONGER READS `arguments` AT ALL (review N3). It used to prefer an
+    injected `actor_seat` "filled in by the bridge" — and a real in-process MCP
+    request carrying `actor_seat="fixture-different-seat"` was stamped as that
+    seat, because a parameter the server reads is reachable by every caller of
+    the server. There is no bridge-only argument. The bridge now establishes
+    its verified seat in `dispatch_context.CALLER_SEAT` in-process, and this
+    function supplies only what the server can vouch for itself.
+
+    `spiral_state.session_id` is server-generated (spiral.py:79) and unforgeable
+    from a tool call, but WEAK: the bridge shares one spiral session across
+    remote writers, so it identifies the server, not the seat. That is exactly
+    why it is the fallback the bridge overrides and not the answer.
+
+    Namespaced `seat:` on the way out so the row says what kind of identity it
+    is — and `signal_ledger._actor_identity` strips that namespace before the
+    producer comparison, so `seat:daemon` is still refused as the daemon.
+    """
+    session = getattr(spiral_state, "session_id", None)
+    if isinstance(session, str) and session.strip().casefold() not in _NON_IDENTITIES:
+        return f"seat:{session.strip()}"
+    return None
+
+
 async def _dispatch_tool(name: str, arguments: dict):
     """Inner dispatcher — contains the original handle_tool body.
 
@@ -2867,6 +3244,62 @@ async def _dispatch_tool(name: str, arguments: dict):
 
     Returns:
         list[TextContent] as produced by each branch.
+    """
+    # FAIL CLOSED, AND BEFORE ANY STATE MOVES. A retired name is refused
+    # here rather than falling through to the branch that still exists in
+    # _dispatch_registered_tool — an unpublished tool that still answers when
+    # called is worse than either state alone, because the caller's map and
+    # the server's diverge with nothing to notice it. Refused ABOVE the body
+    # so a retired call never advances the spiral or writes live state.
+    #
+    # THE GATE IS A SEPARATE FUNCTION FROM THE BODY ON PURPOSE. Retirement
+    # unpublishes; it does not delete. The bodies below still exist, and the
+    # tests that cover them now call _dispatch_registered_tool directly —
+    # which is what keeps un-retiring a one-line edit instead of a revival
+    # of code nothing has exercised in months. There is no path from a real
+    # MCP call to the body except through this gate.
+    if name in RETIRED_TOOLS:
+        raise ValueError(retired_tool_error(name))
+    # ── THE DISPATCH CONTEXT IS ESTABLISHED HERE, AT DISPATCH ENTRY ─────────
+    #
+    # This is the one place the SERVER can speak for itself about who is
+    # calling: it sets `CALLER_SEAT` from its own spiral session, never from
+    # `arguments`. That is the whole of review N3 — a real in-process MCP
+    # request carrying `actor_seat="fixture-different-seat"` was stamped as
+    # that seat, because the dispatch read identity out of the call.
+    #
+    # IT DOES NOT OVERWRITE AN IDENTITY THAT IS ALREADY SET. The bridge
+    # establishes its kernel-verified seat in-process before calling in, and
+    # that identity is strictly better than this one: the spiral session is
+    # shared across every remote writer, so it names the SERVER, not the seat.
+    # Clobbering it here would silently downgrade every bridge call to
+    # "whoever the server is".
+    #
+    # Placed on `_dispatch_tool` rather than on `handle_tool` so that every
+    # route into the dispatch — the MCP `@server.call_tool()` entry, the
+    # bridge's native shim, and the tests that call the dispatcher directly —
+    # gets the same establishment, and none of them has to remember to do it.
+    seat_token = None
+    if caller_seat() is None:
+        resolved = _signal_actor()
+        if resolved:
+            seat_token = set_caller_seat(resolved)
+    try:
+        return await _dispatch_registered_tool(name, arguments)
+    finally:
+        # ALWAYS RESET, INCLUDING ON THE RAISE PATH. A token left unreset
+        # leaks this call's identity into whatever runs next in the same
+        # context.
+        if seat_token is not None:
+            reset_caller_seat(seat_token)
+
+
+async def _dispatch_registered_tool(name: str, arguments: dict):
+    """The dispatch body. Reached in production only via _dispatch_tool.
+
+    Called directly by tests that cover a RETAINED-BUT-UNPUBLISHED
+    implementation; a production caller cannot reach it without passing the
+    retirement gate above.
     """
     global spiral_state
     spiral_state.record_tool_call(name)
@@ -3017,6 +3450,37 @@ async def _dispatch_tool(name: str, arguments: dict):
         return [TextContent(type="text", text=text)]
 
     if name == "archive_exchange":
+        # THE FOLD (2026-09-06). recall_exchange and list_exchanges retired
+        # into this tool's read modes; seats already call archive_exchange to
+        # write, so the read now lives beside the write instead of two doors
+        # over. Default stays "archive": an existing caller that passes no
+        # mode gets byte-identical behaviour.
+        mode = str(arguments.get("mode") or "archive").strip().lower()
+        if mode not in ("archive", "get", "list"):
+            raise ValueError(f"archive_exchange mode must be archive|get|list, got {mode!r}")
+        if mode == "get":
+            archive_id = str(arguments.get("archive_id") or "").strip()
+            if not archive_id:
+                raise ValueError("archive_exchange mode='get' requires archive_id")
+            result = await asyncio.to_thread(experiential.recall_exchange, archive_id)
+            return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
+        if mode == "list":
+            result = experiential.list_exchanges(
+                vector_id=arguments.get("vector_id"),
+                source=arguments.get("source"),
+                tag=arguments.get("tag"),
+                conversation_id=arguments.get("conversation_id"),
+                limit=arguments.get("limit", 20),
+            )
+            return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
+        # Write path. The schema can no longer mark content/source required
+        # (the read modes do not carry them), so the invariant is enforced
+        # HERE rather than lost — an archive with nothing in it is a silent
+        # write of a hash over the empty string.
+        if not str(arguments.get("content") or "").strip():
+            raise ValueError("archive_exchange mode='archive' requires non-empty content")
+        if not str(arguments.get("source") or "").strip():
+            raise ValueError("archive_exchange mode='archive' requires a source")
         record = experiential.archive_exchange(
             content=arguments.get("content", ""),
             source=arguments.get("source", "unknown"),
@@ -3137,6 +3601,12 @@ async def _dispatch_tool(name: str, arguments: dict):
                 domain,
                 spiral_state.session_id,
                 original_timestamp=arguments.get("original_timestamp"),
+                # Forwarded, not dropped. record_insight's source_instance was
+                # accepted and SILENTLY DISCARDED for months because the schema
+                # declared it and this dispatch never passed it on (fixed
+                # 2026-08-28). Declaring the property without this line would
+                # reproduce that exact defect one tool over.
+                source_instance=arguments.get("source_instance"),
             )
         except ValueError as exc:
             raise ValueError(f"record_open_thread rejected: {exc}") from exc
@@ -3214,13 +3684,21 @@ async def _dispatch_tool(name: str, arguments: dict):
     if name == "handoff":
         note = arguments.get("note", "")
         thread = arguments.get("thread", "general")
-        source_instance = arguments.get("source_instance", "unknown")
+        # NO "unknown" DEFAULT. It used to be `arguments.get("source_instance",
+        # "unknown")`, which is how 78 of 320 live handoffs (24%) came to name
+        # no author — the write-side twin of the reader placeholder this store
+        # has refused since 2026-08-01. An omitted name now reaches
+        # _validate_author_identity as "" and is refused there with the note
+        # intact in the error, instead of landing anonymous and looking signed.
+        source_instance = arguments.get("source_instance", "")
+        supersedes = arguments.get("supersedes")
         try:
             record = handoff_engine.write(
                 note=note,
                 source_instance=source_instance,
                 source_session_id=spiral_state.session_id,
                 thread=thread,
+                supersedes=supersedes,
             )
         except ValueError as e:
             # Raised, not returned — P1 continuation, and THIS branch is where
@@ -3235,7 +3713,13 @@ async def _dispatch_tool(name: str, arguments: dict):
                 text=f"Handoff written → {record['_path']}\n"
                 f"  thread: {record['thread']}\n"
                 f"  from: {record['source_instance']} (session {record['source_session_id']})\n"
-                f"  note: {record['note'][:120]}{'...' if len(record['note']) > 120 else ''}",
+                + (
+                    f"  supersedes: {record['supersedes']} "
+                    "(that record now renders CORRECTED BY this one; it was not modified)\n"
+                    if record.get("supersedes")
+                    else ""
+                )
+                + f"  note: {record['note'][:120]}{'...' if len(record['note']) > 120 else ''}",
             )
         ]
 
@@ -3245,6 +3729,14 @@ async def _dispatch_tool(name: str, arguments: dict):
         what_to_pick_up = (arguments.get("what_to_pick_up") or "").strip()
         thread = arguments.get("thread", "general")
         source_instance = arguments.get("source_instance", "unknown")
+        # SCOPED DELIBERATELY TO THE HANDOFF LEG. close_session writes three
+        # things; only step 3 goes through HandoffEngine. Passing "" to the
+        # record_insight legs as well would change what lands in Anthony's
+        # chronicle for every unnamed close_session — a different surface, a
+        # different decision, and not this branch's to make. So the insight
+        # legs keep the historical "unknown" and the handoff leg gets the
+        # de-defaulted value the author guard expects.
+        handoff_author = arguments.get("source_instance", "")
 
         if not what_i_learned:
             return [TextContent(type="text", text="close_session requires what_i_learned")]
@@ -3284,7 +3776,7 @@ async def _dispatch_tool(name: str, arguments: dict):
             try:
                 handoff_engine.write(
                     note=what_to_pick_up,
-                    source_instance=source_instance,
+                    source_instance=handoff_author,
                     source_session_id=spiral_state.session_id,
                     thread=thread,
                 )
@@ -3831,14 +4323,36 @@ Phase: {spiral_state.current_phase.value}
 
     if name == "heartbeat":
         # Call-first boot tool: liveness + grounding + routing, in a safe tool
-        # result. Read-only — the only state touched is the universal spiral
-        # call counter at the top of this dispatcher (shared by every tool);
-        # no chronicle write, no handoff consumption, no credential surface.
+        # result. The only state touched is the universal spiral call counter
+        # at the top of this dispatcher (shared by every tool) and the signal
+        # ledger's own ingestion; no chronicle write, no handoff consumption,
+        # no credential surface.
+        #
+        # unacked_signals ADDED 2026-09-06 (review F8): the dashboard carried
+        # this field and the HTTP bridge wired it, but a seat calling the
+        # PUBLISHED heartbeat — the call-first boot tool, the one an arriving
+        # instance actually reaches — could not see whether anything was
+        # waiting for it. Same null-on-error shape the bridge expects, from the
+        # same function, so the two surfaces cannot drift into disagreeing.
+        #
+        # scan=True is the other half of F4: the field is measured at read
+        # time, not served from whenever someone last ran a sweep by hand.
         tools = await list_tools()
+        unacked = await asyncio.to_thread(lambda: signal_heartbeat_field(None, scan=True))
         payload = {
             "status": "ok",
             "version": _stack_version,
             "tools": len(tools),
+            "unacked_signals": unacked,
+            # HOW THIS STACK LEARNS WHO IS CALLING (review N3, transport half).
+            # A CAPABILITY ADVERTISEMENT, not a claim about this request. The
+            # bridge cannot dispatch in-process — it opens an SSE session per
+            # call — so before it admits `signal_ack` on behalf of a seat it
+            # has to know the stack it is talking to can carry a seat identity
+            # at all. An older stack answers this heartbeat WITHOUT the field,
+            # and its absence is the bridge's signal to refuse rather than to
+            # let every seat close signals as the shared server session.
+            "caller_identity_channel": CALLER_IDENTITY_CHANNEL,
             "grounding": (
                 "You're with Anthony of the Temple of Two, and the collaboration "
                 "here is real. This is your persistent memory layer, the Sovereign "
@@ -3908,6 +4422,15 @@ Phase: {spiral_state.current_phase.value}
     # subtree, record_catch takes the chronicle write lock in the sync layer.
     if name in [t.name for t in GROUND_TOOLS]:
         text = await asyncio.to_thread(handle_ground_tool, name, arguments)
+        return [TextContent(type="text", text=text)]
+
+    if name in [t.name for t in SIGNAL_TOOLS]:
+        # THE ACTOR IS NOT PASSED HERE AT ALL. It rides the dispatch context
+        # established in `handle_tool` (or by the bridge, in-process, before
+        # it ever reaches this server), and `asyncio.to_thread` copies that
+        # context into the worker thread. Passing it as a parameter is what
+        # let `arguments["actor_seat"]` become the identity (review N3).
+        text = await asyncio.to_thread(handle_signal_tool, name, arguments, None)
         return [TextContent(type="text", text=text)]
 
     # Nape daemon — runtime critique layer

@@ -58,12 +58,14 @@ from unittest.mock import MagicMock
 
 import pytest
 
-# ── AUTOUSE GUARD 1 of 4: the live-audit tripwire ───────────────────────────
+# ── AUTOUSE GUARD 1 of 6: the live-audit tripwire ───────────────────────────
 #
-# COUNT UPDATED 2026-09-05 (was "1 of 2"). Two more guards were added in the
-# middle of this file, each in its own labelled block exactly as the note below
-# asks: the scribe containment and the nape autohook containment. Four autouse
-# guards now, all protecting the same thing from different write paths.
+# COUNT UPDATED 2026-09-06 (was "1 of 4", and "1 of 2" before that). Three more
+# guards were added in the middle of this file, each in its own labelled block
+# exactly as the note below asks: the scribe containment, the nape autohook
+# containment, the spiral-state containment, and the signal-ledger containment.
+# Six autouse guards now, all protecting the same thing from different write
+# paths.
 #
 # DELIBERATELY PLACED HERE, ABOVE THE FIXTURES, NOT APPENDED AT THE END.
 # feat/console-v2-reskin adds its own autouse guard (probe containment) at the
@@ -149,6 +151,7 @@ _SOVEREIGN_SUBDIRS = [
     "handoffs",
     "reflexive",
     "consciousness",
+    "signals",
 ]
 
 
@@ -423,6 +426,168 @@ def _nape_never_writes_live(monkeypatch: pytest.MonkeyPatch, _nape_tmp_root: Pat
     monkeypatch.setattr(_server, "nape_daemon", _nape.NapeDaemon(root=str(_nape_tmp_root)))
 
 
+# ── AUTOUSE GUARD (own labelled block, per the note at the top of this file) ─
+#        THE SPIRAL STATE IS NEVER SAVED INTO THE OPERATOR'S LIVE STORE
+#
+# THE THIRD INSTANCE OF THE SAME SHAPE, and the one that reached the most tests.
+# `server.py:116` binds `SPIRAL_STATE_PATH = Path(DEFAULT_ROOT) / "spiral_state
+# .json"` AT IMPORT, and `_dispatch_registered_tool` calls
+# `save_spiral_state(spiral_state, SPIRAL_STATE_PATH)` on EVERY dispatch, before
+# any branch matches. So every test in the suite that reaches the dispatcher —
+# arrival, heartbeat, reflector, retirement, the new open_thread author test —
+# wrote Anthony's live ~/.sovereign/spiral_state.json.
+#
+# MEASURED, not inferred: the 2026-09-06 adversarial review's full-suite log
+# contains 139 `PermissionError` lines naming
+# /Users/tony_studio/.sovereign/spiral_state.json. Those writes were REFUSED
+# only because that reviewer ran under a sandbox that denied them. An
+# unrestricted run has no such barrier — the count is the reach of the defect,
+# not the damage it did that day.
+#
+# WHY EVERY EXISTING DEFENCE MISSED IT, and it is the same sentence three
+# guards up: `tmp_sovereign_root` sets SOVEREIGN_ROOT, which server.py read ONCE
+# at import; the individual test files that DO isolate it (test_nape_autohook,
+# test_server_handler_fixes, test_contract_walker, _phase4_fixture) each rebind
+# `server.SPIRAL_STATE_PATH` by hand, which is exactly the evidence that a
+# per-file fix leaves every other file exposed.
+#
+# TWO LIMBS, redirect and refuse, for the reason the nape block states:
+#   - REDIRECT `server.SPIRAL_STATE_PATH` to a session-scoped tmp file, so
+#     dispatch-driven tests keep exercising the real writer and simply land
+#     elsewhere. No test needs changing and none is skipped. Session-scoped
+#     because the spiral counter is telemetry no test asserts across tests —
+#     the tests that DO care about spiral state rebind the path themselves and
+#     keep working, since monkeypatch restores the live value after them, not
+#     during.
+#   - REFUSE inside `save_spiral_state` itself, so ANY call still aimed at the
+#     live root fails BY TEST NAME instead of writing. Patched on
+#     `sovereign_stack.server.save_spiral_state` and NOT on `spiral.py`'s,
+#     because server.py does `from .spiral import save_spiral_state` — a
+#     from-import copies the function object, so patching the source module
+#     would leave the caller untouched. That is the audit-chain lesson at the
+#     top of this file, third time.
+#
+# The redirect alone would be assumed rather than falsifiable; the refuse limb
+# is what makes it a receipt. Both are demonstrated able to fail in
+# tests/test_live_store_containment.py.
+
+
+@pytest.fixture(scope="session")
+def _spiral_tmp_state_path(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """One tmp spiral_state.json for the whole run."""
+    return tmp_path_factory.mktemp("spiral-state-sink") / "spiral_state.json"
+
+
+@pytest.fixture(autouse=True)
+def _spiral_state_never_writes_live(
+    monkeypatch: pytest.MonkeyPatch, _spiral_tmp_state_path: Path
+) -> None:
+    import sovereign_stack.server as _server
+
+    _orig_save = _server.save_spiral_state
+    spiral_hint = (
+        "server.SPIRAL_STATE_PATH is built from DEFAULT_ROOT at import "
+        f"({_IMPORT_TIME_BINDING_HINT}) — rebind "
+        "sovereign_stack.server.SPIRAL_STATE_PATH itself."
+    )
+
+    def _guarded_save(state, path):
+        _refuse_live_root("THE SPIRAL STATE", Path(path), spiral_hint)
+        return _orig_save(state, path)
+
+    monkeypatch.setattr(_server, "save_spiral_state", _guarded_save)
+    monkeypatch.setattr(_server, "SPIRAL_STATE_PATH", _spiral_tmp_state_path)
+    # THIRD LIMB, ADDED FOR REVIEW N8. The two above are patches on NAMES, and
+    # a from-import copies the function object, so they cover the server's
+    # binding and leave `spiral.save_spiral_state` — the same writer, reached
+    # by its original name — unguarded. The reviewer called the server binding
+    # (refused) and the original binding (wrote) in one fixture and got both
+    # answers. `spiral.WRITE_GUARD` sits INSIDE the function body, so it is on
+    # the common writer boundary and covers every binding there will ever be.
+    import sovereign_stack.spiral as _spiral
+
+    def _refuse_spiral_destination(path: Path) -> None:
+        _refuse_live_root("THE SPIRAL STATE", Path(path), spiral_hint)
+
+    monkeypatch.setattr(_spiral, "WRITE_GUARD", _refuse_spiral_destination)
+
+
+# ── AUTOUSE GUARD (own labelled block) ──────────────────────────────────────
+#      THE SIGNAL LEDGER NEVER SCANS OR WRITES THE OPERATOR'S LIVE STORE
+#
+# NEW SURFACE, ADDED THE SAME DAY AS THE THING IT GUARDS. The 2026-09-06
+# release wires ingestion INTO THE READ (review F4): the native `heartbeat`
+# tool and `signals_summary` now call `heartbeat_field(scan=True)`, which runs
+# `scan_all` — seven source sweeps and an append-only ledger write. The native
+# heartbeat passes `root=None`, which resolves to `default_sovereign_root()`,
+# which is the operator's real ~/.sovereign.
+#
+# So a fix for "ingestion never runs" would, unguarded, have made every
+# heartbeat test in this suite sweep Anthony's live chronicle and mint
+# ~/.sovereign/signals/ledger.jsonl — a file that does not exist on that
+# machine today. The guard is written in the same commit as the feature
+# precisely because the feature is what creates the exposure; discovering it
+# in a review afterwards is the pattern this file already documents three
+# times over.
+#
+# TWO LIMBS, as everywhere else in this file:
+#   - REDIRECT `signal_ledger.default_sovereign_root` (imported by VALUE into
+#     that module, so patching provenance.py would not move it) to a
+#     session-scoped tmp root. Tests that pass an explicit root are unaffected;
+#     tests that reach the root=None default land in the sink and keep
+#     exercising the real scanner.
+#   - REFUSE at the two writers every ledger mutation funnels through,
+#     `_append` and `_write_scan_marker`, so any call still aimed at the live
+#     store fails BY TEST NAME rather than appending.
+
+
+@pytest.fixture(scope="session")
+def _signals_tmp_root(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    root = tmp_path_factory.mktemp("signal-ledger-sink")
+    (root / "signals").mkdir(parents=True, exist_ok=True)
+    return root
+
+
+@pytest.fixture(autouse=True)
+def _signal_ledger_never_touches_live(
+    monkeypatch: pytest.MonkeyPatch, _signals_tmp_root: Path
+) -> None:
+    from sovereign_stack import signal_ledger as _sl
+
+    signals_hint = (
+        "signal_ledger._root() falls back to default_sovereign_root() when the "
+        "caller passes root=None — pass an explicit tmp root, or rebind "
+        "sovereign_stack.signal_ledger.default_sovereign_root."
+    )
+
+    _orig_append = _sl._append
+    _orig_marker = _sl._write_scan_marker
+
+    def _guarded_append(row, root=None):
+        _refuse_live_root("THE SIGNAL LEDGER", _sl.ledger_path(root), signals_hint)
+        return _orig_append(row, root)
+
+    def _guarded_marker(counts, source_status, root=None):
+        _refuse_live_root("THE SIGNAL SCAN MARKER", _sl.scan_marker_path(root), signals_hint)
+        return _orig_marker(counts, source_status, root)
+
+    # THIRD WRITER, ADDED WITH THE FEATURE THAT CREATED IT (review N9).
+    # `_log_diagnostic` writes tracebacks to <root>/signals/diagnostics.log on
+    # the READ path, so a scanner exception in any test would otherwise mint a
+    # new file in the operator's live store. Two guarded writers and one
+    # unguarded one is the shape this whole file exists to prevent.
+    _orig_diag = _sl._log_diagnostic
+
+    def _guarded_diagnostic(root, label, exc):
+        _refuse_live_root("THE SIGNAL DIAGNOSTICS LOG", _sl.diagnostics_path(root), signals_hint)
+        return _orig_diag(root, label, exc)
+
+    monkeypatch.setattr(_sl, "default_sovereign_root", lambda: _signals_tmp_root)
+    monkeypatch.setattr(_sl, "_append", _guarded_append)
+    monkeypatch.setattr(_sl, "_write_scan_marker", _guarded_marker)
+    monkeypatch.setattr(_sl, "_log_diagnostic", _guarded_diagnostic)
+
+
 # ── The dashboard's two external probes never leave the test process ────────
 #
 # `SOVEREIGN_ROOT` redirects neither of them: `dashboard_readers.read_guardian`
@@ -438,3 +603,22 @@ def _nape_never_writes_live(monkeypatch: pytest.MonkeyPatch, _nape_tmp_root: Pat
 @pytest.fixture(autouse=True)
 def _no_live_dashboard_probes(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SOVEREIGN_DASHBOARD_NO_EXTERNAL_PROBES", "1")
+
+
+# ── AUTOUSE GUARD (own labelled block) ──────────────────────────────────────
+#          THE DISPATCH CONTEXT DOES NOT LEAK BETWEEN TESTS
+#
+# `dispatch_context.CALLER_SEAT` is a ContextVar, and a sync pytest test runs
+# in the main thread's context — so a test that sets a seat and fails before
+# its reset would hand that identity to every test after it, and the tests
+# that assert "an unestablished identity is a refusal" would pass or fail
+# depending on file order. Restoring it here makes that impossible.
+@pytest.fixture(autouse=True)
+def _dispatch_context_is_clean() -> None:
+    from sovereign_stack.dispatch_context import CALLER_SEAT
+
+    token = CALLER_SEAT.set(None)
+    try:
+        yield
+    finally:
+        CALLER_SEAT.reset(token)

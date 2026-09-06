@@ -1508,6 +1508,7 @@ class ExperientialMemory:
         domain: str = "general",
         session_id: str = None,
         original_timestamp: str = None,
+        source_instance: str = None,
     ) -> str:
         """
         Record an unresolved question for the next instance to explore.
@@ -1527,6 +1528,12 @@ class ExperientialMemory:
             session_id: Current session identifier
             original_timestamp: Optional ISO-8601 authorship time. Same contract as
                    record_insight.
+            source_instance: Optional author — seat + model. Stored as a
+                   first-class field when present, OMITTED entirely when not,
+                   so existing thread records keep their exact shape and no
+                   reader gains a key full of ``None``. A bundled question that
+                   auto-splits stamps every atomic thread with the same author,
+                   because one seat asked all of them.
 
         Returns:
             Path to the recorded thread
@@ -1558,6 +1565,8 @@ class ExperientialMemory:
                     "layer": self.LAYER_OPEN_THREAD,
                     "resolved": False,
                 }
+                if source_instance:
+                    thread["source_instance"] = source_instance
                 if original_timestamp is not None:
                     # thread_id is derived from (question, timestamp) ABOVE and
                     # is deliberately left on the write instant: it is an

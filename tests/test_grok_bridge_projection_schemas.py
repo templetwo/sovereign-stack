@@ -166,7 +166,8 @@ def test_required_argument_census_matches_the_registry():
     }
     assert requiring == {
         "check_mistakes": ["context"],
-        "comms_unread_bodies": ["instance_id"],
+        # comms_unread_bodies retired (unpublished) 2026-09-06 and dropped
+        # from CANONICAL_RING_1; it is no longer in the census.
         "compass_check": ["action"],
         "context_retrieve": ["current_focus"],
         "inspect_claim": ["claim_id"],

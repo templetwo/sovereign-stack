@@ -289,3 +289,220 @@ class TestTheNapeAutohookIsRedirectedAndRefused:
         rows = (tmp_path / "nape" / "observations.jsonl").read_text().splitlines()
         assert len(rows) == 1
         assert json.loads(rows[0])["tool_name"] == "record_insight"
+
+
+class TestTheSpiralStateIsNeverSavedLive:
+    """The third instance of the import-time-binding shape, and the widest one.
+
+    ``server.py:116`` binds ``SPIRAL_STATE_PATH`` from ``DEFAULT_ROOT`` at
+    import, and ``_dispatch_registered_tool`` calls ``save_spiral_state`` on
+    EVERY dispatch before any branch matches — so every test that reaches the
+    dispatcher wrote Anthony's live ``~/.sovereign/spiral_state.json``. The
+    2026-09-06 adversarial review's full-suite log carries **139**
+    ``PermissionError`` lines naming that exact file; they were refused only
+    because that run happened to be sandboxed.
+    """
+
+    def test_the_module_path_is_not_the_live_one(self):
+        server = pytest.importorskip("sovereign_stack.server")
+        resolved = Path(server.SPIRAL_STATE_PATH).resolve()
+        assert not str(resolved).startswith(str(LIVE_SOVEREIGN.resolve())), (
+            f"server.SPIRAL_STATE_PATH is {resolved} — every dispatched tool "
+            "call in this suite is saving spiral state into Anthony's live store"
+        )
+
+    def test_the_live_path_is_what_it_would_be_without_the_guard(self):
+        """The falsifier's premise, same shape as the nape one: DEFAULT_ROOT
+        really is the live store, so an unredirected binding really would
+        write there. Without this the test above could pass for the wrong
+        reason."""
+        server = pytest.importorskip("sovereign_stack.server")
+        assert str(Path(server.DEFAULT_ROOT).resolve()) == str(LIVE_SOVEREIGN.resolve())
+        assert str(Path(server.DEFAULT_ROOT) / "spiral_state.json") == str(
+            LIVE_SOVEREIGN / "spiral_state.json"
+        )
+
+    def test_a_save_aimed_at_the_live_store_is_refused(self):
+        server = pytest.importorskip("sovereign_stack.server")
+        with pytest.raises(AssertionError, match="AIMED THE SPIRAL STATE"):
+            server.save_spiral_state(server.spiral_state, LIVE_SOVEREIGN / "spiral_state.json")
+
+    def test_the_refusal_names_the_binding_to_rebind(self):
+        server = pytest.importorskip("sovereign_stack.server")
+        with pytest.raises(AssertionError) as excinfo:
+            server.save_spiral_state(server.spiral_state, LIVE_SOVEREIGN / "spiral_state.json")
+        assert "sovereign_stack.server.SPIRAL_STATE_PATH" in str(excinfo.value)
+        assert "AT MODULE IMPORT" in str(excinfo.value)
+
+    def test_the_guard_is_on_the_name_the_caller_resolves(self):
+        """server.py does ``from .spiral import save_spiral_state``, so a guard
+        patched onto ``spiral.save_spiral_state`` would leave the caller
+        untouched. Pinned, because getting this wrong produces a guard that
+        passes its own tests and protects nothing."""
+        from sovereign_stack import server, spiral
+
+        assert server.save_spiral_state is not spiral.save_spiral_state
+
+    def test_a_redirected_save_still_writes(self, tmp_path):
+        """Positive control: a gate, not a blanket denial."""
+        from sovereign_stack.spiral import SpiralState
+
+        server = pytest.importorskip("sovereign_stack.server")
+        dest = tmp_path / "spiral_state.json"
+        server.save_spiral_state(SpiralState(), dest)
+        assert json.loads(dest.read_text())["session_id"]
+
+    def test_a_real_dispatch_lands_off_the_live_store(self):
+        """THE REACHABLE PATH, not a hypothetical: dispatch one real tool and
+        show the spiral write went to the tmp sink. This is the call shape the
+        139 refusals came from."""
+        import asyncio
+
+        server = pytest.importorskip("sovereign_stack.server")
+        asyncio.run(server._dispatch_tool("heartbeat", {}))
+        assert Path(server.SPIRAL_STATE_PATH).exists()
+        assert not str(Path(server.SPIRAL_STATE_PATH).resolve()).startswith(
+            str(LIVE_SOVEREIGN.resolve())
+        )
+
+
+class TestTheSignalLedgerNeverTouchesTheLiveStore:
+    """The newest surface, guarded in the same commit that created it.
+
+    The 2026-09-06 release wires ingestion into the READ (review F4): the
+    native ``heartbeat`` tool and ``signals_summary`` call
+    ``heartbeat_field(scan=True)``, which runs seven source sweeps and writes
+    an append-only ledger. The native heartbeat passes ``root=None``, which
+    resolves to ``default_sovereign_root()`` — Anthony's real ~/.sovereign,
+    where ``signals/ledger.jsonl`` does not exist at all. Unguarded, the fix
+    for "ingestion never runs" would have had every heartbeat test in this
+    suite sweep his live chronicle and mint that file.
+    """
+
+    def test_the_module_default_root_is_not_the_live_one(self):
+        from sovereign_stack import signal_ledger as sl
+
+        assert not str(Path(sl._root()).resolve()).startswith(str(LIVE_SOVEREIGN.resolve()))
+
+    def test_the_unpatched_default_really_is_the_live_root(self):
+        """The falsifier's premise: provenance.default_sovereign_root, which is
+        what signal_ledger imports, resolves to the live store."""
+        from sovereign_stack.provenance import default_sovereign_root
+
+        assert str(default_sovereign_root().resolve()) == str(LIVE_SOVEREIGN.resolve())
+
+    def test_a_ledger_append_aimed_at_the_live_store_is_refused(self):
+        from sovereign_stack import signal_ledger as sl
+
+        with pytest.raises(AssertionError, match="AIMED THE SIGNAL LEDGER"):
+            sl._append({"signal_id": "x"}, LIVE_SOVEREIGN)
+
+    def test_a_scan_marker_aimed_at_the_live_store_is_refused(self):
+        from sovereign_stack import signal_ledger as sl
+
+        with pytest.raises(AssertionError, match="AIMED THE SIGNAL SCAN MARKER"):
+            sl._write_scan_marker({}, {}, LIVE_SOVEREIGN)
+
+    def test_the_native_heartbeat_scans_the_sink_not_the_live_store(self):
+        """THE REACHABLE PATH. Dispatch the real heartbeat tool — which is what
+        now calls scan_all — and show the ledger it created is in the sink."""
+        import asyncio
+
+        from sovereign_stack import server
+        from sovereign_stack import signal_ledger as sl
+
+        result = asyncio.run(server._dispatch_tool("heartbeat", {}))
+        payload = json.loads(result[0].text)
+        assert "unacked_signals" in payload
+        assert not (LIVE_SOVEREIGN / "signals" / "ledger.jsonl").exists(), (
+            "the native heartbeat's scan_all minted a ledger in Anthony's live store"
+        )
+        assert not str(sl.ledger_path().resolve()).startswith(str(LIVE_SOVEREIGN.resolve()))
+
+    def test_a_tmp_rooted_scan_still_works(self, tmp_path):
+        """Positive control: a gate, not a blanket denial."""
+        from sovereign_stack import signal_ledger as sl
+
+        (tmp_path / "daemons" / "halts").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "daemons" / "halts" / "h.md").write_text("halt\n", encoding="utf-8")
+        out = sl.scan_all(tmp_path)
+        assert out["counts"]["halt"] == 1
+        assert sl.ledger_path(tmp_path).exists()
+
+
+# ── N8 (review round 2, 2026-09-06) ─────────────────────────────────────────
+#
+#   "tests/conftest.py:498 patches only server.save_spiral_state;
+#    src/sovereign_stack/spiral.py:300 still opens its supplied path for
+#    writing. The actual fixture, with its live-root sentinel rebound to a
+#    temporary simulated live root, refuses the server call but permits the
+#    original module call and creates the simulated live state file."
+#
+# The reviewer's own probe, rebuilt: run the REAL autouse fixture against a
+# simulated live root, then call BOTH bindings and require both to refuse.
+# Nothing here goes near the operator's actual spiral_state.json.
+
+
+class TestN8EveryBindingOfTheSpiralWriterIsGuarded:
+    def _armed(self, monkeypatch, tmp_path):
+        """Arm the real fixture with a SIMULATED live root, and hand back the
+        destination inside it. `_LIVE_SOVEREIGN` is read by name at call time,
+        so rebinding it is what makes this falsifiable without touching the
+        real store."""
+        import sovereign_stack.server as _server
+        import tests.conftest as conf
+
+        fake_live = tmp_path / "simulated-live"
+        fake_live.mkdir()
+        dest = fake_live / "spiral_state.json"
+        sink = tmp_path / "sink.json"
+        monkeypatch.setattr(conf, "_LIVE_SOVEREIGN", fake_live.resolve())
+        monkeypatch.setattr(_server, "SPIRAL_STATE_PATH", dest)
+        conf._spiral_state_never_writes_live.__wrapped__(monkeypatch, sink)
+        return dest, sink
+
+    def test_the_original_module_binding_is_refused_too(self, monkeypatch, tmp_path):
+        from sovereign_stack import spiral
+
+        dest, _sink = self._armed(monkeypatch, tmp_path)
+        with pytest.raises(AssertionError):
+            spiral.save_spiral_state(spiral.SpiralState(), dest)
+        assert not dest.exists(), "the simulated live file was written"
+
+    def test_the_server_binding_is_still_refused(self, monkeypatch, tmp_path):
+        """The limb that already worked has to keep working — the guard moved
+        inward, it did not move away."""
+        import sovereign_stack.server as _server
+        from sovereign_stack import spiral
+
+        dest, _sink = self._armed(monkeypatch, tmp_path)
+        with pytest.raises(AssertionError):
+            _server.save_spiral_state(spiral.SpiralState(), dest)
+        assert not dest.exists()
+
+    def test_the_redirect_limb_is_untouched(self, monkeypatch, tmp_path):
+        import sovereign_stack.server as _server
+
+        _dest, sink = self._armed(monkeypatch, tmp_path)
+        assert sink == _server.SPIRAL_STATE_PATH
+
+    def test_an_ordinary_destination_still_writes(self, monkeypatch, tmp_path):
+        """POSITIVE CONTROL. A guard that refuses everything is not
+        containment, it is a broken writer."""
+        from sovereign_stack import spiral
+
+        _dest, sink = self._armed(monkeypatch, tmp_path)
+        spiral.save_spiral_state(spiral.SpiralState(), sink)
+        assert json.loads(sink.read_text())["session_id"]
+
+    def test_the_guard_is_off_by_default_in_production(self):
+        """The hook must be inert unless a harness arms it, and it must not
+        know what 'the live store' is — that knowledge belongs to whoever is
+        doing the containing."""
+        import importlib
+
+        import sovereign_stack.spiral as spiral
+
+        source = importlib.import_module("sovereign_stack.spiral")
+        assert "WRITE_GUARD = None" in Path(source.__file__).read_text()
+        assert callable(spiral.WRITE_GUARD) or spiral.WRITE_GUARD is None

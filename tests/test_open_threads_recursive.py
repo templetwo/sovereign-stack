@@ -457,7 +457,12 @@ def _dispatch(tool: str, args: dict) -> str:
 
     from sovereign_stack import server
 
-    return asyncio.run(server._dispatch_tool(tool, args))[0].text
+    # resolve_thread was RETIRED (unpublished) 2026-09-06 and folded into
+    # resolve_thread_by_id. Its implementation is retained, and the two
+    # honesty guards below — it must not claim a resolution it did not
+    # perform, and it must say so on a nested shard rather than invent a
+    # record — are exactly the coverage that must survive the retirement.
+    return asyncio.run(server._dispatch_registered_tool(tool, args))[0].text
 
 
 def test_resolve_thread_does_not_claim_a_resolution_it_did_not_perform(

@@ -48,12 +48,17 @@ class TestTaxonomy:
 
     def test_every_core_tool_exists(self, all_tool_names):
         core = {n for n, tier in server.TOOL_TIERS.items() if tier == server.TIER_CORE}
-        missing = core - all_tool_names
+        # A RETIRED tool is not a ghost. The retirement of 2026-09-06
+        # unpublished 48 names without deleting anything, and the tier /
+        # intent classifications are deliberately LEFT IN PLACE so that
+        # un-retiring is a one-line edit rather than a reclassification.
+        # A name in neither the registry nor RETIRED_TOOLS is still a ghost.
+        missing = core - all_tool_names - set(server.RETIRED_TOOLS)
         assert not missing, f"core tier references unknown tools: {missing}"
 
     def test_every_intent_target_exists(self, all_tool_names):
         intent_targets = set(server.TOOL_INTENTS.keys())
-        missing = intent_targets - all_tool_names
+        missing = intent_targets - all_tool_names - set(server.RETIRED_TOOLS)
         assert not missing, f"TOOL_INTENTS references unknown tools: {missing}"
 
     def test_every_essential_has_an_intent(self, all_tool_names):
@@ -125,23 +130,33 @@ class TestFormatToolkit:
             all_tools,
             category_filter="security",
         )
-        # Note: filter compares against _category_for output. Guardian
-        # tools live under category "guardian", not "security" — so the
-        # legacy axis preserves the bucket name.
+        # Note: filter compares against _category_for output, so the legacy
+        # axis preserves the bucket name.
+        #
+        # WAS category="guardian" / guardian_status until 2026-09-06: the
+        # whole guardian family retired that day, so the bucket is now empty
+        # and this test would have asserted the friendly no-match message
+        # while claiming to exercise the filter. "threads" is a live bucket
+        # with six members.
         text2 = server._format_toolkit(
             all_tools,
-            category_filter="guardian",
+            category_filter="threads",
         )
-        assert "guardian_status" in text2
-        assert "category=guardian" in text2
+        assert "get_open_threads" in text2
+        assert "category=threads" in text2
 
     def test_intent_groups_appear_in_canonical_order(self, all_tools):
         text = server._format_toolkit(all_tools, tier="all")
-        # orient should appear before security in the output.
+        # WAS orient-before-security until 2026-09-06. Every "security"
+        # intent tool was a guardian_* tool and the family retired together,
+        # so that header no longer renders at all and the assertion would
+        # have failed for a reason that has nothing to do with ordering.
+        # orient-before-ops tests the same canonical-order property on two
+        # groups that are still populated.
         idx_orient = text.find("## orient")
-        idx_security = text.find("## security")
-        assert idx_orient != -1 and idx_security != -1
-        assert idx_orient < idx_security
+        idx_ops = text.find("## ops")
+        assert idx_orient != -1 and idx_ops != -1
+        assert idx_orient < idx_ops
 
     def test_no_match_returns_friendly_message(self, all_tools):
         text = server._format_toolkit(

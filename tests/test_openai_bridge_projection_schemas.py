@@ -31,7 +31,8 @@ ADAPTER_LOGGER = "openai_bridge.tool_adapter"
 # the_registry` re-derives it so this list cannot quietly go stale.
 RING1_REQUIRING_ARGUMENTS = {
     "check_mistakes": ["context"],
-    "comms_unread_bodies": ["instance_id"],
+    # comms_unread_bodies retired (unpublished) 2026-09-06 and dropped
+    # from CANONICAL_RING_1; it is no longer in the census.
     "compass_check": ["action"],
     "context_retrieve": ["current_focus"],
     "inspect_claim": ["claim_id"],

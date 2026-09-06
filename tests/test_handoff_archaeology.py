@@ -100,7 +100,7 @@ def _tool_names():
 
 
 def _call(**args):
-    out = asyncio.run(server._dispatch_tool("handoff_archaeology", args))
+    out = asyncio.run(server._dispatch_registered_tool("handoff_archaeology", args))
     return json.loads(out[0].text)
 
 
@@ -118,18 +118,40 @@ class TestTheFixtureIsWhatItClaims:
         assert _call(limit=100000)["total"] == len(_SEED)
 
 
-class TestToolExists:
-    def test_registered(self):
-        """RED until the archaeology path is wired to anything at all."""
-        assert "handoff_archaeology" in _tool_names()
+class TestToolIsRetiredButRetained:
+    """RETIRED (unpublished) 2026-09-06 — never called in the 30-day census,
+    folded into the handoff surface, which renders forward-correction links
+    itself as of the same release.
 
-    def test_schema_exposes_its_parameters(self):
+    The rest of this file did NOT go away with the publication, and that is
+    deliberate: the implementation is retained and reversible, so the tests
+    that prove it works are what make un-retiring a one-line edit instead of
+    reviving code nothing has run in months."""
+
+    def test_not_published_and_the_refusal_names_what_was_lost(self):
+        """RECLASSIFIED 2026-09-06 from a fold to an outright retirement.
+
+        `handoff` was advertised as the replacement and is not one: called with
+        listing arguments it refuses "handoff note is empty", because it has no
+        history or list mode at all. The 2026-09-06 review executed both and
+        the refusal now says so rather than sending a caller to a tool that
+        cannot do the job.
+        """
+        assert "handoff_archaeology" not in _tool_names()
+        assert server.RETIRED_TOOLS["handoff_archaeology"].replacement is None
+        with pytest.raises(ValueError, match="It has no replacement") as exc:
+            asyncio.run(server._dispatch_tool("handoff_archaeology", {}))
+        assert "no history or list mode" in str(exc.value)
+
+    def test_the_retained_schema_still_exposes_its_parameters(self):
         """
         The bridge-blindness lesson: a parameter absent from the published
         schema is unreachable by every schema-constrained caller, however
-        well it works underneath.
+        well it works underneath. Asserted against the FULL registry, which
+        still carries the retired tool — an un-retirement must not restore a
+        tool whose schema had rotted while it was off the menu.
         """
-        tool = next(t for t in asyncio.run(server.list_tools()) if t.name == "handoff_archaeology")
+        tool = next(t for t in server._registered_tools() if t.name == "handoff_archaeology")
         props = set((tool.inputSchema or {}).get("properties", {}))
         assert {"limit", "thread", "include_consumed"} <= props
 
