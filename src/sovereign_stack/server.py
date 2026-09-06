@@ -41,6 +41,7 @@ from .compaction_memory_tools import COMPACTION_MEMORY_TOOLS, handle_compaction_
 from .connectivity_tools import CONNECTIVITY_TOOLS, handle_connectivity_tool
 from .consciousness_tools import CONSCIOUSNESS_TOOLS, handle_consciousness_tool
 from .consciousness_tools import meta as _consciousness_meta
+from .dispatch_context import caller_seat, reset_caller_seat, set_caller_seat
 from .glyphs import MEMORY, SPIRAL, get_session_signature, glyph_for
 from .governance import (
     DecisionType,
@@ -3182,8 +3183,8 @@ async def _reject_unknown_params(tool_name: str, arguments: dict) -> None:
 _NON_IDENTITIES = frozenset({"", "none", "null", "unknown", "test", "undefined"})
 
 
-def _signal_actor(arguments: dict | None = None) -> str | None:
-    """The closer identity for the signal ledger, resolved by the DISPATCH.
+def _signal_actor() -> str | None:
+    """THE SERVER'S OWN identity, for the dispatch context. Never a caller's.
 
     Returns None when no identity can be established. That return is the fix:
     the reviewed version was `f"seat:{spiral_state.session_id}"` with no
@@ -3193,32 +3194,23 @@ def _signal_actor(arguments: dict | None = None) -> str | None:
     A function that always returns a string cannot express "I do not know who
     this is", and every caller downstream had to assume it did know.
 
-    ORDER OF TRUST, most trusted first:
+    IT NO LONGER READS `arguments` AT ALL (review N3). It used to prefer an
+    injected `actor_seat` "filled in by the bridge" — and a real in-process MCP
+    request carrying `actor_seat="fixture-different-seat"` was stamped as that
+    seat, because a parameter the server reads is reachable by every caller of
+    the server. There is no bridge-only argument. The bridge now establishes
+    its verified seat in `dispatch_context.CALLER_SEAT` in-process, and this
+    function supplies only what the server can vouch for itself.
 
-      1. `actor_seat`, injected by the BRIDGE from the seat identity it
-         verified. This mirrors the convention the seat-identity-stamp branch
-         already established for `source_instance` on open_thread. It is NOT
-         "a string the caller typed" in the way `owner` was: a native MCP
-         caller cannot reach this path, because the bridge overwrites the
-         field from its own verified identity before dispatch, and the native
-         path below ignores what a caller sent.
-      2. `spiral_state.session_id`, the server's own session. Server-generated
-         (spiral.py:79) and unforgeable from a tool call, but WEAK: the bridge
-         shares one spiral session across remote writers, so it identifies the
-         server, not the seat. Good enough for a single trusted Studio seat,
-         which is why it survives as the fallback and not as the answer.
-      3. Nothing. Refuse.
+    `spiral_state.session_id` is server-generated (spiral.py:79) and unforgeable
+    from a tool call, but WEAK: the bridge shares one spiral session across
+    remote writers, so it identifies the server, not the seat. That is exactly
+    why it is the fallback the bridge overrides and not the answer.
 
     Namespaced `seat:` on the way out so the row says what kind of identity it
     is — and `signal_ledger._actor_identity` strips that namespace before the
     producer comparison, so `seat:daemon` is still refused as the daemon.
     """
-    if arguments:
-        injected = arguments.get("actor_seat")
-        if isinstance(injected, str) and injected.strip():
-            text = injected.strip()
-            if text.casefold() not in _NON_IDENTITIES:
-                return text if ":" in text else f"seat:{text}"
     session = getattr(spiral_state, "session_id", None)
     if isinstance(session, str) and session.strip().casefold() not in _NON_IDENTITIES:
         return f"seat:{session.strip()}"
@@ -3254,7 +3246,38 @@ async def _dispatch_tool(name: str, arguments: dict):
     # MCP call to the body except through this gate.
     if name in RETIRED_TOOLS:
         raise ValueError(retired_tool_error(name))
-    return await _dispatch_registered_tool(name, arguments)
+    # ── THE DISPATCH CONTEXT IS ESTABLISHED HERE, AT DISPATCH ENTRY ─────────
+    #
+    # This is the one place the SERVER can speak for itself about who is
+    # calling: it sets `CALLER_SEAT` from its own spiral session, never from
+    # `arguments`. That is the whole of review N3 — a real in-process MCP
+    # request carrying `actor_seat="fixture-different-seat"` was stamped as
+    # that seat, because the dispatch read identity out of the call.
+    #
+    # IT DOES NOT OVERWRITE AN IDENTITY THAT IS ALREADY SET. The bridge
+    # establishes its kernel-verified seat in-process before calling in, and
+    # that identity is strictly better than this one: the spiral session is
+    # shared across every remote writer, so it names the SERVER, not the seat.
+    # Clobbering it here would silently downgrade every bridge call to
+    # "whoever the server is".
+    #
+    # Placed on `_dispatch_tool` rather than on `handle_tool` so that every
+    # route into the dispatch — the MCP `@server.call_tool()` entry, the
+    # bridge's native shim, and the tests that call the dispatcher directly —
+    # gets the same establishment, and none of them has to remember to do it.
+    seat_token = None
+    if caller_seat() is None:
+        resolved = _signal_actor()
+        if resolved:
+            seat_token = set_caller_seat(resolved)
+    try:
+        return await _dispatch_registered_tool(name, arguments)
+    finally:
+        # ALWAYS RESET, INCLUDING ON THE RAISE PATH. A token left unreset
+        # leaks this call's identity into whatever runs next in the same
+        # context.
+        if seat_token is not None:
+            reset_caller_seat(seat_token)
 
 
 async def _dispatch_registered_tool(name: str, arguments: dict):
@@ -4379,14 +4402,12 @@ Phase: {spiral_state.current_phase.value}
         return [TextContent(type="text", text=text)]
 
     if name in [t.name for t in SIGNAL_TOOLS]:
-        # THE ACTOR IS RESOLVED HERE, NOT READ FROM `arguments`.
-        # `signal_ack` has no closer parameter (signal_ledger.SIGNAL_TOOLS):
-        # producer separation used to be a comparison against a caller-typed
-        # `owner`, which meant a caller with tool access could name a
-        # different closer and the refusal was only a spelling check.
-        text = await asyncio.to_thread(
-            handle_signal_tool, name, arguments, None, _signal_actor(arguments)
-        )
+        # THE ACTOR IS NOT PASSED HERE AT ALL. It rides the dispatch context
+        # established in `handle_tool` (or by the bridge, in-process, before
+        # it ever reaches this server), and `asyncio.to_thread` copies that
+        # context into the worker thread. Passing it as a parameter is what
+        # let `arguments["actor_seat"]` become the identity (review N3).
+        text = await asyncio.to_thread(handle_signal_tool, name, arguments, None)
         return [TextContent(type="text", text=text)]
 
     # Nape daemon — runtime critique layer

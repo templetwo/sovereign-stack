@@ -20,6 +20,7 @@ from typing import Any
 
 from mcp.types import Tool
 
+from .dispatch_context import REFUSED_IDENTITY_ARGUMENTS, caller_seat
 from .memory import iter_thread_shards
 from .provenance import default_sovereign_root
 
@@ -1622,9 +1623,11 @@ SIGNAL_TOOLS = [
         description=(
             "Close or acknowledge one signal. state is acknowledged|acted|dismissed. "
             "acted and dismissed require a non-blank reason. closed_by is stamped "
-            "from the caller identity the DISPATCH resolved — actor_seat is filled "
-            "in by the bridge from the verified seat identity, not composed by the "
-            "caller, and a call with no resolvable actor is refused rather than "
+            "from the DISPATCH CONTEXT — the native server sets it from its own "
+            "spiral session, the bridge sets it in-process from the seat identity "
+            "its kernel verified, and there is no argument that can name a closer. "
+            "Sending actor, actor_seat, owner, closed_by or source_seat is REFUSED, "
+            "not ignored; a call with no resolvable identity is refused rather than "
             "stamped 'seat:None'. The producer of a source cannot close its own "
             "signal. Get the signal_id from signals_summary(mode='list')."
         ),
@@ -1634,16 +1637,14 @@ SIGNAL_TOOLS = [
                 "signal_id": {"type": "string"},
                 "state": {"type": "string", "enum": list(CLOSE_STATES)},
                 "reason": {"type": "string"},
-                "actor_seat": {
-                    "type": "string",
-                    "description": (
-                        "THE BRIDGE FILLS THIS IN from the verified seat identity "
-                        "(same convention as source_instance on open_thread). A "
-                        "seat calling natively may omit it and the server resolves "
-                        "its own; a value here never overrides a dispatch-resolved "
-                        "identity, and an empty one is a refusal, not a default."
-                    ),
-                },
+                # NO CLOSER PARAMETER, DELIBERATELY (review N3). `actor_seat` was
+                # published here so "the bridge could fill it in" — and the
+                # review then closed a signal as an arbitrary seat through the
+                # real MCP handler by simply sending that field. A parameter the
+                # server reads is reachable by every caller of the server; there
+                # is no such thing as a bridge-only argument. Identity now
+                # travels in `dispatch_context.CALLER_SEAT`, which no argument
+                # dict can name.
             },
             "required": ["signal_id", "state"],
         },
@@ -1712,15 +1713,22 @@ def handle_signal_tool(
     name: str,
     arguments: dict | None,
     root: Path | None = None,
-    actor: str | None = None,
 ) -> str:
     """Tool entry point.
 
-    ``actor`` is supplied by the DISPATCH LAYER from identity the server
-    resolved for itself — never read out of ``arguments``. A call that
-    arrives with no resolvable actor is REFUSED, not defaulted: the whole
-    point of producer separation is that "who closed this" cannot be a value
-    the closer supplies.
+    THE ACTOR COMES FROM ``dispatch_context.CALLER_SEAT`` AND FROM NOWHERE
+    ELSE (review N3). It used to arrive as a parameter this function trusted,
+    filled by the dispatch from ``arguments["actor_seat"]`` — which meant the
+    "the bridge fills this in" convention was, in fact, "any caller fills this
+    in", and the reviewer closed a signal as ``seat:fixture-different-seat``
+    through the real MCP handler to prove it.
+
+    A parameter would still be a second source of identity, so there is no
+    parameter. A context variable is the only shape that (a) crosses the
+    ``asyncio.to_thread`` hop the dispatch makes, (b) is per-request rather
+    than global, and (c) cannot be named by anything in ``arguments``.
+
+    An unset or blank context is a REFUSAL, not a default.
     """
     arguments = arguments or {}
     try:
@@ -1803,6 +1811,25 @@ def handle_signal_tool(
                 }
             return json.dumps(payload)
         if name == "signal_ack":
+            # ── REFUSED, NEVER IGNORED ──────────────────────────────────────
+            # An ignored argument looks, from the caller's side, exactly like
+            # an honoured one: the reviewed build carried a comment saying
+            # native `actor_seat` was ignored while the dispatch read it. So
+            # the identity-shaped argument names fail the call and the error
+            # names the one that was sent.
+            for forbidden in REFUSED_IDENTITY_ARGUMENTS:
+                if forbidden in arguments:
+                    return json.dumps(
+                        {
+                            "ok": False,
+                            "error": (
+                                f"{forbidden!r} is not an accepted argument: closed_by is "
+                                "stamped from the identity the dispatch resolved, never "
+                                "from the call. Remove it and retry."
+                            ),
+                        }
+                    )
+            actor = caller_seat()
             sid = str(arguments.get("signal_id") or "").strip()
             state = str(arguments.get("state") or "").strip()
             reason = arguments.get("reason")

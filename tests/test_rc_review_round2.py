@@ -311,14 +311,19 @@ class TestF3TheHonkFoldIsReal:
             sl.handle_signal_tool("signals_summary", {"mode": "list", "source": "honk"}, root=root)
         )
         sid = listed["signals"][0]["signal_id"]
-        acked = json.loads(
-            sl.handle_signal_tool(
-                "signal_ack",
-                {"signal_id": sid, "state": "acknowledged", "reason": "seen"},
-                root=root,
-                actor="seat:watch-2-3",
+        from sovereign_stack.dispatch_context import reset_caller_seat, set_caller_seat
+
+        token = set_caller_seat("seat:watch-2-3")
+        try:
+            acked = json.loads(
+                sl.handle_signal_tool(
+                    "signal_ack",
+                    {"signal_id": sid, "state": "acknowledged", "reason": "seen"},
+                    root=root,
+                )
             )
-        )
+        finally:
+            reset_caller_seat(token)
         assert acked["ok"] is True
         assert acked["row"]["closed_by"] == "seat:watch-2-3"
         # and the concern survives the close, so the audit trail is not ids-only
@@ -440,6 +445,21 @@ def _dispatch_ack(sid: str, **args):
     return json.loads(result[0].text)
 
 
+def _dispatch_ack_as(seat: str, sid: str, **args):
+    """Ack with an identity established the way the BRIDGE establishes one:
+    in-process, in the dispatch context, before the server is called.
+
+    There is no argument that does this (review N3) — that is the point.
+    """
+    from sovereign_stack.dispatch_context import reset_caller_seat, set_caller_seat
+
+    token = set_caller_seat(seat)
+    try:
+        return _dispatch_ack(sid, **args)
+    finally:
+        reset_caller_seat(token)
+
+
 class TestF5TheActorIsResolvedNotComposed:
     """ "In actual in-process MCP requests, patched session values `daemon`,
     `None`, and empty string all successfully closed a halt as `seat:daemon`,
@@ -489,8 +509,10 @@ class TestF5TheActorIsResolvedNotComposed:
 
     def test_two_seats_stamp_two_different_closers(self, tmp_sovereign_root, monkeypatch):
         """ "It also cannot distinguish concurrent trusted seats sharing the
-        server." The bridge injects `actor_seat` from the identity it verified
-        — the same convention `source_instance` already uses on open_thread."""
+        server." The bridge establishes the identity it verified in the
+        DISPATCH CONTEXT, in-process. Round 2 did this with an `actor_seat`
+        argument; review N3 proved a caller could send that argument too, so
+        the contract moved out of band (see TestN3...)."""
         root = tmp_sovereign_root
         monkeypatch.setattr(sl, "default_sovereign_root", lambda: root)
         _guardian_ok(root)
@@ -498,18 +520,26 @@ class TestF5TheActorIsResolvedNotComposed:
         _a_halt(root, "b.md")
         sl.scan_all(root)
         monkeypatch.setattr(server.spiral_state, "session_id", "spiral_shared_session")
-        first = _dispatch_ack(sl.signal_id_for("halt", "a.md"), actor_seat="hq-studio")
-        second = _dispatch_ack(sl.signal_id_for("halt", "b.md"), actor_seat="grok-build")
+        first = _dispatch_ack_as("seat:hq-studio", sl.signal_id_for("halt", "a.md"))
+        second = _dispatch_ack_as("seat:grok-build", sl.signal_id_for("halt", "b.md"))
         assert first["ok"] is True and second["ok"] is True
         assert first["row"]["closed_by"] == "seat:hq-studio"
         assert second["row"]["closed_by"] == "seat:grok-build"
         assert first["row"]["closed_by"] != second["row"]["closed_by"]
 
     def test_an_empty_injected_actor_is_a_refusal_not_a_default(self, signal, monkeypatch):
+        """SUPERSEDED IN FORM BY N3, KEPT IN SUBSTANCE. Round 2 sent
+        `actor_seat="   "`; that argument is now refused outright by name.
+        The property the test exists for — a blank identity is a refusal and
+        never a default — is asserted on the context, which is where identity
+        lives now."""
         monkeypatch.setattr(server.spiral_state, "session_id", None)
         out = _dispatch_ack(signal, actor_seat="   ")
         assert out["ok"] is False
-        assert "no caller identity" in out["error"]
+        assert "'actor_seat' is not an accepted argument" in out["error"]
+        blank = _dispatch_ack(signal)
+        assert blank["ok"] is False
+        assert "no caller identity" in blank["error"]
 
     def test_a_placeholder_session_is_not_an_identity(self, signal, monkeypatch):
         monkeypatch.setattr(server.spiral_state, "session_id", "unknown")
@@ -526,9 +556,18 @@ class TestF5TheActorIsResolvedNotComposed:
         with pytest.raises(ValueError):
             sl._normalise_actor("seat:None")
 
-    def test_actor_seat_is_published_so_the_bridge_can_fill_it(self):
+    def test_no_identity_argument_is_published_at_all(self):
+        """REVERSED BY REVIEW N3, DELIBERATELY. Round 2 published `actor_seat`
+        "so the bridge can fill it in"; the reviewer then filled it in from an
+        ordinary MCP call and closed a signal as an arbitrary seat. A
+        parameter the server reads is reachable by every caller of the
+        server. The bridge now uses the dispatch context instead."""
+        from sovereign_stack.dispatch_context import REFUSED_IDENTITY_ARGUMENTS
+
         tool = next(t for t in asyncio.run(server.list_tools()) if t.name == "signal_ack")
-        assert "actor_seat" in tool.inputSchema["properties"]
+        for forbidden in REFUSED_IDENTITY_ARGUMENTS:
+            assert forbidden not in tool.inputSchema["properties"]
+        assert set(tool.inputSchema["required"]) == {"signal_id", "state"}
 
 
 # ══════════════════════════════════════════════════════════════════════════

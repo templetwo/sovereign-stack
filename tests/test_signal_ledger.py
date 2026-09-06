@@ -316,23 +316,31 @@ def test_handle_tools(tmp_sovereign_root):
     assert summary["ok"] is True
     assert summary["total"] == 1
     sid = sl.signal_id_for("halt", "z.md")
-    closed = json.loads(
-        sl.handle_signal_tool(
-            "signal_ack",
-            {"signal_id": sid, "state": "acted", "reason": "checked"},
-            root=root,
-            actor="seat:spiral_test",
+    from sovereign_stack.dispatch_context import reset_caller_seat, set_caller_seat
+
+    token = set_caller_seat("seat:spiral_test")
+    try:
+        closed = json.loads(
+            sl.handle_signal_tool(
+                "signal_ack",
+                {"signal_id": sid, "state": "acted", "reason": "checked"},
+                root=root,
+            )
         )
-    )
+    finally:
+        reset_caller_seat(token)
     assert closed["ok"] is True
-    refused = json.loads(
-        sl.handle_signal_tool(
-            "signal_ack",
-            {"signal_id": sid, "state": "dismissed", "reason": "x"},
-            root=root,
-            actor="daemon",
+    token = set_caller_seat("daemon")
+    try:
+        refused = json.loads(
+            sl.handle_signal_tool(
+                "signal_ack",
+                {"signal_id": sid, "state": "dismissed", "reason": "x"},
+                root=root,
+            )
         )
-    )
+    finally:
+        reset_caller_seat(token)
     assert refused["ok"] is False
 
 
@@ -556,19 +564,42 @@ class TestP1ProducerSeparationIsAnActorCheck:
         assert set(tool.inputSchema["required"]) == {"signal_id", "state"}
 
     def test_a_caller_cannot_choose_who_closed_it(self, tmp_sovereign_root):
+        """UPDATED BY REVIEW N3. `owner` used to be silently ignored here; an
+        ignored identity argument is indistinguishable from an honoured one,
+        so it is now refused by name. The identity comes from the dispatch
+        context and from nowhere else."""
+        from sovereign_stack.dispatch_context import reset_caller_seat, set_caller_seat
+
         root = tmp_sovereign_root
         sl.open_signal(
             source="halt", native_id="a.md", produced_at="2026-09-01T00:00:00Z", root=root
         )
         sid = sl.signal_id_for("halt", "a.md")
-        out = json.loads(
-            sl.handle_signal_tool(
-                "signal_ack",
-                {"signal_id": sid, "state": "acted", "reason": "done", "owner": "somebody-else"},
-                root=root,
-                actor="seat:spiral_20260906_000000",
+        token = set_caller_seat("seat:spiral_20260906_000000")
+        try:
+            refused = json.loads(
+                sl.handle_signal_tool(
+                    "signal_ack",
+                    {
+                        "signal_id": sid,
+                        "state": "acted",
+                        "reason": "done",
+                        "owner": "somebody-else",
+                    },
+                    root=root,
+                )
             )
-        )
+            out = json.loads(
+                sl.handle_signal_tool(
+                    "signal_ack",
+                    {"signal_id": sid, "state": "acted", "reason": "done"},
+                    root=root,
+                )
+            )
+        finally:
+            reset_caller_seat(token)
+        assert refused["ok"] is False
+        assert "'owner' is not an accepted argument" in refused["error"]
         assert out["ok"] is True
         assert out["row"]["closed_by"] == "seat:spiral_20260906_000000"
         assert out["row"]["owner"] == "watch-2/3", "assignment is not the actor"
@@ -587,22 +618,23 @@ class TestP1ProducerSeparationIsAnActorCheck:
                 sl.ack_signal(sid, actor=spelling, state="dismissed", reason="nope", root=root)
 
     def test_a_call_with_no_resolvable_actor_is_refused(self, tmp_sovereign_root):
+        """An UNSET dispatch context is a refusal. There is no longer an
+        `actor` parameter to pass a blank into (review N3) — the absence of
+        an established identity is the case, and it is the default case."""
         root = tmp_sovereign_root
         sl.open_signal(
             source="halt", native_id="c.md", produced_at="2026-09-01T00:00:00Z", root=root
         )
         sid = sl.signal_id_for("halt", "c.md")
-        for actor in (None, "", "   "):
-            out = json.loads(
-                sl.handle_signal_tool(
-                    "signal_ack",
-                    {"signal_id": sid, "state": "acted", "reason": "x"},
-                    root=root,
-                    actor=actor,
-                )
+        out = json.loads(
+            sl.handle_signal_tool(
+                "signal_ack",
+                {"signal_id": sid, "state": "acted", "reason": "x"},
+                root=root,
             )
-            assert out["ok"] is False
-            assert "caller identity" in out["error"]
+        )
+        assert out["ok"] is False
+        assert "caller identity" in out["error"]
 
     def test_the_dispatch_layer_supplies_a_server_generated_actor(self):
         from sovereign_stack import server

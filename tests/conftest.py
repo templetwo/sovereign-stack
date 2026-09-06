@@ -578,3 +578,22 @@ def _signal_ledger_never_touches_live(
 @pytest.fixture(autouse=True)
 def _no_live_dashboard_probes(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SOVEREIGN_DASHBOARD_NO_EXTERNAL_PROBES", "1")
+
+
+# ── AUTOUSE GUARD (own labelled block) ──────────────────────────────────────
+#          THE DISPATCH CONTEXT DOES NOT LEAK BETWEEN TESTS
+#
+# `dispatch_context.CALLER_SEAT` is a ContextVar, and a sync pytest test runs
+# in the main thread's context — so a test that sets a seat and fails before
+# its reset would hand that identity to every test after it, and the tests
+# that assert "an unestablished identity is a refusal" would pass or fail
+# depending on file order. Restoring it here makes that impossible.
+@pytest.fixture(autouse=True)
+def _dispatch_context_is_clean() -> None:
+    from sovereign_stack.dispatch_context import CALLER_SEAT
+
+    token = CALLER_SEAT.set(None)
+    try:
+        yield
+    finally:
+        CALLER_SEAT.reset(token)
