@@ -115,13 +115,6 @@ BASE_TOOLS: frozenset[str] = frozenset(
         "nape_observe",
         "nape_honks",
         "nape_ack",
-        # Signal ledger (mesh-20260905 watch seat). Read + governed close;
-        # same shape as nape_ack (append-only state change, no deletion,
-        # no policy mutation, no service control). Unclassified, these
-        # would fail-closed to step-up — classify them so a remote seat
-        # can read the watch surface without a tap, matching nape.
-        "signals_summary",
-        "signal_ack",
         "record_prior_alignment",
         "prior_alignment_summary",
         "nape_honks_with_history",
@@ -219,6 +212,28 @@ STEP_UP_REASONS: dict[str, str] = {
 def step_up_reason(tool_name: str) -> str | None:
     """The human-readable reason this tool taps, if one is registered."""
     return STEP_UP_REASONS.get(tool_name)
+
+
+# Live native tools DELIBERATELY left unclassified, with the reason and date.
+#
+# `classify()` does not read this set — an unclassified tool already falls to
+# step-up, which is the fail-closed default and exactly the behaviour wanted
+# here. The set exists so the registry drift guard can tell "held at a human's
+# gate" from "somebody forgot to classify a new tool", and so a reader of this
+# module finds the decision written down instead of inferring it from absence.
+#
+#   signals_summary / signal_ack — the signal-ledger branch shipped these in
+#   BASE_TOOLS. The cross-substrate review of 2026-09-06 (Astra, Codex seat)
+#   named it as a P1: this module's contract at the top of the file reserves a
+#   new base classification for a human, and the release does not widen the
+#   outside Claude surface. Anthony's trusted-seat surface is the bridge's seat
+#   path, not the remote base tier. Held pending an explicit classification.
+HELD_UNCLASSIFIED: frozenset[str] = frozenset(
+    {
+        "signals_summary",
+        "signal_ack",
+    }
+)
 
 
 def classify(tool_name: str) -> str:

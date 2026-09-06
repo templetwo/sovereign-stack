@@ -2888,6 +2888,27 @@ async def _reject_unknown_params(tool_name: str, arguments: dict) -> None:
     raise ValueError("; also: ".join(_describe(k) for k in unknown))
 
 
+def _signal_actor() -> str:
+    """The closer identity for the signal ledger, resolved SERVER-SIDE.
+
+    This is deliberately NOT `arguments["owner"]` and NOT
+    `arguments["source_instance"]`. Both are strings the caller composes, and
+    the ledger's producer separation is meaningless if the thing it compares
+    against is chosen by the party it is meant to constrain: the review of
+    2026-09-06 showed `owner="daemon"` refused while `owner="Daemon"` and
+    `owner="watch-2/3"` both landed, i.e. a caller could claim to be any
+    closer that was not spelled exactly like the producer.
+
+    `spiral_state.session_id` is server-generated (spiral.py:79) and cannot
+    be set from a tool call, so it can never collide with a producer name.
+    It is a WEAK identity — the bridge shares one spiral session across
+    remote writers, which is why the two ledger tools are held out of the
+    remote base tier in this release rather than leaning on it — but it is a
+    TRUE one, and that is the property producer separation actually needs.
+    """
+    return f"seat:{spiral_state.session_id}"
+
+
 async def _dispatch_tool(name: str, arguments: dict):
     """Inner dispatcher — contains the original handle_tool body.
 
@@ -3973,7 +3994,12 @@ Phase: {spiral_state.current_phase.value}
         return [TextContent(type="text", text=text)]
 
     if name in [t.name for t in SIGNAL_TOOLS]:
-        text = await asyncio.to_thread(handle_signal_tool, name, arguments)
+        # THE ACTOR IS RESOLVED HERE, NOT READ FROM `arguments`.
+        # `signal_ack` has no closer parameter (signal_ledger.SIGNAL_TOOLS):
+        # producer separation used to be a comparison against a caller-typed
+        # `owner`, which meant a caller with tool access could name a
+        # different closer and the refusal was only a spelling check.
+        text = await asyncio.to_thread(handle_signal_tool, name, arguments, None, _signal_actor())
         return [TextContent(type="text", text=text)]
 
     # Nape daemon — runtime critique layer
