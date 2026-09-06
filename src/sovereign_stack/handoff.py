@@ -367,8 +367,12 @@ class HandoffEngine:
         correction pointed at the wrong record is worse than no link: it moves
         the CORRECTED BY banner onto an innocent handoff.
 
-        Raises ValueError if the reference resolves to nothing on disk, or is
-        not a string at all — see the type check below.
+        Raises ValueError on all four ways a reference can fail, each with its
+        own message: not a string at all (see the type check below), empty once
+        stripped, not normalisable to an id (a bare "." or "/"), or resolving
+        to nothing on disk. Enumerated rather than summarised because a
+        docstring that outran its code is finding 4 of this same review — the
+        author guard promised to echo the refused note and did not.
         """
         # TYPE-CHECKED, and the reason is a real caller, not defensiveness:
         # record_insight's `supersedes` in this same codebase is a
