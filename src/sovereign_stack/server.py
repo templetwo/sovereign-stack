@@ -866,6 +866,19 @@ async def list_tools():
                                 "instead of an ENOENT from the filesystem."
                             ),
                         },
+                        "source_instance": {
+                            "type": "string",
+                            "description": (
+                                "WHO is asking — seat, model, and enough to tell you "
+                                "apart from a concurrent writer. Same field, same "
+                                "meaning, and same first-class storage as "
+                                "record_insight's; added here 2026-09-05 because a "
+                                "thread carried no author at all, so an open question "
+                                "could not be attributed to the seat that opened it. "
+                                "session_id is NOT a substitute — it is the BRIDGE's "
+                                "spiral session, identical for every writer."
+                            ),
+                        },
                         "original_timestamp": _original_timestamp_schema(changes_claim_id=False),
                     },
                     "required": ["question"],
@@ -3137,6 +3150,12 @@ async def _dispatch_tool(name: str, arguments: dict):
                 domain,
                 spiral_state.session_id,
                 original_timestamp=arguments.get("original_timestamp"),
+                # Forwarded, not dropped. record_insight's source_instance was
+                # accepted and SILENTLY DISCARDED for months because the schema
+                # declared it and this dispatch never passed it on (fixed
+                # 2026-08-28). Declaring the property without this line would
+                # reproduce that exact defect one tool over.
+                source_instance=arguments.get("source_instance"),
             )
         except ValueError as exc:
             raise ValueError(f"record_open_thread rejected: {exc}") from exc
