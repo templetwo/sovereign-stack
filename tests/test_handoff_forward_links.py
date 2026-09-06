@@ -442,3 +442,227 @@ class TestAuthorGuardThroughTheTool:
         # No "default" key: test_contract_walker walks every default-bearing
         # param and would try to call handoff with it.
         assert "default" not in props["supersedes"]
+
+
+# ── 7. Malformed back-pointers on disk: cost their own link, not the store ──
+
+
+class TestMalformedBackPointersDoNotBreakTheStore:
+    """One odd ``supersedes`` value on disk must not take down every read.
+
+    THE DEFECT THIS PINS (two adversarial reviews, 2026-09-05): the first cut
+    of ``_build_forward_index`` did ``(rec.get("supersedes") or "").strip()``,
+    which raises AttributeError on a list or an int, and
+    ``_annotate_forward_links`` ran OUTSIDE ``_load_all``'s per-file guard. So
+    a single hand-edited record, a migration artefact, or a substrate writing
+    the ``record_insight`` list shape would have broken ``unconsumed()``,
+    ``unsigned_by()``, ``all()`` and the boot door for the WHOLE store — the
+    failure the forward-link feature exists to prevent, delivered by the
+    feature itself.
+
+    The fixtures are hand-written JSON on purpose: ``write()`` refuses all four
+    of these shapes, so the only way a store acquires one is out-of-band, which
+    is exactly the case the read side has to survive.
+    """
+
+    MALFORMED = {
+        "list": ["x"],
+        "int": 42,
+        "empty": "",
+        "dict": {"id": "x"},
+    }
+
+    @pytest.fixture
+    def poisoned(self, engine):
+        """A store holding one good correction pair + four malformed records.
+
+        The good pair is what makes "the other records still get their
+        annotations" a real assertion instead of a vacuous one.
+        """
+        original = _write(engine, "hq_module_audit exit 0")
+        corrector = _write(engine, "correction: exit 1", supersedes=_id(original))
+
+        for label, value in self.MALFORMED.items():
+            path = engine.root / f"20260101T00000{len(label)}_{label}_probe_aaaaaa.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "timestamp": f"2026-01-01T00:00:0{len(label)}",
+                        "source_instance": f"malformed-{label}",
+                        "source_session_id": "spiral_test",
+                        "thread": "general",
+                        "note": f"a record whose supersedes is {label}-shaped",
+                        "consumed_at": None,
+                        "consumed_by": None,
+                        "supersedes": value,
+                    },
+                    indent=2,
+                )
+            )
+        # A null supersedes is ABSENT-shaped, not malformed — pinned alongside
+        # so the two are not conflated by a future tightening.
+        (engine.root / "20260101T000009_null_probe_aaaaaa.json").write_text(
+            json.dumps(
+                {
+                    "timestamp": "2026-01-01T00:00:09",
+                    "source_instance": "malformed-null",
+                    "source_session_id": "spiral_test",
+                    "thread": "general",
+                    "note": "supersedes is explicit JSON null",
+                    "consumed_at": None,
+                    "consumed_by": None,
+                    "supersedes": None,
+                }
+            )
+        )
+        return engine, original, corrector
+
+    def test_unconsumed_survives(self, poisoned):
+        engine, original, _corrector = poisoned
+        records = engine.unconsumed(limit=50)
+        assert len(records) == 7  # 2 written + 4 malformed + 1 null
+        assert _id(original) in {_id(r) for r in records}
+
+    def test_unsigned_by_survives(self, poisoned):
+        engine, _original, _corrector = poisoned
+        assert len(engine.unsigned_by("hq-reader-seat", limit=50)) == 7
+        assert engine.unsigned_by_count("hq-reader-seat") == 7
+
+    def test_all_survives(self, poisoned):
+        engine, _original, _corrector = poisoned
+        assert len(engine.all(limit=50)) == 7
+        assert engine.all_count() == 7
+        assert engine.unconsumed_count() == 7
+
+    def test_supersession_index_survives_and_keeps_the_good_link(self, poisoned):
+        engine, original, corrector = poisoned
+        index = engine.supersession_index()
+        assert list(index) == [_id(original)]
+        assert index[_id(original)][0]["handoff_id"] == _id(corrector)
+
+    def test_the_good_record_still_gets_its_annotation(self, poisoned):
+        engine, original, corrector = poisoned
+        by_id = {_id(r): r for r in engine.all(limit=50)}
+        assert by_id[_id(original)]["_corrected_by"][0]["handoff_id"] == _id(corrector)
+        for label in self.MALFORMED:
+            malformed = next(
+                r for r in by_id.values() if r["source_instance"] == f"malformed-{label}"
+            )
+            assert "_corrected_by" not in malformed
+
+    def test_malformed_records_render_without_crashing(self, poisoned):
+        engine, _original, _corrector = poisoned
+        for rec in engine.all(limit=50):
+            text = format_handoff_for_surface(rec)
+            assert rec["note"] in text
+            # A back-pointer that names nothing renders as no back-pointer —
+            # never as a stray "supersedes []" line, and never as a traceback.
+            # Checked on the LINE, not the whole text: one fixture's note says
+            # the word (and a substring check on it passed vacuously at first).
+            if rec.get("source_instance", "").startswith("malformed-"):
+                assert not [ln for ln in text.splitlines() if ln.strip().startswith("supersedes ")]
+
+    def test_the_skipped_links_are_counted_not_swallowed(self, poisoned, caplog):
+        """A dropped link is a partial answer; a partial answer says so."""
+        from sovereign_stack import handoff as handoff_module
+
+        engine, _original, _corrector = poisoned
+        with caplog.at_level("WARNING", logger=handoff_module.__name__):
+            _index, malformed = handoff_module._forward_index_with_coverage(engine._load_all())
+        assert len(malformed) == len(self.MALFORMED)
+        assert "unusable 'supersedes'" in caplog.text
+        assert str(len(self.MALFORMED)) in caplog.text
+
+    def test_a_non_object_json_file_does_not_break_the_read(self, engine):
+        """The same store-wide outage, one malformation over: ``_path`` cannot
+        be assigned into a list, and TypeError was not in the except tuple."""
+        good = _write(engine, "a real handoff")
+        (engine.root / "20260101T000010_notanobject_probe_aaaaaa.json").write_text("[1, 2]")
+        (engine.root / "20260101T000011_scalar_probe_aaaaaa.json").write_text("42")
+        records = engine.all(limit=50)
+        assert [_id(r) for r in records] == [_id(good)]
+
+
+# ── 8. Read-side normalisation: the write path normalised, the read did not ─
+
+
+class TestReadSideNormalisation:
+    def test_a_stem_form_pointer_still_yields_a_corrected_by_banner(self, engine):
+        """A back-pointer stored WITHOUT ``.json`` must still link.
+
+        ``write()`` normalises through ``resolve_handoff_id`` and the read side
+        did not, so a stem-form pointer built an index key no filename could
+        match and the correction silently did not exist — no error, no banner.
+        Nothing this codebase writes takes that shape, which is precisely why
+        the gap would have gone unnoticed until something else wrote one.
+        """
+        original = _write(engine, "hq_module_audit exit 0")
+        corrector = _write(engine, "correction: exit 1")
+
+        # Rewrite the corrector's stored pointer to the stem form, out of band.
+        path = Path(corrector["_path"])
+        data = json.loads(path.read_text())
+        data["supersedes"] = _id(original).removesuffix(".json")
+        path.write_text(json.dumps(data, indent=2))
+
+        by_id = {_id(r): r for r in engine.all(limit=50)}
+        stubs = by_id[_id(original)].get("_corrected_by")
+        assert stubs, "a stem-form back-pointer produced no forward link"
+        assert stubs[0]["handoff_id"] == _id(corrector)
+        assert f"⚠ CORRECTED BY {_id(corrector)}" in format_handoff_for_surface(
+            by_id[_id(original)]
+        )
+
+    def test_the_corrector_renders_its_pointer_in_canonical_form(self, engine):
+        """Rendered as the id the banner keys on, not as the stored spelling —
+        two spellings of one link would read as two links."""
+        original = _write(engine, "original")
+        corrector = _write(engine, "correction")
+        path = Path(corrector["_path"])
+        data = json.loads(path.read_text())
+        data["supersedes"] = _id(original).removesuffix(".json")
+        path.write_text(json.dumps(data, indent=2))
+
+        by_id = {_id(r): r for r in engine.all(limit=50)}
+        assert f"supersedes {_id(original)}" in format_handoff_for_surface(by_id[_id(corrector)])
+
+
+# ── 9. The refused note travels back to the caller (docstring made true) ────
+
+
+class TestRefusedNoteTravelsBack:
+    """handoff.py's author guard promised this in prose and did not do it.
+
+    An unnamed handoff over REST is refused with the caller's only copy of the
+    note in the request body; a refusal that does not echo it is a lost note.
+    """
+
+    def test_unnamed_author_refusal_echoes_the_note(self, engine):
+        with pytest.raises(ValueError, match="source_instance is required") as exc:
+            engine.write(
+                note="the thing the next seat needs", source_instance="", source_session_id="s"
+            )
+        assert "the thing the next seat needs" in str(exc.value)
+
+    def test_placeholder_author_refusal_echoes_the_note(self, engine):
+        with pytest.raises(ValueError, match="does not identify an author") as exc:
+            engine.write(
+                note="the thing the next seat needs",
+                source_instance="unknown",
+                source_session_id="s",
+            )
+        assert "the thing the next seat needs" in str(exc.value)
+
+    def test_the_preview_is_bounded_and_single_line(self, engine):
+        long_note = "line one\nline two\n" + ("x" * 500)
+        with pytest.raises(ValueError) as exc:
+            engine.write(note=long_note, source_instance="", source_session_id="s")
+        message = str(exc.value)
+        assert "\n" not in message, "a multi-line preview breaks downstream match= regexes"
+        assert "line one line two" in message
+        assert "x" * 500 not in message
+        assert "…" in message
+
+    def test_a_named_author_is_unaffected(self, engine):
+        record = _write(engine, "a signed note")
+        assert record["note"] == "a signed note"

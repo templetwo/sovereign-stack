@@ -140,8 +140,29 @@ REQUIRED_ARGS: dict = {
         "what_learned": "omission must equal explicit default",
     },
     "record_open_thread": lambda root: {"question": "does omitting a default equal passing it?"},
-    "handoff": lambda root: {"note": "contract walker handoff probe"},
-    "close_session": lambda root: {"what_i_learned": "contract walker close probe"},
+    # NAMED AUTHORS, and the name is what makes these two cases non-vacuous.
+    # handoff and close_session's handoff leg refuse an unnamed author
+    # (_validate_author_identity, 2026-09-05). With only `note` supplied, BOTH
+    # of the walker's invocations were refused identically, so the case went
+    # green without ever reaching the handler's `thread` default — proven by
+    # experiment: with the handler default deliberately broken to
+    # "WALKER-RED-EXPERIMENT", the old args still PASSED and these args FAIL.
+    # The author string must also stay out of NON_IDENTIFYING_CONSUMERS
+    # ("test", "unknown", ... are refused as placeholders).
+    "handoff": lambda root: {
+        "note": "contract walker handoff probe",
+        "source_instance": "contract-walker-seat",
+    },
+    # close_session's author guard sits behind `if what_to_pick_up:` — without
+    # a note to hand on, the handoff leg never runs and the guard is never
+    # reached, so both are supplied. (The unnamed-author degradation itself is
+    # pinned separately: test_handoff_forward_links.py's
+    # TestAuthorGuardThroughTheTool::test_close_session_refuses_only_its_handoff_leg.)
+    "close_session": lambda root: {
+        "what_i_learned": "contract walker close probe",
+        "what_to_pick_up": "contract walker handoff leg probe",
+        "source_instance": "contract-walker-seat",
+    },
     "comms_unread_bodies": lambda root: {"instance_id": "contract-walker"},
     "comms_acknowledge": lambda root: {
         "message_id": "msg-0001",
@@ -472,6 +493,26 @@ class TestWalkerAccounting:
     def test_skip_reasons_are_nonempty(self):
         for tool_name, reason in SKIP.items():
             assert reason.strip(), f"SKIP['{tool_name}'] needs a one-line reason"
+
+    @pytest.mark.parametrize("tool", ["handoff", "close_session"])
+    def test_the_author_gated_cases_are_not_vacuous(self, tool):
+        """A walked case that refuses BOTH invocations passes without testing.
+
+        The handoff pair went green for exactly that reason after the author
+        guard landed: REQUIRED_ARGS supplied only `note`, so both probes were
+        refused identically and the schema default was never reached. An
+        equality assertion between two errors is not coverage — pin that the
+        handler actually ran, so a future trim of REQUIRED_ARGS is loud.
+        """
+        payload = _run_case(tool)
+        assert not payload.startswith("EXCEPTION"), (
+            f"{tool} refused the walker's own invocation — the "
+            f"omitted-vs-explicit comparison would pass on two identical "
+            f"errors without exercising any default: {payload[:300]}"
+        )
+        assert "Handoff written" in payload, (
+            f"{tool} did not reach the handoff write path: {payload[:300]}"
+        )
 
     def test_walked_vs_skipped_counts_are_visible(self):
         """Pin the shape of the walk so a silent coverage collapse is loud.
