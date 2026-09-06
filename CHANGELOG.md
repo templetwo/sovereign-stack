@@ -9,6 +9,120 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### The signal ledger measures, or it says null
+
+The 2026-09-06 adversarial review of the release candidate rejected it on
+nine findings. Eight are closed here; the ninth (the suite's live-store
+isolation) is below under its own heading.
+
+**A completed scan now leaves cumulative evidence, not a delta.** The scan
+marker recorded `counts` meaning "opened by THIS scan", so an ordinary
+zero-delta rescan wrote all zeros and the only loss check became `0 >
+distinct` — false for every possible ledger. Truncating the ledger after such
+a rescan produced `error: null, ingestion: "ok", total: 0` for a ledger whose
+contents were gone. The marker now carries `ledger_bytes`, `ledger_rows`,
+`ledger_sha256` and `max_age_seconds`, and every read re-verifies the whole
+ledger against them. The digest covers exactly the first `ledger_bytes` bytes:
+the ledger is append-only and a watch seat legitimately acks a second after a
+scan, so a whole-file hash would report loss on every honest acknowledgement,
+and a tail-only hash survives a file whose head was cut away. Scans are now
+judged stale against a bound the marker itself declares. Empty or partial
+`counts` / `source_status` maps are refused — `scan_all` always writes all
+seven sources, so a marker missing one did not come from a completed scan.
+
+**A source that could not be read no longer counts as zero of anything.**
+`scan_threads` kept each shard's `bad_lines` and dropped its read status, so a
+`chmod 000` shard scanned as `thread: "ok"`. Counts are now nulled at the fold:
+`total`, the stale windows and every unmeasured source return `null`, and
+corrupt rows blind all sources, because a row rejected for an invalid `source`
+field has no trustworthy source to attribute the loss to. `signals_summary`
+returns the heartbeat field itself rather than re-folding the ledger — the
+review caught it rebuilding numbers that discarded exactly these nulls. The
+measured floor remains available under `open_measured` /
+`stale_24h_measured` / `stale_7d_measured`, names that say what they are.
+
+**Ingestion runs on read.** `scan_all` described itself as an "owned ingestion
+path" and had no caller anywhere in the tree, the bridge, the scripts or the
+LaunchAgents. The native `heartbeat` tool and `signals_summary` now refresh
+before answering, skipped while the marker is inside its freshness bound so a
+burst of reads costs one sweep. A scan failure is reported as an error and
+never as the previous sweep's counts. No worker is installed; that is a system
+change and stays at the human gate.
+
+**`signal_ack` stamps who the dispatch resolved, or refuses.** The actor was
+`f"seat:{spiral_state.session_id}"` with no branches, so it could not express
+"I do not know who this is": patched session values of `daemon`, `None` and
+`""` each closed a signal successfully, stamping `seat:daemon`, `seat:None`
+and `seat:`. The bridge now injects `actor_seat` from the seat identity it
+verified — the convention `source_instance` already uses on
+`record_open_thread` — the spiral session remains a fallback only when it is a
+real value, and a missing identity is a refusal. Producer separation strips one
+namespace before comparing, so `seat:daemon` is finally comparable to the
+producer label `daemon`, and refused.
+
+**`signal_ack`'s intent is `write`, not `govern`.** Acknowledging a signal is
+the watch seat's ordinary operational act, not law, policy, seat permission,
+ring placement or a delete. The `govern` classification is what left the
+designated watch seat with no closure path at all.
+
+**One cross-shard latest-state policy.** Thread state was decided per shard and
+could only ever close a signal, so a thread resolved in August and re-opened in
+September stayed `acted` permanently — a rescan is idempotent, so nothing
+repaired it. Scanning is now two passes: decide across all shards by latest
+timestamp, then act. `unacked_signals` also reaches the native heartbeat, from
+the same function the dashboard uses.
+
+### Five advertised folds were not folds
+
+The retirement release mapped ten retired tools onto surviving ones. The review
+executed each replacement against a real store and found seven did not preserve
+the retired effect. Three are now implemented properly, five are withdrawn.
+
+`signals_summary` gains `mode='list'`, returning per-signal rows — `signal_id`,
+`source`, `kind`, `opened_at`, `owner`, `state` and the concern text — so a
+watch seat can see what it is acknowledging and pass the id to `signal_ack`.
+Ledger rows gained optional `kind` and `concern`, carried forward through a
+close so the trail is not identifiers with no bodies. That makes `nape_honks`
+and `nape_honks_with_history` real folds. (Honest limit: per-ack note text
+still lives in `nape/acks.jsonl` and is not carried into the ledger.)
+
+`mark_uncertainty`, `resolve_uncertainty`, `comms_acknowledge`,
+`handoff_acted_on` and `handoff_archaeology` are now outright retirements whose
+refusal text names what was lost: no uncertainty marker or confidence value, no
+marker-id resolution, `comms_get_acks(message_id)` stays empty after a
+`signal_ack`, the acted-on count does not move, and `handoff` has no history or
+list mode. **An advertised fold that does not preserve the effect is worse than
+an honest dead end, because the caller believes the work landed.**
+
+`watch_status`, `watch_cancel` and `watch_resample` went the other way.
+Retiring them outright left `post_fix_verify` published and still creating
+watches a seat could then never inspect or cancel — a workflow regression, not
+a retirement. They fold into `post_fix_verify` as
+`mode='status'|'cancel'|'resample'`; the handlers are unchanged and reached
+through the mode. The schema's `required: [fix_description, probes]` had to go,
+since the manage modes carry neither, so that invariant moved into the handler
+and is tested — dropping it without re-asserting it would have traded a fold
+for a fail-open on the only write path there.
+
+### The test suite stops writing into the operator's live store
+
+`server.py` binds `SPIRAL_STATE_PATH` from `DEFAULT_ROOT` at import and saves
+spiral state on every dispatch before any branch matches, so every test that
+reached the dispatcher wrote the operator's live
+`~/.sovereign/spiral_state.json`. The review's full-suite log carries **139**
+`PermissionError` lines naming that file; they were refused only because that
+run happened to be sandboxed. Four test files already rebound the path by hand,
+which is the evidence that a per-file fix leaves every other file exposed.
+
+`tests/conftest.py` gains two more autouse guards, six now, all the same
+redirect-and-refuse shape: one for the spiral state, one for the signal ledger.
+The second exists because this release's own change — ingestion on read — makes
+the native heartbeat sweep `default_sovereign_root()`, which would have had
+every heartbeat test scan the live chronicle and mint a ledger file that does
+not exist on that machine. Both are demonstrated able to fail in
+`tests/test_live_store_containment.py`, including through a real dispatch.
+
+
 ### Ring 2 reviewer identity is required, never defaulted
 
 Every review entry point in both bridge libraries defaulted the reviewer name
