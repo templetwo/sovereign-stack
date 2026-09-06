@@ -102,15 +102,55 @@ class TestHandoffEngine:
         )
         assert record["thread"] == "general"
 
-    def test_write_unknown_source_defaults(self):
-        """Empty source_instance / session_id get replaced with 'unknown'."""
+    def test_write_unnamed_author_refused(self):
+        """An empty source_instance is REFUSED, not silently stamped 'unknown'.
+
+        THIS TEST WAS INVERTED ON PURPOSE (2026-09-05). It used to be
+        ``test_write_unknown_source_defaults`` and asserted the opposite —
+        that an empty source_instance "gets replaced with 'unknown'" — which
+        locked the write-side fail-open into the suite as a guarantee. That
+        default is how 78 of 320 live handoffs (24%) came to name no author,
+        4 of them inside the newest 25 (gpt-6-astra / Codex audit,
+        2026-09-05). A test asserting a defect is the reason the defect
+        survived three fixes to its reader-side twin.
+
+        The session_id half of the old assertion is UNCHANGED and still
+        holds: source_session_id is stamped server-side from spiral_state and
+        is not the caller's to name, so it keeps its "unknown" fallback.
+        """
+        with pytest.raises(ValueError, match="source_instance is required"):
+            self.engine.write(
+                note="test",
+                source_instance="",
+                source_session_id="",
+                thread="t",
+            )
+
+    def test_write_placeholder_author_refused(self):
+        """A filled-in-but-meaningless author is refused the same way.
+
+        The reader half (NON_IDENTIFYING_CONSUMERS) has refused these since
+        2026-08-01; the writer half accepted them until now, so 'unknown'
+        looked exactly like a real seat name on every surface.
+        """
+        for placeholder in ("unknown", "test", "  N/A  ", "TBD"):
+            with pytest.raises(ValueError, match="does not identify an author"):
+                self.engine.write(
+                    note="test",
+                    source_instance=placeholder,
+                    source_session_id="s",
+                )
+
+    def test_write_real_author_still_accepted_and_session_id_falls_back(self):
+        """The guard rejects placeholders only — a real seat name passes, and
+        the server-stamped session id keeps its historical fallback."""
         record = self.engine.write(
             note="test",
-            source_instance="",
+            source_instance="  HQ Mac Studio — claude-fable-5-1  ",
             source_session_id="",
             thread="t",
         )
-        assert record["source_instance"] == "unknown"
+        assert record["source_instance"] == "HQ Mac Studio — claude-fable-5-1"
         assert record["source_session_id"] == "unknown"
 
     def test_write_with_special_chars_in_slug(self):

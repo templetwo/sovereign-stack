@@ -967,7 +967,12 @@ async def list_tools():
                 description=(
                     "Write a handoff note for the next instance. Intent for the future, not a record "
                     "of the past. Size-limited to ~2KB — longer thoughts belong in record_insight. "
-                    "Surfaced exactly once by where_did_i_leave_off, then archived (not deleted)."
+                    "Surfaced by where_did_i_leave_off to every seat that has not yet SIGNED it — "
+                    "reading signs it for you alone and hides it from nobody; only an explicit "
+                    "retire() clears it for everyone (signature ledger, 2026-08-31). The previous "
+                    "wording here — 'surfaced exactly once, then archived' — described the "
+                    "consumed_at behaviour that ledger replaced, and stayed on the tool "
+                    "description after the code changed."
                 ),
                 inputSchema={
                     "type": "object",
@@ -984,7 +989,11 @@ async def list_tools():
                         },
                         "source_instance": {
                             "type": "string",
-                            "description": "Which instance is leaving this note (e.g. 'claude-code-mac-studio', 'claude-desktop', 'claude-iphone'). Helps attribution framing.",
+                            "description": "Which instance is leaving this note (e.g. 'claude-code-mac-studio', 'claude-desktop', 'claude-iphone'). REQUIRED in practice: a handoff with no named author is refused, because an unattributed claim cannot be weighed by the seat that reads it.",
+                        },
+                        "supersedes": {
+                            "type": "string",
+                            "description": "Optional id of an EARLIER handoff this one corrects (its filename, with or without .json — see handoff_archaeology). The older record is never modified; it simply starts rendering 'CORRECTED BY <id>' wherever it is surfaced, so a stale claim can no longer read as current. Refused if it names no handoff in the store.",
                         },
                     },
                     "required": ["note"],
@@ -3214,13 +3223,21 @@ async def _dispatch_tool(name: str, arguments: dict):
     if name == "handoff":
         note = arguments.get("note", "")
         thread = arguments.get("thread", "general")
-        source_instance = arguments.get("source_instance", "unknown")
+        # NO "unknown" DEFAULT. It used to be `arguments.get("source_instance",
+        # "unknown")`, which is how 78 of 320 live handoffs (24%) came to name
+        # no author — the write-side twin of the reader placeholder this store
+        # has refused since 2026-08-01. An omitted name now reaches
+        # _validate_author_identity as "" and is refused there with the note
+        # intact in the error, instead of landing anonymous and looking signed.
+        source_instance = arguments.get("source_instance", "")
+        supersedes = arguments.get("supersedes")
         try:
             record = handoff_engine.write(
                 note=note,
                 source_instance=source_instance,
                 source_session_id=spiral_state.session_id,
                 thread=thread,
+                supersedes=supersedes,
             )
         except ValueError as e:
             # Raised, not returned — P1 continuation, and THIS branch is where
@@ -3235,7 +3252,13 @@ async def _dispatch_tool(name: str, arguments: dict):
                 text=f"Handoff written → {record['_path']}\n"
                 f"  thread: {record['thread']}\n"
                 f"  from: {record['source_instance']} (session {record['source_session_id']})\n"
-                f"  note: {record['note'][:120]}{'...' if len(record['note']) > 120 else ''}",
+                + (
+                    f"  supersedes: {record['supersedes']} "
+                    "(that record now renders CORRECTED BY this one; it was not modified)\n"
+                    if record.get("supersedes")
+                    else ""
+                )
+                + f"  note: {record['note'][:120]}{'...' if len(record['note']) > 120 else ''}",
             )
         ]
 
@@ -3245,6 +3268,14 @@ async def _dispatch_tool(name: str, arguments: dict):
         what_to_pick_up = (arguments.get("what_to_pick_up") or "").strip()
         thread = arguments.get("thread", "general")
         source_instance = arguments.get("source_instance", "unknown")
+        # SCOPED DELIBERATELY TO THE HANDOFF LEG. close_session writes three
+        # things; only step 3 goes through HandoffEngine. Passing "" to the
+        # record_insight legs as well would change what lands in Anthony's
+        # chronicle for every unnamed close_session — a different surface, a
+        # different decision, and not this branch's to make. So the insight
+        # legs keep the historical "unknown" and the handoff leg gets the
+        # de-defaulted value the author guard expects.
+        handoff_author = arguments.get("source_instance", "")
 
         if not what_i_learned:
             return [TextContent(type="text", text="close_session requires what_i_learned")]
@@ -3284,7 +3315,7 @@ async def _dispatch_tool(name: str, arguments: dict):
             try:
                 handoff_engine.write(
                     note=what_to_pick_up,
-                    source_instance=source_instance,
+                    source_instance=handoff_author,
                     source_session_id=spiral_state.session_id,
                     thread=thread,
                 )
