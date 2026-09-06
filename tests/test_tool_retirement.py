@@ -28,11 +28,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shutil
+from pathlib import Path
 
 import pytest
 
 from sovereign_stack import server
-from tests.test_nape_autohook import _isolated_server
+from tests.test_nape_autohook import _isolated_server, _make_nape_with_tmpdir
 
 # The 48, exactly as Anthony's census named them.
 CENSUS_48 = [
@@ -177,9 +179,28 @@ def test_the_implementation_is_retained_not_deleted(name):
 
 
 def test_handle_tool_propagates_the_refusal_as_an_error():
-    """Through the real MCP entry point, past the Nape wrapper."""
-    with pytest.raises(ValueError, match="retired on 2026-09-06"):
-        asyncio.run(server.handle_tool("guardian_scan", {}))
+    """Through the real MCP entry point, past the Nape wrapper.
+
+    ISOLATE THE NAPE DAEMON, not just the chronicle. handle_tool's except
+    branch calls nape_daemon.observe on the way out, and nape_daemon is a
+    module-level singleton bound to the live root at import — _isolated_server
+    does not patch it (its docstring enumerates what it does patch, and this
+    is not on the list). Caught by the mtime snapshot around the full run:
+    without this, the test appended a real observation to
+    ~/.sovereign/nape/observations.jsonl. Same class as the handoff_engine
+    leak that fixture's own comment records, one singleton over.
+    """
+    daemon, tmpdir = _make_nape_with_tmpdir()
+    original = server.nape_daemon
+    server.nape_daemon = daemon
+    try:
+        with pytest.raises(ValueError, match="retired on 2026-09-06"):
+            asyncio.run(server.handle_tool("guardian_scan", {}))
+        observed = (Path(tmpdir) / "nape" / "observations.jsonl").read_text()
+        assert "guardian_scan" in observed, "Nape must still see the refused call"
+    finally:
+        server.nape_daemon = original
+        shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 def test_a_refused_call_does_not_advance_the_spiral():
