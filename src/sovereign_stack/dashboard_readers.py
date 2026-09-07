@@ -17,6 +17,15 @@ Four disciplines run through every function below.
      from a real zero at the panel, and the page has no way to say "this
      source is missing" if the server already answered "it's empty."
 
+     ONE READER DEPARTS FROM THE ``None`` HALF OF THIS, NARROWLY, AND SAYS
+     SO: ``read_open_threads_index`` returns an explicit ``{"status":
+     "absent", "reason": ..., "last_seen_age_seconds": ...}`` envelope,
+     because its panel was specified to render WHY the catalog is
+     unusable and HOW OLD the last usable one was, and ``None`` carries
+     neither. The prohibition this rule actually enforces is on plausible
+     ZEROS, and that envelope contains no count of any kind. See
+     ``_index_absent``.
+
   2. **PROVENANCE IS PART OF THE PAYLOAD.** Every returned dict carries a
      ``source`` (what was read) and an ``age_seconds`` (how old the data
      is). A panel cannot render staleness the server never told it about,
@@ -430,6 +439,305 @@ def read_open_threads(limit: int = 6) -> dict | None:
         "malformed_skipped": malformed,
         "unreadable_files": unreadable,
         "age_seconds": newest_age,
+    }
+
+
+# ── OPEN-THREADS INDEX ──────────────────────────────────────────────────────
+#
+# The pile the OPEN THREADS panel structurally cannot show. That panel
+# renders the 6 NEWEST unresolved threads; on 2026-09-06 there were 191
+# open and 176 of them had never been touched. Six of one hundred ninety
+# one is not a sample, it is a lid — the newest six are by construction the
+# only ones a reader ever sees, so the 138-day-old April rows are invisible
+# from the console no matter how long anyone watches it.
+#
+# This reader does NOT re-derive that catalog. It reads the filing the
+# index run writes, and the division of labour is the point: the index
+# script walks 163 shard files, classifies, clusters, and assigns owners;
+# the dashboard reads ONE json and renders totals. A console that
+# recomputed the catalog on a 3-second poll would walk that tree ~28,800
+# times a day to answer a question whose answer changes when someone runs
+# the index.
+
+#: Where the index run lands its newest output. LATEST.json is the pointer;
+#: the dated siblings (``2026-09-06_open-threads-index.json``) are the
+#: history and are what `_last_seen` falls back to when the pointer is gone.
+OPEN_THREADS_INDEX_DIRNAME = "open-threads-index"
+OPEN_THREADS_INDEX_FILENAME = "LATEST.json"
+
+#: Past this the panel degrades visually. The index is a hand-run
+#: instrument, not a daemon: a 3-day-old catalog is old, not broken.
+OPEN_THREADS_INDEX_STALE_DAYS = 3
+
+#: `similar_to[].reason` opens with this label when the index run grouped a
+#: near-duplicate family. See `_duplicate_clusters` for why a free-text
+#: prefix is the PRIMARY key here and what happens when it is absent.
+_DUP_LABEL_RE = re.compile(r"\bdup-(\d+)")
+
+
+def _index_absent(path: Path, reason: str, last_seen: Path | None = None) -> dict:
+    """The ABSENT envelope: a reason, an age, and NOT ONE COUNT.
+
+    This reader is the module's one deliberate departure from "a missing
+    source returns None" (discipline #1 in the module docstring), and the
+    departure is narrow: None can carry neither WHY the file is unusable
+    nor HOW OLD the last usable one was, and the panel was specified to
+    render both. Discipline #1 forbids a PLAUSIBLE ZERO — a shape a panel
+    cannot distinguish from a real measurement. There is no count of any
+    kind below, so this envelope cannot be misread as one: the panel
+    branches on `status` before it reads anything else.
+
+    `last_seen_at` is MTIME-derived and named so. It is a different
+    instrument from the `generated_at` a present file carries (that is the
+    record's own stamp), and this module already has a test insisting the
+    two never get conflated — an rsync moves an mtime, it does not move a
+    generation.
+    """
+    stat_path = last_seen if last_seen is not None else path
+    age = _mtime_age(stat_path)
+    seen_at = None
+    if age is not None:
+        with contextlib.suppress(OSError, OverflowError, ValueError):
+            seen_at = datetime.fromtimestamp(stat_path.stat().st_mtime, tz=timezone.utc).isoformat()
+    return {
+        "source": str(path),
+        "status": "absent",
+        "reason": reason,
+        "last_seen_source": str(stat_path) if age is not None else None,
+        "last_seen_at": seen_at,
+        "last_seen_age_seconds": age,
+        "age_seconds": None,
+    }
+
+
+def _newest_index_sibling(directory: Path, exclude: Path) -> Path | None:
+    """Newest dated index file, for "the age of whatever last existed".
+
+    A vanished LATEST.json does not mean the catalog never existed; the
+    dated files are still there and their mtime is the honest answer to
+    "how long since anyone ran this." Returns None when the directory
+    itself is gone, which is the case where the true answer is "never".
+    """
+    try:
+        candidates = [
+            p for p in directory.glob("*.json") if p.is_file() and p.resolve() != exclude.resolve()
+        ]
+    except OSError:
+        return None
+    if not candidates:
+        return None
+    return max(candidates, key=lambda p: p.stat().st_mtime)
+
+
+def _duplicate_clusters(open_entries: list[dict]) -> tuple[int, int, str]:
+    """(clusters, members, method) over the near-duplicate families.
+
+    TWO ALGORITHMS, and which one ran is part of the payload, because a
+    number nobody can tie to the filing beside it is a rumour.
+
+    PRIMARY — group by the ``dup-NN`` label the index run writes into each
+    ``similar_to[].reason``, and count only families with **two or more
+    OPEN members**. Verified against the 2026-09-06 filing: 14 clusters
+    covering 40 open ids, exactly what its section (a) reports. Both halves
+    of the rule are load-bearing — 15 labels appear, and `dup-05` is
+    dropped because three of its four members are already resolved, so a
+    "cluster" of one open thread is not a duplicate of anything.
+
+    FALLBACK — connected components over ``similar_to[].thread_id``,
+    restricted to open entries. Structural, using only schema fields, and
+    it exists so that a future index run which stops writing the free-text
+    label degrades to a defensible number instead of to ZERO. Zero clusters
+    while `similar_to` links plainly exist is the fabricated-zero this
+    house forbids, and a regex over prose is exactly the kind of coupling
+    that breaks quietly. Named in the payload as `similar-to-components`
+    because it does NOT reproduce the filing's number (16/47 vs 14/40 on
+    the 09-06 data): the label groups a semicolon-split family that the
+    link graph splits in two, and it ignores links carrying no label.
+    """
+    labelled: dict[str, set[str]] = {}
+    adjacency: dict[str, set[str]] = {}
+    open_ids = {e.get("thread_id") for e in open_entries if e.get("thread_id")}
+
+    for entry in open_entries:
+        this_id = entry.get("thread_id")
+        similar = entry.get("similar_to")
+        if not this_id or not isinstance(similar, list):
+            continue
+        for link in similar:
+            if not isinstance(link, dict):
+                continue
+            match = _DUP_LABEL_RE.search(str(link.get("reason") or ""))
+            if match:
+                labelled.setdefault(f"dup-{match.group(1)}", set()).add(this_id)
+            other = link.get("thread_id")
+            if isinstance(other, str) and other in open_ids and other != this_id:
+                adjacency.setdefault(this_id, set()).add(other)
+                adjacency.setdefault(other, set()).add(this_id)
+
+    families = [ids for ids in labelled.values() if len(ids) >= 2]
+    if families:
+        return len(families), sum(len(ids) for ids in families), "dup-label"
+
+    seen: set[str] = set()
+    components = 0
+    members = 0
+    for start in sorted(adjacency):
+        if start in seen:
+            continue
+        stack = [start]
+        component: set[str] = set()
+        while stack:
+            node = stack.pop()
+            if node in component:
+                continue
+            component.add(node)
+            seen.add(node)
+            stack.extend(adjacency.get(node, set()) - component)
+        if len(component) >= 2:
+            components += 1
+            members += len(component)
+    return components, members, "similar-to-components"
+
+
+def _tally(pairs, *, chronological: bool = False) -> list[dict]:
+    """Counted breakdown as an ORDERED list, not a dict.
+
+    A list because the order is a decision the server makes and JSON object
+    key order is not a contract the page should have to trust. Categories
+    and gate-shapes sort biggest-first (ties by name, so the panel does not
+    reshuffle between polls on equal counts); months sort chronologically,
+    because "2026-04" before "2026-05" is information and "72 before 52" is
+    not — a month axis that jumps around by size is unreadable as a trend.
+    """
+    counts: dict[str, int] = {}
+    for value in pairs:
+        counts[value] = counts.get(value, 0) + 1
+    if chronological:
+        ordered = sorted(counts.items())
+    else:
+        ordered = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    return [{"name": name, "count": count} for name, count in ordered]
+
+
+def read_open_threads_index() -> dict:
+    """``~/.sovereign/filings/open-threads-index/LATEST.json`` — the catalog.
+
+    ALWAYS returns a dict, never None: see `_index_absent` for why this one
+    reader carries an explicit absent envelope instead.
+
+    THE DENOMINATOR IS DERIVED, NOT COPIED, AND IT IS ONE NUMBER. The
+    filing's `coverage.counts` carries no by-category, by-month, by-shape,
+    answered-elsewhere or cluster totals, so every breakdown here is
+    computed from `entries` with `status == "open"`. That gives 191 on the
+    09-06 file, which equals `coverage.counts.open_including_nested`, and
+    the reader cross-checks exactly that: `counts_reconcile` is False when
+    the derivation and the file's own coverage line disagree, which is a
+    coverage signal, not a crash.
+
+    Be careful reading this against the filing's prose. THE .MD MIXES TWO
+    DENOMINATORS: its by-category and by-gate-shape tables sum to 191 (all
+    open), while its by-month table and its "176 never touched" are scoped
+    to the 190 TOP-LEVEL rows and silently drop the one nested entry from
+    `tech-debt,compaction,auto-detection/log.jsonl`. Nothing in an entry
+    marks it nested, so the 190 view is not reconstructible from the JSON.
+    This panel uses ONE denominator for everything and states it, so its
+    April count reads 17 where the filing's table reads 16, and its
+    never-touched reads 177 where the filing reads 176. Both are right
+    about different sets; only one of them can be a panel.
+
+    MALFORMED IS A THREE-PART BAR, and it is deliberately not stricter: a
+    dict, an `entries` list, and a parseable generation stamp. The stamp is
+    looked for at `coverage.generated_at_utc`, then top-level
+    `generated_at_utc`, then top-level `generated_at` — a fallback chain
+    rather than one key, because the LATEST.json writer is a separate
+    program from the one that produced the file this was verified against,
+    and a cosmetic difference in where it puts its own timestamp must not
+    render the panel ABSENT. An `entries` list that is EMPTY is a real
+    zero and renders present: a catalog honestly reporting nothing open is
+    a measurement, and refusing to show it would be the mirror-image lie.
+    """
+    directory = _sovereign_root() / "filings" / OPEN_THREADS_INDEX_DIRNAME
+    path = directory / OPEN_THREADS_INDEX_FILENAME
+
+    if not path.is_file():
+        # Two different absences, and telling them apart is the whole
+        # value of the line: a missing pointer beside dated files means an
+        # index run happened and did not update LATEST.json, which is a
+        # different problem from an index that has never been run here.
+        sibling = _newest_index_sibling(directory, path)
+        reason = (
+            "LATEST.json not found — dated index files exist, so the pointer is missing"
+            if sibling is not None
+            else "LATEST.json not found — no index run has landed here"
+        )
+        return _index_absent(path, reason, last_seen=sibling)
+
+    payload = _read_json(path)
+    if payload is None:
+        return _index_absent(path, "LATEST.json is unreadable or not valid JSON")
+    if not isinstance(payload, dict):
+        return _index_absent(path, "LATEST.json is not a JSON object")
+
+    entries = payload.get("entries")
+    if not isinstance(entries, list):
+        return _index_absent(path, "LATEST.json carries no `entries` list")
+
+    coverage = payload.get("coverage") if isinstance(payload.get("coverage"), dict) else {}
+    generated_at = None
+    for candidate in (
+        coverage.get("generated_at_utc"),
+        payload.get("generated_at_utc"),
+        payload.get("generated_at"),
+    ):
+        if _parse_ts(candidate) is not None:
+            generated_at = candidate
+            break
+    if generated_at is None:
+        return _index_absent(path, "LATEST.json carries no parseable generation timestamp")
+
+    open_entries = [
+        e for e in entries if isinstance(e, dict) and str(e.get("status") or "") == "open"
+    ]
+
+    def _untouched(entry: dict) -> bool:
+        touches = entry.get("touches")
+        if isinstance(touches, dict):
+            return not touches.get("count")
+        return not touches
+
+    never_touched = sum(1 for e in open_entries if _untouched(e))
+    answered = sum(1 for e in open_entries if e.get("answered_elsewhere") not in (None, "", [], {}))
+    clusters, cluster_members, cluster_method = _duplicate_clusters(open_entries)
+
+    counts = coverage.get("counts") if isinstance(coverage.get("counts"), dict) else {}
+    declared = counts.get("open_including_nested")
+    reconcile = None if not isinstance(declared, int) else declared == len(open_entries)
+
+    return {
+        "source": str(path),
+        "status": "present",
+        "author": payload.get("author") if isinstance(payload.get("author"), str) else None,
+        "generated_at": generated_at,
+        # The record's own stamp, NOT the file's mtime. `last_seen_age_seconds`
+        # on the absent envelope is the mtime one; they are never the same field.
+        "age_seconds": _age_seconds(generated_at),
+        "stale_after_days": OPEN_THREADS_INDEX_STALE_DAYS,
+        "entries_total": len(entries),
+        "open_count": len(open_entries),
+        "never_touched": never_touched,
+        "touched": len(open_entries) - never_touched,
+        "answered_elsewhere": answered,
+        "duplicate_clusters": clusters,
+        "duplicate_cluster_members": cluster_members,
+        "cluster_method": cluster_method,
+        "by_category": _tally(str(e.get("category") or "(uncategorized)") for e in open_entries),
+        "by_month": _tally(
+            ((str(e.get("opened") or "")[:7] or "(undated)") for e in open_entries),
+            chronological=True,
+        ),
+        "by_shape": _tally(str(e.get("shape") or "none") for e in open_entries),
+        "declared_open_including_nested": declared if isinstance(declared, int) else None,
+        "counts_reconcile": reconcile,
     }
 
 

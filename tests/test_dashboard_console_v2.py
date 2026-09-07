@@ -76,6 +76,17 @@ V2_KEYS = [
     "lineage",
 ]
 
+# Key 18, kept OUT of V2_KEYS deliberately. Every assertion over V2_KEYS
+# says "None on a bare root", and this key is the one reader that answers
+# absence with a reasoned envelope instead of None. Folding it into that
+# list would either break those tests or force them to be loosened, and
+# loosening the nullability contract to accommodate one exception is how a
+# contract stops being one. Its own behaviour is pinned in
+# tests/test_dashboard_open_threads_index.py.
+INDEX_KEYS = ["open_threads_index"]
+
+SNAPSHOT_KEYS = LEGACY_KEYS + V2_KEYS + INDEX_KEYS
+
 
 @pytest.fixture(autouse=True)
 def _no_external_probes(monkeypatch):
@@ -113,7 +124,7 @@ class TestSnapshotKeyContract:
         """The 10 legacy keys keep their exact names AND order; the v2 keys
         are appended as 11..16. Fails on unfixed code (only 10 keys)."""
         snapshot = web.build_snapshot()
-        assert list(snapshot.keys()) == LEGACY_KEYS + V2_KEYS
+        assert list(snapshot.keys()) == SNAPSHOT_KEYS
 
     def test_every_v2_key_is_individually_nullable(self, isolated_snapshot):
         """A bare tmp root has no spiral_state.json, no self_model.json, no
@@ -722,6 +733,7 @@ class TestStaticAssets:
             "mirror-body",
             "spiral-body",
             "threads-list",
+            "otindex-body",
             "arrival-body",
             "lineage-list",
         ],
@@ -743,6 +755,7 @@ class TestStaticAssets:
             "function svcHistoryPush",
             "function buildSparkline",
             "function toggleServiceExpanded",
+            "function renderOpenThreadsIndex",
         ):
             assert fn in js, f"must-survive function lost: {fn}"
 
@@ -825,7 +838,7 @@ class TestMetabolizeIsNeverCalled:
         monkeypatch.setattr(metabolism, "_load_all_threads", tripwire)
         monkeypatch.setattr(metabolism, "handle_metabolism_tool", tripwire)
         snapshot = web.build_snapshot()
-        assert list(snapshot.keys()) == LEGACY_KEYS + V2_KEYS
+        assert list(snapshot.keys()) == SNAPSHOT_KEYS
 
     def test_metabolism_log_is_not_written_by_a_snapshot(self, isolated_snapshot):
         web.build_snapshot()
@@ -876,7 +889,7 @@ class TestSnapshotCarriesReaderOutput:
         monkeypatch.setattr(readers, "read_spiral_state", boom)
         snapshot = web.build_snapshot()
         assert snapshot["spiral"] is None
-        assert list(snapshot.keys()) == LEGACY_KEYS + V2_KEYS
+        assert list(snapshot.keys()) == SNAPSHOT_KEYS
 
     def test_every_v2_key_carries_provenance(self, monkeypatch, isolated_snapshot):
         """Per-panel provenance: a panel cannot render staleness the server
