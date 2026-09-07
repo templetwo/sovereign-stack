@@ -405,18 +405,59 @@ class TestTheSignalLedgerNeverTouchesTheLiveStore:
 
     def test_the_native_heartbeat_scans_the_sink_not_the_live_store(self):
         """THE REACHABLE PATH. Dispatch the real heartbeat tool — which is what
-        now calls scan_all — and show the ledger it created is in the sink."""
+        now calls scan_all — and show the ledger it created is in the sink.
+
+        ASSERTS WHAT THIS PROCESS DID, NOT WHAT EXISTS ON THE OPERATOR'S DISK.
+        The original assertion was `not (LIVE/signals/ledger.jsonl).exists()`,
+        resting on the premise in this class's docstring that the file "does
+        not exist at all". THE 2026-09-06 DEPLOY MADE THAT FILE EXIST — the
+        release wired ingestion into the read, the live bridge swept at
+        14:39 EDT, and from that moment this test failed on the operator's own
+        machine on unmodified `main`. Verified against a pristine 0ed12da
+        worktree before it was touched: same failure, same line.
+
+        A test that asserts against live human state fails for a reason that
+        has nothing to do with the code — the same class as the protected-
+        drawer boot tests isolated at a6f42cf, and the rule that came out of
+        it: isolate EVERY write path a test can reach.
+
+        The replacement is STRICTER, not looser. "The file does not exist" was
+        only ever a proxy for "this dispatch did not write there", and it was a
+        proxy that could not survive the file existing for any legitimate
+        reason. Stat both live artifacts either side of the dispatch and
+        require them BYTE-IDENTICAL: that catches an append to an existing live
+        ledger, which the old form could not see at all.
+        """
         import asyncio
 
         from sovereign_stack import server
         from sovereign_stack import signal_ledger as sl
 
+        live = [
+            LIVE_SOVEREIGN / "signals" / "ledger.jsonl",
+            LIVE_SOVEREIGN / "signals" / "last_scan.json",
+        ]
+
+        def _fingerprint() -> dict:
+            out = {}
+            for p in live:
+                try:
+                    st = p.stat()
+                except OSError:
+                    out[str(p)] = None
+                else:
+                    out[str(p)] = (st.st_size, st.st_mtime_ns)
+            return out
+
+        before = _fingerprint()
         result = asyncio.run(server._dispatch_tool("heartbeat", {}))
         payload = json.loads(result[0].text)
         assert "unacked_signals" in payload
-        assert not (LIVE_SOVEREIGN / "signals" / "ledger.jsonl").exists(), (
-            "the native heartbeat's scan_all minted a ledger in Anthony's live store"
+        assert _fingerprint() == before, (
+            "the native heartbeat's scan_all wrote into Anthony's live store"
         )
+        # POSITIVE CONTROL: the sweep is not simply doing nothing everywhere.
+        assert sl.ledger_path().exists(), "the scan wrote no ledger at all"
         assert not str(sl.ledger_path().resolve()).startswith(str(LIVE_SOVEREIGN.resolve()))
 
     def test_a_tmp_rooted_scan_still_works(self, tmp_path):
