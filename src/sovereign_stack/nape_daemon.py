@@ -497,6 +497,23 @@ WINDOW_PREMATURE = 10  # scan back 10 calls for error indicators
 WINDOW_REPEATED = 20  # scan back 20 calls for repeated error class
 
 
+def _successful_signal_ack(tool_name: str, result: Any) -> bool:
+    """True when this is a signal_ack whose result parses as JSON with ok: true.
+
+    A successful ack is the close of an old drift. Observing it feeds the
+    original concern (and the caller's reason) back through the detectors and
+    recurses. Failures (`ok: false`) and unparseable results stay visible so
+    repeated_mistake and premature_summary still see real ack failures.
+    """
+    if tool_name != "signal_ack":
+        return False
+    try:
+        payload = json.loads(_result_to_str(result))
+    except json.JSONDecodeError:
+        return False
+    return isinstance(payload, dict) and payload.get("ok") is True
+
+
 # =============================================================================
 # NAPE DAEMON
 # =============================================================================
@@ -575,6 +592,13 @@ class NapeDaemon:
             )
 
         ts = timestamp or _now_iso()
+
+        # A successful signal_ack is the close of an old drift, not a new one.
+        # The returned row carries kind/concern/origin forward, so observing
+        # it re-scans the original observation (and the caller's reason) and
+        # honks with trigger_tool=signal_ack. Failures stay in the stream.
+        if _successful_signal_ack(tool_name, result):
+            return
 
         record: dict[str, Any] = {
             "obs_id": str(uuid.uuid4()),
