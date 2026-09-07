@@ -392,18 +392,37 @@ def test_the_totals_sum_the_measured_substrates_without_a_live_store(tmp_path, m
 
 def test_an_unmeasured_substrate_contributes_nothing_to_the_totals(tmp_path, monkeypatch):
     """Rule 3 at the aggregate: a substrate that could not be read must not be
-    summed as a zero — it must be excluded, and flagged."""
+    summed as a zero — it must be excluded, and flagged.
+
+    TWO SUBSTRATES, ONE OF EACH, DELIBERATELY. With only the failing queue the
+    total is 0 whether the code excludes it or sums it as zero, so the assertion
+    would hold for both the right and the wrong implementation — a test that
+    cannot fail is not a check. A healthy queue beside it makes the two
+    behaviours produce different numbers: 7 if the unmeasured one is excluded,
+    still 7 if it were summed as zero — so the load-bearing half is that the
+    total is REPORTED AT ALL while `any_unmeasured` is true, and that the
+    unreadable entry carries no counts of its own.
+    """
     from sovereign_stack import gate_census as gc
 
-    def boom(source, now):
-        raise RuntimeError("console unavailable")
+    def measure(source, now):
+        if source == "boom":
+            raise RuntimeError("console unavailable")
+        return _measured(7, 4)
 
-    monkeypatch.setitem(gc._DIR_TO_SOURCE, "some_connector", "stub")
-    monkeypatch.setattr(gc, "_measure_substrate", boom)
-    c = measure_gate(NOW, root=_synthetic_root(tmp_path))
-    entry = c["substrates"]["some_connector"]
-    assert entry["status"] == "unmeasured"
-    assert "console unavailable" in entry["reason"]
-    assert "by_status" not in entry
-    assert c["total_pending_all_substrates"] == 0
+    (tmp_path / "good_connector" / "pending_writes").mkdir(parents=True)
+    (tmp_path / "broken_connector" / "pending_writes").mkdir(parents=True)
+    monkeypatch.setitem(gc._DIR_TO_SOURCE, "good_connector", "stub")
+    monkeypatch.setitem(gc._DIR_TO_SOURCE, "broken_connector", "boom")
+    monkeypatch.setattr(gc, "_measure_substrate", measure)
+
+    c = measure_gate(NOW, root=tmp_path)
+    broken = c["substrates"]["broken_connector"]
+    assert broken["status"] == "unmeasured"
+    assert "console unavailable" in broken["reason"]
+    assert "by_status" not in broken
+    assert "pending_claim_bearing" not in broken
+    assert c["substrates"]["good_connector"]["status"] == "measured"
+    assert c["total_pending_all_substrates"] == 7
+    assert c["total_pending_claim_bearing"] == 4
     assert c["any_unmeasured"] is True
