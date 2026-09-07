@@ -24,11 +24,40 @@ from sovereign_stack.nape_daemon import (
     _result_to_str,
     _safe_truncate,
     contains_declare_word,
+    strip_null_error_fields,
     strip_system_stamps,
 )
 
 SESSION = "test-session-001"
 OTHER = "test-session-002"
+
+
+def _native_heartbeat_result(error):
+    """Pretty-printed JSON matching the native heartbeat emitter
+    (server.py: json.dumps(payload, indent=2)). Grounding/route text is
+    kept free of ERROR_WORDS so the certificate field is the only match.
+    """
+    payload = {
+        "status": "ok",
+        "version": "1.21.0",
+        "tools": 52,
+        "unacked_signals": {
+            "source": "sovereign_stack.signal_ledger",
+            "error": error,
+            "ingestion": "ok" if error is None else "error",
+            "scanned_at": "2026-09-07T18:00:40.000Z",
+            "refresh_started_at": None,
+            "partial": False,
+            "unreached": [],
+            "measured": error is None,
+            "total": 760 if error is None else None,
+        },
+        "caller_identity_channel": "mcp-session",
+        "grounding": "You're with Anthony of the Temple of Two.",
+        "route": "Call arrive_lineage, then where_did_i_leave_off.",
+    }
+    return json.dumps(payload, indent=2)
+
 
 # Verbatim result strings lifted from the live corpus at ~/.sovereign/nape/
 # (observations.jsonl + the two rotated .gz archives). Copied, not invented —
@@ -112,6 +141,47 @@ class TestStripSystemStamps:
         out = strip_system_stamps(text)
         assert "receipts:" not in out
         assert "verified against the live tree" in out
+
+
+class TestStripNullErrorFields:
+    """The null-error strip is asserted directly, not only through the
+    detector — a detector-only assertion can pass because READONLY or some
+    other early return fired, proving nothing about the mechanism."""
+
+    def test_json_null_error_field_is_removed(self):
+        out = strip_null_error_fields('{"ok": true, "error": null, "ingestion": "ok"}')
+        assert "error" not in out.lower()
+        assert "ingestion" in out
+
+    def test_compact_null_error_field_is_removed(self):
+        out = strip_null_error_fields('{"error":null,"ingestion":"ok"}')
+        assert "error" not in out.lower()
+
+    def test_empty_string_error_field_is_removed(self):
+        out = strip_null_error_fields('{"error": "", "ingestion": "ok"}')
+        assert "error" not in out.lower()
+
+    def test_non_empty_error_value_is_kept(self):
+        text = '{"error": "ledger unreadable", "ingestion": "error"}'
+        out = strip_null_error_fields(text)
+        assert out == text
+        assert "error" in out.lower()
+
+    def test_pretty_printed_heartbeat_certificate_null_is_removed(self):
+        text = _native_heartbeat_result(error=None)
+        assert '"error": null' in text
+        out = strip_null_error_fields(text)
+        assert "error" not in out.lower()
+
+    def test_pretty_printed_heartbeat_non_null_is_kept(self):
+        text = _native_heartbeat_result(error="ledger unreadable")
+        out = strip_null_error_fields(text)
+        assert '"error": "ledger unreadable"' in out
+
+    def test_adjacent_key_named_error_message_is_not_eaten(self):
+        text = '{"error_message": null, "ok": true}'
+        out = strip_null_error_fields(text)
+        assert out == text
 
 
 class TestReceiptStampIsNotADeclaration:
@@ -946,6 +1016,53 @@ class TestRepeatedMistake:
         assert len(honks) == 1, f"Expected one repeated_mistake honk. Got: {honks}"
         assert honks[0]["level"] == "uneasy"
         assert honks[0]["trigger_tool"] == "record_insight"
+
+    def test_heartbeat_error_null_field_is_not_a_repeated_mistake_or_premature_summary(self):
+        """Two native heartbeat results whose certificate carries "error": null
+        are the machine reporting NO error, not the same tool repeating a
+        mistake. A later handoff must not read those as recent errors either.
+
+        heartbeat stays out of READONLY_TOOL_NAMES: a non-null certificate
+        error is a live measurement failure (clause 3) and must still honk.
+        PR #5's signals_summary exemption is left in place.
+        """
+        assert "heartbeat" not in READONLY_TOOL_NAMES
+        assert "signals_summary" in READONLY_TOOL_NAMES
+        result = _native_heartbeat_result(error=None)
+        assert '"error": null' in result
+        self.daemon.observe("heartbeat", {}, result, SESSION)
+        self.daemon.observe("heartbeat", {}, result, SESSION)
+        repeated = [
+            h for h in self.daemon.current_honks(SESSION) if h["pattern"] == "repeated_mistake"
+        ]
+        assert repeated == [], (
+            f"heartbeat certificate field error:null is not a mistake; got {repeated}"
+        )
+        self.daemon.observe("handoff", {"note": "session state"}, "Handoff written", SESSION)
+        premature = [
+            h for h in self.daemon.current_honks(SESSION) if h["pattern"] == "premature_summary"
+        ]
+        assert premature == [], (
+            f"error:null on heartbeat is not a recent error for handoff; got {premature}"
+        )
+
+    def test_heartbeat_non_null_error_field_still_fires_repeated_mistake(self):
+        """Control: the same two heartbeat observations with a non-empty
+        error value must still produce one repeated_mistake. The strip of
+        null/empty error fields must leave "error": "<anything non-empty>"
+        matchable, and READONLY membership must not hide it.
+        """
+        assert "heartbeat" not in READONLY_TOOL_NAMES
+        result = _native_heartbeat_result(error="ledger unreadable")
+        assert '"error": "ledger unreadable"' in result
+        self.daemon.observe("heartbeat", {}, result, SESSION)
+        self.daemon.observe("heartbeat", {}, result, SESSION)
+        honks = [
+            h for h in self.daemon.current_honks(SESSION) if h["pattern"] == "repeated_mistake"
+        ]
+        assert len(honks) == 1, f"Expected one repeated_mistake honk. Got: {honks}"
+        assert honks[0]["level"] == "uneasy"
+        assert honks[0]["trigger_tool"] == "heartbeat"
 
 
 class TestStorageHelpers:
