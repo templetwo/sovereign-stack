@@ -61,6 +61,16 @@
 //                           gate_total_pending_all_substrates}
 //       lineage          : {letters[{bucket, title, date, from,
 //                           age_seconds}], counts{}, total}
+//   open_threads_index (NEW) — the LAST key, and the ONE that is not simply
+//     nullable-on-absence. It carries `status`: 'present' with counts, or
+//     'absent' with {reason, last_seen_at, last_seen_age_seconds} and NO
+//     counts at all. `null` is still possible and still means the reader
+//     raised. Three branches, three renders — see renderOpenThreadsIndex.
+//       present : {open_count, never_touched, touched, answered_elsewhere,
+//                  duplicate_clusters, duplicate_cluster_members,
+//                  cluster_method, by_category[], by_month[], by_shape[]
+//                  (each [{name, count}]), generated_at, age_seconds,
+//                  stale_after_days, counts_reconcile}
 //
 // PROVENANCE IS PER PANEL, NOT GLOBAL. The prototype drives one mode badge
 // off heartbeat reachability alone, so panels that never received live data
@@ -1423,6 +1433,144 @@ function renderThreads(snapshot) {
   }
 }
 
+// ── OPEN-THREADS INDEX ───────────────────────────────────────────────────
+//
+// The panel above renders the six newest open threads. This one renders the
+// pile, and the reason it exists is a counting problem, not a staleness one:
+// `open_threads.limit` is 6 and there were 191 open with 176 never touched,
+// so the oldest rows (April, 138 days) can never appear up there. A lid, not
+// a lag.
+//
+// THREE FAILURE SHAPES, THREE DIFFERENT RENDERS, NEVER A ZERO:
+//   null                  → the reader itself raised. Generic unavailable.
+//   status === 'absent'   → the file is missing/unreadable/malformed. Render
+//                           the server's REASON verbatim plus the age of the
+//                           last index file that did exist. No counts exist
+//                           in that payload, so none can leak into the page.
+//   status === 'present'  → real counts, including a real 0 if the catalog
+//                           honestly has nothing open.
+//
+// EVERY TRUNCATED LIST STATES ITS DENOMINATOR. There are 15 categories and
+// this column fits about five; a panel showing the top five without saying
+// so is the read-side fail-open — it reads as the whole taxonomy.
+const OTI_CATEGORY_ROWS = 5;
+const OTI_SHAPE_ROWS = 4;
+const OTI_MONTH_ROWS = 12;
+
+function otiBreakdown(label, rows, limit) {
+  const wrap = el('div', 'oti-group');
+  const total = rows.length;
+  const shown = rows.slice(0, limit);
+  const head = el('div', 'oti-group-head');
+  head.append(
+    el('span', 'oti-group-label', label),
+    el('span', 'oti-group-count', shown.length === total
+      ? `${total}`
+      : `${shown.length} of ${total}`),
+  );
+  wrap.appendChild(head);
+  if (!total) {
+    wrap.appendChild(el('div', 'oti-none', 'none recorded'));
+    return wrap;
+  }
+  // Bar width is relative to the LARGEST BAR IN THIS GROUP, never to the
+  // open total — a 54-of-191 bar drawn against 191 is a sliver in a 190px
+  // column and the shape of the distribution disappears.
+  const peak = Math.max(...rows.map((r) => r.count || 0), 1);
+  for (const row of shown) {
+    const line = el('div', 'oti-row');
+    line.appendChild(el('span', 'oti-name', row.name || '(unnamed)'));
+    const track = el('span', 'oti-track');
+    const fill = el('span', 'oti-fill');
+    fill.style.width = `${Math.max(2, Math.round(((row.count || 0) / peak) * 100))}%`;
+    track.appendChild(fill);
+    line.appendChild(track);
+    line.appendChild(el('span', 'oti-count', String(row.count)));
+    wrap.appendChild(line);
+  }
+  return wrap;
+}
+
+function renderOpenThreadsIndex(snapshot) {
+  const body = $('otindex-body');
+  const note = $('otindex-note');
+  const section = snapshot.open_threads_index || null;
+
+  if (!section) {
+    panelUnavailable(body, note, 'open-threads index reader failed');
+    return;
+  }
+
+  body.replaceChildren();
+
+  if (section.status !== 'present') {
+    // The absent branch is the whole "no simulated data" rule made visible:
+    // the reason the server gave, and how old the last real catalog was.
+    note.textContent = 'catalog absent';
+    note.className = 'panel-note is-missing';
+    body.appendChild(el('div', 'oti-absent-title', 'CATALOG ABSENT'));
+    body.appendChild(el('div', 'oti-absent-why',
+      section.reason || 'no reason reported'));
+    const lastAge = fmtAge(section.last_seen_age_seconds);
+    body.appendChild(el('div', 'oti-absent-age', lastAge
+      ? `last index file ${lastAge} old · ${section.last_seen_source || ''}`
+      : 'no index file has ever landed here'));
+    return;
+  }
+
+  const staleSeconds = (section.stale_after_days || 0) * 86400;
+  const age = section.age_seconds;
+  const stale = age != null && staleSeconds > 0 && age > staleSeconds;
+  setPanelAge(note, section, `${section.open_count} open`);
+  if (stale) note.className = 'panel-note is-stale';
+
+  const stats = el('div', 'oti-stats');
+  for (const [value, label] of [
+    [section.open_count, 'OPEN'],
+    [section.never_touched, 'NEVER TOUCHED'],
+  ]) {
+    const cell = el('div', 'oti-stat');
+    cell.appendChild(el('span', 'oti-stat-num', value == null ? '—' : String(value)));
+    cell.appendChild(el('span', 'oti-stat-label', label));
+    stats.appendChild(cell);
+  }
+  body.appendChild(stats);
+
+  const meta = [];
+  if (section.answered_elsewhere != null) {
+    meta.push(`${section.answered_elsewhere} may be answered elsewhere`);
+  }
+  if (section.duplicate_clusters != null) {
+    meta.push(`${section.duplicate_clusters} near-duplicate clusters`
+      + (section.duplicate_cluster_members != null
+        ? ` (${section.duplicate_cluster_members} ids)` : ''));
+  }
+  if (meta.length) body.appendChild(el('div', 'oti-meta', meta.join(' · ')));
+
+  body.appendChild(otiBreakdown('CATEGORY', section.by_category || [], OTI_CATEGORY_ROWS));
+  body.appendChild(otiBreakdown('GATE-SHAPE', section.by_shape || [], OTI_SHAPE_ROWS));
+  body.appendChild(otiBreakdown('OPENED', section.by_month || [], OTI_MONTH_ROWS));
+
+  const foot = el('div', 'oti-foot');
+  const bits = [];
+  if (section.generated_at) bits.push(`generated ${fmtRelTime(section.generated_at)}`);
+  const fileAge = fmtAge(age);
+  if (fileAge) bits.push(`${fileAge} old${stale ? ' · STALE' : ''}`);
+  // A cluster number nobody can tie back to the filing beside it is a rumour;
+  // the server says which algorithm produced it, so the panel says it too.
+  if (section.cluster_method) bits.push(`clusters by ${section.cluster_method}`);
+  foot.textContent = bits.join(' · ');
+  body.appendChild(foot);
+
+  // The one honest disagreement this panel can have with its own source, and
+  // it must be visible rather than averaged away.
+  if (section.counts_reconcile === false) {
+    body.appendChild(el('div', 'oti-warn',
+      `derived ${section.open_count} open, file's coverage line says `
+      + `${section.declared_open_including_nested} — counts do not reconcile`));
+  }
+}
+
 // ── ARRIVAL GATE ─────────────────────────────────────────────────────────
 function renderArrival(snapshot) {
   const body = $('arrival-body');
@@ -1736,6 +1884,7 @@ async function poll() {
     renderMirror(snapshot);
     renderSpiral(snapshot);
     renderThreads(snapshot);
+    renderOpenThreadsIndex(snapshot);
     renderArrival(snapshot);
     renderLineage(snapshot);
 

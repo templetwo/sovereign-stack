@@ -387,6 +387,38 @@ def build_snapshot() -> dict:
                           panel, whose transport was retired 2026-06.
       bridge_heartbeat  — GET :8100/api/heartbeat, NO AUTH, cached ~20s.
 
+    ── Key 19 (open_threads_index) ──
+    Appended for the OPEN-THREADS INDEX panel, same additive-only
+    discipline: the 18 keys above are untouched in name, order, and
+    value-structure. (EIGHTEEN, counted — not the seventeen the "keys
+    11..17" heading above implies. `unacked_signals` was later inserted as
+    the 6th key and every ordinal below it in that heading has been off by
+    one since. Count `list(build_snapshot())`, do not trust a heading.)
+
+      open_threads_index — ~/.sovereign/filings/open-threads-index/
+                          LATEST.json, the catalog of the whole open-thread
+                          pile. It exists because `open_threads` above is
+                          structurally incapable of showing that pile: that
+                          reader's `limit` is 6 and there were 191 open,
+                          176 of them never touched, so the oldest rows are
+                          invisible from the console by construction rather
+                          than by staleness. Totals only — open and
+                          never-touched counts, breakdowns by category,
+                          month and gate-shape, the answered-elsewhere
+                          candidates, the near-duplicate cluster count, and
+                          the filing's own generation stamp.
+
+                          THE ONE KEY THAT IS NOT NULLABLE-ON-ABSENCE. It
+                          returns `{"status": "absent", "reason": ...,
+                          "last_seen_age_seconds": ...}` when LATEST.json is
+                          missing, unreadable or malformed, because a panel
+                          that can only say "source unavailable" cannot say
+                          which of those happened or how stale the last
+                          catalog was. The envelope carries NO counts, so it
+                          is not the plausible-zero shape the rule forbids.
+                          A malformed file degrades this key alone; the 18
+                          above keep rendering.
+
     EVERY ONE OF THE SEVEN IS INDIVIDUALLY NULLABLE and individually
     fail-soft: a reader that raises yields null for its own key and cannot
     take /snapshot.json down with it. Each non-null section carries a
@@ -450,6 +482,11 @@ def build_snapshot() -> dict:
         # 17th: the LINEAGE panel that replaces the design's COMMS panel.
         # Titles and dates only — a letter's body never leaves the disk.
         "lineage": _safe_section(dashboard_readers.read_lineage_letters),
+        # 19th: OPEN-THREADS INDEX. Still routed through _safe_section even
+        # though the reader answers absence itself — an unforeseen raise
+        # must yield null for this key alone, and the renderer branches on
+        # null and on status=="absent" separately.
+        "open_threads_index": _safe_section(dashboard_readers.read_open_threads_index),
     }
 
 

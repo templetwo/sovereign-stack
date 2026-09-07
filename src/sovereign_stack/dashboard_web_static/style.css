@@ -1444,6 +1444,52 @@ input::placeholder { color: var(--text-faint); }
   overflow: hidden;
 }
 
+/* ── 14.7b OPEN-THREADS INDEX ───────────────────────────────────────────── */
+/* Sits directly under OPEN THREADS on purpose: the two answer the same
+   question at different scales, and the pile is only legible next to the
+   six rows that hide it. */
+.otindex-body { display: flex; flex-direction: column; gap: 7px; }
+.oti-stats { display: flex; gap: 8px; }
+.oti-stat {
+  flex: 1 1 0; display: flex; flex-direction: column; gap: 1px;
+  padding: 6px 9px; background: var(--v2-thread-bg); border-radius: var(--r);
+}
+.oti-stat-num { font-size: 17px; font-weight: 700; line-height: 1.1; color: var(--v2-blue); }
+/* The second stat is the finding, not a decoration: never-touched is the
+   count of threads no seat has looked at even once. */
+.oti-stat:last-child .oti-stat-num { color: var(--degraded); }
+.oti-stat-label { font-size: 7.5px; letter-spacing: .15em; color: var(--text-ghost); }
+.oti-meta { font-size: 9px; color: var(--text-dim); line-height: 1.4; }
+.oti-group { display: flex; flex-direction: column; gap: 2px; }
+.oti-group-head {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 8px;
+  border-top: 1px solid var(--v2-hairline); padding-top: 5px; margin-top: 1px;
+}
+.oti-group-label { font-size: 8px; font-weight: 700; letter-spacing: .16em; color: var(--text-dim); }
+/* "5 of 15" — a truncated list that does not say so reads as the whole set. */
+.oti-group-count { font-size: 8px; color: var(--text-ghost); flex: 0 0 auto; }
+.oti-row { display: flex; align-items: center; gap: 6px; }
+.oti-name {
+  flex: 0 0 40%; font-size: 9px; color: var(--text-body);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.oti-track {
+  flex: 1 1 auto; height: 5px; border-radius: 3px;
+  background: var(--v2-inner-soft); overflow: hidden;
+}
+.oti-fill { display: block; height: 100%; background: var(--v2-blue); border-radius: 3px; }
+.oti-count { flex: 0 0 auto; font-size: 9px; color: var(--text-dim); min-width: 20px; text-align: right; }
+.oti-none { font-size: 9.5px; color: var(--text-unknown); padding: 2px; }
+.oti-foot {
+  font-size: 8.5px; color: var(--text-ghost); line-height: 1.4;
+  border-top: 1px solid var(--v2-hairline); padding-top: 5px;
+}
+.oti-warn { font-size: 9px; color: var(--degraded); line-height: 1.4; }
+/* Absence is a state with content, not a blank. */
+.oti-absent-title { font-size: 10px; font-weight: 700; letter-spacing: .14em; color: var(--down); }
+.oti-absent-why { font-size: 9.5px; color: var(--text-dim); line-height: 1.45; }
+.oti-absent-age { font-size: 8.5px; color: var(--text-ghost); line-height: 1.4; word-break: break-all; }
+
 /* ── 14.8 ARRIVAL GATE ──────────────────────────────────────────────────── */
 .arrival-body { display: flex; flex-direction: column; gap: 6px; }
 .arrival-status { font-size: 9.5px; font-weight: 700; letter-spacing: .14em; }
