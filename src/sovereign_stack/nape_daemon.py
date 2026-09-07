@@ -440,6 +440,41 @@ def strip_system_stamps(result_str: str) -> str:
     return result_str
 
 
+# A JSON field named error whose value is null or empty is the machine
+# reporting NO error. ERROR_WORDS contains "error" and the scan is a
+# substring match over result_str, so the key name itself reads as a
+# failure. Measured 2026-09-07 after PR #6: two native heartbeat calls a
+# minute apart honked repeated_mistake, then a handoff honked
+# premature_summary, citing those two "error results". The same field
+# already exists on signals_summary (exempted by PR #5 via READONLY);
+# the next certificate-bearing tool would need another PR without a
+# class strip.
+#
+# Keep `"error": "<anything non-empty>"` matchable. Do not fold this into
+# strip_system_stamps — that helper runs before DECLARE_WORDS, a different
+# detector, and widening it would change declare_before_verify.
+NULL_ERROR_FIELD_PATTERNS: tuple = (re.compile(r'"error"\s*:\s*(?:null|"")', re.IGNORECASE),)
+
+
+def strip_null_error_fields(result_str: str) -> str:
+    """
+    Remove JSON `error` fields whose value is null or the empty string.
+
+    Used before ERROR_WORDS scans. A key named error with a null or empty
+    value is the machine reporting no error; matching the key is the bug.
+    `"error": "<non-empty>"` is left in place and still matches.
+
+    Args:
+        result_str: Raw result string as observed.
+
+    Returns:
+        The same string with null/empty JSON error fields replaced by a space.
+    """
+    for pattern in NULL_ERROR_FIELD_PATTERNS:
+        result_str = pattern.sub(" ", result_str)
+    return result_str
+
+
 # Tools that write a session summary or handoff — used for premature-summary check.
 # `where_did_i_leave_off` is NOT a summary tool — it's the boot/orient call.
 # Including it here (pre-2026-04-25) caused false-positive premature_summary
@@ -471,6 +506,15 @@ ERROR_WORDS: frozenset = frozenset(
         "denied",
     }
 )
+
+
+def _result_has_error_word(result_str: str) -> bool:
+    """True when result_str contains an ERROR_WORD after null/empty JSON
+    error fields have been stripped. The scan stays a substring match;
+    only the empty forms of the `error` key are removed first."""
+    scanned = strip_null_error_fields(result_str).lower()
+    return any(word in scanned for word in ERROR_WORDS)
+
 
 # Pattern name → honk level mapping. Source of truth for the gesture vocabulary.
 PATTERN_LEVELS: dict[str, str] = {
@@ -1083,7 +1127,9 @@ class NapeDaemon:
         EXCEPT for results from READONLY_TOOL_NAMES, whose result_str is
         surfaced chronicle content (insights, threads, comms) that may
         contain error-shaped words from stored history rather than from
-        an actual error in the current session.
+        an actual error in the current session. JSON `error` fields whose
+        value is null or empty are stripped before the scan (see
+        strip_null_error_fields) — the key name is not a live failure.
         """
         if latest.get("tool_name") not in SUMMARY_TOOL_NAMES:
             return []
@@ -1093,7 +1139,7 @@ class NapeDaemon:
             obs
             for obs in preceding
             if obs.get("tool_name") not in READONLY_TOOL_NAMES
-            and any(word in obs.get("result_str", "").lower() for word in ERROR_WORDS)
+            and _result_has_error_word(obs.get("result_str", ""))
         ]
 
         if not error_obs:
@@ -1177,7 +1223,9 @@ class NapeDaemon:
 
         Read-only tools (READONLY_TOOL_NAMES) are exempt — their result_str
         is surfaced chronicle content, so an error word in their result
-        reflects stored history, not a current-session error.
+        reflects stored history, not a current-session error. JSON `error`
+        fields whose value is null or empty are stripped before the scan
+        (see strip_null_error_fields).
         """
         trigger_tool = latest.get("tool_name")
 
@@ -1186,7 +1234,7 @@ class NapeDaemon:
         if trigger_tool in READONLY_TOOL_NAMES:
             return []
 
-        if not any(word in latest.get("result_str", "").lower() for word in ERROR_WORDS):
+        if not _result_has_error_word(latest.get("result_str", "")):
             return []
 
         session_id = latest.get("session_id")
@@ -1199,7 +1247,7 @@ class NapeDaemon:
             obs
             for obs in preceding
             if obs.get("tool_name") == trigger_tool
-            and any(word in obs.get("result_str", "").lower() for word in ERROR_WORDS)
+            and _result_has_error_word(obs.get("result_str", ""))
         ]
 
         if not earlier_errors:
