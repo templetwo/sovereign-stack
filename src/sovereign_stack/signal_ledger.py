@@ -1897,7 +1897,14 @@ def scan_honks(
             skipped += 1
             continue
         produced = rec.get("timestamp") or _now()
-        if open_signal(
+        # An ack is the close of an old drift, not a new one. A honk whose
+        # trigger_tool is signal_ack is an echo of that close (or of a failed
+        # close). Opening it as a honk-source signal is the nape/ledger
+        # recursion: the ack returns the original concern, observe honks,
+        # ingest opens a new signal, the next cleanup acks that, and the
+        # queue doubles. Failed-ack honks stay in honks.jsonl and in nape's
+        # detectors; they do not enter the ledger.
+        if rec.get("trigger_tool") != "signal_ack" and open_signal(
             source="honk",
             native_id=hid,
             produced_at=str(produced),
