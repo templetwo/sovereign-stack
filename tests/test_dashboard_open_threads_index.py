@@ -320,6 +320,32 @@ class TestPresentCounts:
         assert out["duplicate_cluster_members"] == 2
         assert out["cluster_method"] == "dup-label"
 
+    def test_labels_present_but_no_family_qualifies_stays_on_the_label_method(self, root):
+        """The fallback must not fire while the label convention is alive.
+
+        A catalog whose only dup-NN family has aged down to ONE open member
+        has zero clusters BY THAT METHOD — it has not stopped using the
+        method. Gating the fallback on "no qualifying family" instead of "no
+        labels at all" would report a components-derived count under the
+        name `dup-label`'s absence, i.e. a number tied to an algorithm that
+        is not the one in force. `dup-05` in the real 2026-09-06 filing is
+        already this shape at n=1; a catalog where every family reaches it
+        is what fires this.
+        """
+        entries = [
+            _entry("a", similar=[{"thread_id": "z", "reason": "dup-01 (exact-copy): twice."}]),
+            _entry("z", status="resolved"),
+            # An unlabelled open pair that the components fallback WOULD
+            # find, so this test fails loudly if the gate is wrong.
+            _entry("b", similar=[{"thread_id": "c", "reason": "no label here"}]),
+            _entry("c", similar=[{"thread_id": "b", "reason": "no label here"}]),
+        ]
+        _write_index(root, _fixture_payload(entries=entries))
+        out = readers.read_open_threads_index()
+        assert out["cluster_method"] == "dup-label"
+        assert out["duplicate_clusters"] == 0
+        assert out["duplicate_cluster_members"] == 0
+
     def test_unlabelled_links_fall_back_to_components_and_say_so(self, root):
         """A future index run that stops writing `dup-NN` must not make the
         cluster count silently ZERO while `similar_to` links plainly exist.

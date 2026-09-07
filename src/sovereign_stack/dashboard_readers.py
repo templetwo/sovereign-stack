@@ -574,8 +574,15 @@ def _duplicate_clusters(open_entries: list[dict]) -> tuple[int, int, str]:
                 adjacency.setdefault(this_id, set()).add(other)
                 adjacency.setdefault(other, set()).add(this_id)
 
-    families = [ids for ids in labelled.values() if len(ids) >= 2]
-    if families:
+    # GATED ON `labelled`, NOT ON `families`, and the difference is a real
+    # fault. If a catalog carries dup-NN labels but every family has aged
+    # down to a single open member, `families` is empty while the label
+    # convention is very much alive — gating on it would fall through to
+    # components and report a number under a method name that is not the
+    # one in force. Zero clusters by dup-label is the honest answer there,
+    # and `dup-05` in the 2026-09-06 filing is exactly that shape already.
+    if labelled:
+        families = [ids for ids in labelled.values() if len(ids) >= 2]
         return len(families), sum(len(ids) for ids in families), "dup-label"
 
     seen: set[str] = set()
