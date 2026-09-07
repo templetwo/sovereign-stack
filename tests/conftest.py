@@ -567,9 +567,14 @@ def _signal_ledger_never_touches_live(
         _refuse_live_root("THE SIGNAL LEDGER", _sl.ledger_path(root), signals_hint)
         return _orig_append(row, root)
 
-    def _guarded_marker(counts, source_status, root=None):
+    def _guarded_marker(counts, source_status, root=None, **kwargs):
+        # **kwargs, NOT A RETYPED SIGNATURE. The guard exists to refuse a live
+        # path, and it must not also be a second copy of the writer's parameter
+        # list — the incremental release added watermarks/partial/unreached and
+        # a fixed signature here turned every scan in the suite into a
+        # TypeError raised from the guard, which reads as a product bug.
         _refuse_live_root("THE SIGNAL SCAN MARKER", _sl.scan_marker_path(root), signals_hint)
-        return _orig_marker(counts, source_status, root)
+        return _orig_marker(counts, source_status, root, **kwargs)
 
     # THIRD WRITER, ADDED WITH THE FEATURE THAT CREATED IT (review N9).
     # `_log_diagnostic` writes tracebacks to <root>/signals/diagnostics.log on

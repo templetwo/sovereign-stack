@@ -9,6 +9,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### The signal sweep is incremental, budgeted, and off the caller's thread
+
+The deployed release wired ingestion into the read, and the read then cost
+what a batch job costs. Measured on the live corpus (8,765 ledger rows /
+6.09 MB, 3,975 honks, 240 spool rows, 295 proposal files, 161 thread shards):
+a full sweep took **265 s** and a rescan that opened nothing took **268 s**,
+at full CPU, inside the process that answers every stack tool call. On this
+branch the same corpus, on a copy, measures **0.335 s** full, **0.026 s**
+no-change rescan, and **0.273 s** for the production-shaped case where nape has
+appended a handful of honks since the last sweep.
+
+**Almost all of it was the ledger, not the sources.** `open_signal` re-read and
+re-folded the entire ledger inside its append lock ONCE PER SOURCE RECORD, to
+answer "have I seen this id?" — 66 ms per fold times ~4,000 honks — and three
+scanners called `load_latest` a second time per record on top. A sweep now
+carries ONE fold and refreshes it by TAILING the file under the same append
+lock, so a foreign append is picked up on exactly the schedule the full re-read
+picked it up on and `open_signal` stays idempotent. Any surprise — a shrink, a
+decode failure, a malformed line — falls back to a full reload, so every error
+a reader sees is byte-identical to the unindexed path's.
+
+**The certificate now records what it read.** Per shard: relative path, size,
+mtime_ns and row count, plus a digest of the whole list. A rescan re-stats each
+shard and skips the ones whose size and mtime are unchanged AND which are still
+readable — `chmod 000` moves neither size nor mtime, so a stat-only comparison
+would carry a stale "ok" forward for a source it can no longer open. A skipped
+shard carries its entry forward verbatim, so the certificate still describes
+the whole source. Over 2,000 entries the list is elided to shards touched in
+the last 30 days and SAYS SO, and an elided shard is simply re-read.
+
+**`thread` skips all-or-nothing, and that is a correctness rule.** It is the
+one source with a cross-shard fold (F7), so reading a subset decides a thread's
+state from a subset of its evidence. The cheap-looking guard — ignore a
+candidate older than the row's `produced_at` — is a no-op, because
+`open_signal` stamps `produced_at` at first open and never updates it.
+
+**A sweep that overruns its budget says so instead of shortening.** Default
+120 s, configurable. An unreached source is stamped `partial:` in
+`source_status`, which every reader already treats as unmeasured, so `total` is
+null by the rule that was already there; `ingestion` reports `partial` and the
+error names what was not reached. The unreached source's watermarks are carried
+forward, so the next sweep resumes rather than restarting.
+
+**A read no longer waits behind a sweep.** The sweep runs on a worker thread
+under the existing flock. The read that starts one waits a bounded 5 s; a read
+that finds one already running does not wait at all and is answered from the
+previous certificate with `ingestion: "refreshing"`, its `scanned_at`, and
+`refresh_started_at`. Never a zero, never stale-but-ok. Integrity is still
+judged on the caller's thread BEFORE any worker exists, so a damaged ledger is
+refused rather than queued.
+
+Nothing here is required to read an older certificate: `watermarks`, `partial`
+and `unreached` are optional on read and validated only when present. Adding
+them to `MARKER_REQUIRED` would have made the certificate on the live box
+invalid on deploy, and `_refresh_decision` answers that with a quarantine
+instruction for an undamaged ledger.
+
+Also fixed: `test_the_native_heartbeat_scans_the_sink_not_the_live_store`
+asserted that `~/.sovereign/signals/ledger.jsonl` does not exist. The 2026-09-06
+deploy created that file, so the test had been failing on the operator's own
+machine on unmodified `main`. It now stats both live artifacts either side of
+the dispatch and requires them byte-identical, which also catches an append to
+an existing live ledger — something the old form could not see.
+
 ### Uncertain provenance withholds; a certificate is not a lock
 
 A third independent review rejected the candidate on nine findings, two of

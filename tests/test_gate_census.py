@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
@@ -21,6 +22,70 @@ from sovereign_stack.gate_census import (
 )
 
 NOW = datetime.now(timezone.utc)
+
+
+# ── A BARE measure_gate() READS THE OPERATOR'S HOME, AND THAT IS THE MODULE
+# ── BEHAVING CORRECTLY. THE TESTS WERE ASKING THE WRONG QUESTION. ────────────
+#
+# `_sovereign_root(None)` is `Path.home() / ".sovereign"`, by design: the live
+# queues ARE the thing this census measures, and `SOVEREIGN_ROOT` does not
+# redirect it. On any machine without that store — every CI runner — discovery
+# finds nothing and raises FileNotFoundError, which is rule 3 working. Nine
+# tests called `measure_gate(NOW)` bare and so asserted against Anthony's real
+# store; they were green on his Mac and red everywhere else. Same class as the
+# protected-drawer boot tests isolated at `a6f42cf` and the signal-ledger
+# containment test retyped alongside this: a test that reads live human state
+# fails for a reason that has nothing to do with the code.
+#
+# TWO REMEDIES, PICKED PER TEST, because they are two different kinds of claim:
+#
+#   * `_live_census()` — for assertions that are genuinely ABOUT the operator's
+#     real queues (does the census agree with the console he drains from; do
+#     real seat identifiers stay out of the public block). Those cannot be
+#     asked anywhere else, so off that machine they SKIP, naming the reason —
+#     the idiom `test_live_third_queue_is_not_invisible` already used.
+#
+#   * `_stub_measured()` — for assertions about AGGREGATION and PROSE, which
+#     are properties of the code and must therefore run in CI. Skipping all
+#     nine would trade a red suite for a silent one, and a suite that reports
+#     success by declining to look is the failure this repo hunts everywhere
+#     else.
+#
+# WHY A STUB IS NEEDED AT ALL, and it is worth knowing: `root=` redirects
+# DISCOVERY ONLY. `measure_gate` calls `_measure_substrate(source, now)` with no
+# root, so a routable substrate is always measured through the real bridge
+# console. That is why every pre-existing tmp_path test in this file asserts
+# only on *unmeasured* entries — a synthetic root cannot produce a measured one.
+
+
+def _live_census() -> dict:
+    """The census over the operator's real store, or a skip that says why."""
+    base = Path.home() / ".sovereign"
+    if not any(p.is_dir() for p in base.glob("*/pending_writes")):
+        pytest.skip(
+            f"no live bridge queues under {base}; this assertion is about the "
+            "operator's real store and cannot be asked here"
+        )
+    return measure_gate(NOW)
+
+
+def _synthetic_root(tmp_path: Path) -> Path:
+    """A root holding one discoverable queue, so discovery does not raise."""
+    (tmp_path / "some_connector" / "pending_writes").mkdir(parents=True)
+    return tmp_path
+
+
+def _stub_measured(monkeypatch, entries: dict[str, dict]) -> None:
+    """Make named substrates render as MEASURED, with counts we control.
+
+    A test double for the console read, NOT for the aggregation under test:
+    `measure_gate` still does its own discovery, summing, partitioning and
+    prose. Only the per-substrate console call is replaced.
+    """
+    from sovereign_stack import gate_census as gc
+
+    monkeypatch.setitem(gc._DIR_TO_SOURCE, "some_connector", "stub")
+    monkeypatch.setattr(gc, "_measure_substrate", lambda source, now: entries[source])
 
 
 # -- The trust anchor ---------------------------------------------------------
@@ -37,7 +102,9 @@ def test_census_equals_console_per_substrate():
     """
     from bridge_core.cli import _SubstrateOps
 
-    census = measure_gate(NOW)
+    # The skip has to come BEFORE the call: on a store with no queues
+    # `measure_gate` raises, so the per-substrate skip below was unreachable.
+    census = _live_census()
     for dirname, source in (("grok_bridge", "grok"), ("openai_bridge", "openai")):
         entry = census["substrates"][dirname]
         if entry["status"] != "measured":
@@ -49,7 +116,7 @@ def test_census_equals_console_per_substrate():
 
 
 def test_total_is_the_sum_of_measured_substrates():
-    c = measure_gate(NOW)
+    c = _live_census()
     expected = sum(
         s["by_status"].get("pending", 0)
         for s in c["substrates"].values()
@@ -129,7 +196,7 @@ def test_future_timestamp_raises_rather_than_reading_as_fresh():
 def test_status_keys_are_read_from_data_not_a_fixed_set():
     """Every status present in the data must appear in by_status and waiting_on,
     so a status added later cannot vanish silently."""
-    c = measure_gate(NOW)
+    c = _live_census()
     for entry in c["substrates"].values():
         if entry.get("status") != "measured":
             continue
@@ -142,7 +209,7 @@ def test_public_block_leaks_no_proposal_content():
     """This block renders on the PUBLIC unauthenticated heartbeat. Counts, dates,
     tool names and statuses are the ceiling -- never bodies, domains, or the
     source_instance strings that identify a seat."""
-    c = measure_gate(NOW)
+    c = _live_census()
     blob = json.dumps(c)
     for leak in ("chatgpt-openai-bridge", "grok-xai", "grok-4.5", "grok-4.6"):
         assert leak not in blob, f"source_instance leaked into public block: {leak}"
@@ -153,7 +220,7 @@ def test_public_block_leaks_no_proposal_content():
 
 
 def test_needs_revision_terminal_warning_appears_only_when_nonzero():
-    c = measure_gate(NOW)
+    c = _live_census()
     for entry in c["substrates"].values():
         if entry.get("status") != "measured":
             continue
@@ -164,10 +231,13 @@ def test_needs_revision_terminal_warning_appears_only_when_nonzero():
             assert "needs_revision_is_terminal" not in entry
 
 
-def test_drain_names_the_human_gate():
+def test_drain_names_the_human_gate(tmp_path):
     """HQ reviews; it does not approve, commit, or reject. The block must say so
-    on its face -- a remote seat reading this must not conclude HQ can ratify."""
-    d = measure_gate(NOW)["drain"]
+    on its face -- a remote seat reading this must not conclude HQ can ratify.
+
+    Runs anywhere: the prose is a constant, so it needs a discoverable queue and
+    no live data at all."""
+    d = measure_gate(NOW, root=_synthetic_root(tmp_path))["drain"]
     assert "Anthony only" in d["who"]
     assert "does not approve" in d["hq_role"]
 
@@ -222,7 +292,7 @@ def test_live_third_queue_is_not_invisible():
 
 def test_claim_bearing_and_bookkeeping_partition_the_pending_set():
     """The two kind-counts must sum to pending -- no write falls outside both."""
-    c = measure_gate(NOW)
+    c = _live_census()
     for entry in c["substrates"].values():
         if entry.get("status") != "measured":
             continue
@@ -232,7 +302,7 @@ def test_claim_bearing_and_bookkeeping_partition_the_pending_set():
 
 
 def test_claim_bearing_total_is_never_larger_than_total_pending():
-    c = measure_gate(NOW)
+    c = _live_census()
     assert c["total_pending_claim_bearing"] <= c["total_pending_all_substrates"]
     assert "overstates" in c["burden_note"]
 
@@ -267,11 +337,92 @@ def test_unreadable_queue_is_unmeasured_never_zero(tmp_path):
         os.chmod(q, 0o755)
 
 
-def test_bookkeeping_label_disclaims_being_a_safety_tier():
+def test_bookkeeping_label_disclaims_being_a_safety_tier(tmp_path):
     """The set is burden accounting. A comms_acknowledge that would fabricate a
     consent record is 'bookkeeping' by tool name — the block must say on its face
     that this is not a drain list."""
-    c = measure_gate(NOW)
+    c = measure_gate(NOW, root=_synthetic_root(tmp_path))
     note = c["burden_note"]
     assert "NOT a safety tier" in note
     assert "NOT a drain list" in note
+
+
+# -- Aggregation, exercised without the operator's store ----------------------
+#
+# THE SKIPS ABOVE ARE HONEST AND THEY ARE ALSO A COST: assertions that ran on one
+# Mac now run nowhere else. These re-ask the part that is machine-independent.
+#
+# WHAT A STUB CAN AND CANNOT EARN HERE, stated because the first draft of this
+# block got it wrong in both directions. Replacing `_measure_substrate` replaces
+# the console read AND everything computed inside it — the per-substrate
+# `by_status` / `waiting_on` / claim-bearing split, and the
+# `needs_revision_is_terminal` warning, are all produced THERE. So:
+#
+#   * Asserting that a stubbed entry's own fields partition, or that its
+#     by_status keys match its waiting_on keys, asserts nothing about the code:
+#     it reads back the fixture. Those stay live-or-skip.
+#   * Asserting the needs_revision prose is not merely tautological but
+#     impossible — the stub is what removed it.
+#   * What `measure_gate` itself still computes over the stub is the CROSS-
+#     SUBSTRATE SUMMATION and the constant prose. That is what is tested below,
+#     and it is the half that had no coverage off Anthony's machine at all.
+
+
+def _measured(pending: int, claim_bearing: int) -> dict:
+    return {
+        "status": "measured",
+        "total_proposals": pending,
+        "by_status": {"pending": pending},
+        "waiting_on": {"pending": "Anthony"},
+        "pending_claim_bearing": claim_bearing,
+        "pending_bookkeeping": pending - claim_bearing,
+    }
+
+
+def test_the_totals_sum_the_measured_substrates_without_a_live_store(tmp_path, monkeypatch):
+    """measure_gate's own arithmetic, over a substrate it never had to read."""
+    _stub_measured(monkeypatch, {"stub": _measured(7, 4)})
+    c = measure_gate(NOW, root=_synthetic_root(tmp_path))
+    assert c["substrates"]["some_connector"]["status"] == "measured"
+    assert c["total_pending_all_substrates"] == 7
+    assert c["total_pending_claim_bearing"] == 4
+    assert c["total_pending_claim_bearing"] <= c["total_pending_all_substrates"]
+    assert "overstates" in c["burden_note"]
+
+
+def test_an_unmeasured_substrate_contributes_nothing_to_the_totals(tmp_path, monkeypatch):
+    """Rule 3 at the aggregate: a substrate that could not be read must not be
+    summed as a zero — it must be excluded, and flagged.
+
+    TWO SUBSTRATES, ONE OF EACH, DELIBERATELY. With only the failing queue the
+    total is 0 whether the code excludes it or sums it as zero, so the assertion
+    would hold for both the right and the wrong implementation — a test that
+    cannot fail is not a check. A healthy queue beside it makes the two
+    behaviours produce different numbers: 7 if the unmeasured one is excluded,
+    still 7 if it were summed as zero — so the load-bearing half is that the
+    total is REPORTED AT ALL while `any_unmeasured` is true, and that the
+    unreadable entry carries no counts of its own.
+    """
+    from sovereign_stack import gate_census as gc
+
+    def measure(source, now):
+        if source == "boom":
+            raise RuntimeError("console unavailable")
+        return _measured(7, 4)
+
+    (tmp_path / "good_connector" / "pending_writes").mkdir(parents=True)
+    (tmp_path / "broken_connector" / "pending_writes").mkdir(parents=True)
+    monkeypatch.setitem(gc._DIR_TO_SOURCE, "good_connector", "stub")
+    monkeypatch.setitem(gc._DIR_TO_SOURCE, "broken_connector", "boom")
+    monkeypatch.setattr(gc, "_measure_substrate", measure)
+
+    c = measure_gate(NOW, root=tmp_path)
+    broken = c["substrates"]["broken_connector"]
+    assert broken["status"] == "unmeasured"
+    assert "console unavailable" in broken["reason"]
+    assert "by_status" not in broken
+    assert "pending_claim_bearing" not in broken
+    assert c["substrates"]["good_connector"]["status"] == "measured"
+    assert c["total_pending_all_substrates"] == 7
+    assert c["total_pending_claim_bearing"] == 4
+    assert c["any_unmeasured"] is True

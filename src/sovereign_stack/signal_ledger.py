@@ -22,6 +22,21 @@ on the marker path and re-checks under it. Lock order is one-directional and
 must stay that way: MARKER LOCK -> ledger appends (``_append_lock``) ->
 marker write. Never take the marker lock while holding a ledger append.
 
+THE SWEEP IS INCREMENTAL, BUDGETED, AND OFF THE CALLER'S THREAD (2026-09-06).
+The deployed sweep re-read every source shard and re-folded the whole ledger
+once per source record: 265 s at full CPU, measured, inside the process that
+answers every stack tool call. Three changes, and only the first one is the
+one people expect. (1) ``_ScanIndex`` — the sweep carries ONE fold of the
+ledger and tails the file for what was appended, instead of re-folding 6 MB
+per record; this alone took the same corpus from 265 s to 0.34 s. (2) PER-SHARD
+WATERMARKS in the certificate — size, mtime_ns and row count per shard, so a
+rescan reads only what moved and unchanged shards carry their certified
+entries forward. (3) A HARD TIME BUDGET and a background worker: a sweep that
+overruns writes a PARTIAL certificate that names what it did not reach, and a
+read that finds a sweep running answers from the previous certificate marked
+``refreshing`` rather than waiting. None of it weakens the integrity rules
+below: a partial or refreshing read still publishes NULL, never a short count.
+
 AND A DAMAGED LEDGER IS NEVER REPAIRED BY RESCANNING IT (review N2). A refresh
 writes a new marker, and a new marker certifies whatever the file now holds —
 so a refresh over a truncated ledger destroys the only evidence that anything
@@ -32,11 +47,15 @@ moves the damaged ledger aside.
 
 from __future__ import annotations
 
+import concurrent.futures
 import contextlib
+import contextvars
 import fcntl
 import hashlib
 import json
 import os
+import threading
+import time
 import traceback
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -105,6 +124,72 @@ def marker_max_age_seconds() -> int:
         if value > 0:
             return value
     return DEFAULT_MARKER_MAX_AGE_SECONDS
+
+
+# ── THE SWEEP'S OWN BOUNDS (2026-09-06, the incremental release) ────────────
+#
+# THREE NUMBERS, AND EACH ONE EXISTS BECAUSE A MEASUREMENT SAID SO. The
+# deployed sweep took 265 s over the live corpus, at full CPU, inside the
+# process that answers every stack tool call. A reader waiting on that is not
+# waiting on a health check, it is waiting on a batch job.
+#
+#   * SCAN_BUDGET   — how long one sweep may run before it stops and says it
+#     stopped. Exceeding it produces a PARTIAL certificate, never a partial
+#     count wearing a total's name.
+#   * REFRESH_WAIT  — how long the read that STARTED a sweep waits for it
+#     before handing back the previous certificate's numbers marked
+#     "refreshing". A read that finds a sweep ALREADY running never waits at
+#     all.
+#   * WATERMARK bounds — how much per-shard evidence one certificate may
+#     carry before it starts eliding entries, and it says when it does.
+SCAN_BUDGET_ENV = "SIGNAL_LEDGER_SCAN_BUDGET"
+DEFAULT_SCAN_BUDGET_SECONDS = 120.0
+REFRESH_WAIT_ENV = "SIGNAL_LEDGER_REFRESH_WAIT"
+DEFAULT_REFRESH_WAIT_SECONDS = 5.0
+WATERMARK_MAX_SHARDS_ENV = "SIGNAL_LEDGER_WATERMARK_MAX_SHARDS"
+DEFAULT_WATERMARK_MAX_SHARDS = 2000
+WATERMARK_WINDOW_DAYS_ENV = "SIGNAL_LEDGER_WATERMARK_WINDOW_DAYS"
+DEFAULT_WATERMARK_WINDOW_DAYS = 30
+
+
+def _positive_float_env(name: str, default: float) -> float:
+    raw = os.environ.get(name, "").strip()
+    if raw:
+        try:
+            value = float(raw)
+        except ValueError:
+            return default
+        if value > 0:
+            return value
+    return default
+
+
+def _positive_int_env(name: str, default: int) -> int:
+    raw = os.environ.get(name, "").strip()
+    if raw:
+        try:
+            value = int(raw)
+        except ValueError:
+            return default
+        if value > 0:
+            return value
+    return default
+
+
+def scan_budget_seconds() -> float:
+    return _positive_float_env(SCAN_BUDGET_ENV, DEFAULT_SCAN_BUDGET_SECONDS)
+
+
+def refresh_wait_seconds() -> float:
+    return _positive_float_env(REFRESH_WAIT_ENV, DEFAULT_REFRESH_WAIT_SECONDS)
+
+
+def watermark_max_shards() -> int:
+    return _positive_int_env(WATERMARK_MAX_SHARDS_ENV, DEFAULT_WATERMARK_MAX_SHARDS)
+
+
+def watermark_window_days() -> int:
+    return _positive_int_env(WATERMARK_WINDOW_DAYS_ENV, DEFAULT_WATERMARK_WINDOW_DAYS)
 
 
 def _now() -> str:
@@ -400,6 +485,146 @@ def load_latest(root: Path | None = None) -> dict[str, dict]:
     return load_state(root).latest
 
 
+# ── THE FOLD A SWEEP CARRIES WITH IT, INSTEAD OF REBUILDING PER ROW ────────
+#
+# THIS IS WHERE THE 265 SECONDS WENT, and no amount of shard watermarking
+# would have found it. `open_signal` re-read and re-folded the WHOLE ledger
+# inside its append lock, once per source record, to answer one question:
+# "have I seen this id?". Measured on the live corpus 2026-09-06: 8,765 rows
+# / 6.09 MB is ~66 ms to fold, and `nape/honks.jsonl` holds 3,975 rows, so the
+# honk source alone spent ~4,000 x 66 ms = ~260 s answering a dictionary
+# lookup. `scan_honks`, `scan_proposals` and `scan_threads` each called
+# `load_latest` a SECOND time per record on top of that.
+#
+# It is O(rows x records) and it is invisible in a profile of any one call,
+# which is why it survived four reviews: every individual read is fast and
+# correct.
+#
+# THE INDEX IS REFRESHED BY TAILING THE FILE, NOT BY BOOKKEEPING ITS OWN
+# WRITES. An index that updated itself in memory on append would be a second
+# model of the ledger that can silently disagree with the ledger; this one
+# re-reads whatever bytes appeared since it last looked, so its only source of
+# truth is still the file. It is refreshed INSIDE `open_signal`'s append lock,
+# so a foreign writer's append is picked up on exactly the same schedule the
+# old full re-read picked it up on — the check-and-append atomicity that
+# reviewer finding 8 closed is untouched.
+#
+# ANY SURPRISE IS A FULL RELOAD. Shrinkage, a decode failure, a malformed
+# line: every one of them falls back to `load_state`, so the errors a reader
+# sees are byte-identical to the ones the unindexed path raised. The index is
+# an accelerator, never a second implementation of the fold.
+class _ScanIndex:
+    """The ledger fold for the life of ONE sweep. Never crosses a sweep."""
+
+    __slots__ = ("key", "root", "latest", "corrupt_count", "consumed", "loaded")
+
+    def __init__(self, root: Path | None) -> None:
+        self.root = _root(root)
+        self.key = str(self.root)
+        self.latest: dict[str, dict] = {}
+        self.corrupt_count = 0
+        self.consumed = 0
+        self.loaded = False
+
+    def matches(self, root: Path | None) -> bool:
+        return str(_root(root)) == self.key
+
+    def _fold(self, rows: list) -> None:
+        for rec in rows:
+            if _validate_row(rec) is not None:
+                self.corrupt_count += 1
+                continue
+            self.latest[str(rec["signal_id"])] = rec
+
+    def _full_reload(self) -> None:
+        path = ledger_path(self.root)
+        self.latest = {}
+        self.corrupt_count = 0
+        self.consumed = 0
+        self.loaded = True
+        if not path.exists():
+            return
+        data = path.read_bytes()
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise LedgerUnreadable(f"encoding:{exc.__class__.__name__}") from exc
+        self._fold(_parse_ledger_rows(text))
+        self.consumed = len(data)
+
+    def refresh(self) -> dict[str, dict]:
+        """The current fold. Cheap when nothing was appended since last call."""
+        path = ledger_path(self.root)
+        if not self.loaded or not path.exists():
+            self._full_reload()
+            return self.latest
+        try:
+            size = path.stat().st_size
+        except OSError as exc:
+            raise LedgerUnreadable(f"unreadable:{exc.__class__.__name__}") from exc
+        if size == self.consumed:
+            return self.latest
+        if size < self.consumed:
+            # THE FILE SHRANK UNDER US. Append-only says this cannot happen, so
+            # trust the file and not the assumption: reload from scratch.
+            self._full_reload()
+            return self.latest
+        try:
+            with path.open("rb") as fh:
+                fh.seek(self.consumed)
+                chunk = fh.read(size - self.consumed)
+        except OSError as exc:
+            raise LedgerUnreadable(f"unreadable:{exc.__class__.__name__}") from exc
+        cut = chunk.rfind(b"\n")
+        if cut == -1:
+            # A partial final line. Consume nothing; the next refresh sees it
+            # whole. (Appends are one fsync'd line under flock, so this is the
+            # foreign-writer-mid-write case, not our own.)
+            return self.latest
+        usable = chunk[: cut + 1]
+        try:
+            text = usable.decode("utf-8")
+            rows = _parse_ledger_rows(text)
+        except (UnicodeDecodeError, LedgerUnreadable):
+            self._full_reload()
+            return self.latest
+        self._fold(rows)
+        self.consumed += len(usable)
+        return self.latest
+
+
+_SCAN_INDEX: contextvars.ContextVar[_ScanIndex | None] = contextvars.ContextVar(
+    "signal_ledger_scan_index", default=None
+)
+
+
+@contextlib.contextmanager
+def _scan_index(root: Path | None):
+    """Install a fold for the duration of one sweep.
+
+    A ContextVar rather than a parameter threaded through nine functions:
+    `open_signal` and `ack_signal` are public and are called directly by
+    callers that have no sweep, and a new keyword on each of them would be a
+    second way to get the fold wrong. It is reset in a finally, so no sweep
+    can leak its index into the next one, and a worker thread starts with its
+    own context so two sweeps cannot share one.
+    """
+    index = _ScanIndex(root)
+    token = _SCAN_INDEX.set(index)
+    try:
+        yield index
+    finally:
+        _SCAN_INDEX.reset(token)
+
+
+def _latest_view(root: Path | None = None) -> dict[str, dict]:
+    """`load_latest`, served from the sweep's index when one is installed."""
+    index = _SCAN_INDEX.get()
+    if index is not None and index.matches(root):
+        return index.refresh()
+    return load_latest(root)
+
+
 # ── scan marker ─────────────────────────────────────────────────────────────
 #
 # A marker is a CLAIM about a scan, not evidence of one. Reviewer finding 2:
@@ -478,6 +703,60 @@ def _validate_marker(rec: Any) -> str | None:
     max_age = rec.get("max_age_seconds")
     if isinstance(max_age, bool) or not isinstance(max_age, int) or max_age <= 0:
         return "max_age_seconds must be a positive integer"
+    # ── THE 2026-09-06 FIELDS ARE OPTIONAL ON READ, AND THAT IS A DEPLOY
+    # ── REQUIREMENT, NOT A STYLE CHOICE ────────────────────────────────────
+    # The certificate on the live box right now carries exactly the eight keys
+    # above. Adding `watermarks` or `partial` to MARKER_REQUIRED would make
+    # that file `marker_invalid` the moment this release lands, and
+    # `_refresh_decision` answers marker_invalid with REFUSE plus a quarantine
+    # instruction — i.e. the release would hand Anthony a recovery procedure
+    # for an undamaged ledger. Same rule, same reason, as `origin` on a ledger
+    # row: a required field added late turns the existing store corrupt on the
+    # next read.
+    #
+    # Absent watermarks simply mean "nothing is known to be unchanged", which
+    # degrades to the full sweep this release is replacing. Present-and-broken
+    # is a different fact and is refused, because a watermark we cannot parse
+    # is a claim about what was read that we cannot check.
+    watermarks = rec.get("watermarks")
+    if watermarks is not None:
+        if not isinstance(watermarks, dict):
+            return "watermarks must be an object when present"
+        for src_name, block in watermarks.items():
+            if src_name not in SOURCES:
+                return f"watermarks[{src_name!r}] is not a source"
+            if not isinstance(block, dict):
+                return f"watermarks[{src_name!r}] must be an object"
+            digest = block.get("digest")
+            if not isinstance(digest, str) or len(digest) != 64:
+                return f"watermarks[{src_name!r}].digest must be a 64-character hex digest"
+            shards = block.get("shards")
+            if not isinstance(shards, list):
+                return f"watermarks[{src_name!r}].shards must be a list"
+            for entry in shards:
+                if not isinstance(entry, dict):
+                    return f"watermarks[{src_name!r}] has a shard entry that is not an object"
+                if not isinstance(entry.get("path"), str) or not entry["path"].strip():
+                    return f"watermarks[{src_name!r}] has a shard with no path"
+                for numeric in ("size", "mtime_ns", "rows"):
+                    value = entry.get(numeric)
+                    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                        return (
+                            f"watermarks[{src_name!r}] shard {entry['path']!r} has a bad {numeric}"
+                        )
+    partial = rec.get("partial")
+    if partial is not None and not isinstance(partial, bool):
+        return "partial must be a boolean when present"
+    unreached = rec.get("unreached")
+    if unreached is not None and (
+        not isinstance(unreached, list) or any(not isinstance(u, str) for u in unreached)
+    ):
+        return "unreached must be a list of strings when present"
+    if partial and not unreached:
+        # A PARTIAL CERTIFICATE THAT CANNOT NAME WHAT IT MISSED is worse than
+        # no certificate: it publishes the flag that nulls every aggregate
+        # while leaving the reader no way to know what is still owed.
+        return "a partial certificate must name what it did not reach"
     return None
 
 
@@ -614,7 +893,24 @@ def _marker_staleness(marker: dict, now: datetime | None = None) -> str | None:
     return None
 
 
-def _write_scan_marker(counts: dict, source_status: dict, root: Path | None = None) -> dict:
+def _write_scan_marker(
+    counts: dict,
+    source_status: dict,
+    root: Path | None = None,
+    *,
+    watermarks: dict | None = None,
+    partial: bool = False,
+    unreached: list[str] | None = None,
+    budget_seconds: float | None = None,
+    scan_seconds: float | None = None,
+) -> dict:
+    """ONE WRITER FOR BOTH THE COMPLETE AND THE PARTIAL CERTIFICATE.
+
+    A second writer for partial scans is how `ledger_bytes` / `ledger_rows` /
+    `ledger_sha256` come to be computed two ways and disagree — and those three
+    are the only cumulative loss evidence there is. A partial certificate is
+    the same certificate with `partial` set and the unreached sources named.
+    """
     path = scan_marker_path(root)
     path.parent.mkdir(parents=True, exist_ok=True)
     # MATERIALISE THE LEDGER BEFORE THE MARKER EXISTS. Without this, a scan
@@ -634,7 +930,7 @@ def _write_scan_marker(counts: dict, source_status: dict, root: Path | None = No
     # "scanned, then the ledger was lost": the latter has no file at all, and
     # _check_marker_integrity calls it ledger_missing unconditionally.
     ledger_bytes, ledger_rows, ledger_sha = _ledger_integrity(root)
-    rec = {
+    rec: dict[str, Any] = {
         "scanned_at": _now(),
         "counts": counts,
         "source_status": source_status,
@@ -642,7 +938,14 @@ def _write_scan_marker(counts: dict, source_status: dict, root: Path | None = No
         "ledger_rows": ledger_rows,
         "ledger_sha256": ledger_sha,
         "max_age_seconds": marker_max_age_seconds(),
+        "watermarks": watermarks or {},
+        "partial": bool(partial),
+        "unreached": list(unreached or []),
     }
+    if budget_seconds is not None:
+        rec["scan_budget_seconds"] = float(budget_seconds)
+    if scan_seconds is not None:
+        rec["scan_seconds"] = round(float(scan_seconds), 3)
     path.write_text(json.dumps(rec, sort_keys=True) + "\n", encoding="utf-8")
     return rec
 
@@ -777,7 +1080,10 @@ def open_signal(
         produced_at = now
     origin = _origin(source, native, claim_id=origin_claim_id, path=origin_path)
     with _append_lock(root) as fh:
-        existing = load_latest(root).get(sid)
+        # THE FOLD, NOT A RE-FOLD. `_latest_view` is `load_latest` outside a
+        # sweep and the sweep's tailed index inside one; either way it is read
+        # here, under the append lock, exactly as before.
+        existing = _latest_view(root).get(sid)
         if existing is not None:
             # ── PROVENANCE BACKFILL (R1) ────────────────────────────────────
             # INGESTION IS IDEMPOTENT ON STATE, NOT ON PROVENANCE. A signal
@@ -883,7 +1189,7 @@ def ack_signal(
         raise ValueError(f"{state} requires a reason")
     if state == "acknowledged" and not (reason and reason.strip()):
         reason = "acknowledged"
-    prev = load_latest(root).get(signal_id)
+    prev = _latest_view(root).get(signal_id)
     if not prev:
         raise KeyError(f"unknown signal_id {signal_id}")
     producer = SOURCE_PRODUCER.get(prev.get("source", ""), "")
@@ -1115,7 +1421,12 @@ def summarize(root: Path | None = None, *, now: datetime | None = None) -> dict:
     }
 
 
-def _blind_field(error: str, ingestion: str, scanned_at: str | None = None) -> dict:
+def _blind_field(
+    error: str,
+    ingestion: str,
+    scanned_at: str | None = None,
+    refresh_started_at: str | None = None,
+) -> dict:
     """The shape for "we could not measure ANYTHING". Every count is None.
 
     ``measured: False`` is the flag that separates this from a PARTIAL read.
@@ -1130,6 +1441,12 @@ def _blind_field(error: str, ingestion: str, scanned_at: str | None = None) -> d
         "error": error,
         "ingestion": ingestion,
         "scanned_at": scanned_at,
+        # WHEN THE ANSWER IS ALREADY BEING REPLACED. Null on every read that
+        # has no sweep behind it, so a reader can tell "there is no number and
+        # nobody is working on it" from "there is no number YET".
+        "refresh_started_at": refresh_started_at,
+        "partial": False,
+        "unreached": None,
         "measured": False,
         "total": None,
         "total_configured": None,
@@ -1193,6 +1510,7 @@ def heartbeat_field(root: Path | None = None, *, scan: bool = False) -> dict:
         # whether or not a scan ever ran, and answering "not_scanned" for a
         # file full of broken JSON tells the reader the wrong thing to go fix.
         state = load_state(root)
+        refreshing = refresh_in_flight(root)
         if marker is None:
             # A ledger with no completed scan behind it. The rows are real, but
             # nothing certifies that the SOURCES were read, so no count here is
@@ -1203,7 +1521,12 @@ def heartbeat_field(root: Path | None = None, *, scan: bool = False) -> dict:
             # defect behind a different one — the reader would see
             # "not_scanned" and go run a scan, never learning that the ledger
             # it was about to certify has unreadable rows in it.
-            unscanned = _blind_field("not_scanned", "never")
+            unscanned = _blind_field(
+                "not_scanned",
+                "refreshing" if refreshing else "never",
+                None,
+                (refreshing or {}).get("started_at"),
+            )
             unscanned["corrupt_rows"] = state.corrupt_count
             corrupt_error = state.error()
             if corrupt_error:
@@ -1217,9 +1540,17 @@ def heartbeat_field(root: Path | None = None, *, scan: bool = False) -> dict:
         if integrity_error:
             return _blind_field(integrity_error, "error", marker.get("scanned_at"))
         stale_error = _marker_staleness(marker)
-        if stale_error:
+        if stale_error and not refreshing:
             # STALE IS AN ERROR STATE, NOT A FOOTNOTE. A six-year-old marker
             # returned ingestion:"ok" on the reviewed tip.
+            #
+            # WITH A SWEEP IN FLIGHT IT IS NOT THE ANSWER EITHER. Blanking the
+            # counts because the certificate aged out, while the replacement
+            # is already being computed, hands the watch seat nothing at the
+            # one moment it has a perfectly good previous answer. So the
+            # numbers stand, `ingestion` says `refreshing` rather than `ok`,
+            # and `scanned_at` still shows how old they are. What is refused is
+            # calling them fresh — "stale but ok" stays impossible.
             return _blind_field(stale_error, "stale", marker.get("scanned_at"))
         summary = summarize(root)
         error = None
@@ -1254,6 +1585,29 @@ def heartbeat_field(root: Path | None = None, *, scan: bool = False) -> dict:
             # file was going to define, so the count cannot stand either.
             error = f"{error}; {config_error}" if error else config_error
             ingestion = "config_error"
+        if stale_error:
+            # ONLY REACHABLE WITH A SWEEP IN FLIGHT — the branch above returns
+            # otherwise. Appended last so it can never displace the shrank,
+            # corrupt, unmeasured or config messages, which are all about the
+            # data rather than about its age.
+            error = f"{error}; {stale_error}" if error else stale_error
+        # ── A PARTIAL SWEEP NEVER PUBLISHES A TOTAL ────────────────────────
+        # The `partial:` statuses `scan_all` writes already make every
+        # unreached source unmeasured, so `summarize` nulls the aggregates by
+        # the rule that was already there. This adds the NAME: `ingestion`
+        # says `partial` and the error lists what was not reached, so a reader
+        # can tell a partial sweep from a broken source without diffing
+        # statuses. INGESTION PRECEDENCE, most severe first: error,
+        # config_error, partial, refreshing, degraded, ok.
+        partial = bool(marker.get("partial"))
+        unreached = marker.get("unreached") or []
+        if partial:
+            partial_error = "partial_scan:" + ",".join(str(u) for u in unreached)
+            error = f"{error}; {partial_error}" if error else partial_error
+            if ingestion in ("ok", "degraded"):
+                ingestion = "partial"
+        if refreshing and ingestion in ("ok", "degraded"):
+            ingestion = "refreshing"
         # ── N5: THE ledger_shrank BRANCH RETURNS NULL LIKE EVERY OTHER ONE ──
         # It used to set `error` and then copy the numeric total out of the
         # fold unchanged, so the one branch that has ARITHMETIC PROOF that
@@ -1263,7 +1617,7 @@ def heartbeat_field(root: Path | None = None, *, scan: bool = False) -> dict:
         # the missing rows have no source to subtract them from either.
         by_source_open = {k: v["open"] for k, v in summary["by_source"].items()}
         by_source_detail = summary["by_source"]
-        blind_aggregates = shrank or bool(config_error)
+        blind_aggregates = shrank or bool(config_error) or partial
         if blind_aggregates:
             by_source_open = dict.fromkeys(by_source_open)
             by_source_detail = {k: dict.fromkeys(v) for k, v in summary["by_source"].items()}
@@ -1271,6 +1625,9 @@ def heartbeat_field(root: Path | None = None, *, scan: bool = False) -> dict:
             "error": error,
             "ingestion": ingestion,
             "scanned_at": marker.get("scanned_at"),
+            "refresh_started_at": (refreshing or {}).get("started_at"),
+            "partial": partial,
+            "unreached": list(unreached),
             "measured": True,
             # THE NULLS COME STRAIGHT FROM summarize(). Nothing here recomputes
             # a count from rows it happens to hold — that recomputation is what
@@ -1313,14 +1670,178 @@ class ScanResult:
     A count without a status is the fail-open the reviewer named twice: a
     source that could not be parsed, and a source that is simply not there,
     both used to return ``0`` and be published as "ok".
+
+    ``shards`` and ``unreached`` are the 2026-09-06 additions and they are the
+    same idea one layer down. ``shards`` is the per-file evidence a later
+    rescan judges "has this changed?" against — size, mtime_ns and row count
+    for every shard the source is made of, INCLUDING the ones this scan
+    skipped because they had not changed, because a watermark list that
+    silently drops what it did not re-read certifies a smaller store than the
+    one on disk. ``unreached`` names the shards a time budget stopped us
+    before; it is what makes a partial scan say so instead of looking complete.
     """
 
-    __slots__ = ("opened", "status", "skipped")
+    __slots__ = ("opened", "status", "skipped", "shards", "unreached")
 
-    def __init__(self, opened: int, status: str, skipped: int = 0) -> None:
+    def __init__(
+        self,
+        opened: int,
+        status: str,
+        skipped: int = 0,
+        shards: list[dict] | None = None,
+        unreached: list[str] | None = None,
+    ) -> None:
         self.opened = opened
         self.status = status
         self.skipped = skipped
+        self.shards = shards or []
+        self.unreached = unreached or []
+
+
+# ── PER-SHARD WATERMARKS ───────────────────────────────────────────────────
+#
+# A certificate used to say only "these seven sources were read". It could not
+# say WHAT was read, so every rescan re-read everything: the deployed sweep
+# folded 3,975 honks, 240 spool rows, 295 proposal files and 161 thread shards
+# on the hour, every hour, to discover that almost none of them had moved.
+#
+# A watermark is the smallest honest answer to "did this file change?": its
+# size and its nanosecond mtime at the moment we read it, plus the row count we
+# got. A rescan re-stats each shard; equal size AND equal mtime_ns AND still
+# readable means the bytes we folded last time are the bytes on disk now, so
+# its rows are already in the ledger and re-folding them can only reproduce
+# what is there.
+#
+# THE READABILITY PROBE IS NOT DECORATION. `chmod 000` changes neither size nor
+# mtime, so a permission loss is invisible to a stat-only comparison and the
+# source would carry its old "ok" forward while being unopenable. One
+# `os.access` per skipped shard closes that, and a shard that fails it is
+# treated as CHANGED — read it, and let the real status come back.
+#
+# ABSENCE OF A WATERMARK MEANS SCAN IT. Every path here degrades toward the
+# full sweep: no certificate, a certificate from a release that had no
+# watermarks, an elided entry, a shard we have never seen. Being wrong in that
+# direction costs time; being wrong in the other direction loses signals.
+
+
+def _shard_entry(rel: str, path: Path, rows: int) -> dict | None:
+    """This shard as the certificate will record it. None if it vanished."""
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    return {"path": rel, "size": st.st_size, "mtime_ns": st.st_mtime_ns, "rows": int(rows)}
+
+
+def _prev_shards(prev: dict | None) -> dict[str, dict]:
+    """path -> previous watermark entry, for the entries the certificate kept."""
+    if not isinstance(prev, dict):
+        return {}
+    shards = prev.get("shards")
+    if not isinstance(shards, list):
+        return {}
+    out: dict[str, dict] = {}
+    for entry in shards:
+        if isinstance(entry, dict) and isinstance(entry.get("path"), str):
+            out[entry["path"]] = entry
+    return out
+
+
+def _shard_unchanged(entry: dict | None, path: Path) -> bool:
+    """True only when the bytes we folded last time are the bytes on disk now."""
+    if not isinstance(entry, dict):
+        return False
+    try:
+        st = path.stat()
+    except OSError:
+        return False
+    if st.st_size != entry.get("size") or st.st_mtime_ns != entry.get("mtime_ns"):
+        return False
+    return os.access(path, os.R_OK)
+
+
+def _status_carryable(status: Any) -> bool:
+    """May an unchanged shard keep the status the last scan gave it?
+
+    NOT FOR "unknown" AND NOT FOR "partial:". Those two are the absence of a
+    measurement, and carrying an absence forward on the strength of "nothing
+    changed" would make a source that has never been read look permanently
+    settled — the sweep would skip it forever on evidence it never gathered.
+    """
+    if not isinstance(status, str) or not status.strip():
+        return False
+    return status != "unknown" and not status.startswith("partial:")
+
+
+def _canonical_shards(shards: list[dict]) -> list[dict]:
+    return sorted(
+        (
+            {
+                "path": s.get("path"),
+                "size": s.get("size"),
+                "mtime_ns": s.get("mtime_ns"),
+                "rows": s.get("rows"),
+            }
+            for s in shards
+            if isinstance(s, dict)
+        ),
+        key=lambda s: str(s.get("path")),
+    )
+
+
+def _watermark_block(shards: list[dict], *, now: datetime | None = None) -> dict:
+    """One source's watermark evidence, BOUNDED, and it says when it bounded.
+
+    The bound exists because a certificate is read on every refresh decision
+    and a source with tens of thousands of shards would turn that read into its
+    own cost. Over ``watermark_max_shards()`` entries, only shards touched
+    within ``watermark_window_days()`` are kept (newest first, still capped),
+    and the block records how many were dropped plus a DIGEST OF THE WHOLE
+    LIST — so a reader can still tell that the shard set changed even where the
+    per-shard entry is gone. An elided shard simply has no watermark, which
+    means the next sweep reads it: the bound costs time, never correctness.
+
+    Measured on the live store 2026-09-06: the largest source is `thread` at
+    161 shards, three orders of magnitude under the 2000 default, so nothing is
+    elided today. The path is exercised by lowering the bound in a test.
+    """
+    canonical = _canonical_shards(shards)
+    digest = hashlib.sha256(
+        json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    block: dict[str, Any] = {
+        "shard_count": len(canonical),
+        "digest": digest,
+        "elided": 0,
+        "shards": canonical,
+    }
+    cap = watermark_max_shards()
+    if len(canonical) <= cap:
+        return block
+    window_days = watermark_window_days()
+    cutoff_ns = int(
+        ((now or datetime.now(timezone.utc)) - timedelta(days=window_days)).timestamp() * 1e9
+    )
+    recent = [
+        s for s in canonical if isinstance(s.get("mtime_ns"), int) and s["mtime_ns"] >= cutoff_ns
+    ]
+    recent.sort(key=lambda s: s.get("mtime_ns") or 0, reverse=True)
+    kept = _canonical_shards(recent[:cap])
+    block["shards"] = kept
+    block["elided"] = len(canonical) - len(kept)
+    block["window_days"] = window_days
+    block["note"] = (
+        f"{len(canonical)} shards exceeds the {cap}-entry watermark bound; per-shard "
+        f"entries are kept only for shards touched in the last {window_days} days "
+        f"({len(kept)} kept, {len(canonical) - len(kept)} elided). An elided shard has "
+        "no watermark and is therefore RE-READ by the next sweep; `digest` still "
+        "covers the whole list."
+    )
+    return block
+
+
+def _budget_exceeded(deadline: float | None) -> bool:
+    return deadline is not None and time.monotonic() >= deadline
 
 
 def _degrade(status: str, skipped: int) -> str:
@@ -1331,9 +1852,38 @@ def _degrade(status: str, skipped: int) -> str:
     return status
 
 
-def scan_honks(root: Path, owner: str = "watch-2/3") -> ScanResult:
-    honks = _read_source_jsonl(root / "nape" / "honks.jsonl")
-    acks = _read_source_jsonl(root / "nape" / "acks.jsonl")
+def scan_honks(
+    root: Path,
+    owner: str = "watch-2/3",
+    prev: dict | None = None,
+    prev_status: str | None = None,
+    deadline: float | None = None,
+) -> ScanResult:
+    """honks.jsonl and acks.jsonl SKIP AS A PAIR, deliberately.
+
+    An ack is matched against a honk, so reading one file without the other
+    decides an acknowledgement from half its evidence. Either both are
+    unchanged and the source is skipped whole, or both are read.
+
+    On the live box this source is the one that keeps moving — nape appends to
+    honks.jsonl continuously — so the watermark will USUALLY miss here and the
+    cost of a re-read is what the sweep's ledger index (see `_ScanIndex`) is
+    there to make affordable. The two fixes are not alternatives.
+    """
+    honk_path = root / "nape" / "honks.jsonl"
+    ack_path = root / "nape" / "acks.jsonl"
+    pairs = [("nape/honks.jsonl", honk_path), ("nape/acks.jsonl", ack_path)]
+    present = [(rel, p) for rel, p in pairs if p.exists()]
+    prev_map = _prev_shards(prev)
+    if (
+        prev_map
+        and _status_carryable(prev_status)
+        and set(prev_map) == {rel for rel, _ in present}
+        and all(_shard_unchanged(prev_map.get(rel), p) for rel, p in present)
+    ):
+        return ScanResult(0, str(prev_status), 0, shards=list(prev_map.values()))
+    honks = _read_source_jsonl(honk_path)
+    acks = _read_source_jsonl(ack_path)
     # NORMALISE BOTH SIDES. The old code stringified the ack id and then
     # compared the RAW honk id against that set, so integer id 7 was written
     # as "7" on one side and matched as 7 on the other and never matched at
@@ -1369,7 +1919,7 @@ def scan_honks(root: Path, owner: str = "watch-2/3") -> ScanResult:
             n += 1
         if hid in ack_ids:
             sid = signal_id_for("honk", hid)
-            latest = load_latest(root).get(sid)
+            latest = _latest_view(root).get(sid)
             if latest and latest.get("state") == "open":
                 with contextlib.suppress(PermissionError):
                     ack_signal(
@@ -1382,11 +1932,34 @@ def scan_honks(root: Path, owner: str = "watch-2/3") -> ScanResult:
     status = honks.status if honks.status != "absent" else "ok"
     if acks.status not in ("ok", "absent"):
         status = f"{status}; acks {acks.status}"
-    return ScanResult(n, _degrade(status, skipped), skipped)
+    shards = [
+        e
+        for e in (
+            _shard_entry("nape/honks.jsonl", honk_path, len(honks.rows) + honks.bad_lines),
+            _shard_entry("nape/acks.jsonl", ack_path, len(acks.rows) + acks.bad_lines),
+        )
+        if e is not None
+    ]
+    return ScanResult(n, _degrade(status, skipped), skipped, shards=shards)
 
 
-def scan_watchman(root: Path, owner: str = "watch-2/3") -> ScanResult:
-    spool = _read_source_jsonl(root / "watchman" / "spool.jsonl")
+def scan_watchman(
+    root: Path,
+    owner: str = "watch-2/3",
+    prev: dict | None = None,
+    prev_status: str | None = None,
+    deadline: float | None = None,
+) -> ScanResult:
+    spool_path = root / "watchman" / "spool.jsonl"
+    prev_map = _prev_shards(prev)
+    if (
+        prev_map
+        and _status_carryable(prev_status)
+        and set(prev_map) == ({"watchman/spool.jsonl"} if spool_path.exists() else set())
+        and _shard_unchanged(prev_map.get("watchman/spool.jsonl"), spool_path)
+    ):
+        return ScanResult(0, str(prev_status), 0, shards=list(prev_map.values()))
+    spool = _read_source_jsonl(spool_path)
     n = 0
     skipped = 0
     for rec in spool.rows:
@@ -1408,18 +1981,57 @@ def scan_watchman(root: Path, owner: str = "watch-2/3") -> ScanResult:
         ):
             n += 1
     status = spool.status if spool.status != "absent" else "ok"
-    return ScanResult(n, _degrade(status, skipped), skipped)
+    entry = _shard_entry("watchman/spool.jsonl", spool_path, len(spool.rows) + spool.bad_lines)
+    return ScanResult(n, _degrade(status, skipped), skipped, shards=[entry] if entry else [])
 
 
-def scan_proposals(root: Path, owner: str = "watch-2/3") -> ScanResult:
+def scan_proposals(
+    root: Path,
+    owner: str = "watch-2/3",
+    prev: dict | None = None,
+    prev_status: str | None = None,
+    deadline: float | None = None,
+) -> ScanResult:
+    """One pending-write file is one shard, so skipping is per file.
+
+    A proposal's whole lifecycle lives in its own file — the `status` field is
+    what drives the committed/rejected transitions — so an unchanged file has
+    nothing new to say and skipping it decides nothing.
+
+    RESIDUAL, NAMED RATHER THAN ENGINEERED AROUND: `native_id` comes from
+    `proposal_id` INSIDE the file, with the filename only as a fallback. Two
+    files in one substrate carrying the same `proposal_id` are therefore one
+    signal, and which of them drives its transitions is already walk-order
+    arbitrary on a full sweep; skipping one can change which. Same ambiguity,
+    same blast radius, not made worse here.
+    """
     n = 0
     skipped = 0
     notes: list[str] = []
+    prev_map = _prev_shards(prev)
+    shards: list[dict] = []
+    unreached: list[str] = []
+    stopped = False
     for substrate in ("grok_bridge", "openai_bridge", "antigravity_connector"):
         d = root / substrate / "pending_writes"
         if not d.is_dir():
             continue
         for f in sorted(d.glob("*.json")):
+            rel = f"{substrate}/pending_writes/{f.name}"
+            if stopped:
+                unreached.append(rel)
+                continue
+            carried = prev_map.get(rel)
+            if _status_carryable(prev_status) and _shard_unchanged(carried, f):
+                shards.append(carried)
+                continue
+            if _budget_exceeded(deadline):
+                stopped = True
+                unreached.append(rel)
+                continue
+            entry = _shard_entry(rel, f, 1)
+            if entry is not None:
+                shards.append(entry)
             try:
                 rec = json.loads(f.read_text(encoding="utf-8"))
             except (OSError, UnicodeDecodeError, json.JSONDecodeError):
@@ -1448,7 +2060,7 @@ def scan_proposals(root: Path, owner: str = "watch-2/3") -> ScanResult:
             ):
                 n += 1
             sid = signal_id_for("proposal", key)
-            latest = load_latest(root).get(sid)
+            latest = _latest_view(root).get(sid)
             if not latest or latest.get("state") != "open":
                 continue
             if status == "committed":
@@ -1465,47 +2077,105 @@ def scan_proposals(root: Path, owner: str = "watch-2/3") -> ScanResult:
                 )
     if skipped:
         notes.append(f"{skipped} unreadable proposal files")
-    return ScanResult(n, _degrade("ok", skipped), skipped)
+    return ScanResult(n, _degrade("ok", skipped), skipped, shards=shards, unreached=unreached)
 
 
-def scan_halts(root: Path, owner: str = "watch-2/3") -> ScanResult:
+def scan_halts(
+    root: Path,
+    owner: str = "watch-2/3",
+    prev: dict | None = None,
+    prev_status: str | None = None,
+    deadline: float | None = None,
+) -> ScanResult:
+    return _scan_file_source(
+        root,
+        owner,
+        prev,
+        prev_status,
+        deadline,
+        directory=root / "daemons" / "halts",
+        pattern="*.md",
+        rel_prefix="daemons/halts",
+        source="halt",
+        kind="halt",
+    )
+
+
+def scan_decisions(
+    root: Path,
+    owner: str = "watch-2/3",
+    prev: dict | None = None,
+    prev_status: str | None = None,
+    deadline: float | None = None,
+) -> ScanResult:
+    return _scan_file_source(
+        root,
+        owner,
+        prev,
+        prev_status,
+        deadline,
+        directory=root / "decisions",
+        pattern="metabolize_*.md",
+        rel_prefix="decisions",
+        source="decision",
+        kind="metabolize",
+    )
+
+
+def _scan_file_source(
+    root: Path,
+    owner: str,
+    prev: dict | None,
+    prev_status: str | None,
+    deadline: float | None,
+    *,
+    directory: Path,
+    pattern: str,
+    rel_prefix: str,
+    source: str,
+    kind: str,
+) -> ScanResult:
+    """halts and metabolize decisions: one FILE is one signal and one shard.
+
+    ONE FUNCTION FOR BOTH, because they were the same eleven lines twice and a
+    watermark change landing on one of them and not the other is exactly the
+    drift `iter_thread_shards` was extracted to end.
+    """
     n = 0
-    d = root / "daemons" / "halts"
-    if not d.is_dir():
+    if not directory.is_dir():
         return ScanResult(0, "ok")
-    for f in sorted(d.glob("*.md")):
+    prev_map = _prev_shards(prev)
+    shards: list[dict] = []
+    unreached: list[str] = []
+    stopped = False
+    for f in sorted(directory.glob(pattern)):
+        rel = f"{rel_prefix}/{f.name}"
+        if stopped:
+            unreached.append(rel)
+            continue
+        carried = prev_map.get(rel)
+        if _status_carryable(prev_status) and _shard_unchanged(carried, f):
+            shards.append(carried)
+            continue
+        if _budget_exceeded(deadline):
+            stopped = True
+            unreached.append(rel)
+            continue
+        entry = _shard_entry(rel, f, 1)
+        if entry is not None:
+            shards.append(entry)
         if open_signal(
-            source="halt",
+            source=source,
             native_id=f.name,
             produced_at=_iso_from_mtime(f),
             owner=owner,
             root=root,
-            kind="halt",
+            kind=kind,
             concern=_text_or_none(f.name),
-            origin_path=f"daemons/halts/{f.name}",
+            origin_path=rel,
         ):
             n += 1
-    return ScanResult(n, "ok")
-
-
-def scan_decisions(root: Path, owner: str = "watch-2/3") -> ScanResult:
-    n = 0
-    d = root / "decisions"
-    if not d.is_dir():
-        return ScanResult(0, "ok")
-    for f in sorted(d.glob("metabolize_*.md")):
-        if open_signal(
-            source="decision",
-            native_id=f.name,
-            produced_at=_iso_from_mtime(f),
-            owner=owner,
-            root=root,
-            kind="metabolize",
-            concern=_text_or_none(f.name),
-            origin_path=f"decisions/{f.name}",
-        ):
-            n += 1
-    return ScanResult(n, "ok")
+    return ScanResult(n, "ok", 0, shards=shards, unreached=unreached)
 
 
 def default_guardian_provider():
@@ -1572,7 +2242,18 @@ def _guardian_payload(root: Path, provider=None) -> dict | None:
     return payload if isinstance(payload, dict) else None
 
 
-def scan_guardian(root: Path, owner: str = "watch-2/3", provider=None) -> ScanResult:
+def scan_guardian(
+    root: Path,
+    owner: str = "watch-2/3",
+    provider=None,
+    prev: dict | None = None,
+    prev_status: str | None = None,
+    deadline: float | None = None,
+) -> ScanResult:
+    """NO WATERMARKS, AND THAT IS NOT AN OVERSIGHT. Guardian posture is a live
+    probe of the box, not a file, so there is nothing whose mtime could stand
+    in for it. It is re-measured on every sweep — which is also what keeps a
+    guardian that went unavailable from carrying a stale "ok" forward."""
     payload = _guardian_payload(root, provider=provider)
     if payload is None:
         # UNAVAILABLE, NOT ZERO. This status is what stops the heartbeat
@@ -1676,8 +2357,40 @@ def _may_reopen(latest: dict, source_produced_at: str) -> bool:
     return when > closed_at
 
 
-def scan_threads(root: Path, owner: str = "watch-2/3") -> ScanResult:
+def scan_threads(
+    root: Path,
+    owner: str = "watch-2/3",
+    prev: dict | None = None,
+    prev_status: str | None = None,
+    deadline: float | None = None,
+) -> ScanResult:
     """One signal per thread id ACROSS every shard. Latest timestamp wins.
+
+    THIS SOURCE SKIPS ALL-OR-NOTHING, AND THAT IS A CORRECTNESS RULE, NOT A
+    SIMPLIFICATION. Per-shard skipping is sound only where a signal's identity
+    is confined to one shard. `thread` is the one source with a CROSS-SHARD
+    fold — F7 exists because "latest record wins" used to hold only within a
+    shard — so reading a subset of shards decides a thread's state from a
+    subset of its evidence. Concretely: a thread resolved in `a.jsonl` on
+    2026-08-01 and reopened in `b.jsonl` on 2026-09-01, with `a` unchanged and
+    `b` touched, would be judged from `b` alone.
+
+    A GUARD ON produced_at DOES NOT RESCUE THAT, which was the tempting cheap
+    fix: `open_signal` stamps `produced_at` at FIRST OPEN and returns early on
+    every rescan without updating it, so the stored value is first-seen, not
+    latest-across-shards, and comparing against it is a no-op on exactly the
+    case it would exist for.
+
+    So: every shard unchanged -> skip the source; anything moved -> read all of
+    them. Measured on the live store 2026-09-06 that is 161 shards / 772 KB /
+    267 records, i.e. milliseconds. If this store ever grows to where a full
+    thread pass is expensive, the answer is a per-thread index, not per-shard
+    skipping.
+
+    THE BUDGET ABANDONS THIS SOURCE RATHER THAN HALF-FOLDING IT, for the same
+    reason: a pass-1 fold cut short is a decision made from part of the
+    evidence. Hitting the deadline mid-walk reports every shard unreached and
+    mutates nothing.
 
     TWO DEFECTS FIXED HERE, and they are different animals.
 
@@ -1701,12 +2414,40 @@ def scan_threads(root: Path, owner: str = "watch-2/3") -> ScanResult:
     d = root / "chronicle" / "open_threads"
     if not d.is_dir():
         return ScanResult(0, "ok")
+    all_shards = iter_thread_shards(d)
+
+    def _rel(path: Path) -> str:
+        try:
+            return f"chronicle/open_threads/{path.relative_to(d)}"
+        except ValueError:
+            return f"chronicle/open_threads/{path.name}"
+
+    prev_map = _prev_shards(prev)
+    if (
+        prev_map
+        and _status_carryable(prev_status)
+        and set(prev_map) == {_rel(f) for f in all_shards}
+        and all(_shard_unchanged(prev_map.get(_rel(f)), f) for f in all_shards)
+    ):
+        return ScanResult(0, str(prev_status), 0, shards=list(prev_map.values()))
     degraded = 0
     unreadable: list[str] = []
+    shards: list[dict] = []
     # PASS 1 — decide, mutating nothing.
     latest_by_id: dict[str, tuple[dict, Path, datetime | None]] = {}
-    for f in iter_thread_shards(d):
+    for f in all_shards:
+        if _budget_exceeded(deadline):
+            return ScanResult(
+                0,
+                "ok",
+                0,
+                shards=[],
+                unreached=[_rel(s) for s in all_shards],
+            )
         read = _read_source_jsonl(f)
+        entry = _shard_entry(_rel(f), f, len(read.rows) + read.bad_lines)
+        if entry is not None:
+            shards.append(entry)
         degraded += read.bad_lines
         if read.status not in ("ok", "absent"):
             try:
@@ -1754,7 +2495,7 @@ def scan_threads(root: Path, owner: str = "watch-2/3") -> ScanResult:
             n += 1
         sid = signal_id_for("thread", native)
         resolved = rec.get("resolved") is True or rec.get("status") == "resolved"
-        latest = load_latest(root).get(sid)
+        latest = _latest_view(root).get(sid)
         if not latest:
             continue
         if resolved and latest.get("state") == "open":
@@ -1802,7 +2543,7 @@ def scan_threads(root: Path, owner: str = "watch-2/3") -> ScanResult:
         status = "unreadable:" + "; ".join(sorted(unreadable)[:5])
     elif degraded:
         status = f"degraded:{degraded} unparseable lines"
-    return ScanResult(n, status, degraded)
+    return ScanResult(n, status, degraded, shards=shards)
 
 
 # ── SCANNER DIAGNOSTICS (review N9) ────────────────────────────────────────
@@ -1877,7 +2618,13 @@ def _log_diagnostic(root: Path | None, label: str, exc: BaseException) -> None:
         return
 
 
-def scan_all(root: Path | None = None, owner: str = "watch-2/3", guardian_provider=None) -> dict:
+def scan_all(
+    root: Path | None = None,
+    owner: str = "watch-2/3",
+    guardian_provider=None,
+    *,
+    budget_seconds: float | None = None,
+) -> dict:
     """Owned ingestion path. Writes signals/last_scan.json. Does not install a worker.
 
     EVERY SOURCE IS ISOLATED. The branch as reviewed ran the seven scanners
@@ -1886,46 +2633,136 @@ def scan_all(root: Path | None = None, owner: str = "watch-2/3", guardian_provid
     certifying a scan that had actually aborted (reviewer finding 6). A
     source that raises is now recorded as ``failed:<Exc>`` and the scan
     continues; the marker carries that status to every reader.
+
+    IT IS INCREMENTAL AGAINST THE PREVIOUS CERTIFICATE (2026-09-06). Each
+    scanner is handed the watermark block and the status the last completed
+    scan recorded for its source, and skips the shards whose size and mtime
+    are unchanged and which are still readable. A skipped shard carries its
+    previous watermark entry forward verbatim, so the certificate still
+    describes the WHOLE source and not just the part this sweep touched.
+
+    IT HAS A HARD TIME BUDGET, and exceeding it produces a PARTIAL certificate
+    rather than a short answer wearing a total's name. A source not reached is
+    stamped `partial:` in `source_status`, which every downstream reader
+    already treats as unmeasured — so `total` is null by the existing rule, not
+    by a new one. Its previous watermarks are carried forward untouched so the
+    next sweep resumes where this one stopped instead of starting over.
     """
     r = _root(root)
+    budget = scan_budget_seconds() if budget_seconds is None else float(budget_seconds)
+    started = time.monotonic()
+    deadline = started + budget
+    prev_marker, _prev_marker_error = _read_scan_marker(r)
+    if prev_marker is not None and _check_marker_integrity(prev_marker, r) is not None:
+        # ── A WATERMARK CERTIFIES "THOSE ROWS ARE ALREADY IN *THIS* LEDGER" ──
+        # and it stops meaning that the moment the ledger is no longer the one
+        # the certificate was written over. Skipping an unchanged shard is only
+        # sound because re-reading it could not change the ledger; if the
+        # ledger itself was rewritten under us, that is exactly what re-reading
+        # it might repair.
+        #
+        # THE CASE THAT PROVED IT (R1): strip `origin` from every ledger row and
+        # rescan. The sources have not moved, so a stat-only skip skips them —
+        # and the provenance backfill, which is the whole R1 remedy, never runs,
+        # so every concern in the queue stays withheld forever. `ensure_scanned`
+        # would REFUSE this state outright (it is a rewritten ledger), but
+        # `scan_all` is public and reachable directly, and a repair path that
+        # only works through one door is not a repair path.
+        #
+        # Costs one sha256 of the ledger prefix per sweep: ~10 ms on the live
+        # 6.09 MB store.
+        prev_marker = None
+    prev_watermarks = (prev_marker or {}).get("watermarks")
+    if not isinstance(prev_watermarks, dict):
+        prev_watermarks = {}
+    prev_statuses = (prev_marker or {}).get("source_status")
+    if not isinstance(prev_statuses, dict):
+        prev_statuses = {}
+
+    def _prev(name: str) -> tuple[dict | None, str | None]:
+        block = prev_watermarks.get(name)
+        status = prev_statuses.get(name)
+        return (block if isinstance(block, dict) else None), (
+            status if isinstance(status, str) else None
+        )
+
     scanners = (
-        ("honk", lambda: scan_honks(r, owner)),
-        ("watchman", lambda: scan_watchman(r, owner)),
-        ("proposal", lambda: scan_proposals(r, owner)),
-        ("halt", lambda: scan_halts(r, owner)),
-        ("decision", lambda: scan_decisions(r, owner)),
-        ("guardian", lambda: scan_guardian(r, owner, provider=guardian_provider)),
-        ("thread", lambda: scan_threads(r, owner)),
+        ("honk", lambda: scan_honks(r, owner, *_prev("honk"), deadline)),
+        ("watchman", lambda: scan_watchman(r, owner, *_prev("watchman"), deadline)),
+        ("proposal", lambda: scan_proposals(r, owner, *_prev("proposal"), deadline)),
+        ("halt", lambda: scan_halts(r, owner, *_prev("halt"), deadline)),
+        ("decision", lambda: scan_decisions(r, owner, *_prev("decision"), deadline)),
+        (
+            "guardian",
+            lambda: scan_guardian(r, owner, guardian_provider, *_prev("guardian"), deadline),
+        ),
+        ("thread", lambda: scan_threads(r, owner, *_prev("thread"), deadline)),
     )
     counts: dict[str, int] = {}
     source_status: dict[str, str] = {}
+    watermarks: dict[str, dict] = {}
+    unreached: list[str] = []
     # DECLARED INAPPLICABLE, NOT INFERRED (judgment 2). Only an explicit
     # human-written declaration in signals/sources.json takes a source out of
     # scope. A missing file, a probe returning None, or a scanner raising
     # never lands here — those are `unavailable` and `failed:`, which are
     # measurement failures and must stay loud.
     declared_off, config_error = _declared_not_configured(r)
-    for name, fn in scanners:
-        if name in declared_off:
-            counts[name] = 0
-            source_status[name] = NOT_CONFIGURED
-            continue
-        try:
-            result = fn()
-        except Exception as exc:  # noqa: BLE001 — one bad source must not blind the rest
-            counts[name] = 0
-            source_status[name] = f"failed:{exc.__class__.__name__}: {exc}"
-            _log_diagnostic(r, f"source {name!r} raised during scan_all", exc)
-            continue
-        counts[name] = result.opened
-        source_status[name] = result.status
+    budget_note = f"not reached before the {budget:g}s scan budget"
+    with _scan_index(r):
+        for name, fn in scanners:
+            if name in declared_off:
+                counts[name] = 0
+                source_status[name] = NOT_CONFIGURED
+                continue
+            if _budget_exceeded(deadline):
+                # NEVER STARTED. Carry its watermarks forward so the next sweep
+                # still knows what it does not have to re-read, and stamp a
+                # status that no reader can mistake for a measurement.
+                counts[name] = 0
+                source_status[name] = f"partial:{budget_note}"
+                block, _ = _prev(name)
+                if block is not None:
+                    watermarks[name] = block
+                unreached.append(name)
+                continue
+            try:
+                result = fn()
+            except Exception as exc:  # noqa: BLE001 — one bad source must not blind the rest
+                counts[name] = 0
+                source_status[name] = f"failed:{exc.__class__.__name__}: {exc}"
+                _log_diagnostic(r, f"source {name!r} raised during scan_all", exc)
+                continue
+            counts[name] = result.opened
+            if result.unreached:
+                source_status[name] = f"partial:{len(result.unreached)} shard(s) {budget_note}"
+                unreached.append(name)
+            else:
+                source_status[name] = result.status
+            watermarks[name] = _watermark_block(result.shards)
     # An unreadable declaration EXCUSES NOTHING: `_declared_not_configured`
     # returned an empty set, so every source stayed in scope and was scanned.
     # The error itself is surfaced at READ time by `summarize`, against the
     # file as it stands then, rather than frozen into this marker.
     del config_error
-    _write_scan_marker(counts, source_status, r)
-    return {"counts": counts, "source_status": source_status}
+    marker = _write_scan_marker(
+        counts,
+        source_status,
+        r,
+        watermarks=watermarks,
+        partial=bool(unreached),
+        unreached=sorted(unreached),
+        budget_seconds=budget,
+        scan_seconds=time.monotonic() - started,
+    )
+    return {
+        "counts": counts,
+        "source_status": source_status,
+        "watermarks": watermarks,
+        "partial": bool(unreached),
+        "unreached": sorted(unreached),
+        "scan_seconds": marker.get("scan_seconds"),
+    }
 
 
 @contextlib.contextmanager
@@ -2026,12 +2863,112 @@ def _refresh_decision(root: Path | None, *, now: datetime | None = None) -> tupl
     return "refresh", None
 
 
+# ── THE SWEEP RUNS OFF THE CALLER'S THREAD ─────────────────────────────────
+#
+# `heartbeat_field(scan=True)` is reached from the native `heartbeat` tool and
+# from `signals_summary`, both of which the SSE server dispatches through
+# `asyncio.to_thread`. That already keeps the sweep off the event loop's own
+# thread — and it did NOT keep the box responsive, because a 265 s CPU-bound
+# Python sweep holds the GIL for essentially all of that wall time, so every
+# other tool call crawls behind it. The measured symptom was exactly that.
+#
+# So the fix is not "put it in a thread", it is "STOP WAITING FOR IT". One
+# executor thread owns the sweep; the read that started it waits a bounded
+# `refresh_wait_seconds()` and then hands back the previous certificate's
+# numbers marked `refreshing`; a read that finds a sweep ALREADY running never
+# waits at all.
+#
+# BE HONEST ABOUT WHAT THIS BUYS. With the sweep's ledger index in place the
+# ordinary sweep on the live corpus finishes in well under a second, so in
+# practice the triggering read completes inside the wait and returns FRESH
+# numbers rather than `refreshing`. The `refreshing` path is what covers a
+# first sweep on a cold store and whatever this corpus grows into. Claiming
+# "the loop is never blocked" would overstate it; the loop is never blocked for
+# longer than the wait.
+_REFRESH_GUARD = threading.Lock()
+_REFRESH_EXECUTOR: concurrent.futures.ThreadPoolExecutor | None = None
+_REFRESH_INFLIGHT: dict[str, dict] = {}
+
+
+def _refresh_executor() -> concurrent.futures.ThreadPoolExecutor:
+    global _REFRESH_EXECUTOR
+    if _REFRESH_EXECUTOR is None:
+        _REFRESH_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+            max_workers=4, thread_name_prefix="signal-scan"
+        )
+    return _REFRESH_EXECUTOR
+
+
+def _refresh_worker(
+    root: Path | None, owner: str, guardian_provider, now: datetime | None
+) -> str | None:
+    """The sweep, under the flock. RETURNS its failure; never raises.
+
+    An exception escaping into the executor thread would be swallowed into a
+    Future nobody inspects — and on a tmp root pytest has already deleted, that
+    is a phantom error with no reader. Everything is caught, logged with its
+    traceback, and returned as the same string `ensure_scanned` has always
+    returned.
+    """
+    try:
+        with _refresh_lock(root):
+            # RE-DECIDE UNDER THE LOCK. Another reader may have completed the
+            # very scan we queued behind; scanning again would be the second
+            # sweep this lock exists to prevent. It also re-runs the integrity
+            # check, so a ledger damaged while we waited is still refused.
+            decision, error = _refresh_decision(root, now=now)
+            if decision == "skip":
+                return None
+            if decision == "refuse":
+                return error
+            scan_all(root, owner, guardian_provider)
+        return None
+    except Exception as exc:  # noqa: BLE001 — reported, not raised
+        _log_diagnostic(root, "ingestion raised during ensure_scanned's background refresh", exc)
+        return f"{exc.__class__.__name__}: {exc}"
+
+
+def _start_refresh(
+    root: Path | None, owner: str, guardian_provider, now: datetime | None
+) -> tuple[concurrent.futures.Future, bool, str]:
+    """(future, started_by_this_caller, started_at). One sweep per root."""
+    key = str(_root(root))
+    with _REFRESH_GUARD:
+        entry = _REFRESH_INFLIGHT.get(key)
+        if entry is not None and not entry["future"].done():
+            return entry["future"], False, entry["started_at"]
+        started_at = _now()
+        future = _refresh_executor().submit(_refresh_worker, root, owner, guardian_provider, now)
+        _REFRESH_INFLIGHT[key] = {"future": future, "started_at": started_at}
+        return future, True, started_at
+
+
+def refresh_in_flight(root: Path | None = None) -> dict | None:
+    """``{"started_at": iso}`` while a sweep for this root is still running.
+
+    This is what lets a read say `refreshing` instead of `stale`. It is a
+    SEPARATE function rather than a richer return from `ensure_scanned`
+    because that function's contract — a string is a failure, None is not —
+    is asserted directly by a dozen tests and is worth keeping exactly.
+    """
+    key = str(_root(root))
+    with _REFRESH_GUARD:
+        entry = _REFRESH_INFLIGHT.get(key)
+        if entry is None:
+            return None
+        if entry["future"].done():
+            _REFRESH_INFLIGHT.pop(key, None)
+            return None
+        return {"started_at": entry["started_at"]}
+
+
 def ensure_scanned(
     root: Path | None = None,
     owner: str = "watch-2/3",
     guardian_provider=None,
     *,
     now: datetime | None = None,
+    wait: float | None = None,
 ) -> str | None:
     """INGESTION ON READ. Returns None on success, an error string on failure.
 
@@ -2064,23 +3001,29 @@ def ensure_scanned(
     would be "stale but ok" — the exact shape the review named.
     """
     try:
+        # THE DECISION IS MADE ON THIS THREAD, BEFORE ANY WORKER EXISTS.
+        # A refusal must never be reachable only by waiting on a future: the
+        # integrity-before-refresh rule (review N2) is what stops a rescan
+        # erasing the evidence of a damaged ledger, and it has to answer the
+        # caller immediately and identically whether or not a sweep is queued.
         decision, error = _refresh_decision(root, now=now)
         if decision == "skip":
             return None
         if decision == "refuse":
             return error
-        with _refresh_lock(root):
-            # RE-DECIDE UNDER THE LOCK. Another reader may have completed the
-            # very scan we queued behind; scanning again would be the second
-            # sweep this lock exists to prevent. It also re-runs the integrity
-            # check, so a ledger damaged while we waited is still refused.
-            decision, error = _refresh_decision(root, now=now)
-            if decision == "skip":
-                return None
-            if decision == "refuse":
-                return error
-            scan_all(root, owner, guardian_provider)
-        return None
+        future, started_here, _started_at = _start_refresh(root, owner, guardian_provider, now)
+        if not started_here:
+            # SOMEONE ELSE'S SWEEP IS ALREADY RUNNING. Waiting on it would be
+            # the blocking this release exists to remove; the reader gets the
+            # previous certificate marked `refreshing` instead.
+            return None
+        try:
+            return future.result(timeout=refresh_wait_seconds() if wait is None else wait)
+        except concurrent.futures.TimeoutError:
+            # Still going. Not an error — `refresh_in_flight` is what the
+            # reader consults, and a failure will surface on a later read
+            # because the certificate it would have written is still not there.
+            return None
     except Exception as exc:  # noqa: BLE001 — reported, not raised; see docstring
         _log_diagnostic(root, "ingestion raised during ensure_scanned", exc)
         return f"{exc.__class__.__name__}: {exc}"
@@ -2470,6 +3413,7 @@ def handle_signal_tool(
                         "error": field["error"],
                         "ingestion": field.get("ingestion"),
                         "scanned_at": field.get("scanned_at"),
+                        "refresh_started_at": field.get("refresh_started_at"),
                     }
                 )
             mode = str(arguments.get("mode") or "summary")
@@ -2507,6 +3451,9 @@ def handle_signal_tool(
                         "error": list_error,
                         "ingestion": field.get("ingestion"),
                         "scanned_at": field.get("scanned_at"),
+                        "refresh_started_at": field.get("refresh_started_at"),
+                        "partial": field.get("partial"),
+                        "unreached": field.get("unreached"),
                         "source": source_filter,
                         "state": row_state,
                         "count": len(rows),
@@ -2533,6 +3480,13 @@ def handle_signal_tool(
                 "error": field.get("error"),
                 "ingestion": field.get("ingestion"),
                 "scanned_at": field.get("scanned_at"),
+                # WHAT IS BEING DONE ABOUT IT. `ingestion` names the state;
+                # these two name the work in flight and what a partial sweep
+                # still owes, so a watch seat can tell "come back in a moment"
+                # from "this is the answer".
+                "refresh_started_at": field.get("refresh_started_at"),
+                "partial": field.get("partial"),
+                "unreached": field.get("unreached"),
                 "total": field.get("total"),
                 # SCOPE TRAVELS WITH THE NARROWER NUMBER, always. Publishing
                 # `total_configured` without saying what it covers is how a
