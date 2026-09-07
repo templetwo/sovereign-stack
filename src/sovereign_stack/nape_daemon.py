@@ -273,6 +273,11 @@ READONLY_TOOL_NAMES: frozenset = frozenset(
         "nape_honks",
         "nape_summary",
         "nape_honks_with_history",
+        # Signal ledger. Summary/list is built from the STORED ledger and
+        # certificate (signal_ledger.py), not from what this turn did.
+        # `"error": null` is a certificate field. WRITE sibling signal_ack
+        # reports this turn's own write and is deliberately NOT here.
+        "signals_summary",
         # Watch / post-fix introspection
         "watch_status",
         "post_fix_verify",

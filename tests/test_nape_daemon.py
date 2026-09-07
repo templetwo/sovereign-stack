@@ -919,6 +919,34 @@ class TestRepeatedMistake:
         ]
         assert len(honks) == 0
 
+    def test_signals_summary_error_null_field_is_not_a_repeated_mistake(self):
+        """Two successful signals_summary certificates carrying "error": null
+        are not the same tool repeating a mistake. The field is stored ledger
+        state, not a live failure of the calling turn."""
+        result = '{"ok": true, "error": null, "ingestion": "ok", "total": 987}'
+        self.daemon.observe("signals_summary", {"mode": "summary"}, result, SESSION)
+        self.daemon.observe("signals_summary", {"mode": "summary"}, result, SESSION)
+        honks = [
+            h for h in self.daemon.current_honks(SESSION) if h["pattern"] == "repeated_mistake"
+        ]
+        assert honks == [], (
+            f"signals_summary certificate field error:null is not a mistake; got {honks}"
+        )
+
+    def test_non_exempt_tool_with_traceback_still_fires_repeated_mistake(self):
+        """Control: the same two-observation shape under a non-exempt tool
+        whose result_str contains traceback must still produce one
+        repeated_mistake honk, so the gate can demonstrably fail."""
+        result = "Traceback (most recent call last): write failed"
+        self.daemon.observe("record_insight", {}, result, SESSION)
+        self.daemon.observe("record_insight", {}, result, SESSION)
+        honks = [
+            h for h in self.daemon.current_honks(SESSION) if h["pattern"] == "repeated_mistake"
+        ]
+        assert len(honks) == 1, f"Expected one repeated_mistake honk. Got: {honks}"
+        assert honks[0]["level"] == "uneasy"
+        assert honks[0]["trigger_tool"] == "record_insight"
+
 
 class TestStorageHelpers:
     """Unit tests for module-level utilities."""
@@ -1261,6 +1289,9 @@ class TestReadonlyToolCompletion:
         ("recall_exchange", '{"integrity": "verified", "content": "..."}'),
         ("list_exchanges", '[{"id": "x", "integrity": "verified"}]'),
         ("the_ground", "CATCH LEDGER: cross-instance verification — resolved"),
+        # Certificate JSON from signal_ledger.py: "error": null is a field
+        # name, not a live fault. WRITE sibling signal_ack is not here.
+        ("signals_summary", '{"ok": true, "error": null, "ingestion": "ok", "total": 987}'),
     ]
 
     # WITHDRAWN by HQ review after adversarial review returned a blocker.
