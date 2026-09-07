@@ -424,9 +424,28 @@ class TestTheSignalLedgerNeverTouchesTheLiveStore:
         The replacement is STRICTER, not looser. "The file does not exist" was
         only ever a proxy for "this dispatch did not write there", and it was a
         proxy that could not survive the file existing for any legitimate
-        reason. Stat both live artifacts either side of the dispatch and
-        require them BYTE-IDENTICAL: that catches an append to an existing live
-        ledger, which the old form could not see at all.
+        reason. It also could not see an append to an existing live ledger,
+        which this can.
+
+        WHAT IT ACTUALLY MEASURES IS STAT-IDENTITY, NOT BYTE-IDENTITY, and the
+        distinction is worth stating because an earlier draft of this docstring
+        claimed the stronger one. Each live artifact is `stat()`ed either side
+        of the dispatch and compared on `(st_size, st_mtime_ns)`, plus absent
+        vs present. Nothing is hashed and nothing is opened.
+
+        STAT-ONLY IS THE RIGHT INSTRUMENT HERE, NOT A COMPROMISE. A byte
+        comparison would have to READ Anthony's live ledger into this test
+        process — 6.09 MB of it, on every suite run — and reading live human
+        state is the exact thing this class exists to prevent. An assertion
+        that violates its own invariant in order to check it is not stronger,
+        it is self-refuting. `stat()` touches metadata and never the contents.
+
+        THE RESIDUAL, NAMED: an in-place rewrite that preserved both length and
+        mtime_ns would pass. No writer in this house does that — `_append` and
+        `_write_scan_marker` both change length, and mtime moves on any write —
+        and defeating it would take deliberate mtime restoration. Absent,
+        appended-to, truncated, and rewritten-to-a-different-length are all
+        caught; same-length-and-same-nanosecond is not.
         """
         import asyncio
 
