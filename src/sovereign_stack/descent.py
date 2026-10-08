@@ -649,8 +649,11 @@ def load_closes(
     skipped_rows.
 
     legs=False reads the reflection leg only (no surprise, no handoff join):
-    the counts, months and protection are exact, the surprise and handed
-    fields are None. Raises OSError (NotADirectoryError and LedgerUnreadable
+    the counts and months are exact, the surprise and handed fields are None,
+    and `protected` reflects the CLOSE ROW ONLY (a designation on the surprise
+    row is seen only with legs=True). The foyer and calm depths render no
+    part of a close, so nothing leaks there; a future surface built on those
+    depths must not render parts without legs=True. Raises OSError (NotADirectoryError and LedgerUnreadable
     included) on an unreadable store or ledger — the caller degrades (boot) or
     errors (descend), never reports 0. A corrupt line or an unusable row is
     skipped and counted.
@@ -1532,7 +1535,9 @@ def _render_close(i: int, c: Close, state: DescentState) -> tuple[list[str], int
             f"{dist_tag} · protected",
             f"  {PROTECTED_PREVIEW_NOTICE}",
             f"  (all three parts of this close are withheld with it; inspect_claim("
-            f"'{prov.display_id(c.claim_id)}') returns the learned part coupled with its stakes)",
+            f"'{prov.display_id(c.claim_id)}') reaches the record by id; stakes travel with "
+            "whichever row carries the designation, so a surprise-row designation does not "
+            "couple the learned part there)",
         ], masked
     thread = ""
     if c.thread:
