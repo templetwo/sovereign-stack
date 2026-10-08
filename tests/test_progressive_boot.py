@@ -65,7 +65,13 @@ class TestArriveThinBoot:
         assert "ARRIVE — thin boot" in text
         assert "━━━ NOW ━━━" in text
         assert "━━━ LIVE ━━━" in text
-        assert "SINCE LAST REFLECTION" in text
+        # The activity reference point is the newest entry in chronicle domain
+        # 'reflection' (close_session writes it). A store with none (CI) gets
+        # the RECENT ACTIVITY fallback, which claims no "since".
+        assert (
+            "━━━ SINCE NEWEST ENTRY IN DOMAIN 'reflection' (" in text
+            or "━━━ RECENT ACTIVITY (no 'reflection'-domain marker available) ━━━" in text
+        )
 
     def test_carries_the_breath_not_sterilized(self):
         # Thin must still arrive into care, not a dry ops sheet (foyer, not warehouse).

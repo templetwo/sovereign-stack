@@ -3,7 +3,8 @@ Tests for where_did_i_leave_off boot output structure.
 
 Covers the post-2026-04-26 fireside additions:
   * THE VOICES IN THE BOOT section (4-voice reading-key)
-  * REFLECTOR'S MARGINALIA section (machine-generated reflections surface)
+  * the retired reflector: an unread note in the reflections store must NOT
+    surface (its MARGINALIA section and voice were retired with it)
   * Bootstrap-vs-ground-truth warning footer
   * full_content escape hatch + its discoverability footer
 
@@ -61,8 +62,9 @@ def _call_arrive_lineage(source_instance: str = "test-instance") -> str:
 class TestVoicesInTheBoot:
     """The four-voice reading key was added 2026-04-26 from a sibling
     instance's chronicle proposal. It teaches arriving instances to
-    distinguish lineage / chronicle / self-model / reflector before they
-    encounter those voices in the rest of the boot output."""
+    distinguish handoffs / chronicle / self-model / lineage before they
+    encounter those voices in the rest of the boot output. (The reflector's
+    voice was removed when the reflector was retired.)"""
 
     def test_section_header_present(self):
         text = _call_boot()
@@ -70,11 +72,15 @@ class TestVoicesInTheBoot:
 
     def test_all_four_voices_named(self):
         text = _call_boot()
-        # All four voice labels must be present.
-        assert "HANDOFFS" in text
-        assert "CHRONICLE" in text
-        assert "SELF-MODEL" in text
-        assert "REFLECTOR'S MARGINALIA" in text
+        # Scoped to the VOICES block: its text is static, while the rest of the
+        # boot carries live chronicle content that may quote any of these words.
+        voices = text.split("THE VOICES IN THE BOOT ━━━", 1)[1].split("━━━", 1)[0]
+        assert "HANDOFFS —" in voices
+        assert "CHRONICLE —" in voices
+        assert "SELF-MODEL —" in voices
+        assert "LINEAGE —" in voices
+        # The reflector is retired; its voice is no longer one of the four.
+        assert "REFLECTOR" not in voices
 
     def test_voices_section_appears_before_spiral_status(self):
         # Reading-key arrives before content it unlocks.
@@ -84,19 +90,6 @@ class TestVoicesInTheBoot:
         assert voices_idx > 0
         assert spiral_idx > 0
         assert voices_idx < spiral_idx
-
-    def test_acknowledgment_discipline_explained(self):
-        # The sibling instance specifically called out: ack each note
-        # on its own merits, not batch-confirm or batch-reject.
-        # Source text wraps across multiple lines so we check for the
-        # distinctive substrings, tolerating whitespace between them.
-        text = _call_boot()
-        lower = text.lower()
-        # Batch-vs-individual discipline named.
-        assert "batch-confirmed" in lower or "batch-reject" in lower
-        # Unread-as-a-state discipline named (text wraps "leaving an unread\n      state alone").
-        assert "leaving an unread" in lower
-        assert "state alone" in lower
 
 
 # ── Bootstrap-vs-ground-truth warning ───────────────────────────────────────
@@ -137,19 +130,20 @@ class TestFullContentFooter:
         assert "Content above truncated for boot brevity" not in text
 
 
-# ── Reflector's marginalia section ──────────────────────────────────────────
+# ── The retired reflector ───────────────────────────────────────────────────
 
 
-class TestReflectorMarginalia:
-    """Machine-generated reflections surface in the boot ritual when
-    unread reflections exist in ~/.sovereign/reflections/."""
+class TestReflectorRetired:
+    """The reflector is retired (all three generations). An unread note left in
+    ~/.sovereign/reflections/ must no longer surface in the boot ritual. (Three
+    tests retired with the section they covered: two could no longer fail and
+    one asserted the retired framing. tests/test_reflector_retired_boot_surfaces.py
+    covers the absence hermetically.)"""
 
-    def test_marginalia_appears_when_unread_exists(self, tmp_path: Path):
-        # Build a fake reflections file with one unread reflection.
+    def test_unread_reflection_does_not_surface(self, tmp_path: Path):
         reflections_dir = tmp_path / "reflections"
         reflections_dir.mkdir()
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        path = reflections_dir / f"{today}.jsonl"
         record = {
             "id": "reflection_test_abcd1234",
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -162,82 +156,14 @@ class TestReflectorMarginalia:
             "confidence": "medium",
             "ack_status": "unread",
         }
-        path.write_text(json.dumps(record) + "\n")
+        (reflections_dir / f"{today}.jsonl").write_text(json.dumps(record) + "\n")
 
-        # Patch REFLECTIONS_DIR to point at our tmp dir.
         with patch("sovereign_stack.reflections.REFLECTIONS_DIR", reflections_dir):
             text = _call_boot()
 
-        assert "REFLECTOR'S MARGINALIA" in text
-        assert "test observation about a structural pattern" in text
-        assert "test-model" in text
-
-    def test_marginalia_absent_when_no_unread(self, tmp_path: Path):
-        # Empty reflections dir — no marginalia section in boot output.
-        # NB: the VOICES IN THE BOOT section names "REFLECTOR'S MARGINALIA"
-        # as a voice label, so we check for the unique SECTION HEADER form
-        # ("(unread, machine-generated)"), not the bare substring.
-        reflections_dir = tmp_path / "reflections"
-        reflections_dir.mkdir()
-        with patch("sovereign_stack.reflections.REFLECTIONS_DIR", reflections_dir):
-            text = _call_boot()
-        assert "(unread, machine-generated)" not in text
-
-    def test_marginalia_framing_calibrates_reader(self, tmp_path: Path):
-        # The "machine-generated" framing must be in-band — reader needs
-        # to know the source before they engage with the content.
-        reflections_dir = tmp_path / "reflections"
-        reflections_dir.mkdir()
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        (reflections_dir / f"{today}.jsonl").write_text(
-            json.dumps(
-                {
-                    "id": "reflection_calibration_test",
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                    "model": "test-model",
-                    "prompt_version": "v",
-                    "run_id": "r",
-                    "observation": "calibration probe",
-                    "entries_referenced": [],
-                    "connection_type": "other",
-                    "confidence": "low",
-                    "ack_status": "unread",
-                }
-            )
-            + "\n"
-        )
-        with patch("sovereign_stack.reflections.REFLECTIONS_DIR", reflections_dir):
-            text = _call_boot()
-        lower = text.lower()
-        assert "machine-generated" in lower
-        assert "reflection_ack" in lower
-
-    def test_marginalia_acked_reflections_filtered(self, tmp_path: Path):
-        # Reflections marked confirm/discard/engage must NOT surface in
-        # the unread-only marginalia section.
-        reflections_dir = tmp_path / "reflections"
-        reflections_dir.mkdir()
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        path = reflections_dir / f"{today}.jsonl"
-        records = [
-            {
-                "id": f"reflection_acked_{i}",
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "model": "m",
-                "prompt_version": "v",
-                "run_id": "r",
-                "observation": f"acked observation {i}",
-                "entries_referenced": [],
-                "connection_type": "other",
-                "confidence": "low",
-                "ack_status": status,
-            }
-            for i, status in enumerate(("confirm", "discard", "engage"))
-        ]
-        path.write_text("\n".join(json.dumps(r) for r in records) + "\n")
-        with patch("sovereign_stack.reflections.REFLECTIONS_DIR", reflections_dir):
-            text = _call_boot()
-        # No unread → no section header (acked ones don't surface).
+        # Both strings are specific to the planted note and the retired section
+        # header, so live chronicle content elsewhere in the boot cannot trip them.
+        assert "test observation about a structural pattern" not in text
         assert "(unread, machine-generated)" not in text
 
 

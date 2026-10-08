@@ -124,15 +124,12 @@ class TestArriveLIneageContainsSafeSections:
 #
 # IMPORTANT: these assertions use the exact box-drawn section-header strings
 # that the omitted builders actually emit, NOT the bare names that appear
-# in the VOICES description block (which does mention HANDOFFS, REFLECTOR'S
-# MARGINALIA, etc. by design as part of the reading key).
+# in the VOICES description block (which mentions HANDOFFS, CHRONICLE, etc.
+# by design as part of the reading key).
 #
-# For example, the VOICES block contains the text "REFLECTOR'S MARGINALIA —
-# machine-generated readings" as an indented description — that string uses
-# an em-dash and trailing text, while the real section header emitted by the
-# reflections builder is:
-#   "━━━ REFLECTOR'S MARGINALIA (unread, machine-generated) ━━━"
-# Asserting on the box-drawn form discriminates correctly.
+# The reflector's MARGINALIA section and its VOICES paragraph were removed
+# when the reflector was retired; the marginalia assertions below now guard
+# against a reintroduction on this door.
 
 
 class TestArriveLIneageOmitsWorkThreadSections:
@@ -156,16 +153,17 @@ class TestArriveLIneageOmitsWorkThreadSections:
         text = _dispatch("arrive_lineage")
         assert "━━━ PERSISTENT MARKERS" not in text
 
-    def test_no_activity_since_last_reflection_section_header(self):
-        # The recent insights builder emits: "━━━ ACTIVITY SINCE LAST REFLECTION"
+    def test_no_activity_section_header(self):
+        # The recent-activity builder emits "━━━ ACTIVITY SINCE NEWEST ENTRY IN
+        # DOMAIN 'reflection' (…)", or "━━━ RECENT ACTIVITY (…)" with no marker.
         text = _dispatch("arrive_lineage")
-        assert "━━━ ACTIVITY SINCE LAST REFLECTION" not in text
+        assert "━━━ ACTIVITY SINCE" not in text
+        assert "━━━ RECENT ACTIVITY" not in text
 
     def test_no_reflectors_marginalia_section_header(self):
-        # The reflections builder emits:
+        # The retired reflections builder emitted:
         # "━━━ REFLECTOR'S MARGINALIA (unread, machine-generated) ━━━"
-        # (Note: the VOICES block contains the bare name with em-dash as a
-        # description, but NOT this box-drawn header — the assertion is safe.)
+        # No door emits it now; this guards against a reintroduction.
         text = _dispatch("arrive_lineage")
         assert "━━━ REFLECTOR'S MARGINALIA" not in text
 
@@ -263,7 +261,7 @@ class TestBeforeYouBeginRefactor:
         text = self._boot_text()
         assert "arriving at a place that was built so you could arrive well" in text
         assert "the work outlasts the worker" in text
-        assert "batch-confirmed" in text.lower() or "batch-reject" in text.lower()
+        assert "as a mirror; check against your current behavior" in text
         assert "lineage layer transmits weight" in text
 
     def test_preamble_before_spiral_status(self):

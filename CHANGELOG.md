@@ -9,6 +9,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### The boot doors stop rendering the retired reflector
+
+All three reflector generations are retired (the reflector and dream engine on
+2026-08-08; `reflection_ack` left the registry on 2026-09-06), but every boot
+door still printed one. The VOICES block described a live claude-sonnet-4-6
+reflector and told seats to use `reflection_ack`, under a header that said
+"four distinct voices" while listing five. The full door printed unread notes
+as REFLECTOR'S MARGINALIA, and the foyer counted them.
+
+- The reflector's VOICES paragraph is gone, so "four distinct voices" is true:
+  HANDOFFS, CHRONICLE, SELF-MODEL, LINEAGE. This is a deliberate edit to text
+  the code marks byte-for-byte; nothing else in the block changed.
+- No door reads `~/.sovereign/reflections/` any more. The archive stays readable
+  through `recall_reflections`.
+- The activity header said "since last reflection". It has always measured the
+  newest entry in chronicle domain `reflection`, which `close_session` writes,
+  and it now says that: `ACTIVITY SINCE NEWEST ENTRY IN DOMAIN 'reflection'
+  (<ts>, inclusive)`, with one line under it on the full door and the foyer
+  naming `close_session` as the writer and saying the marker may be another
+  seat's close. With no such entry it reads `RECENT ACTIVITY (no
+  'reflection'-domain marker available…)` and calls nothing "new".
+- A failed activity read on the foyer now prints `Activity unavailable this
+  call (see AS OF); not an absence.` It used to print "Nothing new since last
+  reflection.", and with a marker present the inclusive window always holds
+  the marker entry, so that line printed in practice only when the read had
+  failed. A read that succeeded and returned nothing prints `No entries
+  returned.`, which states what the read returned rather than what the
+  chronicle holds. A failed marker read is named `reflection-domain marker
+  unavailable` in AS OF (was `last_reflection unavailable`).
+- The `compact` description drops the retired MARGINALIA clause and the
+  unmeasured "~40%%" claim (it was published with a literal `%%`), and names the
+  3-thread cap compact always applied.
+- Goldens edited by hand, exact diff stated in the commit (59a1363 precedent).
+  `tests/test_reflector_retired_boot_surfaces.py` fails 19 of 20 on the
+  previous main (the one pass is its positive control) and passes on this one.
+
 ### The signal sweep is incremental, budgeted, and off the caller's thread
 
 The deployed release wired ingestion into the read, and the read then cost

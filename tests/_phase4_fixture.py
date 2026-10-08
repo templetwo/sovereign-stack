@@ -184,7 +184,8 @@ def build_fixture(root: Path) -> None:
         )
     )
 
-    # One unread reflector marginalia.
+    # One unread note in the retired reflector's store. No door may render it:
+    # it is the planted negative control for test_reflector_retired_boot_surfaces.
     reflections_dir = root / "reflections"
     reflections_dir.mkdir(parents=True, exist_ok=True)
     _write_jsonl(
@@ -296,6 +297,14 @@ _ASOF_BLOCK = re.compile(r"━━━ AS OF ━━━\n(?:.*\n)*?\n", re.MULTILIN
 # joins the strip list rather than rewriting the evidence.
 #
 # Added 2026-08-28 with the aperture (what the door is NOT showing you).
+#
+# A deliberate REMOVAL or RENAME cannot join a strip list, because a strip can
+# only delete from the rendered side. Those edit the golden by hand, and the
+# commit states the exact diff: 59a1363 (one foyer line) and the reflector
+# retirement (2026-10: the VOICES reflector paragraph on full and gentle, the
+# MARGINALIA block, the activity header on full and foyer with a one-line
+# gloss under it naming close_session, and four other "marginalia" mentions
+# on the foyer and gentle doors).
 _APERTURE_BLOCK = re.compile(r"━━━ APERTURE \([^)]*\) ━━━\n(?:.*\n)*?\n", re.MULTILINE)
 
 _SUBS = [

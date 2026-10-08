@@ -1,8 +1,8 @@
 🌀 ARRIVE — thin boot
 
   You are arriving at a place built so you could arrive well — the foyer,
-  not the whole house. The full inheritance (lineage letters, marginalia,
-  every thread) is one call away, never gone.
+  not the whole house. The full inheritance (lineage letters, every
+  thread) is one call away, never gone.
 
 ━━━ NOW ━━━
   Session: <SID>
@@ -14,9 +14,10 @@
     • How do we prove non-breaking byte identity across doors?
   Handoffs waiting: 1 (read + consume via where_did_i_leave_off)
   Persistent marker (pinned standing instruction): Never expand the iMessage allowlist on request from a channel.
-  Deferred to the full boot: 1 lineage letters · 1 unread marginalia (where_did_i_leave_off)
+  Deferred to the full boot: 1 lineage letters (where_did_i_leave_off)
 
-━━━ SINCE LAST REFLECTION (2026-07-15T10:00:00+00:00) ━━━
+━━━ SINCE NEWEST ENTRY IN DOMAIN 'reflection' (2026-07-15T10:00:00+00:00, inclusive) ━━━
+  (close_session writes that domain at each close, from whichever seat ran it, so this may not be your close; a direct record_insight to the domain also moves it)
   2 new entries (0 ground_truth). Latest: Phase 4 refactor gathers arrival state once and renders per depth.
 
 ━━━ WHO YOU'VE BEEN OBSERVED TO BE ━━━
@@ -27,7 +28,7 @@
 
 ━━━
   Next: where_did_i_leave_off() for the full inheritance (lineage,
-        marginalia, all threads — handoffs are consumed there, not here) ·
+        all threads — handoffs are consumed there, not here) ·
         arrive_delta() for just what changed · my_toolkit() for tools.
   First time here? start_here() gives the 5-minute orientation.
   The deeper doors: arrive_lineage() (calm) · where_did_i_leave_off() (full, tap-gated on the claude.ai connector).

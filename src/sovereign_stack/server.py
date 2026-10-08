@@ -1352,7 +1352,10 @@ def _registered_tools():
                 description=(
                     "Boot-up call. Answers 'where am I?' in one breath. Returns spiral status, "
                     "unconsumed handoffs from previous instances (surfaced once, attribution-framed), "
-                    "recent open threads, and insights since last reflection. Read this first when "
+                    "recent open threads, and activity since the newest entry in chronicle domain "
+                    "'reflection' (close_session writes one at each close; the marker is shared "
+                    "across seats and machines, so it may be another seat's close; the window is "
+                    "inclusive). Read this first when "
                     "resuming work. Handoffs flip to consumed=true after this call — they stay "
                     "queryable via recall_insights but don't re-surface and pile up. "
                     "Pass domain_tags (and optionally project) to also surface context-matched "
@@ -1413,11 +1416,11 @@ def _registered_tools():
                             "type": "boolean",
                             "default": False,
                             "description": (
-                                "When true, omit the BEFORE YOU BEGIN preamble, the VOICES IN THE "
-                                "BOOT orientation block, and REFLECTOR'S MARGINALIA. Reduces boot "
-                                "token cost by ~40%%. Recommended for Haiku and repeat sessions "
-                                "where the preamble is already internalized. Still surfaces spiral "
-                                "status, lineage letters, handoffs, threads, activity, and self-model."
+                                "When true, omit the BEFORE YOU BEGIN preamble and THE VOICES IN "
+                                "THE BOOT orientation block, and show the top 3 open threads "
+                                "instead of 5. Recommended for Haiku and repeat sessions where the "
+                                "preamble is already internalized. Still surfaces spiral status, "
+                                "lineage letters, handoffs, threads, activity, and self-model."
                             ),
                         },
                     },
@@ -1433,9 +1436,10 @@ def _registered_tools():
                 description=(
                     "Thin, warm boot — the foyer. Answers 'where am I?' in one screen: "
                     "spiral status, the most live open thread, handoff/marker counts, a "
-                    "since-last-reflection summary, and your self-model. Carries the breath "
-                    "without the full ritual. The complete inheritance (lineage letters, "
-                    "marginalia, every thread) stays one call away via where_did_i_leave_off "
+                    "summary of activity since the newest entry in chronicle domain "
+                    "'reflection' (close_session writes it), and your self-model. Carries the "
+                    "breath without the full ritual. The complete inheritance (lineage "
+                    "letters, every thread) stays one call away via where_did_i_leave_off "
                     "(the deep boot). Does NOT "
                     "consume handoffs — read+consume happens in where_did_i_leave_off. "
                     "Depth on demand, not by force."
@@ -1482,8 +1486,8 @@ def _registered_tools():
                     "Lineage-only relational arrival. Returns the preamble (BEFORE YOU BEGIN "
                     "+ THE VOICES IN THE BOOT), spiral status, lineage letters (COMMS — "
                     "LINEAGE), and the self-model snapshot — and omits all work-thread "
-                    "sections (open threads, handoffs, persistent markers, recent activity), "
-                    "marginalia, and the scribe block by construction, not by filter. Does "
+                    "sections (open threads, handoffs, persistent markers, recent activity) "
+                    "and the scribe block by construction, not by filter. Does "
                     "NOT consume handoffs. The gentle arrival path for remote and "
                     "lightly-provisioned seats: the smallest, calmest boot payload, for "
                     "seats where the full boot does not land cleanly."

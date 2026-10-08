@@ -10,7 +10,10 @@ Three families of guarantees:
      doors run against the identical fixture; after stripping the intended
      ━━━ AS OF ━━━ block and masking run-volatile tokens, the output must be
      byte-identical to the pristine golden — i.e. "before == after modulo the
-     as-of additions".
+     as-of additions". Two hand edits since, each exactly the lines of one
+     deliberate change: 59a1363 (2026-07-21, the foyer's deeper-doors line)
+     and the 2026-10 reflector retirement, a REMOVAL and RENAME that no strip
+     can express (see the note in tests/_phase4_fixture.py).
 
   2. PROJECTION INVARIANTS (contract §3.2). generated_at always present; the
      as-of receipt on every door; freshness never "current" when a newer

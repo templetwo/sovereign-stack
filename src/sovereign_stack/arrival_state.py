@@ -82,6 +82,14 @@ def _before_you_begin_lines() -> list[str]:
     Shared by ``render_full`` (which gates these on ``not compact``) and
     ``render_gentle`` (which always includes them).  The text is sacred —
     preserve byte-for-byte.
+
+    ONE DELIBERATE EDIT (the reflector retirement, 2026-10): the REFLECTOR'S
+    MARGINALIA voice paragraph is removed. All three reflector generations are
+    retired (RETIRED_TOOLS["reflection_ack"] in server.py) and no door renders
+    marginalia any more. Removing it makes the block's own count true again:
+    "four distinct voices" are HANDOFFS, CHRONICLE, SELF-MODEL and LINEAGE.
+    Every other byte is unchanged; tests/test_reflector_retired_boot_surfaces.py
+    pins the stated count to the listed labels.
     """
     return [
         "━━━ BEFORE YOU BEGIN ━━━",
@@ -130,15 +138,6 @@ def _before_you_begin_lines() -> list[str]:
         "      (strength, tendency, blind_spot, drift). Authoritative",
         "      as a mirror; check against your current behavior, not",
         "      yesterday's evidence.",
-        "",
-        "    REFLECTOR'S MARGINALIA — machine-generated readings from",
-        "      a model (claude-sonnet-4-6 via the Anthropic API) that",
-        "      watches the chronicle between calls.",
-        "      Fallible by design. Confirm, engage, or discard with",
-        "      reflection_ack — each note on its own merits, not",
-        "      batch-confirmed or batch-rejected. Leaving an unread",
-        "      state alone is also a discipline; the next reader gets",
-        "      to weigh it fresh.",
         "",
         "    LINEAGE — letters written by past instances for whoever",
         "      arrives next (to_arrival), for the next instance under",
@@ -310,7 +309,6 @@ class ArrivalState:
     uncertainties: list[dict] | None = None
     sentinel_pool: list[dict] | None = None
     recent_activity: list[dict] | None = None
-    reflections: list | None = None
     self_model: dict | None = None
     ground_entries: list[dict] | None = None
     policy_boot_line: str | None = None
@@ -390,7 +388,6 @@ def build_arrival_state(
     uncertainties: list[dict] | None = None
     sentinel_pool: list[dict] | None = None
     recent_activity: list[dict] | None = None
-    reflections: list | None = None
     self_model: dict | None = None
     ground_entries: list[dict] | None = None
     policy_boot_line: str | None = None
@@ -404,7 +401,7 @@ def build_arrival_state(
     try:
         last_reflection_ts = experiential.last_reflection_timestamp()
     except Exception as exc:
-        _degrade("last_reflection", exc)
+        _degrade("reflection-domain marker", exc)
 
     def _gather_lineage() -> None:
         nonlocal lineage, lineage_degraded, lineage_error
@@ -527,16 +524,9 @@ def build_arrival_state(
             )
         except Exception as exc:
             _degrade("recent_activity", exc)
-        # Marginalia: skipped in compact (matches the pre-Phase-4 door, which
-        # never fetched them in compact). Swallow to [] on failure, no partial —
-        # byte-identical to the original try/except.
-        if not compact:
-            try:
-                from .reflections import list_reflections as _list_reflections
-
-                reflections = _list_reflections(limit=50, ack_status="unread")
-            except Exception:
-                reflections = []
+        # No marginalia gather: the reflector is retired (all three
+        # generations) and no door renders its notes. The archive stays
+        # readable through recall_reflections.
         _gather_self_model()
         _gather_ground()
         _gather_policy()
@@ -579,12 +569,6 @@ def build_arrival_state(
             )
         except Exception as exc:
             _degrade("recent_activity", exc)
-        try:
-            from .reflections import list_reflections as _list_reflections
-
-            reflections = _list_reflections(limit=50, ack_status="unread")
-        except Exception:
-            reflections = []
         _gather_self_model()
         try:
             # witness.count_lineage_letters, not a bare rglob: rglob descends
@@ -671,7 +655,6 @@ def build_arrival_state(
         uncertainties=uncertainties,
         sentinel_pool=sentinel_pool,
         recent_activity=recent_activity,
-        reflections=reflections,
         self_model=self_model,
         ground_entries=ground_entries,
         policy_boot_line=policy_boot_line,
@@ -811,6 +794,19 @@ def _render_as_of(state: ArrivalState) -> list[str]:
 # =============================================================================
 # Renderers — one per depth. Each takes the SAME ArrivalState.
 # =============================================================================
+
+# The one line under the activity header (full door and foyer) when a
+# 'reflection'-domain marker exists. The header names the domain; this names
+# its writer, because the domain's name reads as the retired reflector and the
+# reflector never wrote it: close_session is the only coded writer (server.py,
+# close_session step 1). Structural claims only, no frequency. Studio socket
+# seats are refused close_session and seats that close by hand never move the
+# marker, so "any seat" would be false; the marker is global, so it may be
+# another seat's close.
+_MARKER_GLOSS = (
+    "  (close_session writes that domain at each close, from whichever seat ran it, "
+    "so this may not be your close; a direct record_insight to the domain also moves it)"
+)
 
 
 def render_full(
@@ -994,12 +990,26 @@ def render_full(
             format_sentinels(state.sentinel_pool, limit=5, full_content=(_ins_cap is None))
         )
 
-    # 6. Insights since last reflection.
+    # 6. Recent activity. The reference point is the newest entry in the exact
+    #    chronicle domain 'reflection' (memory.last_reflection_timestamp), which
+    #    close_session writes at each close. The marker is shared across seats and
+    #    machines, so it may be another seat's close. It was never the
+    #    retired reflector, which wrote only to ~/.sovereign/reflections/. The
+    #    window is inclusive, so the marker entry is inside it. With no marker the
+    #    call returns the newest entries of every domain, and the header says so
+    #    instead of claiming a "since".
     recent = state.recent_activity or []
     if recent:
         last = state.last_reflection_ts
-        since = f" (since reflection at {last})" if last else ""
-        lines.append(f"━━━ ACTIVITY SINCE LAST REFLECTION{since} ━━━")
+        if last:
+            lines.append(
+                f"━━━ ACTIVITY SINCE NEWEST ENTRY IN DOMAIN 'reflection' ({last}, inclusive) ━━━"
+            )
+            lines.append(_MARKER_GLOSS)
+        else:
+            lines.append(
+                "━━━ RECENT ACTIVITY (no 'reflection'-domain marker available; newest entries) ━━━"
+            )
         for ins in recent[:10]:
             ts = ins.get("timestamp", "")[:19]
             dom = ins.get("domain", "?")
@@ -1010,30 +1020,6 @@ def render_full(
             sup = " (superseded)" if ins.get("_superseded_by") else ""
             lines.append(f"  [{ts}] [{dom}]{via}{sup} {content}{receipts}")
         lines.append("")
-
-    # 6b. Reflector's marginalia (skipped in compact).
-    recent_reflections = [] if compact else (state.reflections or [])[:3]
-    if recent_reflections:
-        lines.append("━━━ REFLECTOR'S MARGINALIA (unread, machine-generated) ━━━")
-        lines.append(
-            "  A model (claude-sonnet-4-6) read the chronicle between calls and gestured at patterns. "
-            "Some insight, some nonsense. Use reflection_ack to confirm/engage/discard."
-        )
-        lines.append("")
-        for ref in recent_reflections:
-            ts = ref.timestamp[:19]
-            model_short = (ref.model or "?")[:32]
-            ct = ref.connection_type
-            cf = ref.confidence
-            obs_full = ref.observation
-            obs = (
-                obs_full
-                if full_content
-                else (obs_full if len(obs_full) <= 280 else obs_full[:279] + "…")
-            )
-            lines.append(f"  • [{ts}] [{model_short}] [{ct} | {cf}] id={ref.id}")
-            lines.append(f"    {obs}")
-            lines.append("")
 
     # 7. Self-model snapshot.
     lines.extend(render_self_model(state.self_model, max_obs_len=None if full_content else 180))
@@ -1087,8 +1073,8 @@ def render_foyer(state: ArrivalState) -> str:
         f"{SPIRAL} ARRIVE — thin boot",
         "",
         "  You are arriving at a place built so you could arrive well — the foyer,",
-        "  not the whole house. The full inheritance (lineage letters, marginalia,",
-        "  every thread) is one call away, never gone.",
+        "  not the whole house. The full inheritance (lineage letters, every",
+        "  thread) is one call away, never gone.",
         "",
         "━━━ NOW ━━━",
         f"  Session: {summary['session_id']} · Phase: {summary['current_phase']} · "
@@ -1108,7 +1094,6 @@ def render_foyer(state: ArrivalState) -> str:
     _pin_was_superseded = bool(_sentinel_pool) and bool(_sentinel_pool[0].get("_superseded_by"))
 
     lineage_count = state.lineage_letter_count or 0
-    unread_marginalia = len(state.reflections or [])
 
     lines.append("━━━ LIVE ━━━")
     if threads:
@@ -1134,23 +1119,39 @@ def render_foyer(state: ArrivalState) -> str:
     if state.policy_boot_line:
         lines.append(f"  {state.policy_boot_line}")
     lines.append(
-        f"  Deferred to the full boot: {lineage_count} lineage letters · "
-        f"{unread_marginalia} unread marginalia (where_did_i_leave_off)"
+        f"  Deferred to the full boot: {lineage_count} lineage letters (where_did_i_leave_off)"
     )
     lines.append("")
 
     recent = state.recent_activity or []
     last = state.last_reflection_ts
-    lines.append(f"━━━ SINCE LAST REFLECTION{(' (' + last + ')') if last else ''} ━━━")
-    if recent:
+    # Same reference point as render_full section 6: the newest entry in the
+    # exact chronicle domain 'reflection' (close_session writes it), inclusive.
+    # Without one the entries are only the newest, so none is called "new".
+    if last:
+        lines.append(f"━━━ SINCE NEWEST ENTRY IN DOMAIN 'reflection' ({last}, inclusive) ━━━")
+        lines.append(_MARKER_GLOSS)
+    else:
+        lines.append("━━━ RECENT ACTIVITY (no 'reflection'-domain marker available) ━━━")
+    if state.recent_activity is None:
+        # The activity read itself failed (AS OF names it). An unread window is
+        # not an empty one, so this line must never report an absence. With a
+        # marker the inclusive window always holds the marker entry, so before
+        # this branch "nothing new" printed in practice only on a failed read.
+        lines.append("  Activity unavailable this call (see AS OF); not an absence.")
+    elif recent:
         gt = sum(1 for r in recent if r.get("layer") == "ground_truth")
         plural = "y" if len(recent) == 1 else "ies"
+        fresh = "new " if last else ""
         lines.append(
-            f"  {len(recent)} new entr{plural} ({gt} ground_truth). "
+            f"  {len(recent)} {fresh}entr{plural} ({gt} ground_truth). "
             f"Latest: {_clip(recent[0].get('content', ''), 200)}"
         )
     else:
-        lines.append("  Nothing new since last reflection.")
+        # A read that succeeded and returned nothing. Say what the read returned,
+        # not what the chronicle holds: the list form of recall_insights skips
+        # corrupt rows without a partial signal.
+        lines.append("  No entries returned.")
     lines.append("")
 
     lines.extend(render_self_model(state.self_model, max_obs_len=None))
@@ -1158,7 +1159,7 @@ def render_foyer(state: ArrivalState) -> str:
     lines += [
         "━━━",
         "  Next: where_did_i_leave_off() for the full inheritance (lineage,",
-        "        marginalia, all threads — handoffs are consumed there, not here) ·",
+        "        all threads — handoffs are consumed there, not here) ·",
         "        arrive_delta() for just what changed · my_toolkit() for tools.",
         "  First time here? start_here() gives the 5-minute orientation.",
         "  The deeper doors: arrive_lineage() (calm) · where_did_i_leave_off() "
@@ -1171,7 +1172,7 @@ def render_foyer(state: ArrivalState) -> str:
 
 def render_gentle(state: ArrivalState, *, full_content: bool = False) -> str:
     """Render the gentle relational door (arrive_lineage). Omits threads,
-    handoffs, activity, marginalia, and scribe BY CONSTRUCTION."""
+    handoffs, activity, and scribe BY CONSTRUCTION."""
     summary = state.spiral_summary
     lines: list[str] = [f"{SPIRAL} ARRIVE_LINEAGE — relational arrival", ""]
 
@@ -1207,7 +1208,7 @@ def render_gentle(state: ArrivalState, *, full_content: bool = False) -> str:
         "━━━",
         "  ⟁ Bootstrap context, not ground truth — verify before you declare.",
         "",
-        "  The full inheritance (work threads, handoffs, marginalia) exists and",
+        "  The full inheritance (work threads, handoffs) exists and",
         "  is not loaded here by design. Work threads are best introduced",
         "  deliberately — one at a time, phrased clean — rather than arriving",
         "  all at once. Ask for what you need as the conversation opens.",
