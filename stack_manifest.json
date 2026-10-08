@@ -1,9 +1,9 @@
 {
   "manifest_schema_version": 1,
   "version": "1.21.0",
-  "source_commit": "82d324d43fe7912afd4d5deae554e763b1a18579",
+  "source_commit": "adc9c1af415ea4ed5edddcc3c17d1b27a0f5e5fb",
   "working_tree_dirty": false,
-  "tools_count": 52,
+  "tools_count": 53,
   "tools": [
     "archive_exchange",
     "arrive",
@@ -17,6 +17,7 @@
     "connectivity_status",
     "context_retrieve",
     "current_policies",
+    "descend",
     "get_compaction_context",
     "get_compaction_stats",
     "get_growth_summary",
@@ -58,5 +59,5 @@
     "triage_threads",
     "where_did_i_leave_off"
   ],
-  "tests_collected": 3652
+  "tests_collected": 3783
 }
