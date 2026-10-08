@@ -364,6 +364,64 @@ def test_protected_close_still_counts_and_withholds_all_three_parts(root, plante
     assert NOTICE in july
 
 
+@pytest.mark.parametrize("break_stakes", (False, True), ids=("stakes-verified", "stakes-missing"))
+def test_protected_surprise_still_counts_its_close_and_withholds_all_three_parts(
+    root, planted, break_stakes
+):
+    # Spec 5.4's other half: the designation sits on the JOINED SURPRISE row and
+    # the close row carries none, so only the join can carry the protection to
+    # the learned part and the pick-up. stakes-missing is the trap here too: the
+    # surprise comes back from finalize_read as a sentinel, and only its stashed
+    # claim_id maps it back to its close.
+    from sovereign_stack import provenance as prov
+    from sovereign_stack.protected import load_protected_fold
+
+    _designate(root, planted["surprise_b2"], break_stakes=break_stakes)
+    # Positive control: the surprise row alone is designated, so this test
+    # cannot pass through the close-row half the test above covers.
+    assert set(load_protected_fold(root / "chronicle")) == {planted["surprise_b2"]}
+    doors = _doors(root)
+    for name in ("full", "full_compact"):
+        block = _block(doors[name])
+        assert block[1].startswith("  4 closes on record"), name
+        assert block[3] == (
+            f"  Newest close, 2026-07-03 08:00 EDT, from fixture-seat-beta: {NOTICE}; "
+            "all three parts are withheld."
+        ), name
+        assert not any(
+            x.startswith(("    learned:", "    surprised:", "    handed")) for x in block
+        ), name
+    foyer = [x for x in doors["foyer"].splitlines() if x.startswith("  The Descent:")]
+    assert foyer == [
+        "  The Descent: 4 closes on record, newest 2026-07-03; 1 undistilled, due (descend())"
+    ]
+    july = fx.run_door(root, "descend", {"month": "2026-07"})
+    beta = fx.run_door(root, "descend", {"seat": "beta"})
+    assert july.startswith("THE DESCENT — 2 closes in this selection")
+    assert beta.startswith("THE DESCENT — 1 close in this selection")
+    for text in (july, beta):
+        lines = text.splitlines()
+        i = next(k for k, x in enumerate(lines) if f"close {prov.display_id(planted['b2'])}" in x)
+        assert lines[i].endswith(" · protected")
+        assert lines[i + 1] == f"  {NOTICE}"
+        # Only the clause's head is pinned. With the close row undesignated,
+        # inspect_claim on the close id returns the learned part bare, not
+        # "coupled with its stakes" as the clause's tail says (named for review,
+        # not fixed here).
+        assert lines[i + 2].startswith("  (all three parts of this close are withheld with it;")
+    # The surprise is the designated record: its text reaches no door and no
+    # descend output at all. The learned part and the pick-up are scoped to THE
+    # DESCENT's own surfaces, as in the close-row test (the full door's HANDOFFS
+    # section prints the pick-up raw and always has).
+    surprise_text = fx.DESCENT_SURPRISES["b2"][1]
+    for name, text in {**doors, "july": july, "beta": beta}.items():
+        assert surprise_text not in text, name
+    descent_blocks = ["\n".join(_block(doors[n])) for n in ("full", "full_compact")]
+    for text in (*descent_blocks, doors["foyer"], doors["gentle"], july, beta):
+        for needle in BETA_TEXT:
+            assert needle not in text, needle
+
+
 def test_superseded_close_drops_out_of_the_voice(root, planted):
     from sovereign_stack import provenance as prov
 
