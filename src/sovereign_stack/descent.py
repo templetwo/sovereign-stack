@@ -148,6 +148,10 @@ _ISO_OFFSET_RE = re.compile(
     r"^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])T([01]\d|2[0-3]):[0-5]\d:[0-5]\d"
     r"(\.\d+)?([+-]\d{2}:\d{2}|Z)$"
 )
+# Every pattern above is applied with fullmatch, never match: in Python `$`
+# also matches before one trailing newline, so re.match(r"^...$") accepts
+# "2026-07\n" or "claim:<64 hex>\n" as valid, and a close id carrying that
+# newline would never equal a live id (a silent miscount of coverage).
 SHAPE_KINDS = ("recurring", "once", "learned", "surprised")
 # A sidecar is a "distillate" (one landed close-distill run) or a "withdrawal"
 # (Anthony's veto, filed as an erratum BESIDE a distillate, never a deletion).
@@ -598,7 +602,7 @@ def _is_int(v: object) -> bool:
 
 def _parse_iso_offset(v: object, field: str) -> datetime:
     _need(
-        isinstance(v, str) and bool(_ISO_OFFSET_RE.match(v)),
+        isinstance(v, str) and bool(_ISO_OFFSET_RE.fullmatch(v)),
         f"{field} must be ISO 8601 with an offset",
     )
     s = v[:-1] + "+00:00" if v.endswith("Z") else v
@@ -611,7 +615,7 @@ def _parse_iso_offset(v: object, field: str) -> datetime:
 def _hex_list(v: object, field: str) -> list[str]:
     _need(isinstance(v, list), f"{field} must be a list")
     _need(
-        all(isinstance(x, str) and _HEX64_RE.match(x) for x in v),
+        all(isinstance(x, str) and _HEX64_RE.fullmatch(x) for x in v),
         f"{field} must hold 64-hex claim ids",
     )
     _need(len(set(v)) == len(v), f"{field} holds duplicates")
@@ -634,17 +638,20 @@ def _validate_doc(doc: object, stem: str) -> Distillate | Withdrawal:
     _need(set(doc) == keys, f"keys must be exactly {sorted(keys)}")
     _need(doc["schema"] == INDEX_SCHEMA, f"schema must be {INDEX_SCHEMA}")
     did = doc["id"]
-    _need(isinstance(did, str) and bool(_DISTILLATE_ID_RE.match(did)), "id is not a distillate id")
+    _need(
+        isinstance(did, str) and bool(_DISTILLATE_ID_RE.fullmatch(did)), "id is not a distillate id"
+    )
     _need(did == stem, "id does not match the file name")
     _parse_iso_offset(doc["created"], "created")
     auth = doc["authorized_by"]
     _need(
-        isinstance(auth, str) and bool(_AUTH_RE.match(auth)),
+        isinstance(auth, str) and bool(_AUTH_RE.fullmatch(auth)),
         "authorized_by must be claim:<64 hex> (a review copy marked pending is refused)",
     )
     w = doc["withdraws"]
     _need(
-        isinstance(w, list) and all(isinstance(x, str) and _DISTILLATE_ID_RE.match(x) for x in w),
+        isinstance(w, list)
+        and all(isinstance(x, str) and _DISTILLATE_ID_RE.fullmatch(x) for x in w),
         "withdraws must list distillate ids",
     )
     _need(did not in w and len(set(w)) == len(w), "withdraws names itself or repeats")
@@ -673,7 +680,7 @@ def _validate_doc(doc: object, stem: str) -> Distillate | Withdrawal:
         _need(
             isinstance(p["path"], str)
             and isinstance(p["sha256"], str)
-            and _HEX64_RE.match(p["sha256"]) is not None
+            and _HEX64_RE.fullmatch(p["sha256"]) is not None
             and _is_int(p["bytes"]),
             f"sources.{part} is malformed",
         )
@@ -684,7 +691,7 @@ def _validate_doc(doc: object, stem: str) -> Distillate | Withdrawal:
             and set(s) == {"key", "sha256"}
             and isinstance(s["key"], str)
             and isinstance(s["sha256"], str)
-            and _HEX64_RE.match(s["sha256"]) is not None
+            and _HEX64_RE.fullmatch(s["sha256"]) is not None
             for s in src["sections"]
         ),
         "sources.sections is malformed",
@@ -714,11 +721,13 @@ def _validate_doc(doc: object, stem: str) -> Distillate | Withdrawal:
     _need(corpus["closes"] == len(close_ids), "corpus.closes disagrees with close_ids")
     bm, bs = corpus["by_month"], corpus["by_seat"]
     _need(
-        isinstance(bm, dict) and all(_MONTH_RE.match(k) and _is_int(v) for k, v in bm.items()),
+        isinstance(bm, dict)
+        and all(_MONTH_RE.fullmatch(k) and _is_int(v) and v >= 0 for k, v in bm.items()),
         "corpus.by_month is malformed",
     )
     _need(
-        isinstance(bs, dict) and all(isinstance(k, str) and _is_int(v) for k, v in bs.items()),
+        isinstance(bs, dict)
+        and all(isinstance(k, str) and _is_int(v) and v >= 0 for k, v in bs.items()),
         "corpus.by_seat is malformed",
     )
     _need(
@@ -735,7 +744,7 @@ def _validate_doc(doc: object, stem: str) -> Distillate | Withdrawal:
         _need(isinstance(s, dict) and set(s) == skeys, f"each shape needs exactly {sorted(skeys)}")
         _need(
             isinstance(s["id"], str)
-            and bool(_SHAPE_ID_RE.match(s["id"]))
+            and bool(_SHAPE_ID_RE.fullmatch(s["id"]))
             and s["id"] not in seen_ids,
             "shape id malformed or repeated",
         )
@@ -758,7 +767,7 @@ def _validate_doc(doc: object, stem: str) -> Distillate | Withdrawal:
         m = s["months"]
         _need(
             isinstance(m, list)
-            and all(isinstance(x, str) and _MONTH_RE.match(x) for x in m)
+            and all(isinstance(x, str) and _MONTH_RE.fullmatch(x) for x in m)
             and m == sorted(set(m)),
             f"shape {s['id']}: months must be sorted unique YYYY-MM",
         )
@@ -829,7 +838,9 @@ def load_distillates(
         stem = name[: -len(INDEX_SUFFIX)]
         # A file name reaches the boot only when it is a validated distillate id.
         label = (
-            name if _DISTILLATE_ID_RE.match(stem) else "a file whose name is not a distillate id"
+            name
+            if _DISTILLATE_ID_RE.fullmatch(stem)
+            else "a file whose name is not a distillate id"
         )
         path = d / name
         try:
@@ -1294,14 +1305,14 @@ def descend(
 ) -> str:
     """The read tool. Refusals return text; an unreadable store RAISES."""
     # Validate before reading. Refusals never echo the caller's text.
-    if month is not None and not (isinstance(month, str) and _MONTH_RE.match(month)):
+    if month is not None and not (isinstance(month, str) and _MONTH_RE.fullmatch(month)):
         return _refuse("month must be an Eastern calendar month written YYYY-MM")
     if seat is not None and not (
         isinstance(seat, str) and seat.strip() and len(seat) <= _SEAT_FILTER_MAX
     ):
         return _refuse(f"seat must be non-empty text of at most {_SEAT_FILTER_MAX} characters")
     if shape is not None and not (
-        isinstance(shape, str) and _SHAPE_ID_RE.match(shape.strip().upper())
+        isinstance(shape, str) and _SHAPE_ID_RE.fullmatch(shape.strip().upper())
     ):
         return _refuse("shape must be a shape id such as R1 or L4 (descend() lists them)")
     if not (_is_int(limit) and 1 <= limit <= DESCEND_MAX_LIMIT):
