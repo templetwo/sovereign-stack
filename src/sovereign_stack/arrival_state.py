@@ -465,6 +465,17 @@ def build_arrival_state(
             _degrade("the_descent", exc)  # suppressed render → nothing
             descent = None
             return
+        if not descent.closes and descent.skipped_rows:
+            # No close read, yet rows were skipped, and any of them may have
+            # been a close: an absent voice would claim an empty store this
+            # call has not earned. Degrade instead (AS OF names it); descend()
+            # states the same reading with its skipped count.
+            _degrade(
+                "the_descent",
+                RuntimeError(f"no close readable; {descent.skipped_rows} unreadable rows skipped"),
+            )
+            descent = None
+            return
         if descent.index_error is not None:
             _degrade("the_descent distillate index", RuntimeError(descent.index_error))
 

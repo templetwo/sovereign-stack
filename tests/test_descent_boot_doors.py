@@ -399,14 +399,18 @@ def test_leaked_markup_is_repaired_at_read_time_only(root, planted):
 
 
 def test_no_door_writes_on_a_read(root, planted):
+    # chronicle/ and handoffs/: the descent read path reads both. The doors add
+    # only exist_ok directories and spiral_state.json, outside these files.
     def snapshot() -> dict[str, str]:
         out = {}
-        for p in sorted((root / "chronicle").rglob("*")):
-            if p.is_file():
-                out[str(p.relative_to(root))] = hashlib.sha256(p.read_bytes()).hexdigest()
+        for top in ("chronicle", "handoffs"):
+            for p in sorted((root / top).rglob("*")):
+                if p.is_file():
+                    out[str(p.relative_to(root))] = hashlib.sha256(p.read_bytes()).hexdigest()
         return out
 
     before = snapshot()
+    assert any(k.startswith("handoffs/") for k in before)  # the snapshot sees the handoff files
     fx.run_all_doors(root)
     fx.run_door(root, "descend", {})
     fx.run_door(root, "descend", {"month": "2026-07"})
@@ -503,6 +507,116 @@ def test_credential_shaped_text_is_masked_in_the_block_and_in_descend(root, plan
         "1 span masked by the house redactor (display only; the store is unchanged)."
     )
     assert key in shard.read_text()  # display only: the record is unchanged
+
+
+def test_credential_shaped_text_is_masked_in_every_field(root, planted):
+    # The learned leg is pinned above; this pins the seat name, the thread, the
+    # surprise and the pick-up, at the boot block and in descend (fix round 1:
+    # six one-line unmasking mutants survived every test before this one).
+    key = "sk-" + "ant-" + "z" * 30  # built at run time; never a literal in this file
+    sess = "descentfixture_cred"
+    insights = root / "chronicle" / "insights"
+    fx._write_jsonl(
+        insights / "reflection" / "descent-cred.jsonl",
+        [
+            {
+                "timestamp": "2026-07-04T12:00:00+00:00",
+                "domain": "reflection",
+                "content": "Cred learned to keep secrets out of the record.",
+                "session_id": sess,
+                "source_instance": f"fixture-seat-cred {key}",
+                "thread": f"fixture-cred-thread {key}",
+                "close_session": True,
+            }
+        ],
+    )
+    fx._write_jsonl(
+        insights / "surprise" / "descent-cred.jsonl",
+        [
+            {
+                "timestamp": "2026-07-04T12:00:00.200000+00:00",
+                "domain": "surprise",
+                "content": f"Cred was surprised {key} still worked.",
+                "session_id": sess,
+            }
+        ],
+    )
+    (root / "handoffs" / "descent_fixture_cred.json").write_text(
+        json.dumps(
+            {
+                "timestamp": "2026-07-04T08:00:00.400000",
+                "source_instance": "fixture-handoff-author",
+                "source_session_id": sess,
+                "thread": "fixture-thread",
+                "note": f"Cred hands on: revoke {key} first.",
+                "consumed_at": None,
+                "consumed_by": None,
+            }
+        )
+    )
+    block = _block(fx.run_all_doors(root)["full"])
+    assert key not in "\n".join(block)
+    assert (
+        block[3] == "  Newest close, 2026-07-04 08:00 EDT, from fixture-seat-cred <redacted-key>:"
+    )
+    assert block[5] == "    surprised: Cred was surprised <redacted-key> still worked."
+    assert block[6] == "    handed forward: Cred hands on: revoke <redacted-key> first."
+
+    july = fx.run_door(root, "descend", {"month": "2026-07"})
+    assert key not in july
+    lines = july.splitlines()
+    assert lines[4].startswith(
+        "[1] 2026-07-04 08:00 EDT · fixture-seat-cred <redacted-key> · "
+        "thread fixture-cred-thread <redacted-key> · close "
+    )
+    i = lines.index("  SURPRISED")  # the cred close renders first
+    assert lines[i + 1] == "    Cred was surprised <redacted-key> still worked."
+    i = lines.index("  HANDED FORWARD")
+    assert lines[i + 1] == "    Cred hands on: revoke <redacted-key> first."
+    # seat, thread, surprise, pick-up: one span each (the learned leg carries none)
+    assert lines[-1].endswith(
+        "4 spans masked by the house redactor (display only; the store is unchanged)."
+    )
+
+    by_seat = fx.run_door(root, "descend", {"seat": "fixture-seat-cred"})
+    assert key not in by_seat
+    assert "  Selection: 1 seat name: fixture-seat-cred <redacted-key>." in by_seat.splitlines()
+    assert by_seat.splitlines()[-1].endswith(
+        "5 spans masked by the house redactor (display only; the store is unchanged)."
+    )
+
+    index = fx.run_door(root, "descend", {})
+    assert key not in index
+    assert (
+        "    (1 span masked by the house redactor in the names above; display only, "
+        "the store is unchanged)"
+    ) in index.splitlines()
+    assert key in (insights / "reflection" / "descent-cred.jsonl").read_text()  # display only
+
+
+def _aperture_insights(text: str) -> str:
+    block = text.split("━━━ APERTURE (", 1)[1].split("\n\n", 1)[0]
+    row = next(x for x in block.splitlines() if x.split()[:1] == ["insights"])
+    return row.split(" · ", 1)[1]
+
+
+def test_a_protected_newest_close_shows_the_aperture_only_its_own_line(root, planted):
+    # Fix round 1: removing the protected guard in shown_locators survived every
+    # test. A protected newest close renders ONE withheld line for its
+    # reflection row; its joined surprise row is withheld, so it is not "shown".
+    from sovereign_stack import descent
+
+    before = _aperture_insights(
+        fx.run_door(root, "where_did_i_leave_off", {"consume": False, "source_instance": "r"})
+    )
+    assert before == "5 shown here"  # 3 base rows + the newest close's two rows
+    _designate(root, planted["b2"], break_stakes=False)
+    state = descent.gather_descent(root, depth="full")
+    newest = state.closes[0]
+    assert newest.protected and newest.surprise_locator is not None  # the joined row exists
+    assert descent.shown_locators(state) == {newest.reflection_locator}
+    full = fx.run_door(root, "where_did_i_leave_off", {"consume": False, "source_instance": "r"})
+    assert _aperture_insights(full) == "4 shown here"
 
 
 def test_a_corrected_pick_up_is_marked_wherever_it_renders(root, planted):

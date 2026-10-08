@@ -53,7 +53,19 @@ READ RULES (each one earned elsewhere in this house):
     resolve against insights/ only), so the pick-up of a protected close has
     no stakes to travel with and is withheld with it.
   * An unreadable shard or directory RAISES (an unread shard is not an empty
-    one); a corrupt line is skipped AND COUNTED, and the count is shown.
+    one); a corrupt line is skipped AND COUNTED, and the count is shown. An
+    entry named like a shard that is not a regular file (a dangling or looping
+    symlink, a directory, a FIFO) is an unread shard: it RAISES, and it is
+    never opened, because opening a FIFO blocks. A line that will not decode
+    or parse (bad UTF-8, broken JSON, an integer past the conversion limit,
+    nesting past the parser's recursion limit) is a corrupt line, and a row
+    whose session_id or content is not text, or whose stamp the house clock
+    cannot show, is unusable: each is skipped and counted, and none of them
+    takes the whole voice down.
+  * A handoff FILE that cannot be used (an entry that is not a regular file,
+    an unreadable file, one that is not a JSON object, or one whose note or
+    source_session_id is not text) is COUNTED in handoffs_unreadable, as the
+    extractor counts it, and the count is shown wherever a pick-up is missing.
   * Read-only: no directory is created on a read (no ExperientialMemory or
     HandoffEngine construction — both mkdir).
   * A path that does not exist is an empty surface; a path that exists and is
@@ -284,7 +296,13 @@ class DescentState:
 
 
 def _parse_house_ts(raw: object) -> datetime | None:
-    """Aware UTC datetime; naive stamps are HOUSE_TZ wall-clock. None if unparseable."""
+    """Aware UTC datetime; naive stamps are HOUSE_TZ wall-clock. None if unparseable.
+
+    None too for an instant the reader's two clocks cannot both show: a stamp
+    at the edge of the calendar (a naive 9999-12-31T23:30, or 0001-01-01T00:00Z,
+    which is year 0 in Eastern) parses, then overflows on conversion, at read
+    time or at render time, and would take the whole voice down.
+    """
     if not isinstance(raw, str) or not raw.strip():
         return None
     s = raw.strip()
@@ -292,11 +310,13 @@ def _parse_house_ts(raw: object) -> datetime | None:
         s = s[:-1] + "+00:00"
     try:
         dt = datetime.fromisoformat(s)
-    except ValueError:
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=HOUSE_TZ)
+        utc = dt.astimezone(timezone.utc)
+        utc.astimezone(HOUSE_TZ)  # every render reads the Eastern wall clock
+    except (ValueError, OverflowError):
         return None
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=HOUSE_TZ)
-    return dt.astimezone(timezone.utc)
+    return utc
 
 
 def _read_jsonl_counted(path: Path) -> tuple[list[dict], int]:
@@ -305,23 +325,31 @@ def _read_jsonl_counted(path: Path) -> tuple[list[dict], int]:
     Blank lines are not counted. A corrupt or non-object line is skipped AND
     counted. An unreadable file RAISES — ground._iter_jsonl returns a partial
     list on OSError, which reads an unread shard as an empty one.
+
+    Decoded line by line, so one undecodable line is a corrupt line rather
+    than an unreadable shard. bytes.splitlines() splits on the same universal
+    newlines (LF, CRLF, CR) as a text-mode read.
     """
     records: list[dict] = []
     skipped = 0
-    with open(path, encoding="utf-8") as fh:
-        for line in fh:
-            line = line.strip()
+    with open(path, "rb") as fh:
+        data = fh.read()
+    for raw in data.splitlines():
+        try:
+            line = raw.decode("utf-8").strip()
             if not line:
                 continue
-            try:
-                obj = json.loads(line)
-            except json.JSONDecodeError:
-                skipped += 1
-                continue
-            if isinstance(obj, dict):
-                records.append(obj)
-            else:
-                skipped += 1
+            obj = json.loads(line)
+        except (ValueError, RecursionError):
+            # Bad UTF-8, broken JSON, an integer past the conversion limit (a
+            # plain ValueError) or nesting past the parser's recursion limit
+            # (not a ValueError): a corrupt line, skipped and counted.
+            skipped += 1
+            continue
+        if isinstance(obj, dict):
+            records.append(obj)
+        else:
+            skipped += 1
     return records, skipped
 
 
@@ -340,6 +368,27 @@ def _present_dir(path: Path, label: str) -> bool:
     raise NotADirectoryError(f"{label} is not a directory")
 
 
+def _is_regular(entry: os.DirEntry) -> bool:
+    """True only when ``entry`` resolves to a regular file, decided WITHOUT opening it.
+
+    A dangling symlink, a directory or a FIFO answers False, and so does a
+    symlink loop: DirEntry.is_file() raises OSError (ELOOP) for one, which
+    must not escape a reader that counts per file. The caller treats False as
+    UNREADABLE, never as absent, and never opens the entry (a FIFO blocks the
+    open).
+    """
+    try:
+        return entry.is_file()
+    except OSError:
+        return False
+
+
+def _text_or_none(value: object) -> bool:
+    """A field the join or the render reads must be text or absent. Anything
+    else (a list, a number, an object) makes the row unusable, not fatal."""
+    return value is None or isinstance(value, str)
+
+
 def _locator(row: dict) -> tuple[str, str]:
     return (str(row.get("timestamp") or ""), str(row.get("domain") or ""))
 
@@ -349,20 +398,25 @@ def _leg_rows(chronicle_root: Path, dirname: str) -> tuple[list[dict], int]:
 
     os.scandir, not Path.glob: pathlib's glob swallows PermissionError and
     would report an unreadable directory as an empty one. A path that exists
-    and is not a directory raises (_present_dir).
+    and is not a directory raises (_present_dir). An entry named like a shard
+    that is not a regular file raises too, and is never opened (_is_regular).
     """
     d = chronicle_root / "insights" / dirname
     if not _present_dir(d, f"insights/{dirname}"):
         return [], 0
     with os.scandir(d) as it:
-        names = sorted(
-            e.name
+        entries = sorted(
+            (e.name, _is_regular(e))
             for e in it
-            if e.name.endswith(".jsonl") and not e.name.startswith(".") and e.is_file()
+            if e.name.endswith(".jsonl") and not e.name.startswith(".")
         )
+    if not all(regular for _, regular in entries):
+        # Named like a shard and not a regular file: an unread shard, never an
+        # absent one. Checked before any shard is read; the entry is not opened.
+        raise OSError(f"insights/{dirname}: a shard is not a readable regular file")
     rows: list[dict] = []
     skipped = 0
-    for name in names:
+    for name, _ in entries:
         r, s = _read_jsonl_counted(d / name)
         rows.extend(r)
         skipped += s
@@ -372,8 +426,10 @@ def _leg_rows(chronicle_root: Path, dirname: str) -> tuple[list[dict], int]:
 def _handoff_rows(sovereign_root: Path) -> tuple[list[dict], int]:
     """Parsed handoff files (dicts) and how many could not be read.
 
-    An unreadable FILE is counted, as the extractor counts it; an unreadable
-    DIRECTORY, or a path that exists and is not one, raises. No HandoffEngine:
+    An unreadable FILE is counted, as the extractor counts it, and so is an
+    entry that is not a regular file (counted unopened: a FIFO would block the
+    open) or a file the parser cannot finish; an unreadable DIRECTORY, or a
+    path that exists and is not one, raises. No HandoffEngine:
     its constructor mkdirs. Correction links come from the handoff store's own
     read-time annotation (handoff._annotate_forward_links, pure, keyed on
     ``_path``), so a pick-up a later handoff corrects carries ``_corrected_by``.
@@ -382,17 +438,20 @@ def _handoff_rows(sovereign_root: Path) -> tuple[list[dict], int]:
     if not _present_dir(d, "handoffs"):
         return [], 0
     with os.scandir(d) as it:
-        names = sorted(
-            e.name
+        entries = sorted(
+            (e.name, _is_regular(e))
             for e in it
-            if e.name.endswith(".json") and not e.name.startswith(".") and e.is_file()
+            if e.name.endswith(".json") and not e.name.startswith(".")
         )
     rows: list[dict] = []
     unreadable = 0
-    for name in names:
+    for name, regular in entries:
+        if not regular:
+            unreadable += 1  # counted, never opened (a FIFO would block the open)
+            continue
         try:
             data = json.loads((d / name).read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+        except (OSError, ValueError, RecursionError):
             unreadable += 1
             continue
         if isinstance(data, dict):
@@ -451,8 +510,9 @@ def load_closes(
 
     legs=False reads the reflection leg only (no surprise, no handoff join):
     the counts, months and protection are exact, the surprise and handed
-    fields are None. Raises OSError / UnicodeDecodeError on an unreadable
-    store — the caller degrades (boot) or errors (descend), never reports 0.
+    fields are None. Raises OSError (NotADirectoryError included) on an
+    unreadable store — the caller degrades (boot) or errors (descend), never
+    reports 0. A corrupt line or an unusable row is skipped and counted.
     """
     chronicle_root = Path(chronicle_root)
     sovereign_root = Path(sovereign_root)
@@ -468,8 +528,12 @@ def load_closes(
         if row.get("close_session") is not True:
             continue
         when = _parse_house_ts(row.get("timestamp"))
-        if when is None:
-            skipped += 1
+        if (
+            when is None
+            or not _text_or_none(row.get("session_id"))
+            or not _text_or_none(row.get("content"))
+        ):
+            skipped += 1  # an unusable close row: counted, never fatal
             continue
         cid = prov.derive_claim_id(row)
         if cid in seen:
@@ -490,7 +554,11 @@ def load_closes(
         skipped += s_skipped
         for row in s_rows:
             when = _parse_house_ts(row.get("timestamp"))
-            if when is None:
+            if (
+                when is None
+                or not _text_or_none(row.get("session_id"))
+                or not _text_or_none(row.get("content"))
+            ):
                 skipped += 1
                 continue
             idx = len(surprises)
@@ -499,7 +567,11 @@ def load_closes(
         h_rows, handoffs_unreadable = _handoff_rows(sovereign_root)
         for row in h_rows:
             when = _parse_house_ts(row.get("timestamp"))
-            if when is None:
+            if (
+                when is None
+                or not _text_or_none(row.get("source_session_id"))
+                or not _text_or_none(row.get("note"))
+            ):
                 handoffs_unreadable += 1
                 continue
             idx = len(handoffs)
@@ -607,9 +679,17 @@ def _parse_iso_offset(v: object, field: str) -> datetime:
     )
     s = v[:-1] + "+00:00" if v.endswith("Z") else v
     try:
-        return datetime.fromisoformat(s).astimezone(timezone.utc)
+        dt = datetime.fromisoformat(s).astimezone(timezone.utc)
+        dt.astimezone(HOUSE_TZ)  # the boot shows it on the Eastern wall clock
     except ValueError as exc:
         raise DistillateIndexError(f"{field} does not parse") from exc
+    except OverflowError as exc:
+        # A cursor of 0001-01-01T00:00Z validated and then crashed the whole
+        # full door at render time (year 0 in Eastern).
+        raise DistillateIndexError(
+            f"{field} is outside the range the house clock can show"
+        ) from exc
+    return dt
 
 
 def _hex_list(v: object, field: str) -> list[str]:
@@ -808,13 +888,14 @@ def load_distillates(
     Fail-closed over the WHOLE directory. DistillateIndexError, naming the file
     by its distillate id only, when: the directory is a symlink or not a
     directory; it holds more than INDEX_MAX_FILES sidecars; any sidecar is a
-    symlink, not a regular file, over INDEX_MAX_BYTES, not UTF-8 JSON, or
-    invalid; or any `withdraws` names something that is not a distillate on
-    disk (a typo'd veto must be loud, not a silent no-op). Never falls back to
-    an older file. "Newest" is the distillate in force with the greatest
-    cursor (ties: id), never file mtime. Covered = the union of close_ids over
-    every distillate in force, so a ranged or backfill run can neither win
-    "newest" by accident nor make an earlier close read as undistilled.
+    symlink, not a regular file, over INDEX_MAX_BYTES, not UTF-8 JSON, JSON
+    the parser cannot finish, or invalid; or any `withdraws` names something
+    that is not a distillate on disk (a typo'd veto must be loud, not a silent
+    no-op). Never falls back to an older file. "Newest" is the distillate in
+    force with the greatest cursor (ties: id), never file mtime. Covered = the
+    union of close_ids over every distillate in force, so a ranged or backfill
+    run can neither win "newest" by accident nor make an earlier close read as
+    undistilled.
     """
     d = Path(chronicle_root) / INDEX_DIRNAME
     if not os.path.lexists(d):
@@ -859,7 +940,10 @@ def load_distillates(
             doc = _validate_doc(json.loads(raw.decode("utf-8")), stem)
         except DistillateIndexError as exc:
             raise DistillateIndexError(f"{label}: {exc}") from exc
-        except (OSError, ValueError) as exc:
+        except Exception as exc:
+            # Any sidecar this reader cannot finish (OSError, a decode error, a
+            # RecursionError from nesting the parser cannot finish) makes the
+            # index unknown this call; it never escapes to take the voice down.
             raise DistillateIndexError(f"{label}: {type(exc).__name__}") from exc
         if isinstance(doc, Withdrawal):
             withdrawals.append(doc)
@@ -972,6 +1056,17 @@ def _plural(k: int, word: str) -> str:
     return f"{k} {word}{'' if k == 1 else 's'}"
 
 
+# What the reader can say when a leg has no joined text: none was JOINED (none
+# from the session inside the window, or it sat on a skipped line), never that
+# the seat wrote none. Shared by the boot block and descend.
+_SURPRISE_NONE = f"(no surprise joined: none from this session within {JOIN_SECONDS} seconds)"
+_HANDOFF_NONE = f"(no handoff joined: none from this session within {JOIN_SECONDS} seconds)"
+
+
+def _handoffs_unread_text(h: int) -> str:
+    return f"(none joined; {_plural(h, 'handoff file')} could not be read)"
+
+
 def _months_phrase(months: tuple[str, ...]) -> str:
     """One month as itself; a run of consecutive months as "first to last";
     anything else listed, so a gap is never drawn over."""
@@ -1076,7 +1171,8 @@ def render_descent(
     arc = " · ".join(f"{m} {by_month[m]}" for m in shown)
     earlier = months[:-ARC_MONTHS] if len(months) > ARC_MONTHS else []
     if earlier:
-        arc += f" (+{len(earlier)} earlier months, {sum(by_month[m] for m in earlier)} closes)"
+        folded = sum(by_month[m] for m in earlier)
+        arc += f" (+{_plural(len(earlier), 'earlier month')}, {_plural(folded, 'close')})"
     lines.append(f"  By month: {arc}")
 
     seat_txt, _ = _seat(newest.seat, _SEAT_CLIP)
@@ -1095,16 +1191,16 @@ def render_descent(
         elif newest.surprised:
             surprised = _one_line(newest.surprised, full_content)
         else:
-            surprised = "(none written)"
+            surprised = _SURPRISE_NONE
         lines.append(f"    surprised: {surprised}")
         if newest.handed_forward:
             handed = _one_line(newest.handed_forward, full_content) + (
                 _CORRECTED_MARK if newest.handed_corrected else ""
             )
         elif state.handoffs_unreadable:
-            handed = f"(none joined; {state.handoffs_unreadable} handoff files could not be read)"
+            handed = _handoffs_unread_text(state.handoffs_unreadable)
         else:
-            handed = "(no handoff joined: none from this session within 10 seconds)"
+            handed = _HANDOFF_NONE
         lines.append(f"    handed forward: {handed}")
 
     lines.append(f"  Distillation: {_distillation_sentence(state, now)}.")
@@ -1152,7 +1248,12 @@ def render_descent_foyer_line(
         else:
             tail = f"{len(undistilled)} undistilled, {due}"
     label = DESCENT_LABEL.title()
-    return f"  {label}: {_plural(n, 'close')} on record, newest {newest}; {tail} (descend())"
+    skipped = (
+        f" ({_plural(state.skipped_rows, 'unreadable row')} skipped)" if state.skipped_rows else ""
+    )
+    return (
+        f"  {label}: {_plural(n, 'close')} on record{skipped}, newest {newest}; {tail} (descend())"
+    )
 
 
 def shown_locators(state: DescentState) -> set[tuple[str, str]]:
@@ -1184,13 +1285,17 @@ def _index_view(state: DescentState, now: datetime) -> str:
         lines.append(
             "  No close is on record in this store (close_session entries in chronicle domain "
             "'reflection')."
-            + (f" {state.skipped_rows} unreadable rows skipped." if state.skipped_rows else "")
+            + (
+                f" {_plural(state.skipped_rows, 'unreadable row')} skipped."
+                if state.skipped_rows
+                else ""
+            )
         )
         return "\n".join(lines)
     lines.append(
         f"  {_plural(n, 'close')} on record (close_session entries in chronicle domain "
         f"'reflection'), {_edt(closes[-1].when, '%Y-%m-%d')} to {_edt(closes[0].when, '%Y-%m-%d')} "
-        f"(Eastern). {state.skipped_rows} unreadable rows skipped."
+        f"(Eastern). {_plural(state.skipped_rows, 'unreadable row')} skipped."
     )
     by_month: dict[str, int] = {}
     for c in closes:
@@ -1276,20 +1381,15 @@ def _render_close(i: int, c: Close, state: DescentState) -> tuple[list[str], int
             "SURPRISED", "(superseded; recall_insights(exclude_superseded=false) shows the chain)"
         )
     else:
-        out += block("SURPRISED", c.surprised or "(none written)")
+        out += block("SURPRISED", c.surprised or _SURPRISE_NONE)
     if c.handed_forward:
         out += block("HANDED FORWARD", c.handed_forward)
         if c.handed_corrected:
             out.append("    " + _CORRECTED_MARK.strip())
     elif state.handoffs_unreadable:
-        out += block(
-            "HANDED FORWARD",
-            f"(none joined; {state.handoffs_unreadable} handoff files could not be read)",
-        )
+        out += block("HANDED FORWARD", _handoffs_unread_text(state.handoffs_unreadable))
     else:
-        out += block(
-            "HANDED FORWARD", "(no handoff joined: none from this session within 10 seconds)"
-        )
+        out += block("HANDED FORWARD", _HANDOFF_NONE)
     return out, masked
 
 
@@ -1436,8 +1536,8 @@ def descend(
     lines.append(
         f"COVERAGE: {len(page)} of {total} shown (offset {offset}, limit {limit})"
         + (f"; {after} more: descend(..., offset={offset + len(page)})" if after > 0 else "")
-        + f". {state.skipped_rows} unreadable rows skipped; {state.handoffs_unreadable} handoff "
-        f"files unreadable."
+        + f". {_plural(state.skipped_rows, 'unreadable row')} skipped; "
+        f"{_plural(state.handoffs_unreadable, 'handoff file')} unreadable."
         + (
             f" {_plural(masked, 'span')} masked by the house redactor (display only; the store "
             "is unchanged)."

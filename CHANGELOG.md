@@ -28,6 +28,24 @@ voice of their own, in the slot the retired reflector left.
   exists and is not a directory raises (never "no closes"); a pick-up that a
   later handoff corrects is marked; rendered close text passes through the
   house redactor first (display only; the store is unchanged).
+- An unreadable entry is never read as absent, and the odd records found in
+  review are counted, not fatal. An entry named like a close shard that is
+  not a regular file (a dangling or looping symlink, a directory, a FIFO)
+  fails the close read and is never opened; among the handoffs it counts as
+  an unreadable handoff file. A line that will not decode or parse (bad
+  UTF-8, broken JSON, an integer past the conversion limit, nesting past the
+  parser's limit), a row whose session id, text or pick-up is not text, and a
+  row whose stamp the house clock cannot show are each skipped and counted
+  rather than taking the voice down. A sidecar the reader cannot finish, or
+  whose time the house clock cannot show, makes the distillation "unknown
+  this call" (a cursor of 0001-01-01T00:00Z used to validate and then crash
+  the whole full door). When no close can be read and rows were skipped, the
+  doors degrade through AS OF instead of showing an empty store. The foyer
+  line states skipped rows; a surprise that did not join reads "(no surprise
+  joined: ...)", not "(none written)"; a count of one is singular.
+- Validation takes the whole string: a sidecar field or a descend month with
+  a trailing newline no longer passes. Distillate corpus counts must be
+  non-negative.
 - The full door (and compact) shows the counts, the arc by month, the newest
   close in three lines, the distillation status and the newest distillate's top
   recurring shapes, with a pointer to `descend()`. The foyer gets one line. The
