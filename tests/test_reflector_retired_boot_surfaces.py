@@ -63,7 +63,7 @@ DEAD = (
     "SINCE LAST REFLECTION",
 )
 NUMBER = {"three": 3, "four": 4, "five": 5, "six": 6}
-LIVE_VOICES = ["HANDOFFS", "CHRONICLE", "SELF-MODEL", "LINEAGE"]
+LIVE_VOICES = ["HANDOFFS", "CHRONICLE", "SELF-MODEL", "THE DESCENT", "LINEAGE"]
 DOOR_NAMES = ("full", "full_compact", "foyer", "gentle")
 
 
@@ -114,7 +114,7 @@ def test_no_door_reads_the_reflector_store(fixture_root: Path):
 
 
 @pytest.mark.parametrize("door", ("full", "gentle"))
-def test_voices_name_exactly_the_four_live_voices(fixture_root: Path, door: str):
+def test_voices_name_exactly_the_five_live_voices(fixture_root: Path, door: str):
     text = fx.run_all_doors(fixture_root)[door]
     block = text.split("━━━ THE VOICES IN THE BOOT ━━━", 1)[1].split("━━━", 1)[0]
     stated = re.search(r"written by (\w+) distinct voices", block).group(1)

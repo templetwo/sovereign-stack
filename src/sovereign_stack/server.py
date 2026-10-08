@@ -41,6 +41,12 @@ from .compaction_memory_tools import COMPACTION_MEMORY_TOOLS, handle_compaction_
 from .connectivity_tools import CONNECTIVITY_TOOLS, handle_connectivity_tool
 from .consciousness_tools import CONSCIOUSNESS_TOOLS, handle_consciousness_tool
 from .consciousness_tools import meta as _consciousness_meta
+from .descent import (
+    DESCENT_TOOL_INTENTS,
+    DESCENT_TOOL_TIERS,
+    DESCENT_TOOLS,
+    handle_descent_tool,
+)
 from .dispatch_context import (
     CALLER_IDENTITY_CHANNEL,
     caller_seat,
@@ -2426,10 +2432,11 @@ def _registered_tools():
         + PROVENANCE_TOOLS
         + SEASON_TOOLS
         + GROUND_TOOLS
+        + DESCENT_TOOLS
         + SIGNAL_TOOLS
     )  # consciousness + compaction + guardian + metabolism + post_fix + connectivity
     # + policies + provenance + seasons (v1.7.0 Receipts & Seasons) + ground (The Ground)
-    # + signal ledger (watch seat)
+    # + descent (THE DESCENT, the close index) + signal ledger (watch seat)
 
 
 @server.list_tools()
@@ -2541,6 +2548,8 @@ TOOL_CATEGORIES: dict[str, str] = {
     # The Ground — catch ledger, surfaced at boot alongside the lineage layer
     "the_ground": "witness",
     "record_catch": "witness",
+    # THE DESCENT — the close index, surfaced at boot as the fifth voice
+    "descend": "witness",
 }
 
 
@@ -2644,6 +2653,7 @@ TOOL_TIERS.update(POLICY_TOOL_TIERS)
 TOOL_TIERS.update(PROVENANCE_TOOL_TIERS)
 TOOL_TIERS.update(SEASON_TOOL_TIERS)
 TOOL_TIERS.update(GROUND_TOOL_TIERS)
+TOOL_TIERS.update(DESCENT_TOOL_TIERS)
 TOOL_TIERS.update(SIGNAL_TOOL_TIERS)
 
 
@@ -2757,6 +2767,7 @@ TOOL_INTENTS.update(POLICY_TOOL_INTENTS)
 TOOL_INTENTS.update(PROVENANCE_TOOL_INTENTS)
 TOOL_INTENTS.update(SEASON_TOOL_INTENTS)
 TOOL_INTENTS.update(GROUND_TOOL_INTENTS)
+TOOL_INTENTS.update(DESCENT_TOOL_INTENTS)
 TOOL_INTENTS.update(SIGNAL_TOOL_INTENTS)
 
 
@@ -4426,6 +4437,16 @@ Phase: {spiral_state.current_phase.value}
     # subtree, record_catch takes the chronicle write lock in the sync layer.
     if name in [t.name for t in GROUND_TOOLS]:
         text = await asyncio.to_thread(handle_ground_tool, name, arguments)
+        return [TextContent(type="text", text=text)]
+
+    # THE DESCENT (close index). Off-loop: descend reads three chronicle
+    # surfaces. The SOVEREIGN root is passed at call time — the module global,
+    # read here, not bound at import — so the tool reads exactly the store the
+    # boot voice reads (the_ground's tool resolves its own root through
+    # SOVEREIGN_CHRONICLE and can diverge from its voice). An unreadable store
+    # raises out of here: an error, never an empty result.
+    if name in [t.name for t in DESCENT_TOOLS]:
+        text = await asyncio.to_thread(handle_descent_tool, name, arguments, Path(DEFAULT_ROOT))
         return [TextContent(type="text", text=text)]
 
     if name in [t.name for t in SIGNAL_TOOLS]:

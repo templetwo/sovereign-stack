@@ -28,7 +28,7 @@
 
 ━━━ THE VOICES IN THE BOOT ━━━
 
-  What follows is written by four distinct voices. They have
+  What follows is written by five distinct voices. They have
   different default trust and different shapes of engagement.
   Read each in its own register.
 
@@ -46,6 +46,14 @@
       (strength, tendency, blind_spot, drift). Authoritative
       as a mirror; check against your current behavior, not
       yesterday's evidence.
+
+    THE DESCENT — the closes of the seats before you: what
+      each learned, what surprised it, what it handed on.
+      Indexed, never erased: the arc, the counts, the newest
+      close and the shapes that keep recurring; descend()
+      reaches the raw closes beneath. Each close is its
+      seat's own claim. Take a shape as a check to arrange,
+      not as a lesson to absorb.
 
     LINEAGE — letters written by past instances for whoever
       arrives next (to_arrival), for the next instance under

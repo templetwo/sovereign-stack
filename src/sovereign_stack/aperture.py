@@ -55,6 +55,15 @@ _BOOT_HANDOFF_CAP = 20
 # caller's own coverage envelope supplies that. See measure_aperture.
 _LINEAGE_DEFAULT_SHOWN = 5
 
+# The DEFAULT `limit` of recall_insights and get_open_threads (their schemas in
+# server.py). Like _LINEAGE_DEFAULT_SHOWN, reported ONLY as a default — a
+# caller with no door payload (the heartbeat) gets "default 10", a true
+# statement about the parameter; the boot door passes what it actually showed.
+# These were a bare `"default_shown": 10`, which the full door rendered as
+# "10 shown here" while it showed 5 threads (3 compact).
+_RECALL_INSIGHTS_DEFAULT_LIMIT = 10
+_OPEN_THREADS_DEFAULT_LIMIT = 10
+
 
 def _unsigned_by_reader(root: Path, reader: str | None) -> int | None:
     """This reader's real handoff queue under the signature ledger.
@@ -99,6 +108,7 @@ def measure_aperture(
     reader: str | None = None,
     *,
     lineage_coverage: dict | None = None,
+    door_shown: dict | None = None,
 ) -> dict:
     """
     Measure every surface an arriving seat reads, live.
@@ -117,6 +127,10 @@ def measure_aperture(
     It is the only source of a truthful `default_shown` for the lineage
     buckets, and passing it is what stops this surface describing a payload it
     is not looking at. See the block below.
+
+    `door_shown` is the same rule for the insights and open_threads surfaces:
+    {"insights": int, "open_threads": int}, what the calling door rendered.
+    Without it, each says "default 10" and claims nothing about a payload.
 
     Raises on any failure. Never returns partial numbers.
     """
@@ -197,10 +211,13 @@ def measure_aperture(
             if f.name.endswith(".jsonl"):
                 with open(f.path, "rb") as fh:
                     records += sum(1 for line in fh if line.strip())
+    door_shown = door_shown or {}
     surfaces["insights"] = {
         "on_disk": records,
         "domains": domains,
-        "default_shown": 10,
+        "default_shown": _shown_or_default(
+            door_shown.get("insights"), _RECALL_INSIGHTS_DEFAULT_LIMIT
+        ),
         "default_order": "newest",
         "orders_available": ["newest", "oldest", "relevance"],
         "envelope": "recall_insights returns total_matched / truncated / continuation",
@@ -291,9 +308,14 @@ def measure_aperture(
     surfaces["open_threads"] = {
         "on_disk": total_threads,
         "unresolved": unresolved,
-        "default_shown": 10,
+        "default_shown": _shown_or_default(
+            door_shown.get("open_threads"), _OPEN_THREADS_DEFAULT_LIMIT
+        ),
         "widen_with": "get_open_threads(limit=N)",
     }
+    for name in ("insights", "open_threads"):
+        if isinstance(surfaces[name]["default_shown"], int):
+            surfaces[name]["shown_is"] = "measured from this call's own payload"
 
     return {
         "policy_version": APERTURE_POLICY_VERSION,
@@ -344,6 +366,13 @@ def measure_aperture(
             ),
         },
     }
+
+
+def _shown_or_default(shown: object, default: int) -> int | str:
+    """The caller's own count when it passed one, else the parameter's default, labelled."""
+    if isinstance(shown, int) and not isinstance(shown, bool) and shown >= 0:
+        return shown
+    return f"default {default}"
 
 
 def unmeasured(now: datetime, exc: BaseException) -> dict:

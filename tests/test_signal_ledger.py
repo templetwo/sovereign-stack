@@ -659,7 +659,10 @@ class TestP1LedgerToolsNotInTheRemoteBaseTier:
     def test_the_hold_is_declared_not_merely_absent(self):
         from claude_bridge.tiers import HELD_UNCLASSIFIED
 
-        assert frozenset({"signals_summary", "signal_ack"}) == HELD_UNCLASSIFIED
+        # descend (THE DESCENT, 2026-10-08) is held for the same reason: a new
+        # remote base classification is a human's. Still an equality, so an
+        # unreviewed addition to the hold fails here rather than passing.
+        assert frozenset({"signals_summary", "signal_ack", "descend"}) == HELD_UNCLASSIFIED
 
 
 class TestP2HonkIdTypeNormalisedOnBothSides:

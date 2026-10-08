@@ -40,6 +40,7 @@ from pathlib import Path
 from sovereign_stack.aperture import measure_aperture
 from sovereign_stack.aperture import unmeasured as aperture_unmeasured
 
+from . import descent as descent_mod
 from . import witness
 from .glyphs import SPIRAL
 from .handoff import format_handoff_for_surface
@@ -83,13 +84,17 @@ def _before_you_begin_lines() -> list[str]:
     ``render_gentle`` (which always includes them).  The text is sacred —
     preserve byte-for-byte.
 
-    ONE DELIBERATE EDIT (the reflector retirement, 2026-10): the REFLECTOR'S
-    MARGINALIA voice paragraph is removed. All three reflector generations are
-    retired (RETIRED_TOOLS["reflection_ack"] in server.py) and no door renders
-    marginalia any more. Removing it makes the block's own count true again:
-    "four distinct voices" are HANDOFFS, CHRONICLE, SELF-MODEL and LINEAGE.
-    Every other byte is unchanged; tests/test_reflector_retired_boot_surfaces.py
-    pins the stated count to the listed labels.
+    TWO DELIBERATE EDITS. (1) The reflector retirement (2026-10, c98330a):
+    the REFLECTOR'S MARGINALIA voice paragraph is removed. All three reflector
+    generations are retired (RETIRED_TOOLS["reflection_ack"] in server.py) and
+    no door renders marginalia any more. (2) THE DESCENT (2026-10-08, on
+    Anthony's ruling of 2026-10-07, Stack claim e82799fa): a voice paragraph in
+    the slot the reflector's left, after SELF-MODEL and before LINEAGE, and the
+    count word "four" becomes "five". The block's own count stays true: "five
+    distinct voices" are HANDOFFS, CHRONICLE, SELF-MODEL, THE DESCENT and
+    LINEAGE. Every other byte is unchanged;
+    tests/test_reflector_retired_boot_surfaces.py pins the stated count to the
+    listed labels.
     """
     return [
         "━━━ BEFORE YOU BEGIN ━━━",
@@ -120,7 +125,7 @@ def _before_you_begin_lines() -> list[str]:
         "",
         "━━━ THE VOICES IN THE BOOT ━━━",
         "",
-        "  What follows is written by four distinct voices. They have",
+        "  What follows is written by five distinct voices. They have",
         "  different default trust and different shapes of engagement.",
         "  Read each in its own register.",
         "",
@@ -138,6 +143,14 @@ def _before_you_begin_lines() -> list[str]:
         "      (strength, tendency, blind_spot, drift). Authoritative",
         "      as a mirror; check against your current behavior, not",
         "      yesterday's evidence.",
+        "",
+        "    THE DESCENT — the closes of the seats before you: what",
+        "      each learned, what surprised it, what it handed on.",
+        "      Indexed, never erased: the arc, the counts, the newest",
+        "      close and the shapes that keep recurring; descend()",
+        "      reaches the raw closes beneath. Each close is its",
+        "      seat's own claim. Take a shape as a check to arrange,",
+        "      not as a lesson to absorb.",
         "",
         "    LINEAGE — letters written by past instances for whoever",
         "      arrives next (to_arrival), for the next instance under",
@@ -311,6 +324,9 @@ class ArrivalState:
     recent_activity: list[dict] | None = None
     self_model: dict | None = None
     ground_entries: list[dict] | None = None
+    # THE DESCENT (None = not computed for this profile, or its gather was
+    # suppressed and AS OF names it; an empty store renders nothing).
+    descent: descent_mod.DescentState | None = None
     policy_boot_line: str | None = None
     protected_drawer_count: int | None = None
     lineage_letter_count: int | None = None
@@ -390,6 +406,7 @@ def build_arrival_state(
     recent_activity: list[dict] | None = None
     self_model: dict | None = None
     ground_entries: list[dict] | None = None
+    descent: descent_mod.DescentState | None = None
     policy_boot_line: str | None = None
     protected_drawer_count: int | None = None
     lineage_letter_count: int | None = None
@@ -434,6 +451,22 @@ def build_arrival_state(
         except Exception as exc:
             _degrade("the_ground", exc)  # suppressed render → nothing
             ground_entries = None
+
+    def _gather_descent(depth: str) -> None:
+        # THE DESCENT, re-aggregated from the close store at read time, like
+        # The Ground: a failed close read degrades the whole voice (suppressed
+        # render, AS OF names it); a failed distillate-index read keeps the
+        # live counts and degrades only the distillation line, named in AS OF
+        # too, so a stale distillation can never pass as fresh.
+        nonlocal descent
+        try:
+            descent = descent_mod.gather_descent(sovereign_root, depth=depth)
+        except Exception as exc:
+            _degrade("the_descent", exc)  # suppressed render → nothing
+            descent = None
+            return
+        if descent.index_error is not None:
+            _degrade("the_descent distillate index", RuntimeError(descent.index_error))
 
     def _gather_protected() -> None:
         nonlocal protected_drawer_count
@@ -529,6 +562,7 @@ def build_arrival_state(
         # readable through recall_reflections.
         _gather_self_model()
         _gather_ground()
+        _gather_descent("full")
         _gather_policy()
         _gather_protected()
 
@@ -582,14 +616,19 @@ def build_arrival_state(
             lineage_letter_count = witness.count_lineage_letters(
                 sovereign_root / "comms" / "letters"
             )
-        except Exception:
-            lineage_letter_count = 0
+        except Exception as exc:
+            # An unread count is not a zero: the foyer used to print "0 lineage
+            # letters" here with nothing in AS OF.
+            _degrade("lineage letter count", exc)
+            lineage_letter_count = None
+        _gather_descent("foyer")
         _gather_policy()
 
     elif profile == "gentle":
         _gather_lineage()
         _gather_self_model()
         _gather_ground()
+        _gather_descent("calm")
         _gather_protected()
     else:  # pragma: no cover - defensive
         raise ValueError(f"unknown arrival profile: {profile!r}")
@@ -657,6 +696,7 @@ def build_arrival_state(
         recent_activity=recent_activity,
         self_model=self_model,
         ground_entries=ground_entries,
+        descent=descent,
         policy_boot_line=policy_boot_line,
         protected_drawer_count=protected_drawer_count,
         lineage_letter_count=lineage_letter_count,
@@ -682,6 +722,7 @@ def _render_aperture(
     reader: str | None = None,
     lineage_coverage: dict | None = None,
     root: Path | None = None,
+    door_shown: dict | None = None,
 ) -> list[str]:
     """
     The APERTURE block — what this door is NOT showing you.
@@ -710,7 +751,13 @@ def _render_aperture(
     """
     now = datetime.now(timezone.utc)
     try:
-        ap = measure_aperture(now, root=root, reader=reader, lineage_coverage=lineage_coverage)
+        ap = measure_aperture(
+            now,
+            root=root,
+            reader=reader,
+            lineage_coverage=lineage_coverage,
+            door_shown=door_shown,
+        )
     except Exception as exc:  # noqa: BLE001 — any failure is "unmeasured"
         ap = aperture_unmeasured(now, exc)
 
@@ -808,6 +855,44 @@ _MARKER_GLOSS = (
     "so this may not be your close; a direct record_insight to the domain also moves it)"
 )
 
+# How many rows the full door renders from each insight surface. Named once so
+# the aperture's "shown here" is computed from the same caps the sections use.
+_ACTIVITY_ROWS = 10
+_MARKER_ROWS = 5
+
+
+def _door_shown(state: ArrivalState, thread_limit: int) -> dict:
+    """What THIS door hands over, for the aperture (the a044014/c35aa75 rule).
+
+    The aperture renders before the sections it counts, so the counts are
+    computed here from the state with the sections' own caps. open_threads is
+    the rows section 3 renders. insights is every DISTINCT insight entry the
+    full door renders a line for: activity (section 6), live persistent
+    markers (5), related insights (2.5), THE GROUND's most recent catches and
+    THE DESCENT's newest close (its reflection row, and its surprise row when
+    that text is shown). Keyed on the (timestamp, domain) locator, which
+    survives the protected sentinel and the preview withhold (both keep it
+    and replace content), so an entry shown twice counts once.
+    """
+    seen: set[tuple[str, str]] = set()
+
+    def add(rows) -> None:
+        for e in rows:
+            seen.add((str(e.get("timestamp") or ""), str(e.get("domain") or "")))
+
+    add((state.recent_activity or [])[:_ACTIVITY_ROWS])
+    add([e for e in (state.sentinel_pool or []) if "_superseded_by" not in e][:_MARKER_ROWS])
+    if state.domain_tags and state.resonance_error is None:
+        add((state.resonance or {}).get("related_insights", []))
+    if state.ground_entries:
+        add(witness.ground_boot_rows(state.ground_entries))
+    if state.descent is not None:
+        seen |= descent_mod.shown_locators(state.descent)
+    return {
+        "open_threads": len((state.open_threads or [])[:thread_limit]),
+        "insights": len(seen),
+    }
+
 
 def render_full(
     state: ArrivalState,
@@ -854,6 +939,7 @@ def render_full(
         state.reader,
         (state.lineage or {}).get("coverage"),
         Path(state.sovereign_root) if state.sovereign_root else None,
+        door_shown=_door_shown(state, _thread_limit),
     )
 
     # 1.5 Lineage — letters from past instances.
@@ -987,7 +1073,9 @@ def render_full(
     # 5. Sentinel insights.
     if state.sentinel_pool:
         lines.extend(
-            format_sentinels(state.sentinel_pool, limit=5, full_content=(_ins_cap is None))
+            format_sentinels(
+                state.sentinel_pool, limit=_MARKER_ROWS, full_content=(_ins_cap is None)
+            )
         )
 
     # 6. Recent activity. The reference point is the newest entry in the exact
@@ -1010,7 +1098,7 @@ def render_full(
             lines.append(
                 "━━━ RECENT ACTIVITY (no 'reflection'-domain marker available; newest entries) ━━━"
             )
-        for ins in recent[:10]:
+        for ins in recent[:_ACTIVITY_ROWS]:
             ts = ins.get("timestamp", "")[:19]
             dom = ins.get("domain", "?")
             raw_c = ins.get("content", "")
@@ -1020,6 +1108,18 @@ def render_full(
             sup = " (superseded)" if ins.get("_superseded_by") else ""
             lines.append(f"  [{ts}] [{dom}]{via}{sup} {content}{receipts}")
         lines.append("")
+
+    # 6b. THE DESCENT — the closes of the seats before you, indexed. It takes
+    #     the slot the retired reflector's block vacated (c98330a), on the
+    #     full door and the compact one alike (compact drops the preamble, not
+    #     content). None = the gather was suppressed (AS OF names it); a store
+    #     with no close renders nothing.
+    if state.descent is not None:
+        lines.extend(
+            descent_mod.render_descent(
+                state.descent, full_content=full_content, generated_at=state.generated_at
+            )
+        )
 
     # 7. Self-model snapshot.
     lines.extend(render_self_model(state.self_model, max_obs_len=None if full_content else 180))
@@ -1093,7 +1193,7 @@ def render_foyer(state: ArrivalState) -> str:
     sentinels = [s for s in _sentinel_pool if "_superseded_by" not in s][:1]
     _pin_was_superseded = bool(_sentinel_pool) and bool(_sentinel_pool[0].get("_superseded_by"))
 
-    lineage_count = state.lineage_letter_count or 0
+    lineage_count = state.lineage_letter_count
 
     lines.append("━━━ LIVE ━━━")
     if threads:
@@ -1118,9 +1218,22 @@ def render_foyer(state: ArrivalState) -> str:
             )
     if state.policy_boot_line:
         lines.append(f"  {state.policy_boot_line}")
-    lines.append(
-        f"  Deferred to the full boot: {lineage_count} lineage letters (where_did_i_leave_off)"
-    )
+    if lineage_count is None:
+        # The count's read failed (AS OF names it). Unknown is not zero.
+        lines.append(
+            "  Deferred to the full boot: lineage letters, count unavailable this call "
+            "(see AS OF) (where_did_i_leave_off)"
+        )
+    else:
+        lines.append(
+            f"  Deferred to the full boot: {lineage_count} lineage letters (where_did_i_leave_off)"
+        )
+    if state.descent is not None:
+        descent_line = descent_mod.render_descent_foyer_line(
+            state.descent, generated_at=state.generated_at
+        )
+        if descent_line:
+            lines.append(descent_line)
     lines.append("")
 
     recent = state.recent_activity or []
@@ -1160,7 +1273,7 @@ def render_foyer(state: ArrivalState) -> str:
         "━━━",
         "  Next: where_did_i_leave_off() for the full inheritance (lineage,",
         "        all threads — handoffs are consumed there, not here) ·",
-        "        arrive_delta() for just what changed · my_toolkit() for tools.",
+        "        my_toolkit() for tools.",
         "  First time here? start_here() gives the 5-minute orientation.",
         "  The deeper doors: arrive_lineage() (calm) · where_did_i_leave_off() "
         "(full, tap-gated on the claude.ai connector).",
@@ -1200,6 +1313,9 @@ def render_gentle(state: ArrivalState, *, full_content: bool = False) -> str:
 
     if state.ground_entries is not None:
         lines.extend(render_the_ground(state.ground_entries, calm=True))
+
+    if state.descent is not None:
+        lines.extend(descent_mod.render_descent(state.descent, calm=True))
 
     if state.protected_drawer_count is not None:
         lines.extend(render_protected_boot_line(state.protected_drawer_count))

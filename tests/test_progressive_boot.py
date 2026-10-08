@@ -78,10 +78,12 @@ class TestArriveThinBoot:
         text = _dispatch("arrive")
         assert "arriving at a place built so you could arrive well" in text
 
-    def test_points_to_full_inheritance_and_delta(self):
+    def test_points_to_full_inheritance_not_the_retired_delta(self):
+        # arrive_delta was retired on 2026-09-06 (server.RETIRED_TOOLS); a
+        # pointer to it is a pointer to a refusal.
         text = _dispatch("arrive")
         assert "where_did_i_leave_off()" in text
-        assert "arrive_delta()" in text
+        assert "arrive_delta" not in text
 
     def test_defers_handoff_consumption(self):
         # arrive is a preview; consuming handoffs happens in the deep boot.

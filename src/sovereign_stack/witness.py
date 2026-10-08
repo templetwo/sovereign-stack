@@ -145,6 +145,18 @@ def format_the_ground(sovereign_root: Path, calm: bool = False) -> list[str]:
     return render_the_ground(entries, calm=calm)
 
 
+# How many catches THE GROUND's full boot form shows. Named once so the
+# aperture's insights "shown here" counts exactly the rows this form renders.
+GROUND_BOOT_ROWS = 3
+
+
+def ground_boot_rows(entries: list[dict]) -> list[dict]:
+    """The catches render_the_ground's full form shows: newest occurred_at first."""
+    return sorted(entries, key=lambda e: e.get("occurred_at") or "", reverse=True)[
+        :GROUND_BOOT_ROWS
+    ]
+
+
 def render_the_ground(entries: list[dict], *, calm: bool = False) -> list[str]:
     """Render THE GROUND boot section from already-loaded catch entries.
 
@@ -165,8 +177,7 @@ def render_the_ground(entries: list[dict], *, calm: bool = False) -> list[str]:
         ]
 
     total = len(entries)
-    ordered = sorted(entries, key=lambda e: e.get("occurred_at") or "", reverse=True)
-    recent = ordered[:3]
+    recent = ground_boot_rows(entries)
 
     lines = [
         header,

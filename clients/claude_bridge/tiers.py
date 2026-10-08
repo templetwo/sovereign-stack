@@ -228,10 +228,16 @@ def step_up_reason(tool_name: str) -> str | None:
 #   new base classification for a human, and the release does not widen the
 #   outside Claude surface. Anthony's trusted-seat surface is the bridge's seat
 #   path, not the remote base tier. Held pending an explicit classification.
+#
+#   descend — THE DESCENT's read tool (2026-10-08). A pure read, the same kind
+#   as the_ground (BASE since 2026-07-13 on Anthony's word), but a new base
+#   classification is a human's under this module's contract, so it is held:
+#   step-up on the remote claude.ai surface until Anthony classifies it.
 HELD_UNCLASSIFIED: frozenset[str] = frozenset(
     {
         "signals_summary",
         "signal_ack",
+        "descend",
     }
 )
 

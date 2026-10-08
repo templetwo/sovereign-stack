@@ -132,10 +132,17 @@ class TestTheCensusIsTheMapping:
         assert sorted(server.RETIRED_TOOLS) == sorted(CENSUS_48)
         assert len(CENSUS_48) == 48
 
+    # Tools registered AFTER the 2026-09-06 census. Named, not counted, so the
+    # census arithmetic below stays the census's and an unnamed addition fails.
+    ADDED_SINCE_CENSUS = {"descend"}  # THE DESCENT, 2026-10-08
+
     def test_the_surface_is_52(self):
-        """100 registered (98 on main + the 2 ledger tools) - 48 = 52."""
-        assert len(_registered()) == 100
-        assert len(_published()) == 52
+        """100 registered (98 on main + the 2 ledger tools) - 48 = 52, at the
+        census; every tool added since is named in ADDED_SINCE_CENSUS."""
+        added = self.ADDED_SINCE_CENSUS
+        assert added <= _published()
+        assert len(_registered() - added) == 100
+        assert len(_published() - added) == 52
         assert _registered() - _published() == set(server.RETIRED_TOOLS)
 
     def test_every_entry_carries_a_date_and_a_reason(self):

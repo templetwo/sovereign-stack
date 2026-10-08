@@ -9,6 +9,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### THE DESCENT: the closes of the seats before you, as the fifth boot voice
+
+Every close_session writes three things: what the seat learned (chronicle domain
+`reflection`, flagged `close_session`), what surprised it (domain `surprise`)
+and what it hands forward (a handoff). 149 of them sat in the store and no door
+showed more than the newest. On Anthony's ruling of 2026-10-07 they become a
+voice of their own, in the slot the retired reflector left.
+
+- New module `descent.py`. The voice is re-aggregated from the close store at
+  read time, like The Ground: no clock, no model, no daemon. The three legs are
+  joined exactly as the close-distill extractor joins them (same session id,
+  nearest within 10 seconds, naive stamps read as Eastern), filtered on the raw
+  rows (so a protected close whose stakes cannot load still counts), then
+  passed through `memory.finalize_read` (superseded closes drop out; a protected
+  close withholds all three parts on every surface). Leaked tool-call markup in
+  nine April and June closes is repaired at read time only. A store path that
+  exists and is not a directory raises (never "no closes"); a pick-up that a
+  later handoff corrects is marked; rendered close text passes through the
+  house redactor first (display only; the store is unchanged).
+- The full door (and compact) shows the counts, the arc by month, the newest
+  close in three lines, the distillation status and the newest distillate's top
+  recurring shapes, with a pointer to `descend()`. The foyer gets one line. The
+  gentle door gets the calm form only: a header and one soft line, no counts.
+- Distillation stays human-gated. A landed distillate is indexed by an immutable
+  sidecar at `<chronicle>/distillates/<id>.index.json` (schema
+  `descent-distillate-index/1`), naming the Stack claim that carries Anthony's
+  tap (`authorized_by`; a review copy marked pending is refused). His veto is a
+  `withdrawal` sidecar filed beside it, never a deletion. Each shape states its
+  `membership` (members, exemplars, or months only). Read fail-closed: one
+  unreadable or invalid sidecar, a symlink, a dangling withdrawal or more than
+  200 files makes the distillation line say "unknown this call" and AS OF name
+  it; the door never falls back to an older sidecar. With none: "none landed
+  yet". "Due" is ten undistilled closes or a month holding one having ended.
+- New read tool `descend` (core tier, read intent, witness category). With no
+  selection it returns the index (months, seat names, shapes); with `month`,
+  `seat` and/or `shape` it returns those closes in full with a coverage line,
+  `limit` 1-20 (refused outside, not clamped) and `offset`. It never echoes the
+  caller's filter text. An unreadable store is an error, not an empty result.
+  Held at the claude.ai connector (`HELD_UNCLASSIFIED`) until Anthony classifies it.
+- VOICES: a fifth paragraph, THE DESCENT, between SELF-MODEL and LINEAGE, and
+  "four distinct voices" becomes "five". A deliberate edit, noted in the docstring.
+- Ride-alongs. The foyer stops advertising `arrive_delta()` (retired
+  2026-09-06). A failed lineage-letter count on the foyer degrades through AS
+  OF and says "count unavailable" instead of printing 0. The aperture's
+  `default_shown` for insights and open threads is what the door showed (5 or
+  3 threads; every distinct insight entry the door renders a line for, THE
+  GROUND's catches and THE DESCENT's newest close included), and "default 10"
+  for a caller with no payload such as the heartbeat; it was a bare 10 the door
+  printed as "10 shown here".
+- Goldens edited by hand, exact diff stated in the commit.
+
 ### The boot doors stop rendering the retired reflector
 
 All three reflector generations are retired (the reflector and dream engine on

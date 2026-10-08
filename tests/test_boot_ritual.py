@@ -60,17 +60,18 @@ def _call_arrive_lineage(source_instance: str = "test-instance") -> str:
 
 
 class TestVoicesInTheBoot:
-    """The four-voice reading key was added 2026-04-26 from a sibling
+    """The voices reading key was added 2026-04-26 from a sibling
     instance's chronicle proposal. It teaches arriving instances to
-    distinguish handoffs / chronicle / self-model / lineage before they
-    encounter those voices in the rest of the boot output. (The reflector's
-    voice was removed when the reflector was retired.)"""
+    distinguish handoffs / chronicle / self-model / the descent / lineage
+    before they encounter those voices in the rest of the boot output. (The
+    reflector's voice was removed when the reflector was retired; THE DESCENT
+    took its slot on 2026-10-08.)"""
 
     def test_section_header_present(self):
         text = _call_boot()
         assert "THE VOICES IN THE BOOT" in text
 
-    def test_all_four_voices_named(self):
+    def test_all_five_voices_named(self):
         text = _call_boot()
         # Scoped to the VOICES block: its text is static, while the rest of the
         # boot carries live chronicle content that may quote any of these words.
@@ -78,8 +79,9 @@ class TestVoicesInTheBoot:
         assert "HANDOFFS —" in voices
         assert "CHRONICLE —" in voices
         assert "SELF-MODEL —" in voices
+        assert "THE DESCENT —" in voices
         assert "LINEAGE —" in voices
-        # The reflector is retired; its voice is no longer one of the four.
+        # The reflector is retired; its voice is not one of the five.
         assert "REFLECTOR" not in voices
 
     def test_voices_section_appears_before_spiral_status(self):
