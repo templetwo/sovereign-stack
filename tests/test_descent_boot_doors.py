@@ -401,12 +401,20 @@ def test_leaked_markup_is_repaired_at_read_time_only(root, planted):
 def test_no_door_writes_on_a_read(root, planted):
     # chronicle/ and handoffs/: the descent read path reads both. The doors add
     # only exist_ok directories and spiral_state.json, outside these files.
-    def snapshot() -> dict[str, str]:
+    # Each file is its bytes, its mtime and its inode (fix round 2, from the
+    # test-integrity review of 379c27f): bytes alone miss a read path that
+    # rewrites a file with its own bytes, which races a live writer.
+    def snapshot() -> dict[str, tuple[str, int, int]]:
         out = {}
         for top in ("chronicle", "handoffs"):
             for p in sorted((root / top).rglob("*")):
                 if p.is_file():
-                    out[str(p.relative_to(root))] = hashlib.sha256(p.read_bytes()).hexdigest()
+                    st = p.stat()
+                    out[str(p.relative_to(root))] = (
+                        hashlib.sha256(p.read_bytes()).hexdigest(),
+                        st.st_mtime_ns,
+                        st.st_ino,
+                    )
         return out
 
     before = snapshot()
@@ -450,10 +458,16 @@ def test_a_distillates_path_that_is_not_a_plain_directory_degrades_the_index(roo
     doors = fx.run_all_doors(root)
     block = _block(doors["full"])
     assert block[1].startswith("  4 closes on record")  # the live counts stand
-    assert any(
-        x.startswith("  Distillation: unknown this call; the distillate index could not be trusted")
-        for x in block
-    ), block
+    # The line names WHY (fix round 2: with both checks read off one lstat, a
+    # dropped symlink check still refused, as "not a directory"; pin the reason).
+    reason = {
+        "file": "distillates/ is not a directory",
+        "symlink-to-a-directory": "distillates/ is a symlink (refused)",
+    }[kind]
+    assert (
+        "  Distillation: unknown this call; the distillate index could not be trusted "
+        f"({reason}). The counts above are live and stand."
+    ) in block, block
     assert "the_descent distillate index unavailable" in _as_of(doors["full"])
     assert "distillation unknown this call (see AS OF)" in doors["foyer"]
 

@@ -43,6 +43,27 @@ voice of their own, in the slot the retired reflector left.
   doors degrade through AS OF instead of showing an empty store. The foyer
   line states skipped rows; a surprise that did not join reads "(no surprise
   joined: ...)", not "(none written)"; a count of one is singular.
+- A directory or a ledger the reader cannot use is never read as absent
+  either. A path counts as absent only when it does not exist (os.lstat
+  raises FileNotFoundError), checked for every directory from the store root
+  down, not only the last one. With chronicle/ or insights/ unsearchable, a
+  regular file or a dangling symlink (an unmounted volume), or with the store
+  root itself a dangling symlink, the voice used to read as an empty store
+  and silently leave every door. It now degrades through AS OF, and
+  descend() returns an error. The two ledgers the read chokepoint folds in
+  must be absent or readable whole, and every protected.jsonl line must be a
+  designation the fold can use (the bridge's own guard rule). With either
+  ledger unreadable, a designated close used to show all three parts, and a
+  retired close came back as the newest. distillates/ is examined the same
+  way ("unknown this call", never "none landed"). The foyer's lineage-letter
+  count now fails closed on an unreadable letters directory or bucket; it
+  used to print 0.
+- When the newest close has no surprise joined and some surprise rows could
+  not be read, the voice says "(none joined; N surprise rows could not be
+  read)" instead of claiming that none was written within the window. A
+  shape summary count of 1 now reads "1 of 1 month summary". A sidecar whose
+  cursor is later than its own created time is refused. descend's
+  description now names the newest distillate in force.
 - Validation takes the whole string: a sidecar field or a descend month with
   a trailing newline no longer passes. Distillate corpus counts must be
   non-negative.

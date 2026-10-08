@@ -11,6 +11,7 @@ No MCP coupling here. Pure data → formatted lines. Testable in isolation.
 """
 
 import json
+import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -429,18 +430,38 @@ def count_lineage_letters(letters_dir: Path) -> int:
     the specimen that proves the hazard is not theoretical. Fixing six walkers
     for a future backup dir while a seventh counts two actual ones is the
     doctrine stated in a docstring and not connected.
+
+    An unreadable count RAISES, so the foyer's caller degrades through AS OF
+    ("count unavailable this call") instead of printing a number. The walk was
+    pathlib's rglob, which swallows PermissionError: with the letters
+    directory, or one bucket in it, unreadable, the foyer printed "0 lineage
+    letters" with a clean AS OF (review of 379c27f). Absent is only os.lstat's
+    FileNotFoundError; a path that exists and is not a directory (a regular
+    file, a dangling symlink) raises. os.walk with an onerror that raises,
+    not Path.walk (3.12+; the stack supports 3.10). Hidden directories are
+    pruned before they are entered, so a retired backup is neither counted
+    nor read. Same entries as the rglob counted on a readable tree: every
+    name ending ".md" at any depth (a directory or a symlink so named
+    included), symlinked directories not entered, no hidden path component.
     """
-    if not letters_dir.exists():
+    try:
+        os.lstat(letters_dir)
+    except FileNotFoundError:
         return 0
+    if not os.path.isdir(letters_dir):
+        raise NotADirectoryError("the lineage letters path is not a directory")
+
+    def _unreadable(exc: OSError) -> None:
+        raise exc
+
     count = 0
-    for path in letters_dir.rglob("*.md"):
-        try:
-            rel = path.relative_to(letters_dir)
-        except ValueError:  # pragma: no cover - rglob always yields descendants
-            continue
-        if any(part.startswith(".") for part in rel.parts):
-            continue
-        count += 1
+    for _dirpath, dirnames, filenames in os.walk(letters_dir, onerror=_unreadable):
+        dirnames[:] = [name for name in dirnames if not name.startswith(".")]
+        count += sum(
+            1
+            for name in (*dirnames, *filenames)
+            if name.endswith(".md") and not name.startswith(".")
+        )
     return count
 
 

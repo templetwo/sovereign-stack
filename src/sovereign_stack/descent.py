@@ -72,6 +72,22 @@ READ RULES (each one earned elsewhere in this house):
     not a directory (a regular file, a dangling or looping symlink) RAISES.
     Path.is_dir() alone answers False for all three, and a reader that took
     that False for "absent" would report an unreadable store as an empty one.
+    "Does not exist" means os.lstat raised FileNotFoundError and nothing else
+    does (os.path.lexists answers False on ANY OSError), and it is decided for
+    EVERY directory on the way down from the store root, not only the leaf:
+    with chronicle/ a dangling symlink (an unmounted volume), or insights/
+    unsearchable or a regular file, the leaf's own check answers "absent" and
+    the whole store would read as empty.
+  * The two ledgers memory.finalize_read folds in (supersessions.jsonl and
+    protected.jsonl) must be absent or readable WHOLE before the chokepoint
+    runs. The chokepoint reads them through a reader that returns nothing on
+    OSError, so an unreadable protected.jsonl reads as "nothing designated"
+    (a protected close would be shown) and an unreadable supersessions.jsonl
+    as "nothing retired". A ledger that exists and cannot be read RAISES. A
+    protected.jsonl line the fold cannot use RAISES too (a designation the
+    reader cannot see is a protected close it would show), as the bridge's
+    own guard rules; a corrupt supersessions.jsonl line keeps the stack's
+    reading convention (skipped by the shared reader).
   * A pick-up that a later handoff corrects (the handoff store's `supersedes`
     link, read through handoff._annotate_forward_links, a pure function over
     record dicts) is marked as corrected wherever it renders, never shown as
@@ -90,6 +106,7 @@ RESERVED: `claim_id` and `depth` are reserved descend parameter names for the
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import re
@@ -104,6 +121,7 @@ from mcp.types import Tool
 from . import provenance as prov
 from .ground import _CONTENT_TRUNCATE_LEN
 from .handoff import NON_IDENTIFYING_CONSUMERS, _annotate_forward_links
+from .protected import PROTECTED_ACTIONS
 from .scribe.redactor import redact as _redact
 
 # The voice's name. Anthony's to confirm, as The Ground's was; every surface
@@ -131,6 +149,10 @@ JOIN_SECONDS = 10
 
 REFLECTION_DIR = "reflection"
 SURPRISE_DIR = "surprise"
+
+# The two ledgers memory.finalize_read folds in, under the chronicle root.
+SUPERSESSIONS_LEDGER = "supersessions.jsonl"
+PROTECTED_LEDGER = "protected.jsonl"
 
 INDEX_DIRNAME = "distillates"
 INDEX_SUFFIX = ".index.json"
@@ -209,6 +231,11 @@ _TAG_RE = re.compile(
 
 class DistillateIndexError(ValueError):
     """A distillate sidecar could not be read or failed validation."""
+
+
+class LedgerUnreadable(OSError):
+    """A ledger the read chokepoint folds in exists and could not be read whole,
+    or a protected.jsonl line could not be used. The close read fails closed."""
 
 
 # ── Records ──────────────────────────────────────────────────────────────────
@@ -290,6 +317,9 @@ class DescentState:
     covered_ids: frozenset[str] = frozenset()
     distillates_on_disk: int = 0
     distillates_withdrawn: int = 0
+    # Rows of the surprise leg skipped (included in skipped_rows). A close with
+    # no joined surprise cannot be said to have none while this is above 0.
+    surprise_skipped: int = 0
 
 
 # ── Reading the close store ──────────────────────────────────────────────────
@@ -354,18 +384,46 @@ def _read_jsonl_counted(path: Path) -> tuple[list[dict], int]:
 
 
 def _present_dir(path: Path, label: str) -> bool:
-    """False when ``path`` does not exist; True when it is a directory (a
-    symlink to a directory counts); RAISES NotADirectoryError otherwise.
+    """False only when ``path`` does not exist; True when it is a directory (a
+    symlink to a directory counts); RAISES otherwise.
 
-    Path.is_dir() alone answers False for a regular file, a dangling symlink
-    and a symlink loop alike; a reader that took that False for "absent"
-    would report an unreadable store as an empty one.
+    Absent means os.lstat raised FileNotFoundError, and nothing else does.
+    os.path.lexists answers False on ANY OSError, so an unsearchable parent
+    (EACCES), a parent that is a regular file (ENOTDIR) or an I/O error would
+    read as absent; those errors propagate here. A path that exists and is not
+    a directory (a regular file, a dangling or looping symlink) raises
+    NotADirectoryError: Path.is_dir() alone answers False for all three, and a
+    reader that took that False for "absent" would report an unreadable store
+    as an empty one.
     """
-    if not os.path.lexists(path):
+    try:
+        os.lstat(path)
+    except FileNotFoundError:
         return False
     if os.path.isdir(path):
         return True
     raise NotADirectoryError(f"{label} is not a directory")
+
+
+def _store_dir(base: Path, base_label: str, *parts: str) -> Path | None:
+    """``base/parts...`` when every directory on the way down exists; None when
+    one does not (an empty surface); RAISES when one exists and is not a
+    directory, or cannot be examined (_present_dir).
+
+    Every ANCESTOR is checked, not only the leaf. With chronicle/ a dangling
+    symlink (an unmounted volume) the leaf's lstat answers FileNotFoundError,
+    so a check of the leaf alone read the whole store as empty; so did one
+    with insights/ unsearchable or a regular file before _present_dir stopped
+    reading every OSError as absent.
+    """
+    if not _present_dir(base, base_label):
+        return None
+    path = base
+    for i, part in enumerate(parts):
+        path = path / part
+        if not _present_dir(path, "/".join(parts[: i + 1])):
+            return None
+    return path
 
 
 def _is_regular(entry: os.DirEntry) -> bool:
@@ -397,12 +455,13 @@ def _leg_rows(chronicle_root: Path, dirname: str) -> tuple[list[dict], int]:
     """Every row of the EXACT directory insights/<dirname>; missing dir -> ([], 0).
 
     os.scandir, not Path.glob: pathlib's glob swallows PermissionError and
-    would report an unreadable directory as an empty one. A path that exists
-    and is not a directory raises (_present_dir). An entry named like a shard
+    would report an unreadable directory as an empty one. Every directory from
+    the chronicle root down is checked (_store_dir): one that exists and is not
+    a directory, or cannot be examined, raises. An entry named like a shard
     that is not a regular file raises too, and is never opened (_is_regular).
     """
-    d = chronicle_root / "insights" / dirname
-    if not _present_dir(d, f"insights/{dirname}"):
+    d = _store_dir(chronicle_root, "chronicle", "insights", dirname)
+    if d is None:
         return [], 0
     with os.scandir(d) as it:
         entries = sorted(
@@ -434,6 +493,7 @@ def _handoff_rows(sovereign_root: Path) -> tuple[list[dict], int]:
     read-time annotation (handoff._annotate_forward_links, pure, keyed on
     ``_path``), so a pick-up a later handoff corrects carries ``_corrected_by``.
     """
+    # load_closes has already checked the store root itself (_present_dir).
     d = sovereign_root / "handoffs"
     if not _present_dir(d, "handoffs"):
         return [], 0
@@ -460,6 +520,84 @@ def _handoff_rows(sovereign_root: Path) -> tuple[list[dict], int]:
         else:
             unreadable += 1
     return _annotate_forward_links(rows), unreadable
+
+
+def _ledger_bytes(chronicle_root: Path, name: str) -> bytes | None:
+    """The whole ledger, or None when it does not exist. RAISES LedgerUnreadable
+    when it exists and cannot be read whole as a regular file.
+
+    Exists means os.lstat found an entry: a dangling or looping symlink exists
+    and is unreadable, never absent. Opened O_NONBLOCK, so a FIFO answers at
+    once (and is refused by the fstat check) instead of blocking the read.
+    """
+    path = chronicle_root / name
+    try:
+        os.lstat(path)
+    except FileNotFoundError:
+        return None  # no ledger: nothing designated, or nothing retired
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
+    except OSError as exc:
+        raise LedgerUnreadable(
+            f"{name} exists and could not be opened ({type(exc).__name__})"
+        ) from exc
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise LedgerUnreadable(f"{name} is not a regular file")
+        chunks: list[bytes] = []
+        while True:
+            chunk = os.read(fd, 1 << 20)
+            if not chunk:
+                break
+            chunks.append(chunk)
+    except LedgerUnreadable:
+        raise
+    except OSError as exc:
+        raise LedgerUnreadable(f"{name} could not be read ({type(exc).__name__})") from exc
+    finally:
+        os.close(fd)
+    return b"".join(chunks)
+
+
+def _require_ledgers(chronicle_root: Path) -> None:
+    """RAISE unless the two ledgers memory.finalize_read folds in can be trusted.
+
+    The chokepoint reads both through provenance._iter_jsonl, which returns
+    nothing on OSError: an unreadable protected.jsonl reads there as "nothing
+    designated" and an unreadable supersessions.jsonl as "nothing retired", so
+    a protected close's three parts would be shown and a retired close counted
+    (review of 379c27f). Each ledger must therefore be absent or readable
+    whole. A protected.jsonl line must also be one the fold can use (an
+    object with a known action and a text claim_id), as the bridge's own guard
+    rules: a designation the reader cannot see is a protected close it would
+    show. Lines are split exactly as the chokepoint's text-mode reader splits
+    them (universal newlines). A corrupt supersessions.jsonl line keeps the
+    stack's reading convention: the shared reader skips it.
+    """
+    _ledger_bytes(chronicle_root, SUPERSESSIONS_LEDGER)
+    data = _ledger_bytes(chronicle_root, PROTECTED_LEDGER)
+    if data is None:
+        return
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise LedgerUnreadable(f"{PROTECTED_LEDGER} is not UTF-8") from exc
+    for lineno, raw in enumerate(io.StringIO(text, newline=None), start=1):
+        line = raw.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+        except (ValueError, RecursionError) as exc:
+            raise LedgerUnreadable(f"line {lineno} of {PROTECTED_LEDGER} does not parse") from exc
+        if not (
+            isinstance(record, dict)
+            and record.get("action") in PROTECTED_ACTIONS
+            and isinstance(record.get("claim_id"), str)
+        ):
+            raise LedgerUnreadable(
+                f"line {lineno} of {PROTECTED_LEDGER} is not a designation the fold can use"
+            )
 
 
 def _segment(rest: str, open_tag: str, next_open: str | None) -> str | None:
@@ -505,18 +643,25 @@ def _nearest(candidates: list[tuple[datetime, int]], when: datetime, used: set[i
 
 def load_closes(
     chronicle_root: str | Path, sovereign_root: str | Path, *, legs: bool
-) -> tuple[list[Close], int, int]:
-    """Every live close, newest first, with (skipped_rows, handoffs_unreadable).
+) -> tuple[list[Close], int, int, int]:
+    """Every live close, newest first, with (skipped_rows, handoffs_unreadable,
+    surprise_skipped); surprise_skipped is the surprise leg's share of
+    skipped_rows.
 
     legs=False reads the reflection leg only (no surprise, no handoff join):
     the counts, months and protection are exact, the surprise and handed
-    fields are None. Raises OSError (NotADirectoryError included) on an
-    unreadable store — the caller degrades (boot) or errors (descend), never
-    reports 0. A corrupt line or an unusable row is skipped and counted.
+    fields are None. Raises OSError (NotADirectoryError and LedgerUnreadable
+    included) on an unreadable store or ledger — the caller degrades (boot) or
+    errors (descend), never reports 0. A corrupt line or an unusable row is
+    skipped and counted.
     """
     chronicle_root = Path(chronicle_root)
     sovereign_root = Path(sovereign_root)
 
+    # The store root first: a dangling root reads FileNotFoundError for every
+    # path beneath it, which _store_dir would otherwise take for "absent".
+    if not _present_dir(sovereign_root, "the store root"):
+        return [], 0, 0, 0
     refl_rows, skipped = _leg_rows(chronicle_root, REFLECTION_DIR)
 
     # (when, claim_id, row), deduplicated by claim id: byte-identical
@@ -541,7 +686,7 @@ def load_closes(
         seen.add(cid)
         raw.append((when, cid, row))
     if not raw:
-        return [], skipped, 0
+        return [], skipped, 0, 0
     raw.sort(key=lambda t: (t[0], t[1]))
 
     surprises: list[tuple[datetime, str, dict]] = []
@@ -549,9 +694,9 @@ def load_closes(
     handoffs: list[tuple[datetime, dict]] = []
     by_session_h: dict[str, list[tuple[datetime, int]]] = {}
     handoffs_unreadable = 0
+    surprise_skipped = 0
     if legs:
-        s_rows, s_skipped = _leg_rows(chronicle_root, SURPRISE_DIR)
-        skipped += s_skipped
+        s_rows, surprise_skipped = _leg_rows(chronicle_root, SURPRISE_DIR)
         for row in s_rows:
             when = _parse_house_ts(row.get("timestamp"))
             if (
@@ -559,7 +704,7 @@ def load_closes(
                 or not _text_or_none(row.get("session_id"))
                 or not _text_or_none(row.get("content"))
             ):
-                skipped += 1
+                surprise_skipped += 1
                 continue
             idx = len(surprises)
             surprises.append((when, prov.derive_claim_id(row), row))
@@ -592,10 +737,15 @@ def load_closes(
             used_h.add(h_idx)
         joined.append((when, cid, row, s_idx, h_idx))
 
+    skipped += surprise_skipped
+
     # THE SHARED READ CHOKEPOINT, once, over the closes and their joined
-    # surprises. Lazy import: same dodge as ground.load_ground_entries.
+    # surprises, and only over ledgers it can read whole (_require_ledgers).
+    # Lazy import: same dodge as ground.load_ground_entries.
     from . import protected as protected_module
     from .memory import finalize_read
+
+    _require_ledgers(chronicle_root)
 
     to_finalize = [row for _, _, row in raw]
     to_finalize += [surprises[s][2] for _, _, _, s, _ in joined if s is not None]
@@ -657,7 +807,7 @@ def load_closes(
             )
         )
     closes.sort(key=lambda c: (c.when, c.claim_id), reverse=True)
-    return closes, skipped, handoffs_unreadable
+    return closes, skipped, handoffs_unreadable, surprise_skipped
 
 
 # ── Reading the distillate sidecars (fail-closed) ────────────────────────────
@@ -722,7 +872,7 @@ def _validate_doc(doc: object, stem: str) -> Distillate | Withdrawal:
         isinstance(did, str) and bool(_DISTILLATE_ID_RE.fullmatch(did)), "id is not a distillate id"
     )
     _need(did == stem, "id does not match the file name")
-    _parse_iso_offset(doc["created"], "created")
+    created = _parse_iso_offset(doc["created"], "created")
     auth = doc["authorized_by"]
     _need(
         isinstance(auth, str) and bool(_AUTH_RE.fullmatch(auth)),
@@ -746,6 +896,10 @@ def _validate_doc(doc: object, stem: str) -> Distillate | Withdrawal:
         )
         return Withdrawal(did, tuple(w))
     cursor = _parse_iso_offset(doc["cursor"], "cursor")
+    # A run cannot read past its own making: created is when the concentration
+    # was written, the cursor is the corpus cut it read. A later cursor (a
+    # 2099 one validated, won "newest" and was shown at boot) is refused.
+    _need(cursor <= created, "cursor is later than created")
     src = doc["sources"]
     _need(
         isinstance(src, dict) and set(src) == {"manifest", "body", "sections"},
@@ -897,12 +1051,24 @@ def load_distillates(
     run can neither win "newest" by accident nor make an earlier close read as
     undistilled.
     """
-    d = Path(chronicle_root) / INDEX_DIRNAME
-    if not os.path.lexists(d):
+    root = Path(chronicle_root)
+    d = root / INDEX_DIRNAME
+    # Absent only on FileNotFoundError, as for the close store: any other
+    # error examining the chronicle or distillates/ is an index this call
+    # cannot trust, never "none landed".
+    try:
+        if not _present_dir(root, "chronicle"):
+            return None, frozenset(), 0, 0
+        st_dir = os.lstat(d)
+    except FileNotFoundError:
         return None, frozenset(), 0, 0
-    if os.path.islink(d):
+    except OSError as exc:
+        raise DistillateIndexError(
+            f"{INDEX_DIRNAME}/ could not be examined: {type(exc).__name__}"
+        ) from exc
+    if stat.S_ISLNK(st_dir.st_mode):
         raise DistillateIndexError(f"{INDEX_DIRNAME}/ is a symlink (refused)")
-    if not os.path.isdir(d):
+    if not stat.S_ISDIR(st_dir.st_mode):
         raise DistillateIndexError(f"{INDEX_DIRNAME}/ is not a directory")
     try:
         with os.scandir(d) as it:
@@ -980,8 +1146,12 @@ def gather_descent(sovereign_root: str | Path, *, depth: str) -> DescentState:
     if depth not in ("full", "foyer", "calm"):
         raise ValueError(f"unknown descent depth: {depth!r}")
     root = Path(sovereign_root)
-    closes, skipped, unreadable = load_closes(root / "chronicle", root, legs=(depth == "full"))
-    state = DescentState(closes, skipped, unreadable, legs=(depth == "full"))
+    closes, skipped, unreadable, surprise_skipped = load_closes(
+        root / "chronicle", root, legs=(depth == "full")
+    )
+    state = DescentState(
+        closes, skipped, unreadable, legs=(depth == "full"), surprise_skipped=surprise_skipped
+    )
     if depth == "calm" or not closes:
         return state
     state.index_read = True
@@ -1056,15 +1226,21 @@ def _plural(k: int, word: str) -> str:
     return f"{k} {word}{'' if k == 1 else 's'}"
 
 
-# What the reader can say when a leg has no joined text: none was JOINED (none
-# from the session inside the window, or it sat on a skipped line), never that
-# the seat wrote none. Shared by the boot block and descend.
+# What the reader can say when a leg has no joined text: none was JOINED,
+# never that the seat wrote none. "None from this session" is said only when
+# every row of that leg was read; when some were skipped (a surprise row) or
+# could not be read (a handoff file), the line says so instead, because the
+# missing one may be among them. Shared by the boot block and descend.
 _SURPRISE_NONE = f"(no surprise joined: none from this session within {JOIN_SECONDS} seconds)"
 _HANDOFF_NONE = f"(no handoff joined: none from this session within {JOIN_SECONDS} seconds)"
 
 
 def _handoffs_unread_text(h: int) -> str:
     return f"(none joined; {_plural(h, 'handoff file')} could not be read)"
+
+
+def _surprises_unread_text(k: int) -> str:
+    return f"(none joined; {_plural(k, 'surprise row')} could not be read)"
 
 
 def _months_phrase(months: tuple[str, ...]) -> str:
@@ -1082,7 +1258,7 @@ def _months_phrase(months: tuple[str, ...]) -> str:
 
 def _count_phrase(s: Shape) -> str:
     if s.count is not None and s.of:
-        return f"named in {s.count} of {s.of} month summaries"
+        return f"named in {s.count} of {s.of} month {'summary' if s.of == 1 else 'summaries'}"
     if s.count is not None:
         return f"count {s.count}"
     return "no count recorded"
@@ -1190,6 +1366,8 @@ def render_descent(
             surprised = "(superseded)"
         elif newest.surprised:
             surprised = _one_line(newest.surprised, full_content)
+        elif state.surprise_skipped:
+            surprised = _surprises_unread_text(state.surprise_skipped)
         else:
             surprised = _SURPRISE_NONE
         lines.append(f"    surprised: {surprised}")
@@ -1380,8 +1558,12 @@ def _render_close(i: int, c: Close, state: DescentState) -> tuple[list[str], int
         out += block(
             "SURPRISED", "(superseded; recall_insights(exclude_superseded=false) shows the chain)"
         )
+    elif c.surprised:
+        out += block("SURPRISED", c.surprised)
+    elif state.surprise_skipped:
+        out += block("SURPRISED", _surprises_unread_text(state.surprise_skipped))
     else:
-        out += block("SURPRISED", c.surprised or _SURPRISE_NONE)
+        out += block("SURPRISED", _SURPRISE_NONE)
     if c.handed_forward:
         out += block("HANDED FORWARD", c.handed_forward)
         if c.handed_corrected:
@@ -1559,7 +1741,7 @@ DESCENT_TOOLS = [
             "(chronicle domain 'reflection', close_session entries), what surprised it (domain "
             "'surprise') and what it handed forward (its handoff), joined by session and a "
             "10-second window. With no selection, returns the index: months, seat names and "
-            "the newest landed distillate's shapes, with counts. With month, seat and/or "
+            "the shapes of the newest distillate in force, with counts. With month, seat and/or "
             "shape, returns those closes in full, newest first, with a coverage line (shown of "
             "total), so partiality is never silent. Superseded or retired closes are left out; "
             "a protected close shows its place, never its content; a pick-up a later handoff "
@@ -1584,7 +1766,7 @@ DESCENT_TOOLS = [
                 "shape": {
                     "type": "string",
                     "description": (
-                        "A shape id from the newest landed distillate (e.g. 'R1', 'L4'); "
+                        "A shape id from the newest distillate in force (e.g. 'R1', 'L4'); "
                         "descend() lists them. A shape the distillate recorded by month only "
                         "returns its months, not closes."
                     ),

@@ -548,6 +548,57 @@ def test_descend_reads_the_dispatch_root_not_home(root, ids, tmp_path, monkeypat
     assert "THE DESCENT — 2 closes in this selection" in text
 
 
+def test_a_count_of_one_month_summary_is_singular(root, ids):
+    # Build spec 2(e): a count of 1 is singular. "of 1" printed "1 of 1 month
+    # summaries" in the voice and the index (surface review of 379c27f).
+    shapes = [
+        {
+            "id": "R1",
+            "kind": "recurring",
+            "title": "a single-month fixture shape",
+            "count": 1,
+            "of": 1,
+            "months": ["2026-06"],
+            "membership": "months_only",
+            "close_ids": [],
+        }
+    ]
+    fx.plant_distillate(root, [ids["a1"]], shapes=shapes)
+    state = _d().gather_descent(root, depth="full")
+    block = _d().render_descent(state, generated_at="2026-07-20T12:00:00Z")
+    assert "    · R1 a single-month fixture shape (named in 1 of 1 month summary, 2026-06)" in block
+    assert (
+        "    R1   recurring a single-month fixture shape — named in 1 of 1 month summary, "
+        "2026-06; recorded by month only"
+    ) in _descend(root).splitlines()
+
+
+def test_a_cursor_later_than_its_own_created_makes_the_index_unknown(root, ids):
+    # A distillation cannot read past its own making. A 2099 cursor validated,
+    # won "newest in force" and was shown at boot as the read-through time
+    # (adversarial review of 379c27f).
+    path = fx.plant_distillate(root, [ids["a1"], ids["a2"], ids["b1"]])
+    doc = json.loads(path.read_text())
+    doc["cursor"] = "2099-01-01T00:00:00-05:00"  # created stays 2026-07-02T22:00-04:00
+    path.write_text(json.dumps(doc))
+    state = _d().gather_descent(root, depth="full")
+    assert state.index_error == f"{DISTILLATE}.index.json: cursor is later than created"
+    assert len(state.closes) == 4
+    block = "\n".join(_d().render_descent(state, generated_at="2026-07-20T12:00:00Z"))
+    assert "2099" not in block
+    assert "Distillation: unknown this call" in block
+
+
+def test_descend_names_the_newest_distillate_in_force():
+    # Spec 4.6: "an id from the newest distillate in force". The description
+    # said "newest landed", which a withdrawal makes false (surface review).
+    tool = next(t for t in _d().DESCENT_TOOLS if t.name == "descend")
+    shape = tool.inputSchema["properties"]["shape"]["description"]
+    assert "newest landed" not in tool.description + shape
+    assert "the shapes of the newest distillate in force" in tool.description
+    assert "A shape id from the newest distillate in force" in shape
+
+
 def test_descend_stays_out_of_nape_readonly_tools():
     """Green on main by design: it pins a decision. descend FAILS the call on an
     unreadable store, so clause 3 of Nape's membership test does not hold; it

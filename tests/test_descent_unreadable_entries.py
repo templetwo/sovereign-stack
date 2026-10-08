@@ -20,7 +20,12 @@ foyer printed its count without the rows it skipped.
 
 Never a door in a FIFO case: the HANDOFFS section's reader and the memory
 readers open a FIFO and block, a hazard that predates THE DESCENT. Those cases
-run the gather, the renderers and descend() directly.
+run the gather, the renderers and descend() directly. An audit-hook spy refuses
+any open of the planted entry BEFORE the syscall and records it (fix round 2,
+from the test-integrity review of 379c27f): a reader that opened every entry
+passed the dangling, directory and loop cases (its own failed open satisfied
+pytest.raises(OSError), or was counted as unreadable anyway) and blocked on
+the FIFO, so the regression hung the run instead of failing it.
 
 Synthetic only (tests/_phase4_fixture.py); the module is imported inside each
 test so a tree without the fix fails per test, not at collection.
@@ -66,6 +71,24 @@ def _as_of(text: str) -> str:
     return text.split("━━━ AS OF ━━━", 1)[1].split("━━━", 1)[0]
 
 
+_NEVER_OPEN: dict = {"path": None, "opened": []}
+
+
+def _never_open_spy(event: str, args: tuple) -> None:
+    """Refuse, before the syscall, any open of the one watched entry."""
+    if event != "open" or _NEVER_OPEN["path"] is None or not args:
+        return
+    target = args[0]
+    if not isinstance(target, (str, bytes, os.PathLike)):
+        return
+    if os.path.abspath(os.fsdecode(os.fspath(target))) == _NEVER_OPEN["path"]:
+        _NEVER_OPEN["opened"].append(event)
+        raise PermissionError("test spy: the reader opened an entry it must never open")
+
+
+sys.addaudithook(_never_open_spy)
+
+
 @pytest.fixture
 def root(tmp_path: Path) -> Path:
     r = tmp_path / ".sovereign"
@@ -98,13 +121,19 @@ KINDS = ("dangling-symlink", "directory", "fifo", "symlink-loop")
 def test_a_shard_that_is_not_a_regular_file_is_unreadable_not_absent(root, kind):
     # symlink-loop is green on 21eb7e8 by design: is_file() raised ELOOP there
     # and the shard reader raised with it. The other three were read as absent.
-    _make(root / "chronicle" / "insights" / "reflection" / "zz-entry.jsonl", kind, root)
-    with pytest.raises(OSError):
-        _d().gather_descent(root, depth="full")
-    with pytest.raises(OSError):
-        _d().gather_descent(root, depth="foyer")
-    with pytest.raises(ValueError, match="the close store could not be read"):
-        _d().descend(sovereign_root=root, month="2026-07")
+    entry = root / "chronicle" / "insights" / "reflection" / "zz-entry.jsonl"
+    _make(entry, kind, root)
+    _NEVER_OPEN.update(path=os.path.abspath(entry), opened=[])
+    try:
+        for depth in ("full", "foyer"):
+            with pytest.raises(OSError, match="a shard is not a readable regular file"):
+                _d().gather_descent(root, depth=depth)
+        with pytest.raises(ValueError, match="the close store could not be read"):
+            _d().descend(sovereign_root=root, month="2026-07")
+    finally:
+        opened = list(_NEVER_OPEN["opened"])
+        _NEVER_OPEN.update(path=None, opened=[])
+    assert opened == [], f"the shard reader opened a {kind}"
     if kind != "fifo":
         foyer = fx.run_door(root, "arrive", {})
         assert "The Descent:" not in foyer
@@ -113,13 +142,20 @@ def test_a_shard_that_is_not_a_regular_file_is_unreadable_not_absent(root, kind)
 
 @pytest.mark.parametrize("kind", KINDS)
 def test_a_handoff_entry_that_is_not_a_regular_file_is_counted_unreadable(root, kind):
-    _make(root / "handoffs" / "descent_fixture_b2.json", kind, root)
-    state = _d().gather_descent(root, depth="full")
+    entry = root / "handoffs" / "descent_fixture_b2.json"
+    _make(entry, kind, root)
+    _NEVER_OPEN.update(path=os.path.abspath(entry), opened=[])
+    try:
+        state = _d().gather_descent(root, depth="full")
+        july = _d().descend(sovereign_root=root, month="2026-07").splitlines()
+    finally:
+        opened = list(_NEVER_OPEN["opened"])
+        _NEVER_OPEN.update(path=None, opened=[])
+    assert opened == [], f"the handoff reader opened a {kind}"
     assert len(state.closes) == 4
     assert state.handoffs_unreadable == 1
     block = _d().render_descent(state, generated_at=GEN)
     assert block[6] == "    handed forward: (none joined; 1 handoff file could not be read)"
-    july = _d().descend(sovereign_root=root, month="2026-07").splitlines()
     i = july.index("  HANDED FORWARD")  # b2, the newest, renders first
     assert july[i + 1] == "    (none joined; 1 handoff file could not be read)"
     assert july[-1] == (
@@ -411,6 +447,27 @@ def test_a_surprise_that_did_not_join_is_not_claimed_unwritten(root):
     assert july[i + 1] == f"    {said}"
     assert "(none written)" not in "\n".join(block + july)
     assert any("Beta was surprised" in x for x in s.read_text().splitlines())  # still on disk
+
+
+def test_a_surprise_on_a_line_the_reader_skipped_is_not_claimed_absent(root):
+    # Fix round 2 (both review lenses of 379c27f): b2's own surprise sits on a
+    # line the reader cannot parse, and the voice said "none from this session
+    # within 10 seconds", a claim it had not earned. The handoff leg already
+    # hedged its unreadable files; the surprise leg now says the same.
+    s = root / "chronicle" / "insights" / "surprise" / "descent-fixture.jsonl"
+    rows = s.read_text().splitlines()
+    s.write_text("".join((x[:40] if "Beta was surprised" in x else x) + "\n" for x in rows))
+    hedge = "(none joined; 1 surprise row could not be read)"
+    block = _block(fx.run_all_doors(root)["full"])
+    assert block[5] == f"    surprised: {hedge}"
+    assert block[1].endswith("a close does not record its machine. 1 unreadable row skipped.")
+    july = fx.run_door(root, "descend", {"month": "2026-07"}).splitlines()
+    i = july.index("  SURPRISED")  # b2, the newest, renders first
+    assert july[i + 1] == f"    {hedge}"
+    assert "    The unnamed seat was surprised its note was refused." in july  # b1 joined its own
+    assert "(no surprise joined" not in "\n".join(block + july)
+    state = _d().gather_descent(root, depth="full")
+    assert (state.skipped_rows, state.surprise_skipped) == (1, 1)
 
 
 # ── a count of one is singular (build spec 2(e)) ─────────────────────────────
