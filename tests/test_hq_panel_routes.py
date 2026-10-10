@@ -385,8 +385,19 @@ class TestPageAssets:
         # 12 existing sections carry class="panel ..." plus the HQ panel.
         assert html.count('class="panel ') == 13
         # The HQ panel and ACTIVITY share the center column, HQ first; the
-        # banner sits in its reserved slot above the terminal.
-        center = html[html.index('class="cockpit-col col-center"') :]
+        # banner sits in its reserved slot above the terminal. The slice ends
+        # at the column's OWN closing tag (div depth counter), not end of file.
+        start = html.index('<div class="cockpit-col col-center"')
+        depth, pos = 0, start
+        for m in re.finditer(r"<div\b|</div>", html[start:]):
+            depth += 1 if m.group(0) != "</div>" else -1
+            if depth == 0:
+                pos = start + m.end()
+                break
+        assert depth == 0, "col-center never closes"
+        center = html[start:pos]
+        assert 'class="cockpit-col col-c"' not in center
+        assert 'id="hq-panel"' in center and 'class="panel panel-act"' in center
         assert center.index('id="hq-panel"') < center.index('class="panel panel-act"')
         assert (
             html.index('class="hq-banner-slot"')
@@ -394,6 +405,9 @@ class TestPageAssets:
             < html.index('id="hq-term"')
         )
         assert 'id="hq-collapse"' not in html
+        # Rebuilt every 3 s: a live region would announce constantly.
+        strip_tag = re.search(r'<div class="attention-strip"[^>]*>', html).group(0)
+        assert 'aria-live="off"' in strip_tag
 
     def test_app_js_wires_routes_and_never_uses_innerhtml(self):
         js = (STATIC / "app.js").read_text()
@@ -415,10 +429,29 @@ class TestPageAssets:
             "document.hasFocus()",
             "function renderAttentionStrip",
             "no push link yet",
+            # Review 1 fixes (2026-10-10).
+            "new ResizeObserver(",
+            "lastPosted",
+            "window.addEventListener('focus'",
+            "ev.repeat",
+            "ev.preventDefault()",
+            "chat.db not probed",
+            "chat.db blocked",
+            "HQ off",
+            "HQ unreachable",
+            "console unreachable",
+            "signals, all sources",
+            "honk signals (ledger)",
+            "guardian unavailable",
+            "watchman unavailable",
+            "g.issue_count === 0",
+            "renderHqHeader(null)",
+            "renderAttentionStrip(null)",
         )
         for needle in needles:
             assert needle in js, needle
         assert "not listening" not in js
+        assert " open signals'" not in js  # the strip's old unlabelled total
         # The file's own comment names innerHTML to forbid it; assert no ASSIGNMENT.
         assert re.search(r"\.innerHTML\s*=", js) is None
         assert "new Terminal(" in js and "FitAddon" in js
@@ -432,6 +465,21 @@ class TestPageAssets:
         assert "body.hq-focus .cockpit {" in css
         assert ".hq-banner-slot" in css and "min-height: 34px" in css
         assert ".is-collapsed" not in css
+
+    def test_style_review_1_fixes(self):
+        css = (STATIC / "style.css").read_text()
+        # #hq-term carries no padding (the fit addon measures the parent box).
+        block = re.search(r"#hq-term\s*\{([^}]*)\}", css).group(1)
+        assert "padding" not in block
+        assert "#hq-term .xterm { padding: 4px; }" in css
+        # The attention strip stays visible in focus mode.
+        for m in re.finditer(r"([^{}]+)\{([^}]*)\}", css):
+            sel, body = m.group(1), m.group(2)
+            if "display: none" in body and "hq-focus" in sel:
+                assert "attention-strip" not in sel, sel
+        # Locked focus fills the single row; the calc is only the fallback.
+        assert "grid-template-rows: minmax(0, 1fr)" in css
+        assert "body.hq-focus .app.is-locked .col-center { height: auto; min-height: 0; }" in css
 
 
 class TestPageFixPass:

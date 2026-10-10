@@ -1608,7 +1608,12 @@ input::placeholder { color: var(--text-faint); }
 /* ── HQ PANEL (cockpit Phase 2; centerpiece since the 2026-10-10 layout) ── */
 .panel-hq { padding: 12px; min-height: 0; display: flex; flex-direction: column; gap: 8px; }
 .panel-hq .panel-head { gap: 8px; }
-#hq-term { flex: 1 1 auto; min-height: 0; overflow: hidden; background: #000; border-radius: 6px; padding: 4px; }
+/* No padding on the host: the fit addon reads the PARENT's computed box and,
+   under the global border-box, that box includes the parent's padding, so a
+   padded host overestimates by 8px each way and the last row/column clips.
+   The inset lives on `.xterm`, whose own padding the addon does subtract. */
+#hq-term { flex: 1 1 auto; min-height: 0; overflow: hidden; background: #000; border-radius: 6px; }
+#hq-term .xterm { padding: 4px; }
 /* The banner's slot is reserved whether or not the banner shows, so the
    terminal's box — and therefore the pty's rows — do not change when the
    24-hour banner arrives. */
@@ -1633,17 +1638,23 @@ input::placeholder { color: var(--text-faint); }
 .col-center .panel-act .feed-msg { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 12px; }
 /* (the clicked row's .feed-detail carries the full message, unchanged) */
 
-/* FOCUS: HQ fills the cockpit; the side columns, ACTIVITY and the attention
-   strip step out of the way. `body.hq-focus .cockpit` outranks every
-   breakpoint rule on `.cockpit` by specificity, so no !important. */
-body.hq-focus .cockpit { grid-template-columns: minmax(0, 1fr); grid-template-areas: "act"; align-items: stretch; overflow: hidden; }
-body.hq-focus .cockpit-col:not(.col-center), body.hq-focus .panel-act, body.hq-focus .attention-strip { display: none; }
+/* FOCUS: HQ fills the cockpit; the side columns and ACTIVITY step out of the
+   way. The attention strip STAYS: it carries guardian, watchman and arrival
+   items that never reach the incident strip. `body.hq-focus .cockpit`
+   outranks every breakpoint rule on `.cockpit` by specificity, so no
+   !important. */
+body.hq-focus .cockpit { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); grid-template-areas: "act"; align-items: stretch; overflow: hidden; }
+body.hq-focus .cockpit-col:not(.col-center), body.hq-focus .panel-act { display: none; }
 body.hq-focus .col-center { height: auto; min-height: 0; align-self: stretch; }
 body.hq-focus .col-center > .panel-hq { flex: 1 1 0; }
 @media (max-width: 1379px) {
-  /* Below the locked band the page scrolls; in focus give the column the
-     viewport minus the chrome above and below it. */
+  /* FALLBACK ONLY, for an unlocked page (short window) that scrolls: give
+     the column the viewport minus the chrome. */
   body.hq-focus .col-center { height: calc(100vh - 190px); min-height: 420px; }
+  /* Locked (.app is 100vh; .shell and .cockpit are flex:1 inside it), the single
+     minmax(0, 1fr) row is exactly the space left under the header and the
+     strips, whatever they wrap to, so no magic number. */
+  body.hq-focus .app.is-locked .col-center { height: auto; min-height: 0; }
 }
 
 /* NEEDS A LOOK strip (cockpit layout, 2026-10-10): read-only counts. */

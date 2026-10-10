@@ -424,7 +424,7 @@ function renderHeaderStats(snapshot) {
   }
   if (honksLedger) {
     honksLedger.textContent = hc
-      ? (hc.ledger_open == null ? 'ledger: blind' : `${hc.ledger_open} open signals (ledger since ${hc.ledger_since})`)
+      ? (hc.ledger_open == null ? 'ledger: blind' : `${hc.ledger_open} honk signals (ledger since ${hc.ledger_since})`)
       : '—';
     honksLedger.title = hc ? hc.ledger_label : '';
     honksLedger.classList.toggle('is-muted', !hc);
@@ -1760,6 +1760,10 @@ function synthesizeEvents(snapshot) {
 const hq = {
   term: null, fit: null, es: null, lastSeq: 0, running: false, focused: false,
   pending: '', inflight: false, resumedResize: false,
+  // The size this page last told the pty (null = unknown). A post of the same
+  // size is skipped, forced or not: every /hq/resize is a SIGWINCH to HQ, and a
+  // repeat of an unchanged size is a redraw storm (review 1, item 5).
+  lastPosted: null, refitPending: false, refitForce: false,
 };
 
 // The pty has ONE size and this page may be one of several viewers of it (the
@@ -1771,18 +1775,36 @@ const hq = {
 // keyboard focus. `force` is for the moments the person just acted here
 // (Focus toggle, a click into the terminal).
 function hqPostSize(force) {
-  if (!hq.running || !hq.term) return;
-  if (!force && !document.hasFocus()) return;
-  hqPostWithRetry('/hq/resize', { cols: hq.term.cols, rows: hq.term.rows });
+  if (!hq.running || !hq.term) return false;
+  if (!force && !document.hasFocus()) return false;
+  const size = { cols: hq.term.cols, rows: hq.term.rows };
+  const last = hq.lastPosted;
+  if (last && last.cols === size.cols && last.rows === size.rows) return false;
+  // Set BEFORE the request goes out, so a second caller in the same frame (the
+  // textarea focus listener firing from term.focus()) is deduped against it.
+  hq.lastPosted = size;
+  const clear = () => { if (hq.lastPosted === size) hq.lastPosted = null; };
+  hqPostWithRetry('/hq/resize', size).then((res) => { if (!res || !res.ok) clear(); }, clear);
+  return true;
 }
 
 // Refit the terminal to its box, then tell the pty — after layout settles, so
 // a class toggle or a breakpoint crossing is measured, not the frame before.
+// Calls inside one frame coalesce; a forced call is never downgraded by a
+// pending unforced one. A host with no box (focus mode hiding it, a collapsed
+// band) is skipped: the fit addon would propose 2x1 and that would reach the pty.
 function hqRefit(force) {
   if (!hq.fit) return;
+  hq.refitForce = hq.refitForce || !!force;
+  if (hq.refitPending) return;
+  hq.refitPending = true;
   requestAnimationFrame(() => {
+    const f = hq.refitForce;
+    hq.refitPending = false; hq.refitForce = false;
+    const host = $('hq-term');
+    if (!host || !host.clientWidth || !host.clientHeight) return;
     hq.fit.fit();
-    hqPostSize(force);
+    hqPostSize(f);
   });
 }
 
@@ -1797,10 +1819,21 @@ function hqSetFocus(on) {
     btn.textContent = hq.focused ? 'Unfocus' : 'Focus';
     btn.setAttribute('aria-pressed', String(hq.focused));
   }
-  hqRefit(true);
-  if (hq.term) hq.term.focus();
+  // Own frame, not hqRefit's coalesced one: fit, post, THEN take keyboard
+  // focus, so the textarea focus listener sees the new size already posted
+  // (deduped) instead of racing the old one to the server (review 1, item 4).
+  requestAnimationFrame(() => {
+    const host = $('hq-term');
+    if (hq.fit && host && host.clientWidth && host.clientHeight) {
+      hq.fit.fit();
+      hqPostSize(true);
+    }
+    if (hq.term) hq.term.focus();
+  });
 }
 
+// `ev.repeat` is checked at the call sites, not here: a held key must still be
+// swallowed (else xterm sends ^F to the shell), it just must not toggle again.
 function hqIsFocusKey(ev) {
   return ev.type === 'keydown' && ev.ctrlKey && ev.shiftKey && !ev.altKey && !ev.metaKey && ev.code === 'KeyF';
 }
@@ -1888,6 +1921,7 @@ async function hqStart() {
     hqNote((res && res.data && res.data.error) || 'start refused');
     return;
   }
+  hq.lastPosted = { cols, rows };  // /hq/start carried the size
   hq.running = true;
   const btn = $('hq-start'); if (btn) btn.hidden = true;
   hqOpenStream();
@@ -1917,16 +1951,32 @@ function initHqPanel() {
   });
   // Focus key, intercepted before xterm turns it into bytes for the shell.
   hq.term.attachCustomKeyEventHandler((ev) => {
-    if (hqIsFocusKey(ev)) { hqSetFocus(!hq.focused); return false; }
+    if (hqIsFocusKey(ev)) {
+      ev.preventDefault();
+      if (!ev.repeat) hqSetFocus(!hq.focused);
+      return false;
+    }
     return true;
   });
   // The same key anywhere else on the page (the terminal does not have focus).
   document.addEventListener('keydown', (ev) => {
-    if (hqIsFocusKey(ev) && !host.contains(ev.target)) { ev.preventDefault(); hqSetFocus(!hq.focused); }
+    if (hqIsFocusKey(ev) && !host.contains(ev.target)) {
+      ev.preventDefault();
+      if (!ev.repeat) hqSetFocus(!hq.focused);
+    }
   });
   // A click into the terminal makes this viewer the size owner (see hqPostSize).
   if (hq.term.textarea) hq.term.textarea.addEventListener('focus', () => hqPostSize(true));
   window.addEventListener('resize', () => hqRefit(false));
+  // Bringing the window forward reclaims the size (a resize while unfocused
+  // fitted locally but did not post).
+  window.addEventListener('focus', () => hqPostSize(false));
+  // The box also changes without a window resize: the attention strip arriving
+  // or wrapping, the incident strip, the banner, the focus toggle, breakpoint
+  // crossings. hqRefit coalesces to one frame (review 1, item 1).
+  if (typeof ResizeObserver !== 'undefined') {
+    new ResizeObserver(() => hqRefit(false)).observe(host);
+  }
   const startBtn = $('hq-start');
   if (startBtn) startBtn.addEventListener('click', hqStart);
   const focusBtn = $('hq-focus');
@@ -1958,25 +2008,47 @@ function hqLinkWord(hp) {
   return hp.listening ? 'push link on' : 'no push link yet';
 }
 
-function renderHqHeader(hp) {
+const HQ_PROBE_STALE_S = 120;
+
+// `why` names the two different absences: the console itself unreachable (the
+// poll failed) versus the console up but its hq_panel section missing.
+function renderHqHeader(hp, why) {
   const main = $('stat-hq-main'), sub = $('stat-hq-sub');
   if (!main || !sub) return;
   if (!hp) {
-    main.textContent = '—'; sub.textContent = 'status unavailable';
+    main.textContent = why === 'section' ? 'HQ status unavailable' : 'HQ unreachable';
+    sub.textContent = why === 'section' ? 'hq_panel section missing' : 'console unreachable';
     main.className = 'stat-value is-muted'; sub.className = 'stat-value is-muted';
     return;
   }
+  const exit = hp.last_exit;
   if (hp.running) {
     main.textContent = `LIVE · ${hp.age_seconds != null ? fmtAge(hp.age_seconds) : '—'} open`;
     main.className = 'stat-value is-live';
-  } else {
-    main.textContent = hp.last_exit != null ? `DOWN · exit ${hp.last_exit}` : 'DOWN';
+  } else if (typeof exit === 'number' && exit !== 0) {
+    main.textContent = `DOWN · exit ${exit}`;
     main.className = 'stat-value is-down';
+  } else if (exit === 0) {
+    main.textContent = 'HQ ended · exit 0';
+    main.className = 'stat-value is-muted';
+  } else {
+    main.textContent = 'HQ off';
+    main.className = 'stat-value is-muted';
   }
-  // chat_db_readable is fail-closed on the server: false on ANY failure, so
-  // "blocked" is never a guess.
-  sub.textContent = `${hp.chat_db_readable ? 'chat.db ok' : 'chat.db blocked'} · ${hqLinkWord(hp)}`;
-  sub.className = 'stat-value is-muted';
+  // chat_db_readable is fail-closed on the server once probed (false on ANY
+  // failure); null means the probe has not run yet, which is not "blocked".
+  const r = hp.chat_db_readable;
+  let word = r === true ? 'chat.db ok' : r === false ? 'chat.db blocked' : 'chat.db not probed';
+  // A dead probe thread must not read "ok" forever: an old or unparseable
+  // checked_at marks the word stale (fail-closed on a bad timestamp).
+  let stale = false;
+  if (r === true || r === false) {
+    const t = Date.parse(hp.checked_at || '');
+    stale = !Number.isFinite(t) || (Date.now() - t) / 1000 > HQ_PROBE_STALE_S;
+    if (stale) word += ' (stale)';
+  }
+  sub.textContent = `${word} · ${hqLinkWord(hp)}`;
+  sub.className = 'stat-value is-muted' + (stale ? ' is-stale' : '');
 }
 
 function renderHqPanel(snapshot) {
@@ -1984,7 +2056,7 @@ function renderHqPanel(snapshot) {
   const note = $('hq-note');
   const banner = $('hq-banner');
   const startBtn = $('hq-start');
-  renderHqHeader(hp || null);
+  renderHqHeader(hp || null, 'section');
   if (!hp) { if (note) note.textContent = 'status unavailable'; return; }
   if (hp.running) {
     const age = hp.age_seconds != null ? fmtAge(hp.age_seconds) : '';
@@ -1998,15 +2070,17 @@ function renderHqPanel(snapshot) {
     // Resume: this viewer posts its size only if it is the active window (see
     // hqPostSize) — a background tab or a second viewer must not re-wrap the
     // terminal the person is actually looking at.
+    // Latched only when a post actually went out, so an unfocused resume
+    // retries on the next poll (and the window focus listener covers the rest).
     if (!hq.resumedResize && hq.term && csrfToken) {
-      hq.resumedResize = true;
-      hqPostSize(false);
+      if (hqPostSize(false)) hq.resumedResize = true;
     }
   } else {
     if (note) note.textContent = hp.last_exit != null ? `not running (last exit ${hp.last_exit})` : 'not running';
     if (startBtn) startBtn.hidden = false;
     hq.running = false;
     hq.resumedResize = false;
+    hq.lastPosted = null;  // a new session's pty starts from its own size
   }
   // The banner lives in a reserved slot: showing it never resizes the terminal.
   if (banner) banner.hidden = !hp.over_24h;
@@ -2017,7 +2091,7 @@ function renderHqPanel(snapshot) {
 // nothing here acknowledges. A source that could not be measured says so —
 // never a zero that reads as "nothing waiting".
 const ATT_SOURCES = [
-  ['thread', 'threads'], ['watchman', 'watchman'], ['honk', 'honks'],
+  ['thread', 'threads'], ['watchman', 'watchman'], ['honk', 'honk signals (ledger)'],
   ['proposal', 'proposals'], ['guardian', 'guardian'], ['halt', 'halts'], ['decision', 'decisions'],
 ];
 
@@ -2029,38 +2103,73 @@ function attSeg(cls, before, strong, after) {
   return seg;
 }
 
+// `ingestion` in plain words; 'ok' says nothing.
+const ATT_INGESTION_WORD = {
+  never: 'not scanned yet', stale: 'stale', refreshing: 'refreshing', partial: 'partial sweep',
+  degraded: 'degraded', error: 'error', marker_error: 'marker unreadable', config_error: 'config error',
+};
+
+function attIngestionWord(u) {
+  return ATT_INGESTION_WORD[u.ingestion] || String(u.ingestion || 'unknown');
+}
+
 function renderAttentionStrip(snapshot) {
   const strip = $('attention-strip'), segs = $('att-segs');
   if (!strip || !segs) return;
-  const u = snapshot.unacked_signals || null;
-  const g = snapshot.guardian || null;
-  const w = (snapshot.watchman && snapshot.watchman.summary) || null;
   const out = [];
-  if (u && u.measured && u.error == null) {
-    out.push(attSeg(u.stale_7d ? 'is-old' : '', '', String(u.total), ' open signals'));
-    out.push(attSeg(u.stale_7d ? 'is-old' : '', '', String(u.stale_7d), ' waiting over a week'));
-    for (const [key, label] of ATT_SOURCES) {
-      const d = u.by_source_detail && u.by_source_detail[key];
-      if (!d) continue;
-      if (u.source_status && u.source_status[key] && u.source_status[key] !== 'ok') {
-        out.push(attSeg('is-issue', `${label} `, 'blind', ''));
-        continue;
-      }
-      const seg = attSeg(d.stale_7d ? 'is-old' : '', `${label} `, String(d.open), '');
-      if (d.stale_7d) seg.appendChild(el('span', 'att-old', ` (${d.stale_7d} over a week)`));
-      out.push(seg);
-    }
+  if (!snapshot) {
+    // The poll failed: nothing on this strip may keep its previous value.
+    out.push(attSeg('is-issue', '', 'console unreachable', ''));
   } else {
-    out.push(attSeg('is-issue', 'signal ledger ', u && u.error ? 'error' : 'blind', ''));
-  }
-  if (g) {
-    out.push(g.issue_count
-      ? attSeg('is-issue', 'guardian: ', (g.issues || []).join('; ') || `${g.issue_count} issue(s)`, '')
-      : attSeg('', 'guardian ', 'clear', ''));
-  }
-  if (w) {
-    const age = w.last_sweep_age_seconds != null ? fmtAge(w.last_sweep_age_seconds) : null;
-    out.push(attSeg('', 'watchman ', String(w.status || '—'), age ? `, last sweep ${age} ago` : ''));
+    const u = snapshot.unacked_signals || null;
+    const g = snapshot.guardian || null;
+    const w = (snapshot.watchman && snapshot.watchman.summary) || null;
+    if (!u) {
+      out.push(attSeg('is-issue', 'signal ledger ', 'unavailable', ''));
+    } else if (u.measured === false) {
+      // The one red ledger line: nothing could be measured at all.
+      out.push(attSeg('is-issue', 'signal ledger ', u.error ? 'error' : 'blind', ` (${attIngestionWord(u)})`));
+    } else {
+      if (u.ingestion && u.ingestion !== 'ok') {
+        out.push(attSeg('is-old', 'ledger ', attIngestionWord(u), ''));
+      }
+      out.push(u.total == null
+        ? attSeg('is-old', 'signals, all sources ', 'not counted', '')
+        : attSeg(u.stale_7d ? 'is-old' : '', '', String(u.total), ' signals, all sources'));
+      if (u.stale_7d != null) {
+        out.push(attSeg(u.stale_7d ? 'is-old' : '', '', String(u.stale_7d), ' waiting over a week'));
+      }
+      for (const [key, label] of ATT_SOURCES) {
+        const d = u.by_source_detail && u.by_source_detail[key];
+        if (!d) continue;
+        const st = u.source_status && u.source_status[key];
+        if (d.open == null) {
+          // Never a 0 or "null" for a source that was not read.
+          out.push(st === 'not_configured'
+            ? attSeg('', `${label} `, 'not configured', '')
+            : attSeg('is-issue', `${label} `, 'blind', ''));
+          continue;
+        }
+        const seg = attSeg(d.stale_7d ? 'is-old' : '', `${label} `, String(d.open), '');
+        if (d.stale_7d) seg.appendChild(el('span', 'att-old', ` (${d.stale_7d} over a week)`));
+        out.push(seg);
+      }
+    }
+    if (!g) {
+      out.push(attSeg('is-issue', '', 'guardian unavailable', ''));
+    } else if (g.issue_count === 0) {
+      out.push(attSeg('', 'guardian ', 'clear', ''));
+    } else if (typeof g.issue_count === 'number') {
+      out.push(attSeg('is-issue', 'guardian: ', (g.issues || []).join('; ') || `${g.issue_count} issue(s)`, ''));
+    } else {
+      out.push(attSeg('is-issue', 'guardian ', 'unmeasured', ''));
+    }
+    if (!w) {
+      out.push(attSeg('is-issue', '', 'watchman unavailable', ''));
+    } else {
+      const age = w.last_sweep_age_seconds != null ? fmtAge(w.last_sweep_age_seconds) : null;
+      out.push(attSeg('', 'watchman ', String(w.status || '—'), age ? `, last sweep ${age} ago` : ''));
+    }
   }
   segs.textContent = '';
   out.forEach((seg, i) => {
@@ -2243,6 +2352,9 @@ async function poll() {
     const pill = $('status-pill');
     pill.className = 'status-pill is-down';
     $('status-label').textContent = 'UNREACHABLE';
+    // The page's own rule: never keep a previous value beside UNREACHABLE.
+    renderHqHeader(null);
+    renderAttentionStrip(null);
   } finally {
     setTimeout(poll, POLL_MS);
   }
