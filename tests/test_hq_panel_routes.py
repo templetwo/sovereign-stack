@@ -373,14 +373,27 @@ class TestPageAssets:
             'id="hq-start"',
             'id="hq-note"',
             'id="hq-banner"',
-            'id="hq-collapse"',
+            'id="hq-focus"',  # Focus replaced Collapse (cockpit layout, 2026-10-10)
             'id="stat-honks-alltime"',
             'id="stat-honks-ledger"',
+            'id="stat-hq-main"',  # HQ beside BRIDGE UP in the header
+            'id="stat-hq-sub"',
+            'id="attention-strip"',  # NEEDS A LOOK, read-only
         )
         for needle in needles:
             assert needle in html, needle
         # 12 existing sections carry class="panel ..." plus the HQ panel.
         assert html.count('class="panel ') == 13
+        # The HQ panel and ACTIVITY share the center column, HQ first; the
+        # banner sits in its reserved slot above the terminal.
+        center = html[html.index('class="cockpit-col col-center"') :]
+        assert center.index('id="hq-panel"') < center.index('class="panel panel-act"')
+        assert (
+            html.index('class="hq-banner-slot"')
+            < html.index('id="hq-banner"')
+            < html.index('id="hq-term"')
+        )
+        assert 'id="hq-collapse"' not in html
 
     def test_app_js_wires_routes_and_never_uses_innerhtml(self):
         js = (STATIC / "app.js").read_text()
@@ -395,9 +408,17 @@ class TestPageAssets:
             "get('start') === 'hq'",
             "over_24h",
             "honk_counts",
+            # Cockpit layout, 2026-10-10: focus toggle, size ownership, plain words.
+            "function hqSetFocus",
+            "attachCustomKeyEventHandler",
+            "function hqPostSize",
+            "document.hasFocus()",
+            "function renderAttentionStrip",
+            "no push link yet",
         )
         for needle in needles:
             assert needle in js, needle
+        assert "not listening" not in js
         # The file's own comment names innerHTML to forbid it; assert no ASSIGNMENT.
         assert re.search(r"\.innerHTML\s*=", js) is None
         assert "new Terminal(" in js and "FitAddon" in js
@@ -405,6 +426,12 @@ class TestPageAssets:
     def test_style_has_panel_hq(self):
         css = (STATIC / "style.css").read_text()
         assert ".panel-hq" in css and "#hq-term" in css
+        # Cockpit layout, 2026-10-10: the center column, its cap, focus, the slot.
+        assert ".col-center { grid-area: act;" in css
+        assert "minmax(460px, 1100px)" in css
+        assert "body.hq-focus .cockpit {" in css
+        assert ".hq-banner-slot" in css and "min-height: 34px" in css
+        assert ".is-collapsed" not in css
 
 
 class TestPageFixPass:

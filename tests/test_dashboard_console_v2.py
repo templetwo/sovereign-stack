@@ -1396,6 +1396,9 @@ class TestFrontendCorrections:
         band = css[css.index("@media (max-width: 1019px)") :]
         band = band[: band.index("}\n}") + 3]
         assert "min-height: auto" in band
-        assert "height: 580px" in band
+        # The stacked band's fixed height moved from the ACTIVITY hero (580px)
+        # to the center column that now holds HQ + ACTIVITY (cockpit layout,
+        # 2026-10-10).
+        assert ".col-center { height: 820px;" in band
         # The >=1380 scroll-container behaviour must be untouched.
         assert ".cockpit-col { overflow-y: auto; overflow-x: hidden; }" in css

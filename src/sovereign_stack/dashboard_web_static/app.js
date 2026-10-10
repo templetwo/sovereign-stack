@@ -1758,9 +1758,52 @@ function synthesizeEvents(snapshot) {
 // on the §2a substrate. The stream carries the page's CSRF token as a query
 // parameter because EventSource cannot set headers.
 const hq = {
-  term: null, fit: null, es: null, lastSeq: 0, running: false, collapsed: false,
+  term: null, fit: null, es: null, lastSeq: 0, running: false, focused: false,
   pending: '', inflight: false, resumedResize: false,
 };
+
+// The pty has ONE size and this page may be one of several viewers of it (the
+// Studio's own window, a second tab, a reviewer's pane). Measured 2026-10-10:
+// each viewer posting its own box on resume and on resize re-wrapped HQ's
+// terminal in every other viewer. Rule: the viewer the person is working in
+// owns the size — a page posts only while its window is the active one
+// (`document.hasFocus()`), and once more when the terminal itself takes
+// keyboard focus. `force` is for the moments the person just acted here
+// (Focus toggle, a click into the terminal).
+function hqPostSize(force) {
+  if (!hq.running || !hq.term) return;
+  if (!force && !document.hasFocus()) return;
+  hqPostWithRetry('/hq/resize', { cols: hq.term.cols, rows: hq.term.rows });
+}
+
+// Refit the terminal to its box, then tell the pty — after layout settles, so
+// a class toggle or a breakpoint crossing is measured, not the frame before.
+function hqRefit(force) {
+  if (!hq.fit) return;
+  requestAnimationFrame(() => {
+    hq.fit.fit();
+    hqPostSize(force);
+  });
+}
+
+// FOCUS: HQ fills the cockpit and back. The button and Ctrl+Shift+F do the
+// same thing; the key is caught in xterm's custom handler BEFORE the shell sees
+// it (Ctrl+Shift+F is not a readline or Claude Code binding; plain Ctrl+F is).
+function hqSetFocus(on) {
+  hq.focused = !!on;
+  document.body.classList.toggle('hq-focus', hq.focused);
+  const btn = $('hq-focus');
+  if (btn) {
+    btn.textContent = hq.focused ? 'Unfocus' : 'Focus';
+    btn.setAttribute('aria-pressed', String(hq.focused));
+  }
+  hqRefit(true);
+  if (hq.term) hq.term.focus();
+}
+
+function hqIsFocusKey(ev) {
+  return ev.type === 'keydown' && ev.ctrlKey && ev.shiftKey && !ev.altKey && !ev.metaKey && ev.code === 'KeyF';
+}
 
 function hqB64ToBytes(b64) {
   const bin = atob(b64);
@@ -1872,21 +1915,22 @@ function initHqPanel() {
     hq.pending += data;
     hqFlushInput();
   });
-  window.addEventListener('resize', () => {
-    if (!hq.fit || hq.collapsed) return;
-    hq.fit.fit();
-    if (hq.running) hqPostWithRetry('/hq/resize', { cols: hq.term.cols, rows: hq.term.rows });
+  // Focus key, intercepted before xterm turns it into bytes for the shell.
+  hq.term.attachCustomKeyEventHandler((ev) => {
+    if (hqIsFocusKey(ev)) { hqSetFocus(!hq.focused); return false; }
+    return true;
   });
+  // The same key anywhere else on the page (the terminal does not have focus).
+  document.addEventListener('keydown', (ev) => {
+    if (hqIsFocusKey(ev) && !host.contains(ev.target)) { ev.preventDefault(); hqSetFocus(!hq.focused); }
+  });
+  // A click into the terminal makes this viewer the size owner (see hqPostSize).
+  if (hq.term.textarea) hq.term.textarea.addEventListener('focus', () => hqPostSize(true));
+  window.addEventListener('resize', () => hqRefit(false));
   const startBtn = $('hq-start');
   if (startBtn) startBtn.addEventListener('click', hqStart);
-  const collapseBtn = $('hq-collapse');
-  if (collapseBtn) collapseBtn.addEventListener('click', () => {
-    hq.collapsed = !hq.collapsed;
-    $('hq-panel').classList.toggle('is-collapsed', hq.collapsed);
-    collapseBtn.textContent = hq.collapsed ? 'Expand' : 'Collapse';
-    collapseBtn.setAttribute('aria-expanded', String(!hq.collapsed));
-    if (!hq.collapsed && hq.fit) hq.fit.fit();
-  });
+  const focusBtn = $('hq-focus');
+  if (focusBtn) focusBtn.addEventListener('click', () => hqSetFocus(!hq.focused));
   setInterval(refreshCsrf, 20 * 60 * 1000);
   // Wait for the token, then resume an existing session or auto-start when the
   // launcher asked for it. The start parameter is consumed once: a reload or a
@@ -1906,25 +1950,57 @@ function initHqPanel() {
   }).catch(() => { /* status unreachable: the poll will say so */ });
 }
 
+// `listening` is the Phase 3 channels flag — whether the console can push
+// signals INTO HQ's session — not the iMessage listener. It is a phase marker,
+// so it gets plain words, never a fault (the Phase 2 wording read as one; HQ,
+// 2026-10-10).
+function hqLinkWord(hp) {
+  return hp.listening ? 'push link on' : 'no push link yet';
+}
+
+function renderHqHeader(hp) {
+  const main = $('stat-hq-main'), sub = $('stat-hq-sub');
+  if (!main || !sub) return;
+  if (!hp) {
+    main.textContent = '—'; sub.textContent = 'status unavailable';
+    main.className = 'stat-value is-muted'; sub.className = 'stat-value is-muted';
+    return;
+  }
+  if (hp.running) {
+    main.textContent = `LIVE · ${hp.age_seconds != null ? fmtAge(hp.age_seconds) : '—'} open`;
+    main.className = 'stat-value is-live';
+  } else {
+    main.textContent = hp.last_exit != null ? `DOWN · exit ${hp.last_exit}` : 'DOWN';
+    main.className = 'stat-value is-down';
+  }
+  // chat_db_readable is fail-closed on the server: false on ANY failure, so
+  // "blocked" is never a guess.
+  sub.textContent = `${hp.chat_db_readable ? 'chat.db ok' : 'chat.db blocked'} · ${hqLinkWord(hp)}`;
+  sub.className = 'stat-value is-muted';
+}
+
 function renderHqPanel(snapshot) {
   const hp = snapshot && snapshot.hq_panel;
   const note = $('hq-note');
   const banner = $('hq-banner');
   const startBtn = $('hq-start');
+  renderHqHeader(hp || null);
   if (!hp) { if (note) note.textContent = 'status unavailable'; return; }
   if (hp.running) {
     const age = hp.age_seconds != null ? fmtAge(hp.age_seconds) : '';
     const kb = hp.transcript_bytes != null ? `${(hp.transcript_bytes / 1024).toFixed(0)} KB` : '';
-    const parts = ['running', age ? `${age} open` : '', kb ? `${kb} transcript` : '',
-      hp.listening ? 'listening' : 'not listening (Phase 3)'];
+    const parts = ['running', age ? `${age} open` : '', kb ? `${kb} transcript` : '', hqLinkWord(hp)];
     if (note && !/refused/.test(note.textContent)) note.textContent = parts.filter(Boolean).join(' · ');
     if (!hq.running) { hq.running = true; if (startBtn) startBtn.hidden = true; }
     // Reopen whenever the stream is gone (a closed source after an expired
     // token, a page that resumed before its token arrived).
     if (hp.running && !hq.es && csrfToken) hqOpenStream();
+    // Resume: this viewer posts its size only if it is the active window (see
+    // hqPostSize) — a background tab or a second viewer must not re-wrap the
+    // terminal the person is actually looking at.
     if (!hq.resumedResize && hq.term && csrfToken) {
       hq.resumedResize = true;
-      hqPostWithRetry('/hq/resize', { cols: hq.term.cols, rows: hq.term.rows });
+      hqPostSize(false);
     }
   } else {
     if (note) note.textContent = hp.last_exit != null ? `not running (last exit ${hp.last_exit})` : 'not running';
@@ -1932,7 +2008,66 @@ function renderHqPanel(snapshot) {
     hq.running = false;
     hq.resumedResize = false;
   }
+  // The banner lives in a reserved slot: showing it never resizes the terminal.
   if (banner) banner.hidden = !hp.over_24h;
+}
+
+// ── NEEDS A LOOK strip (cockpit layout, 2026-10-10) ──────────────────────
+// Read-only. Every number is a snapshot field the console already carries;
+// nothing here acknowledges. A source that could not be measured says so —
+// never a zero that reads as "nothing waiting".
+const ATT_SOURCES = [
+  ['thread', 'threads'], ['watchman', 'watchman'], ['honk', 'honks'],
+  ['proposal', 'proposals'], ['guardian', 'guardian'], ['halt', 'halts'], ['decision', 'decisions'],
+];
+
+function attSeg(cls, before, strong, after) {
+  const seg = el('span', 'att-seg' + (cls ? ' ' + cls : ''));
+  if (before) seg.append(document.createTextNode(before));
+  seg.appendChild(el('b', null, strong));
+  if (after) seg.append(document.createTextNode(after));
+  return seg;
+}
+
+function renderAttentionStrip(snapshot) {
+  const strip = $('attention-strip'), segs = $('att-segs');
+  if (!strip || !segs) return;
+  const u = snapshot.unacked_signals || null;
+  const g = snapshot.guardian || null;
+  const w = (snapshot.watchman && snapshot.watchman.summary) || null;
+  const out = [];
+  if (u && u.measured && u.error == null) {
+    out.push(attSeg(u.stale_7d ? 'is-old' : '', '', String(u.total), ' open signals'));
+    out.push(attSeg(u.stale_7d ? 'is-old' : '', '', String(u.stale_7d), ' waiting over a week'));
+    for (const [key, label] of ATT_SOURCES) {
+      const d = u.by_source_detail && u.by_source_detail[key];
+      if (!d) continue;
+      if (u.source_status && u.source_status[key] && u.source_status[key] !== 'ok') {
+        out.push(attSeg('is-issue', `${label} `, 'blind', ''));
+        continue;
+      }
+      const seg = attSeg(d.stale_7d ? 'is-old' : '', `${label} `, String(d.open), '');
+      if (d.stale_7d) seg.appendChild(el('span', 'att-old', ` (${d.stale_7d} over a week)`));
+      out.push(seg);
+    }
+  } else {
+    out.push(attSeg('is-issue', 'signal ledger ', u && u.error ? 'error' : 'blind', ''));
+  }
+  if (g) {
+    out.push(g.issue_count
+      ? attSeg('is-issue', 'guardian: ', (g.issues || []).join('; ') || `${g.issue_count} issue(s)`, '')
+      : attSeg('', 'guardian ', 'clear', ''));
+  }
+  if (w) {
+    const age = w.last_sweep_age_seconds != null ? fmtAge(w.last_sweep_age_seconds) : null;
+    out.push(attSeg('', 'watchman ', String(w.status || '—'), age ? `, last sweep ${age} ago` : ''));
+  }
+  segs.textContent = '';
+  out.forEach((seg, i) => {
+    if (i) segs.appendChild(el('span', 'att-sep', '·'));
+    segs.appendChild(seg);
+  });
+  strip.hidden = out.length === 0;
 }
 
 function renderLatencyCard(snapshot) {
@@ -2097,6 +2232,7 @@ async function poll() {
     renderArrival(snapshot);
     renderLineage(snapshot);
     renderHqPanel(snapshot);
+    renderAttentionStrip(snapshot);
 
     status.className = '';
     status.textContent = `live · last poll ${fmtClock(Date.now() / 1000)} · polling /snapshot.json every 3s`;

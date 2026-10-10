@@ -105,6 +105,16 @@
           <span class="stat-label">BRIDGE UP</span>
           <span class="stat-value is-uptime is-muted" id="stat-uptime">—</span>
         </div>
+        <!-- HQ (cockpit layout, 2026-10-10): the panel seat's state beside the
+             bridge's. Line 1: live/down and how long the session has been open.
+             Line 2: the chat.db probe and the console→HQ push link, in plain
+             words — `listening` is the Phase 3 channels flag, a phase marker,
+             never shown as a fault. -->
+        <div class="stat-block stat-wide stat-hq-block">
+          <span class="stat-label">HQ</span>
+          <span class="stat-value is-muted" id="stat-hq-main">—</span>
+          <span class="stat-value is-muted" id="stat-hq-sub">—</span>
+        </div>
         <!-- HONKS, both counts labelled (cockpit Phase 2, Anthony 2026-10-09):
              the all-time unacked count and the signal ledger's open honk
              signals are two definitions and are never folded into one. -->
@@ -130,6 +140,17 @@
     <div class="incident-strip" id="incident-strip" role="alert" hidden>
       <span class="incident-icon" aria-hidden="true">⚠</span>
       <div class="incident-segs" id="incident-segs"></div>
+    </div>
+
+    <!-- NEEDS A LOOK (cockpit layout, 2026-10-10): one line, read-only, from
+         snapshot keys that already exist (unacked_signals, guardian, watchman).
+         Anthony, 2026-09-05: "the only way the system works is if everything is
+         being looked at" — this is that sentence as a strip. It never shows a
+         plausible zero: a blind ledger says "blind". Acknowledging stays in the
+         panels and on the Stack; nothing here acts. -->
+    <div class="attention-strip" id="attention-strip" aria-live="polite" hidden>
+      <span class="att-label">NEEDS A LOOK</span>
+      <div class="att-segs" id="att-segs"></div>
     </div>
 
     <main class="cockpit" id="cockpit">
@@ -168,7 +189,32 @@
         </section>
       </div>
 
-      <!-- ── Column B (hero): ACTIVITY ── -->
+      <!-- ── Column B (center): HQ, then ACTIVITY under it ──
+           Cockpit layout, 2026-10-10 (Anthony in-seat: HQ's area more
+           prominent, "the centerpiece", not oversized). The center column is a
+           flex stack: the HQ panel takes about three fifths, Activity the rest
+           at one line per event. Both scroll inside; the column does not. -->
+      <div class="cockpit-col col-center">
+
+        <!-- HQ PANEL (cockpit Phase 2, 2026-10-09): the real HQ seat, a pty on the
+             Studio, reachable only on this machine behind the §2a substrate. No stop
+             control: HQ closes its own session. Focus (button or Ctrl+Shift+F, caught
+             before the shell sees it) gives the terminal the whole cockpit and back.
+             The 24-hour banner has a reserved slot above the terminal so its arrival
+             never changes the terminal's size. -->
+        <section class="panel panel-hq" id="hq-panel" aria-labelledby="h-hq">
+          <div class="panel-head">
+            <span class="panel-title" id="h-hq">HQ</span>
+            <span class="panel-note" id="hq-note">not running</span>
+            <button type="button" class="btn btn-sm" id="hq-start">Start HQ</button>
+            <button type="button" class="btn btn-sm" id="hq-focus" aria-pressed="false" title="Fill the cockpit with HQ (Ctrl+Shift+F)">Focus</button>
+          </div>
+          <div class="hq-banner-slot">
+            <div class="hq-banner" id="hq-banner" hidden>This session has been open more than 24 hours. Close it from inside HQ and start fresh (the 2026-08-01 pause). Nothing closes on its own.</div>
+          </div>
+          <div class="hq-term" id="hq-term"></div>
+        </section>
+
       <section class="panel panel-act" aria-labelledby="h-act">
         <div class="panel-head">
           <span class="panel-title" id="h-act">ACTIVITY</span>
@@ -191,6 +237,8 @@
           <li class="feed-empty">Connecting to activity watcher…</li>
         </ol>
       </section>
+
+      </div>
 
       <!-- ── Column C: SPIRAL · CHRONICLE · OPEN THREADS ── -->
       <div class="cockpit-col col-c">
@@ -306,19 +354,7 @@
           </div>
         </section>
 
-        <!-- HQ PANEL (cockpit Phase 2, 2026-10-09): the real HQ seat, a pty on the
-             Studio, reachable only on this machine behind the §2a substrate. No stop
-             control: HQ closes its own session. -->
-        <section class="panel panel-hq" id="hq-panel" aria-labelledby="h-hq">
-          <div class="panel-head">
-            <span class="panel-title" id="h-hq">HQ</span>
-            <span class="panel-note" id="hq-note">not running</span>
-            <button type="button" class="btn btn-sm" id="hq-start">Start HQ</button>
-            <button type="button" class="btn btn-sm" id="hq-collapse" aria-expanded="true">Collapse</button>
-          </div>
-          <div class="hq-banner" id="hq-banner" hidden>This session has been open more than 24 hours. Close it from inside HQ and start fresh (the 2026-08-01 pause). Nothing closes on its own.</div>
-          <div class="hq-term" id="hq-term"></div>
-        </section>
+        <!-- The HQ panel moved to the center column (cockpit layout, 2026-10-10). -->
       </div>
 
     </main>
