@@ -1760,9 +1760,11 @@ function synthesizeEvents(snapshot) {
 const hq = {
   term: null, fit: null, es: null, lastSeq: 0, running: false, focused: false,
   pending: '', inflight: false, resumedResize: false,
-  // The size this page last told the pty (null = unknown). A post of the same
-  // size is skipped, forced or not: every /hq/resize is a SIGWINCH to HQ, and a
-  // repeat of an unchanged size is a redraw storm (review 1, item 5).
+  // The size this page last told the pty (null = unknown). An UNFORCED post of
+  // the same size is skipped: every /hq/resize is a SIGWINCH to HQ, and a
+  // repeat of an unchanged size is a redraw storm (review 1, item 5). A FORCED
+  // post always goes: another viewer may have resized the shared pty while this
+  // page's own size never changed, so lastPosted is not the pty's size.
   lastPosted: null, refitPending: false, refitForce: false,
 };
 
@@ -1779,7 +1781,7 @@ function hqPostSize(force) {
   if (!force && !document.hasFocus()) return false;
   const size = { cols: hq.term.cols, rows: hq.term.rows };
   const last = hq.lastPosted;
-  if (last && last.cols === size.cols && last.rows === size.rows) return false;
+  if (!force && last && last.cols === size.cols && last.rows === size.rows) return false;
   // Set BEFORE the request goes out, so a second caller in the same frame (the
   // textarea focus listener firing from term.focus()) is deduped against it.
   hq.lastPosted = size;
@@ -1819,16 +1821,17 @@ function hqSetFocus(on) {
     btn.textContent = hq.focused ? 'Unfocus' : 'Focus';
     btn.setAttribute('aria-pressed', String(hq.focused));
   }
-  // Own frame, not hqRefit's coalesced one: fit, post, THEN take keyboard
-  // focus, so the textarea focus listener sees the new size already posted
-  // (deduped) instead of racing the old one to the server (review 1, item 4).
+  // Own frame, not hqRefit's coalesced one: fit FIRST, then take keyboard
+  // focus, so the one forced post carries the new size instead of racing the
+  // old one to the server (review 1, item 4). If the terminal does not have
+  // focus yet, term.focus() fires the textarea listener, which is that post;
+  // if it already has focus, post here.
   requestAnimationFrame(() => {
     const host = $('hq-term');
-    if (hq.fit && host && host.clientWidth && host.clientHeight) {
-      hq.fit.fit();
-      hqPostSize(true);
-    }
-    if (hq.term) hq.term.focus();
+    if (hq.fit && host && host.clientWidth && host.clientHeight) hq.fit.fit();
+    if (!hq.term) return;
+    if (document.activeElement === hq.term.textarea) hqPostSize(true);
+    else hq.term.focus();
   });
 }
 
@@ -1923,6 +1926,9 @@ async function hqStart() {
   }
   hq.lastPosted = { cols, rows };  // /hq/start carried the size
   hq.running = true;
+  // A refit while the start was in flight could not post (not running yet);
+  // carry the current size now if it moved.
+  if (hq.term.cols !== cols || hq.term.rows !== rows) hqPostSize(true);
   const btn = $('hq-start'); if (btn) btn.hidden = true;
   hqOpenStream();
 }
@@ -1968,9 +1974,9 @@ function initHqPanel() {
   // A click into the terminal makes this viewer the size owner (see hqPostSize).
   if (hq.term.textarea) hq.term.textarea.addEventListener('focus', () => hqPostSize(true));
   window.addEventListener('resize', () => hqRefit(false));
-  // Bringing the window forward reclaims the size (a resize while unfocused
-  // fitted locally but did not post).
-  window.addEventListener('focus', () => hqPostSize(false));
+  // Bringing the window forward reclaims the size (another viewer may own it,
+  // or a resize while unfocused fitted locally but did not post): forced.
+  window.addEventListener('focus', () => hqPostSize(true));
   // The box also changes without a window resize: the attention strip arriving
   // or wrapping, the incident strip, the banner, the focus toggle, breakpoint
   // crossings. hqRefit coalesces to one frame (review 1, item 1).

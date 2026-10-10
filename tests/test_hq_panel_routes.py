@@ -432,7 +432,8 @@ class TestPageAssets:
             # Review 1 fixes (2026-10-10).
             "new ResizeObserver(",
             "lastPosted",
-            "window.addEventListener('focus'",
+            "window.addEventListener('focus', () => hqPostSize(true))",
+            "if (!force && last &&",  # dedupe is for unforced posts only
             "ev.repeat",
             "ev.preventDefault()",
             "chat.db not probed",
@@ -473,10 +474,9 @@ class TestPageAssets:
         assert "padding" not in block
         assert "#hq-term .xterm { padding: 4px; }" in css
         # The attention strip stays visible in focus mode.
-        for m in re.finditer(r"([^{}]+)\{([^}]*)\}", css):
-            sel, body = m.group(1), m.group(2)
-            if "display: none" in body and "hq-focus" in sel:
-                assert "attention-strip" not in sel, sel
+        # (selector-local, so a rule nested in @media is caught too)
+        hidden = re.search(r"hq-focus[^{}]*attention-strip[^{}]*\{[^}]*display:\s*none", css)
+        assert hidden is None, hidden and hidden.group(0)
         # Locked focus fills the single row; the calc is only the fallback.
         assert "grid-template-rows: minmax(0, 1fr)" in css
         assert "body.hq-focus .app.is-locked .col-center { height: auto; min-height: 0; }" in css
