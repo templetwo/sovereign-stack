@@ -46,6 +46,7 @@
   Layer A (v4 controls the README never named) was never in question. Merge remains his gate.
 -->
 <link rel="stylesheet" href="/static/style.css">
+<link rel="stylesheet" href="/static/vendor/xterm.css">
 </head>
 <body>
 <div class="app" id="app">
@@ -103,6 +104,14 @@
         <div class="stat-block stat-wide">
           <span class="stat-label">BRIDGE UP</span>
           <span class="stat-value is-uptime is-muted" id="stat-uptime">—</span>
+        </div>
+        <!-- HONKS, both counts labelled (cockpit Phase 2, Anthony 2026-10-09):
+             the all-time unacked count and the signal ledger's open honk
+             signals are two definitions and are never folded into one. -->
+        <div class="stat-block stat-wide stat-honks-block">
+          <span class="stat-label">HONKS</span>
+          <span class="stat-value is-muted stat-honks" id="stat-honks-alltime">—</span>
+          <span class="stat-value is-muted stat-honks" id="stat-honks-ledger">—</span>
         </div>
         <div class="stat-block clock-block">
           <div class="clock-row">
@@ -296,6 +305,20 @@
             <div class="panel-empty">Reading letters…</div>
           </div>
         </section>
+
+        <!-- HQ PANEL (cockpit Phase 2, 2026-10-09): the real HQ seat, a pty on the
+             Studio, reachable only on this machine behind the §2a substrate. No stop
+             control: HQ closes its own session. -->
+        <section class="panel panel-hq" id="hq-panel" aria-labelledby="h-hq">
+          <div class="panel-head">
+            <span class="panel-title" id="h-hq">HQ</span>
+            <span class="panel-note" id="hq-note">not running</span>
+            <button type="button" class="btn btn-sm" id="hq-start">Start HQ</button>
+            <button type="button" class="btn btn-sm" id="hq-collapse" aria-expanded="true">Collapse</button>
+          </div>
+          <div class="hq-banner" id="hq-banner" hidden>This session has been open more than 24 hours. Close it from inside HQ and start fresh (the 2026-08-01 pause). Nothing closes on its own.</div>
+          <div class="hq-term" id="hq-term"></div>
+        </section>
       </div>
 
     </main>
@@ -307,6 +330,8 @@
 
   </div>
 </div>
+<script src="/static/vendor/xterm.js"></script>
+<script src="/static/vendor/addon-fit.js"></script>
 <script src="/static/app.js"></script>
 </body>
 </html>

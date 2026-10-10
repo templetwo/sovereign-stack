@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import threading
 import time
 import urllib.error
@@ -353,3 +354,54 @@ class TestSnapshotKeys:
         _, body, _ = _req(f"http://{host}:{port}/snapshot.json")
         hp = json.loads(body)["hq_panel"]
         assert hp["running"] is False and hp["listening"] is False and "over_24h" in hp
+
+
+# ── Task 5: the page assets ─────────────────────────────────────────────────
+
+STATIC = Path(web.__file__).parent / "dashboard_web_static"
+
+
+class TestPageAssets:
+    def test_index_wires_vendor_and_panel(self):
+        html = (STATIC / "index.html").read_text()
+        assert "/static/vendor/xterm.css" in html
+        assert "/static/vendor/xterm.js" in html and "/static/vendor/addon-fit.js" in html
+        assert html.index("/static/vendor/xterm.js") < html.index("/static/app.js")
+        needles = (
+            'id="hq-panel"',
+            'id="hq-term"',
+            'id="hq-start"',
+            'id="hq-note"',
+            'id="hq-banner"',
+            'id="hq-collapse"',
+            'id="stat-honks-alltime"',
+            'id="stat-honks-ledger"',
+        )
+        for needle in needles:
+            assert needle in html, needle
+        # 12 existing sections carry class="panel ..." plus the HQ panel.
+        assert html.count('class="panel ') == 13
+
+    def test_app_js_wires_routes_and_never_uses_innerhtml(self):
+        js = (STATIC / "app.js").read_text()
+        needles = (
+            "/hq/status",
+            "/hq/stream?token=",
+            "/hq/start",
+            "/hq/input",
+            "/hq/resize",
+            "function initHqPanel",
+            "function renderHqPanel",
+            "get('start') === 'hq'",
+            "over_24h",
+            "honk_counts",
+        )
+        for needle in needles:
+            assert needle in js, needle
+        # The file's own comment names innerHTML to forbid it; assert no ASSIGNMENT.
+        assert re.search(r"\.innerHTML\s*=", js) is None
+        assert "new Terminal(" in js and "FitAddon" in js
+
+    def test_style_has_panel_hq(self):
+        css = (STATIC / "style.css").read_text()
+        assert ".panel-hq" in css and "#hq-term" in css

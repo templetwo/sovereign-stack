@@ -1592,3 +1592,13 @@ input::placeholder { color: var(--text-faint); }
   --v2-brand-glow:    none;
   --v2-phase-glow:    none;
 }
+
+/* ── HQ PANEL (cockpit Phase 2) ── */
+.panel-hq { padding: 12px; min-height: 240px; display: flex; flex-direction: column; gap: 8px; }
+.panel-hq .panel-head { gap: 8px; }
+.panel-hq.is-collapsed #hq-term, .panel-hq.is-collapsed #hq-banner { display: none; }
+.panel-hq.is-collapsed { min-height: 0; }
+#hq-term { flex: 1; min-height: 220px; background: #000; border-radius: 6px; padding: 4px; }
+.hq-banner { padding: 8px 10px; border-radius: 6px; background: var(--c-honk, #a65); color: #fff; font-size: 13px; }
+#hq-start[hidden], #hq-banner[hidden] { display: none; }
+.stat-honks { white-space: nowrap; display: block; font-size: 11px; }

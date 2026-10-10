@@ -404,6 +404,22 @@ function renderHeaderStats(snapshot) {
   const spiral = snapshot.spiral || null;
   const hb = snapshot.bridge_heartbeat || null;
 
+  // Both honk counts, each labelled with what it counts (cockpit Phase 2).
+  const hc = snapshot.honk_counts || null;
+  const honksAll = $('stat-honks-alltime'), honksLedger = $('stat-honks-ledger');
+  if (honksAll) {
+    honksAll.textContent = hc ? `${hc.all_time_unacked} unacked (all time)` : '—';
+    honksAll.title = hc ? hc.all_time_label : '';
+    honksAll.classList.toggle('is-muted', !hc);
+  }
+  if (honksLedger) {
+    honksLedger.textContent = hc
+      ? (hc.ledger_open == null ? 'ledger: blind' : `${hc.ledger_open} open signals (ledger since ${hc.ledger_since})`)
+      : '—';
+    honksLedger.title = hc ? hc.ledger_label : '';
+    honksLedger.classList.toggle('is-muted', !hc);
+  }
+
   const phaseEl = $('stat-phase');
   if (spiral && spiral.current_phase) {
     phaseEl.textContent = spiral.current_phase;
@@ -1726,6 +1742,131 @@ function synthesizeEvents(snapshot) {
 }
 
 // ── Bridge latency + throughput (client-derived — §1b) ───────────────────
+// ── HQ PANEL (cockpit Phase 2) ───────────────────────────────────────────
+// The real HQ seat in a pty on the Studio. Output arrives over SSE as base64
+// chunks with sequence ids; a reload replays the buffer. Input goes by POST
+// on the §2a substrate. The stream carries the page's CSRF token as a query
+// parameter because EventSource cannot set headers.
+const hq = { term: null, fit: null, es: null, lastSeq: 0, running: false, collapsed: false };
+
+function hqB64ToBytes(b64) {
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+function hqBytesToB64(str) {
+  const bytes = new TextEncoder().encode(str);
+  let bin = '';
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+  return btoa(bin);
+}
+
+function hqOpenStream() {
+  if (hq.es) { hq.es.close(); hq.es = null; }
+  if (!csrfToken) return;
+  const es = new EventSource(`/hq/stream?token=${encodeURIComponent(csrfToken)}&after=${hq.lastSeq}`);
+  es.addEventListener('hello', (ev) => {
+    try {
+      const h = JSON.parse(ev.data);
+      if (h.truncated_before && hq.lastSeq === 0 && hq.term) {
+        hq.term.writeln('\x1b[2m[earlier output dropped: replay buffer cap]\x1b[0m');
+      }
+    } catch (e) { /* ignore */ }
+  });
+  es.onmessage = (ev) => {
+    if (ev.lastEventId) hq.lastSeq = parseInt(ev.lastEventId, 10) || hq.lastSeq;
+    if (hq.term && ev.data) hq.term.write(hqB64ToBytes(ev.data));
+  };
+  es.addEventListener('exit', () => {
+    if (hq.term) hq.term.writeln('\r\n\x1b[2m[HQ session ended]\x1b[0m');
+    es.close(); hq.es = null; hq.running = false;
+    const btn = $('hq-start'); if (btn) btn.hidden = false;
+  });
+  es.onerror = () => { /* the browser retries; the status poll re-syncs */ };
+  hq.es = es;
+}
+
+async function hqStart() {
+  if (!hq.term) return;
+  const cols = hq.term.cols, rows = hq.term.rows;
+  const res = await postAction('/hq/start', { cols, rows });
+  if (!res || !res.ok) {
+    const note = $('hq-note');
+    if (note) note.textContent = (res && res.data && res.data.error) || 'start refused';
+    return;
+  }
+  hq.running = true;
+  const btn = $('hq-start'); if (btn) btn.hidden = true;
+  hqOpenStream();
+}
+
+function initHqPanel() {
+  const host = $('hq-term');
+  if (!host || typeof Terminal === 'undefined') return;
+  hq.term = new Terminal({ cursorBlink: true, scrollback: 5000, fontSize: 13, convertEol: false });
+  if (typeof FitAddon !== 'undefined') {
+    hq.fit = new FitAddon.FitAddon();
+    hq.term.loadAddon(hq.fit);
+  }
+  hq.term.open(host);
+  if (hq.fit) hq.fit.fit();
+  hq.term.onData((data) => {
+    if (!hq.running) return;
+    postAction('/hq/input', { data: hqBytesToB64(data) });
+  });
+  window.addEventListener('resize', () => {
+    if (!hq.fit || hq.collapsed) return;
+    hq.fit.fit();
+    if (hq.running) postAction('/hq/resize', { cols: hq.term.cols, rows: hq.term.rows });
+  });
+  const startBtn = $('hq-start');
+  if (startBtn) startBtn.addEventListener('click', hqStart);
+  const collapseBtn = $('hq-collapse');
+  if (collapseBtn) collapseBtn.addEventListener('click', () => {
+    hq.collapsed = !hq.collapsed;
+    $('hq-panel').classList.toggle('is-collapsed', hq.collapsed);
+    collapseBtn.textContent = hq.collapsed ? 'Expand' : 'Collapse';
+    collapseBtn.setAttribute('aria-expanded', String(!hq.collapsed));
+    if (!hq.collapsed && hq.fit) hq.fit.fit();
+  });
+  // Resume an existing session, or auto-start when the launcher asked for it.
+  fetch('/hq/status', { cache: 'no-store' }).then((r) => r.json()).then((st) => {
+    if (st && st.running) {
+      hq.running = true; if (startBtn) startBtn.hidden = true; hqOpenStream(); return;
+    }
+    const wantStart = new URLSearchParams(window.location.search).get('start') === 'hq';
+    if (wantStart) {
+      const tryStart = () => { if (csrfToken) hqStart(); else setTimeout(tryStart, 100); };
+      tryStart();
+    }
+  }).catch(() => { /* status unreachable: the poll will say so */ });
+}
+
+function renderHqPanel(snapshot) {
+  const hp = snapshot && snapshot.hq_panel;
+  const note = $('hq-note');
+  const banner = $('hq-banner');
+  const startBtn = $('hq-start');
+  if (!hp) { if (note) note.textContent = 'status unavailable'; return; }
+  if (hp.running) {
+    const age = hp.age_seconds != null ? fmtAge(hp.age_seconds) : '';
+    const kb = hp.transcript_bytes != null ? `${(hp.transcript_bytes / 1024).toFixed(0)} KB` : '';
+    const parts = ['running', age ? `${age} open` : '', kb ? `${kb} transcript` : '',
+      hp.listening ? 'listening' : 'not listening (Phase 3)'];
+    if (note) note.textContent = parts.filter(Boolean).join(' · ');
+    if (!hq.running) {
+      hq.running = true; if (startBtn) startBtn.hidden = true; if (!hq.es) hqOpenStream();
+    }
+  } else {
+    if (note) note.textContent = hp.last_exit != null ? `not running (last exit ${hp.last_exit})` : 'not running';
+    if (startBtn) startBtn.hidden = false;
+    hq.running = false;
+  }
+  if (banner) banner.hidden = !hp.over_24h;
+}
+
 function renderLatencyCard(snapshot) {
   const lat = state.latencyBuf;
   const nowEl = $('latency-now');
@@ -1887,6 +2028,7 @@ async function poll() {
     renderOpenThreadsIndex(snapshot);
     renderArrival(snapshot);
     renderLineage(snapshot);
+    renderHqPanel(snapshot);
 
     status.className = '';
     status.textContent = `live · last poll ${fmtClock(Date.now() / 1000)} · polling /snapshot.json every 3s`;
@@ -1967,6 +2109,7 @@ function initAurora() {
 
 // ── Boot ──────────────────────────────────────────────────────────────────
 initCsrf();
+initHqPanel();
 initTheme();
 initAurora();
 initViewportLock();
