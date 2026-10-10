@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import time
 from pathlib import Path
 
@@ -390,3 +391,70 @@ def test_raw_child_gets_hup_when_the_console_process_dies(tmp_path):
     subprocess.run([sys.executable, str(driver), str(receipt)], env=env, timeout=15, check=True)
     text = _wait_for(receipt, "HUP")
     assert "devtty=OK" in text and "HUP" in text and "TIMEOUT" not in text, text
+
+
+# ── Fix 2 (web seat review of PR #9, 2026-10-10): the panel's own environment ──
+#
+# Measured on the Studio 2026-10-10: the console's launchd PATH puts the live
+# stack's venv/bin FIRST and sets no LANG; the login profile prepends its own
+# dirs but never removes venv/bin, and a bare `pip` still resolved to the live
+# venv's pip. So a routine `pip install` from panel HQ would land in the running
+# stack. The overlay below is the panel child's alone: not the plist, not the launcher.
+
+
+def test_panel_env_scrubs_the_console_venv_and_sets_lang():
+    base = {
+        "PATH": "/x/venv/bin:/opt/homebrew/bin:/usr/bin:/bin",
+        "VIRTUAL_ENV": "/x/venv",
+        "PYTHONPATH": "/x/src",
+        "HOME": "/h",
+    }
+    env = hq_panel.panel_env(base, venv_bin="/x/venv/bin")
+    assert "/x/venv/bin" not in env["PATH"].split(":")
+    assert env["PATH"].split(":")[:1] == [os.path.expanduser("~/.local/bin")]
+    assert "/opt/homebrew/bin" in env["PATH"].split(":")
+    assert env["PATH"].split(":")[-2:] == ["/usr/sbin", "/sbin"]
+    assert "VIRTUAL_ENV" not in env and "PYTHONPATH" not in env
+    assert env["LANG"] == "en_US.UTF-8"
+    assert env["HOME"] == "/h"
+    assert base == {  # the caller's mapping is untouched
+        "PATH": "/x/venv/bin:/opt/homebrew/bin:/usr/bin:/bin",
+        "VIRTUAL_ENV": "/x/venv",
+        "PYTHONPATH": "/x/src",
+        "HOME": "/h",
+    }
+
+
+def test_panel_env_keeps_a_lang_the_console_already_has():
+    env = hq_panel.panel_env({"PATH": "/usr/bin:/bin", "LANG": "de_DE.UTF-8"}, venv_bin="/nowhere")
+    assert env["LANG"] == "de_DE.UTF-8"
+
+
+def test_child_does_not_see_the_console_venv_on_path(monkeypatch, tmp_path):
+    """The real child, started the real way, reports its own PATH, LANG and VIRTUAL_ENV."""
+    own_bin = os.path.join(sys.prefix, "bin")
+    monkeypatch.setenv("PATH", f"{own_bin}:/usr/bin:/bin")
+    monkeypatch.setenv("VIRTUAL_ENV", sys.prefix)
+    monkeypatch.delenv("LANG", raising=False)
+    monkeypatch.setenv(
+        "HQ_PANEL_COMMAND",
+        json.dumps(
+            [
+                "/bin/sh",
+                "-c",
+                'echo "PATH=$PATH"; echo "LANG=$LANG"; echo "VENV=${VIRTUAL_ENV:-none}"; echo READY; cat',
+            ]
+        ),
+    )
+    monkeypatch.setenv("HQ_PANEL_CWD", str(tmp_path))
+    s = hq_panel.HQSession(seat_finder=lambda: None)
+    try:
+        ok, reason = s.start(80, 24)
+        assert ok, reason
+        text = _collect(s).decode(errors="replace")
+    finally:
+        s._terminate_for_tests()
+    path_line = next(ln for ln in text.splitlines() if ln.startswith("PATH="))
+    assert own_bin not in path_line[len("PATH=") :].split(":")
+    assert "LANG=en_US.UTF-8" in text
+    assert "VENV=none" in text

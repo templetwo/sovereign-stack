@@ -435,3 +435,94 @@ class TestSeat2of3Findings:
         status, body, _ = _start(host, port, token)
         assert status == 200, body
         assert isinstance(json.loads(body)["pid"], int)
+
+
+# ── Fix 1 (web seat review of PR #9, 2026-10-10): Studio-only is a rule in code ──
+#
+# The web seat measured serve("0.0.0.0", 0) in a container: a non-loopback client
+# minted a token from /session (no Host check there), spoofed Host and Origin,
+# POSTed /hq/start and got a shell. Loopback was a default of the plist, not a
+# rule of the code. Now the code refuses on its own: /hq/* and /session answer
+# only when the server is bound to a loopback address AND the peer is loopback.
+
+
+class TestStudioOnly:
+    @pytest.mark.parametrize(
+        "bound, peer, expect",
+        [
+            ("127.0.0.1", "127.0.0.1", None),
+            ("127.0.0.1", "::1", None),
+            ("::1", "127.0.0.1", None),
+            ("0.0.0.0", "127.0.0.1", "server is not bound to loopback"),
+            ("", "127.0.0.1", "server is not bound to loopback"),
+            ("192.168.1.10", "127.0.0.1", "server is not bound to loopback"),
+            ("127.0.0.1", "192.168.1.5", "peer is not loopback"),
+            ("127.0.0.1", "::ffff:10.0.0.7", "peer is not loopback"),
+            ("127.0.0.1", "garbage", "peer is not loopback"),
+        ],
+    )
+    def test_gate_names_the_failing_side(self, bound, peer, expect):
+        reason = web._studio_only_reason(bound, peer)
+        if expect is None:
+            assert reason is None
+        else:
+            assert reason is not None and expect in reason
+
+    @pytest.fixture
+    def wide_server(self, monkeypatch, tmp_path):
+        """Bound beyond loopback for a few hundred milliseconds on an ephemeral port;
+        every panel route must refuse even the loopback requester."""
+        monkeypatch.setattr(conn, "_launchctl_print_text", lambda label: None)
+        monkeypatch.setattr(
+            conn,
+            "_http_probe",
+            lambda url, timeout=2.0: {"http_status": None, "body": "", "error": "m"},
+        )
+        monkeypatch.setenv("SOVEREIGN_ROOT", str(tmp_path))
+        server = web.serve(host="0.0.0.0", port=0)
+        port = server.server_address[1]
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        time.sleep(0.05)
+        yield ("127.0.0.1", port)
+        server.shutdown()
+
+    def test_server_bound_beyond_loopback_refuses_the_panel_and_session(
+        self, wide_server, panel_env
+    ):
+        host, port = wide_server
+        pinned = {"Host": f"127.0.0.1:{port}", "Origin": f"http://127.0.0.1:{port}"}
+        status, body, _ = _req(f"http://{host}:{port}/session", headers=pinned)
+        assert status == 403 and "Studio-only" in json.loads(body)["error"]
+        status, body, _ = _req(f"http://{host}:{port}/hq/status", headers=pinned)
+        assert status == 403 and "Studio-only" in json.loads(body)["error"]
+        status, _, _ = _req(f"http://{host}:{port}/hq/stream?token=x", headers=pinned)
+        assert status == 403
+        status, body, _ = _req(
+            f"http://{host}:{port}/hq/start",
+            "POST",
+            {"cols": 80, "rows": 24},
+            {**pinned, "X-CSRF-Token": web._mint_csrf_token()},
+        )
+        assert status == 403 and "Studio-only" in json.loads(body)["error"]
+        assert not panel_env.running
+        # The read-only dashboard itself still answers: the rule is on the panel.
+        status, _, _ = _req(f"http://{host}:{port}/health", headers=pinned)
+        assert status == 200
+
+    def test_loopback_server_still_serves_the_panel(self, running_server, panel_env):
+        host, port = running_server
+        status, _, _ = _req(f"http://{host}:{port}/session")
+        assert status == 200
+        status, _, _ = _req(f"http://{host}:{port}/hq/status")
+        assert status == 200
+
+    def test_live_plist_passes_no_host_flag(self):
+        plist = (
+            Path.home() / "Library" / "LaunchAgents" / "com.templetwo.sovereign-dashboard-web.plist"
+        )
+        if not plist.exists():
+            pytest.skip("not the Studio")
+        import plistlib
+
+        args = plistlib.loads(plist.read_bytes()).get("ProgramArguments", [])
+        assert "--host" not in args and not any(a.startswith("--host=") for a in args)

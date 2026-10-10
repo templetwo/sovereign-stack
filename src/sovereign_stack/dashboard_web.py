@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import base64
 import hmac
+import ipaddress
 import json
 import math
 import os
@@ -527,6 +528,26 @@ _CSRF_TOKENS: dict[str, float] = {}  # token -> expiry epoch
 _csrf_lock = threading.Lock()
 
 
+def _is_loopback(host: str) -> bool:
+    try:
+        return ipaddress.ip_address((host or "").split("%", 1)[0]).is_loopback
+    except ValueError:
+        return False
+
+
+def _studio_only_reason(bound_host: str, peer_host: str) -> str | None:
+    """Fix 1 of the web seat's PR #9 review (2026-10-10): the panel is Studio-only
+    by rule of the code, not by the plist's bind address. Measured by that seat:
+    bound to 0.0.0.0, a non-loopback client minted a token from /session, spoofed
+    Host and Origin, and started the panel. So /hq/* and /session answer only when
+    the server is bound to a loopback address AND the peer is loopback."""
+    if not _is_loopback(bound_host):
+        return "panel is Studio-only: server is not bound to loopback"
+    if not _is_loopback(peer_host):
+        return "panel is Studio-only: peer is not loopback"
+    return None
+
+
 def _mint_csrf_token() -> str:
     """Mint a 128-bit CSRF token, store it with a short TTL. Called by
     GET /session — same-origin-only by virtue of the Host check below and
@@ -779,6 +800,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     # ── §2a substrate helpers ──
 
+    def _studio_only(self) -> str | None:
+        return _studio_only_reason(str(self.server.server_address[0]), str(self.client_address[0]))
+
     def _expected_hosts(self) -> set[str]:
         port = self.server.server_address[1]
         return {f"127.0.0.1:{port}", f"localhost:{port}"}
@@ -850,6 +874,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if path in _POST_ONLY_ROUTES:
             self._send_json(405, {"error": "method not allowed, POST only"}, cors=False)
             return
+
+        if path in ("/hq/status", "/hq/stream", "/session"):
+            reason = self._studio_only()
+            if reason is not None:
+                self._send_json(403, {"error": reason}, cors=False)
+                return
 
         if path == "/hq/status":
             # Phase 2: read-only, same-machine only (Host pin), never CORS.
@@ -925,6 +955,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if path not in _POST_ONLY_ROUTES:
             self._send_json(404, {"error": "not found", "path": path}, cors=False)
             return
+
+        if path.startswith("/hq/"):
+            reason = self._studio_only()
+            if reason is not None:
+                self._send_json(403, {"error": reason}, cors=False)
+                return
 
         reason = self._substrate_check()
         if reason is not None:

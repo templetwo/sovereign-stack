@@ -21,6 +21,7 @@ import signal
 import sqlite3
 import struct
 import subprocess
+import sys
 import termios
 import threading
 import time
@@ -32,6 +33,34 @@ DEFAULT_BUFFER_BYTES = 256 * 1024
 OVER_24H_SECONDS = 24 * 3600
 CODE_TAB_MARKER = "/Application Support/Claude/claude-code/"
 CHAT_DB = Path.home() / "Library" / "Messages" / "chat.db"
+PANEL_LANG = "en_US.UTF-8"
+_PANEL_PATH_TAIL = ("/usr/sbin", "/sbin")
+_PYTHON_ENV_KEYS = ("VIRTUAL_ENV", "PYTHONPATH", "PYTHONHOME")
+
+
+def panel_env(base: dict, venv_bin: str | None = None) -> dict:
+    """The panel child's environment, built from the console's (`base`) and
+    corrected for the panel ALONE (web seat review of PR #9, 2026-10-10; the
+    plist and the launcher stay as they are).
+
+    Measured on the Studio 2026-10-10: the console's launchd PATH leads with the
+    live stack's venv/bin and carries no LANG. The login profile prepends its own
+    dirs but never removes venv/bin, and a bare `pip` in such a shell resolved to
+    the live venv's pip, so a routine install from panel HQ would land in the
+    running stack. Here: every PATH entry equal to the console interpreter's own
+    bin dir (`venv_bin`, default sys.prefix/bin) is dropped, along with the
+    virtualenv markers; ~/.local/bin leads and /usr/sbin:/sbin close, as a
+    Terminal seat sees them; LANG is set only when the console has none."""
+    env = dict(base)
+    venv_bin = venv_bin or os.path.join(sys.prefix, "bin")
+    kept = [d for d in env.get("PATH", "").split(":") if d and d != venv_bin]
+    head = [os.path.expanduser("~/.local/bin"), "/opt/homebrew/bin"]
+    path = [d for d in head if d not in kept] + [d for d in kept if d not in _PANEL_PATH_TAIL]
+    env["PATH"] = ":".join(path + list(_PANEL_PATH_TAIL))
+    for key in _PYTHON_ENV_KEYS:
+        env.pop(key, None)
+    env.setdefault("LANG", PANEL_LANG)
+    return env
 
 
 def _run(argv: list[str]) -> str:
@@ -211,9 +240,12 @@ class HQSession:
         cols = max(20, min(500, int(cols)))
         rows = max(5, min(200, int(rows)))
         master, slave = pty.openpty()
-        env = dict(os.environ)
+        env = panel_env(os.environ)
         env.update({"TERM": "xterm-256color", "COLUMNS": str(cols), "LINES": str(rows)})
         try:
+            # preexec_fn runs between fork and exec in a threaded server; CPython
+            # warns it can deadlock if it touches a lock another thread holds. It
+            # is one ioctl on fd 0 and takes no lock (web seat review, 2026-10-10).
             proc = subprocess.Popen(
                 self._command(),
                 cwd=self._cwd(),
