@@ -486,8 +486,11 @@ class TestSnapshotIntegration:
         been wrong for longer than anyone noticed.
         """
         snapshot = web.build_snapshot()
-        assert list(snapshot.keys())[-1] == "open_threads_index"
-        assert len(snapshot) == 19
+        # Key 19 of 21 since cockpit Phase 2 (2026-10-09) appended honk_counts and
+        # hq_panel AFTER it; "appended last" now means last of the v2-era keys.
+        assert list(snapshot.keys())[18] == "open_threads_index"
+        assert list(snapshot.keys())[-2:] == ["honk_counts", "hq_panel"]
+        assert len(snapshot) == 21
 
     def test_bare_root_yields_the_absent_envelope_not_none(self, isolated_snapshot):
         """The one key that answers absence with content. Fails on unfixed
@@ -500,8 +503,8 @@ class TestSnapshotIntegration:
         _write_index(isolated_snapshot, "{ this is not json")
         snapshot = web.build_snapshot()
         assert snapshot["open_threads_index"]["status"] == "absent"
-        # The other 17 keep rendering — that is the actual requirement.
-        assert len(snapshot) == 19
+        # The other keys keep rendering — that is the actual requirement (21 since Phase 2).
+        assert len(snapshot) == 21
         assert isinstance(snapshot["feed"], list)
         assert isinstance(snapshot["unacked_honks"], int)
 
@@ -516,7 +519,7 @@ class TestSnapshotIntegration:
         monkeypatch.setattr(readers, "read_open_threads_index", boom)
         snapshot = web.build_snapshot()
         assert snapshot["open_threads_index"] is None
-        assert len(snapshot) == 19
+        assert len(snapshot) == 21
 
     def test_populated_root_reaches_the_snapshot(self, isolated_snapshot):
         _write_index(isolated_snapshot, _fixture_payload())
