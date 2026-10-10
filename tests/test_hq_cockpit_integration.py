@@ -72,7 +72,8 @@ def _raw(host, port, method, path, body=b"", headers=None):
         if "Content-Length" not in hdrs and "Transfer-Encoding" not in hdrs:
             hdrs["Content-Length"] = str(len(body))
         for k, v in hdrs.items():
-            c.putheader(k, v)
+            if v is not None:  # None = send no such header at all
+                c.putheader(k, v)
         c.endheaders()
         if body:
             with contextlib.suppress(BrokenPipeError, ConnectionResetError):
@@ -185,13 +186,22 @@ class TestDropRoute:
     def test_the_real_cap_is_25_mb(self):
         assert web.HQ_DROP_MAX_BYTES == 25 * 1024 * 1024
 
-    def test_missing_content_length_is_refused(self, running_server, panel, tmp_path):
+    def test_chunked_transfer_encoding_is_refused(self, running_server, panel, tmp_path):
         host, port = running_server
         panel.start(80, 24)
         status, _, _ = _drop(
             host, port, _token(host, port), "a.txt", b"", extra={"Transfer-Encoding": "chunked"}
         )
         assert status == 411
+        assert _all_drops(tmp_path) == []
+
+    def test_absent_content_length_is_refused(self, running_server, panel, tmp_path):
+        host, port = running_server
+        panel.start(80, 24)
+        status, body, _ = _drop(
+            host, port, _token(host, port), "a.txt", b"", extra={"Content-Length": None}
+        )
+        assert status == 411 and b"Content-Length is required" in body
         assert _all_drops(tmp_path) == []
 
     def test_not_running_is_409_and_writes_nothing(self, running_server, panel, tmp_path):
