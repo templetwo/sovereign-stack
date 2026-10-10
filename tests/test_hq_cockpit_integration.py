@@ -693,3 +693,16 @@ class TestDropRootAndRetention:
             s.close()
         assert b" 408 " in resp.split(b"\r\n", 1)[0]
         assert _all_drops(tmp_path) == []
+
+
+class TestRefusedNoteExpires:
+    def test_a_refused_note_is_held_for_60_s_not_forever(self):
+        js = (STATIC / "app.js").read_text()
+        for needle in (
+            "const HQ_REFUSED_NOTE_MS = 60 * 1000;",
+            "hq.noteSetAt = Date.now();",
+            "Date.now() - hq.noteSetAt < HQ_REFUSED_NOTE_MS",
+            "if (note && !hqHoldRefusedNote(note))",
+        ):
+            assert needle in js, needle
+        assert "!/refused/.test(note.textContent)) note.textContent" not in js

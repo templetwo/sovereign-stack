@@ -1768,6 +1768,7 @@ const hq = {
   lastPosted: null, refitPending: false, refitForce: false, forcedThisFrame: false,
   // The latest GET /hq/status (Studio-only), or null when it failed this poll.
   status: null,
+  noteSetAt: 0,  // when hqNote last wrote the panel note (Date.now())
 };
 
 // The pty has ONE size and this page may be one of several viewers of it (the
@@ -1907,9 +1908,19 @@ function hqBytesToB64(str) {
   return btoa(bin);
 }
 
+// A "refused" note outlives the poll that would overwrite it, but only for
+// HQ_REFUSED_NOTE_MS (review 2026-10-10): it used to persist for the life of
+// the session. The time it was set is kept so the poll can let it go.
+const HQ_REFUSED_NOTE_MS = 60 * 1000;
+
 function hqNote(text) {
   const note = $('hq-note');
   if (note) note.textContent = text;
+  hq.noteSetAt = Date.now();
+}
+
+function hqHoldRefusedNote(note) {
+  return !!note && /refused/.test(note.textContent) && Date.now() - hq.noteSetAt < HQ_REFUSED_NOTE_MS;
 }
 
 // POST on the substrate; on a csrf 403 re-mint the token and retry once.
@@ -2289,7 +2300,7 @@ function renderHqPanel(snapshot) {
     const age = hp.age_seconds != null ? fmtAge(hp.age_seconds) : '';
     const kb = hp.transcript_bytes != null ? `${(hp.transcript_bytes / 1024).toFixed(0)} KB` : '';
     const parts = ['running', age ? `${age} open` : '', kb ? `${kb} transcript` : '', hqLinkWord(hp)];
-    if (note && !/refused/.test(note.textContent)) note.textContent = parts.filter(Boolean).join(' · ');
+    if (note && !hqHoldRefusedNote(note)) note.textContent = parts.filter(Boolean).join(' · ');
     if (!hq.running) { hq.running = true; if (startBtn) startBtn.hidden = true; }
     // Reopen whenever the stream is gone (a closed source after an expired
     // token, a page that resumed before its token arrived).
