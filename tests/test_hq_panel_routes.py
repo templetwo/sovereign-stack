@@ -289,3 +289,67 @@ class TestHqRoutes:
         assert p.exists()
         rec = json.loads(p.read_text())
         assert isinstance(rec["ok"], bool) and rec["checked_at"]
+
+
+# ── Task 4: two additive snapshot keys ──────────────────────────────────────
+
+FIRST_19_KEYS = [
+    "timestamp",
+    "connectivity",
+    "halts_count",
+    "decisions_count",
+    "unacked_honks",
+    "unacked_signals",
+    "listener_stale",
+    "latest",
+    "feed",
+    "service_telemetry",
+    "watchman",
+    "spiral",
+    "self_model",
+    "guardian",
+    "open_threads",
+    "arrival_gate",
+    "bridge_heartbeat",
+    "lineage",
+    "open_threads_index",
+]
+
+
+class TestSnapshotKeys:
+    def test_two_new_keys_append_at_the_end(self, running_server, panel_env):
+        host, port = running_server
+        _, body, _ = _req(f"http://{host}:{port}/snapshot.json")
+        keys = list(json.loads(body).keys())
+        assert keys[-2:] == ["honk_counts", "hq_panel"]
+        assert keys[:19] == FIRST_19_KEYS
+
+    def test_honk_counts_are_two_labelled_numbers_never_folded(
+        self, running_server, panel_env, monkeypatch
+    ):
+        host, port = running_server
+        field = {"ingestion": "ok", "by_source": {"honk": 34, "watchman": 5}}
+        monkeypatch.setattr(web, "heartbeat_field", lambda: field)
+        _, body, _ = _req(f"http://{host}:{port}/snapshot.json")
+        snap = json.loads(body)
+        hc = snap["honk_counts"]
+        assert hc["all_time_unacked"] == snap["unacked_honks"]
+        assert hc["ledger_open"] == 34 and hc["ledger_since"] == "2026-09-07"
+        assert "since the nape daemon began" in hc["all_time_label"]
+        assert "signal ledger" in hc["ledger_label"]
+
+    def test_honk_ledger_count_is_none_when_ledger_blind(
+        self, running_server, panel_env, monkeypatch
+    ):
+        host, port = running_server
+        monkeypatch.setattr(
+            web, "heartbeat_field", lambda: {"ingestion": "never", "by_source": None}
+        )
+        _, body, _ = _req(f"http://{host}:{port}/snapshot.json")
+        assert json.loads(body)["honk_counts"]["ledger_open"] is None
+
+    def test_hq_panel_key_mirrors_status(self, running_server, panel_env):
+        host, port = running_server
+        _, body, _ = _req(f"http://{host}:{port}/snapshot.json")
+        hp = json.loads(body)["hq_panel"]
+        assert hp["running"] is False and hp["listening"] is False and "over_24h" in hp

@@ -457,13 +457,17 @@ def build_snapshot() -> dict:
             "recent_log_lines": dashboard.recent_log_lines(log_path) if log_path else [],
         }
 
+    signals = heartbeat_field()
+    by_source = signals.get("by_source") if isinstance(signals, dict) else None
+    ledger_open = by_source.get("honk") if isinstance(by_source, dict) else None
+
     return {
         "timestamp": state.timestamp,
         "connectivity": state.connectivity_summary,
         "halts_count": state.halts_count,
         "decisions_count": state.decisions_count,
         "unacked_honks": state.unacked_honks,
-        "unacked_signals": heartbeat_field(),
+        "unacked_signals": signals,
         "listener_stale": state.listener_stale,
         "latest": state.latest,
         "feed": _GLOBAL_FEED.to_list(limit=_FEED_LIMIT_IN_SNAPSHOT),
@@ -488,6 +492,21 @@ def build_snapshot() -> dict:
         # must yield null for this key alone, and the renderer branches on
         # null and on status=="absent" separately.
         "open_threads_index": _safe_section(dashboard_readers.read_open_threads_index),
+        # ── Cockpit Phase 2, keys 20 and 21 ──
+        # Two honk numbers, each labelled with what it counts; never folded
+        # into one (Anthony, 2026-10-09). The ledger figure is None, not 0,
+        # when the ledger is blind.
+        "honk_counts": {
+            "all_time_unacked": state.unacked_honks,
+            "all_time_label": (
+                "unacked nape honks since the nape daemon began "
+                "(nape/honks.jsonl against acks.jsonl)"
+            ),
+            "ledger_open": ledger_open if isinstance(ledger_open, int) else None,
+            "ledger_label": "open honk signals in the signal ledger (pacemaker of 2026-09-07)",
+            "ledger_since": "2026-09-07",
+        },
+        "hq_panel": _safe_section(lambda: hq_panel.get_session().status()),
     }
 
 

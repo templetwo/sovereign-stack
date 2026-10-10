@@ -85,7 +85,11 @@ V2_KEYS = [
 # tests/test_dashboard_open_threads_index.py.
 INDEX_KEYS = ["open_threads_index"]
 
-SNAPSHOT_KEYS = LEGACY_KEYS + V2_KEYS + INDEX_KEYS
+# Keys 20 and 21, cockpit Phase 2 (2026-10-09): both honk counts labelled, and
+# the HQ panel's status. Appended, never inserted; see tests/test_hq_panel_routes.py.
+PHASE2_KEYS = ["honk_counts", "hq_panel"]
+
+SNAPSHOT_KEYS = LEGACY_KEYS + V2_KEYS + INDEX_KEYS + PHASE2_KEYS
 
 
 @pytest.fixture(autouse=True)
