@@ -423,3 +423,15 @@ class TestPageFixPass:
         )
         for needle in needles:
             assert needle in js, needle
+
+
+class TestSeat2of3Findings:
+    def test_start_answers_the_spawned_pid_even_for_a_short_lived_child(
+        self, running_server, panel_env, monkeypatch
+    ):
+        host, port = running_server
+        monkeypatch.setenv("HQ_PANEL_COMMAND", json.dumps(["/bin/sh", "-c", "exit 0"]))
+        token = _token(host, port)
+        status, body, _ = _start(host, port, token)
+        assert status == 200, body
+        assert isinstance(json.loads(body)["pid"], int)

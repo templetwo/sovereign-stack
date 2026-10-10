@@ -1117,7 +1117,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._send_json(409, {"error": reason}, cors=False)
             return
         _GLOBAL_FEED.add(dashboard.CAT_DEPLOY, "HQ panel session started")
-        self._send_json(200, {"status": "started", "pid": session.status()["pid"]}, cors=False)
+        # The pid start() spawned, not a second status() read: a child that exits
+        # in that window answered null (seat 2/3, mesh-20261009).
+        self._send_json(200, {"status": "started", "pid": session.last_started_pid}, cors=False)
 
     def _hq_input(self, body: dict) -> None:
         session = hq_panel.get_session()

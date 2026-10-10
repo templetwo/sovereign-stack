@@ -270,3 +270,41 @@ def test_reader_of_an_orphaned_child_never_clears_the_live_session(monkeypatch, 
         assert s.status()["last_exit"] is None
     finally:
         s._terminate_for_tests()
+
+
+def test_start_records_the_spawned_pid_even_if_the_child_exits_at_once(monkeypatch, tmp_path):
+    """Seat 2/3's finding (mesh-20261009): a child that exits before the route reads
+    status() made /hq/start answer pid null. The pid start() spawned must be kept."""
+    monkeypatch.setenv("HQ_PANEL_COMMAND", json.dumps(["/bin/sh", "-c", "exit 0"]))
+    monkeypatch.setenv("HQ_PANEL_CWD", str(tmp_path))
+    s = hq_panel.HQSession(seat_finder=lambda: None)
+    try:
+        ok, reason = s.start(80, 24)
+        assert ok, reason
+        deadline = time.time() + 3
+        while s.running and time.time() < deadline:
+            time.sleep(0.05)
+        assert not s.running
+        pid = s.last_started_pid
+        assert isinstance(pid, int) and pid > 0
+        assert str(pid) in reason
+    finally:
+        s._terminate_for_tests()
+
+
+def test_refusal_for_a_code_tab_seat_names_the_escape(monkeypatch, tmp_path):
+    """Seat 2/3's shrink: keep the wide Code-tab rule, but a 409 for kind=app must
+    tell the operator how to get past it, as the launcher already does."""
+    monkeypatch.setenv("HQ_PANEL_COMMAND", ECHO)
+    monkeypatch.setenv("HQ_PANEL_CWD", str(tmp_path))
+    seat = {
+        "pid": 9,
+        "comm": "claude",
+        "cwd": "/scratch",
+        "exe": "/x/claude.app/Contents/MacOS/claude",
+        "kind": "app",
+    }
+    s = hq_panel.HQSession(seat_finder=lambda: seat)
+    ok, reason = s.start(80, 24)
+    assert not ok
+    assert "close it" in reason and "claude -n HQ" in reason

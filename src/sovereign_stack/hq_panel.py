@@ -122,6 +122,7 @@ class HQSession:
         self._last_exit: int | None = None
         self._transcript_bytes = 0
         self._starting = False
+        self._last_started_pid: int | None = None
 
     # ── configuration ──
     @staticmethod
@@ -151,13 +152,23 @@ class HQSession:
             return self._proc is not None and self._proc.poll() is None
 
     @property
+    def last_started_pid(self) -> int | None:
+        """The pid start() most recently spawned, kept even after that child exits,
+        so a caller that reads it after a short-lived child still gets the pid."""
+        with self._lock:
+            return self._last_started_pid
+
+    @property
     def last_seq(self) -> int:
         with self._lock:
             return self._seq
 
     def start(self, cols: int, rows: int) -> tuple[bool, str]:
-        # The running check, the guard and the spawn are ONE critical section
-        # (review 2026-10-09): two tabs starting at once must get one claude.
+        # Two tabs starting at once must get one claude (review 2026-10-09). The
+        # lock covers the running check and the _starting flag only; the flag is
+        # what serializes the guard and the spawn, which run after the lock is
+        # released because the guard shells out to ps and lsof (seat 2/3,
+        # mesh-20261009). A second start is refused, never queued.
         with self._lock:
             if self._proc is not None and self._proc.poll() is None:
                 return False, f"a panel session is already running (pid {self._proc.pid})"
@@ -173,11 +184,20 @@ class HQSession:
     def _start_locked_out(self, cols: int, rows: int) -> tuple[bool, str]:
         seat = self._seat_finder()
         if seat:
-            return (
-                False,
+            reason = (
                 f"an HQ seat is already live: pid {seat['pid']} ({seat['kind']}, "
-                f"cwd {seat['cwd']}); not starting a second seat",
+                f"cwd {seat['cwd']}); not starting a second seat"
             )
+            if seat.get("kind") == "app":
+                # Any interactive Code-tab session counts, on any project (its cwd
+                # cannot tell HQ from another session). The refusal carries the
+                # launcher's own escape so the console button is not just dead
+                # (seat 2/3, mesh-20261009).
+                reason += (
+                    "; if that Claude app Code-tab session is not HQ, close it, or start HQ "
+                    "by hand with: cd ~ && claude -n HQ '/hq-boot'"
+                )
+            return False, reason
         cols = max(20, min(500, int(cols)))
         rows = max(5, min(200, int(rows)))
         master, slave = pty.openpty()
@@ -201,6 +221,7 @@ class HQSession:
         os.close(slave)
         with self._lock:
             self._proc, self._fd = proc, master
+            self._last_started_pid = proc.pid
             self._started_at = time.time()
             self._last_exit = None
             self._buf.clear()
