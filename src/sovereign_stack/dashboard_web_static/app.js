@@ -1853,8 +1853,9 @@ function hqIsFocusKey(ev) {
 }
 
 // ── Terminal text size (cockpit integration, 2026-10-10) ──
-// Buttons and Ctrl+Shift+= / Ctrl+Shift+- (by ev.code, like the focus key),
-// caught before xterm turns them into bytes. Every change refits and posts the
+// Buttons only. No key chord: Ctrl+Shift+- is Ctrl+_, the undo binding of
+// Claude Code and readline, so a chord would steal it (review 2026-10-10).
+// Ctrl+Shift+F (focus) is the one chord the panel keeps. Every change refits and posts the
 // size through hqRefit(true): the person just acted here. Remembered per
 // viewer in localStorage; a missing or blocked store falls back to 13.
 const HQ_FONT_MIN = 9, HQ_FONT_MAX = 24, HQ_FONT_DEFAULT = 13;
@@ -1873,14 +1874,6 @@ function hqSetFontSize(n) {
   hq.term.options.fontSize = v;
   try { localStorage.setItem(HQ_FONT_KEY, String(v)); } catch (_) { /* blocked */ }
   hqRefit(true);
-}
-
-// +1, -1, or 0 for a keydown that is not a font key.
-function hqFontKeyStep(ev) {
-  if (ev.type !== 'keydown' || !ev.ctrlKey || !ev.shiftKey || ev.altKey || ev.metaKey) return 0;
-  if (ev.code === 'Equal' || ev.code === 'NumpadAdd') return 1;
-  if (ev.code === 'Minus' || ev.code === 'NumpadSubtract') return -1;
-  return 0;
 }
 
 // ── Copy on select ──
@@ -2104,12 +2097,6 @@ function initHqPanel() {
       if (!ev.repeat) hqSetFocus(!hq.focused);
       return false;
     }
-    const step = hqFontKeyStep(ev);
-    if (step) {
-      ev.preventDefault();
-      hqSetFontSize(hq.term.options.fontSize + step);
-      return false;
-    }
     return true;
   });
   hq.term.onSelectionChange(hqCopySelection);
@@ -2118,11 +2105,6 @@ function initHqPanel() {
     if (hqIsFocusKey(ev) && !host.contains(ev.target)) {
       ev.preventDefault();
       if (!ev.repeat) hqSetFocus(!hq.focused);
-    }
-    const step = hqFontKeyStep(ev);
-    if (step && !host.contains(ev.target)) {
-      ev.preventDefault();
-      hqSetFontSize(hq.term.options.fontSize + step);
     }
   });
   hqInitDrop(host);

@@ -549,9 +549,6 @@ class TestPolish:
         assert 'id="hq-font-down"' in html and 'id="hq-font-up"' in html
         for needle in (
             "function hqSetFontSize",
-            "function hqFontKeyStep",
-            "ev.code === 'Equal'",
-            "ev.code === 'Minus'",
             "hq.term.options.fontSize = v;",
             "hqRefit(true);",
             "const HQ_FONT_KEY = 'ss-hq-font';",
@@ -559,8 +556,14 @@ class TestPolish:
         ):
             assert needle in js, needle
         # localStorage is touched only inside try blocks in the font helpers.
-        body = js[js.index("function hqSavedFontSize") : js.index("function hqFontKeyStep")]
-        assert body.count("localStorage.") == body.count("try { ") == 2
+        body = js[js.index("function hqSavedFontSize") : js.index("function hqSetFontSize")]
+        assert body.count("localStorage.") == body.count("try { ") == 1
+        setter = js[js.index("function hqSetFontSize") : js.index("// ── Copy on select")]
+        assert setter.count("localStorage.") == setter.count("try { ") == 1
+        # Buttons only: no font chord (Ctrl+Shift+- is Ctrl+_, undo).
+        assert "hqFontKeyStep" not in js
+        assert "'Equal'" not in js and "'Minus'" not in js and "NumpadSubtract" not in js
+        assert "Ctrl+Shift+-" not in html and "Ctrl+Shift+=" not in html
         # The focus key is unchanged.
         assert "ev.code === 'KeyF'" in js
 
