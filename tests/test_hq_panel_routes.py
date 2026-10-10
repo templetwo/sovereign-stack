@@ -405,3 +405,21 @@ class TestPageAssets:
     def test_style_has_panel_hq(self):
         css = (STATIC / "style.css").read_text()
         assert ".panel-hq" in css and "#hq-term" in css
+
+
+class TestPageFixPass:
+    """Review fix pass: token refresh, stream reopen, resume, serial input, start param."""
+
+    def test_app_js_refreshes_token_reopens_stream_and_queues_input(self):
+        js = (STATIC / "app.js").read_text()
+        needles = (
+            "function refreshCsrf",
+            "readyState === EventSource.CLOSED",
+            "function hqPostWithRetry",
+            "function hqFlushInput",
+            "history.replaceState",
+            "hp.running && !hq.es",
+            "input refused",
+        )
+        for needle in needles:
+            assert needle in js, needle

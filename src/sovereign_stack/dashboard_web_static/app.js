@@ -276,6 +276,16 @@ function initCsrf() {
     .catch(() => { /* /session not deployed yet — token stays empty */ });
 }
 
+// Re-mint the page's CSRF token (review 2026-10-09): the token has a 30-minute
+// server TTL and a terminal panel is used for hours. Called on a timer, before
+// every stream open, and once on a csrf 403.
+function refreshCsrf() {
+  return fetch('/session', { cache: 'no-store' })
+    .then((r) => (r.ok ? r.json() : null))
+    .then((data) => { if (data) csrfToken = data.csrf_token || data.token || data.csrfToken || csrfToken; })
+    .catch(() => { /* keep the token we have */ });
+}
+
 async function postAction(path, body) {
   const headers = { 'Content-Type': 'application/json' };
   if (csrfToken) headers['X-CSRF-Token'] = csrfToken;
@@ -1747,7 +1757,10 @@ function synthesizeEvents(snapshot) {
 // chunks with sequence ids; a reload replays the buffer. Input goes by POST
 // on the §2a substrate. The stream carries the page's CSRF token as a query
 // parameter because EventSource cannot set headers.
-const hq = { term: null, fit: null, es: null, lastSeq: 0, running: false, collapsed: false };
+const hq = {
+  term: null, fit: null, es: null, lastSeq: 0, running: false, collapsed: false,
+  pending: '', inflight: false, resumedResize: false,
+};
 
 function hqB64ToBytes(b64) {
   const bin = atob(b64);
@@ -1763,8 +1776,40 @@ function hqBytesToB64(str) {
   return btoa(bin);
 }
 
-function hqOpenStream() {
+function hqNote(text) {
+  const note = $('hq-note');
+  if (note) note.textContent = text;
+}
+
+// POST on the substrate; on a csrf 403 re-mint the token and retry once.
+async function hqPostWithRetry(path, body) {
+  let res = await postAction(path, body);
+  if (res && res.status === 403 && res.data && /csrf/i.test(res.data.error || '')) {
+    await refreshCsrf();
+    res = await postAction(path, body);
+  }
+  return res;
+}
+
+// Serial input queue: one POST in flight, later keystrokes coalesce into the
+// next one, so bytes reach the pty in the order they were typed.
+async function hqFlushInput() {
+  if (hq.inflight || !hq.pending || !hq.running) return;
+  const chunk = hq.pending;
+  hq.pending = '';
+  hq.inflight = true;
+  try {
+    const res = await hqPostWithRetry('/hq/input', { data: hqBytesToB64(chunk) });
+    if (!res || !res.ok) hqNote(`input refused (${res ? res.status : 'no response'})`);
+  } finally {
+    hq.inflight = false;
+    if (hq.pending) hqFlushInput();
+  }
+}
+
+async function hqOpenStream() {
   if (hq.es) { hq.es.close(); hq.es = null; }
+  await refreshCsrf();
   if (!csrfToken) return;
   const es = new EventSource(`/hq/stream?token=${encodeURIComponent(csrfToken)}&after=${hq.lastSeq}`);
   es.addEventListener('hello', (ev) => {
@@ -1784,22 +1829,32 @@ function hqOpenStream() {
     es.close(); hq.es = null; hq.running = false;
     const btn = $('hq-start'); if (btn) btn.hidden = false;
   });
-  es.onerror = () => { /* the browser retries; the status poll re-syncs */ };
+  es.onerror = () => {
+    // A non-200 (an expired token) closes the source for good; drop it so the
+    // status poll reopens a fresh stream with a fresh token.
+    if (es.readyState === EventSource.CLOSED) { hq.es = null; }
+  };
   hq.es = es;
 }
 
 async function hqStart() {
   if (!hq.term) return;
   const cols = hq.term.cols, rows = hq.term.rows;
-  const res = await postAction('/hq/start', { cols, rows });
+  const res = await hqPostWithRetry('/hq/start', { cols, rows });
   if (!res || !res.ok) {
-    const note = $('hq-note');
-    if (note) note.textContent = (res && res.data && res.data.error) || 'start refused';
+    hqNote((res && res.data && res.data.error) || 'start refused');
     return;
   }
   hq.running = true;
   const btn = $('hq-start'); if (btn) btn.hidden = true;
   hqOpenStream();
+}
+
+function hqTokenReady() {
+  return new Promise((resolve) => {
+    const tick = () => { if (csrfToken) resolve(); else setTimeout(tick, 100); };
+    tick();
+  });
 }
 
 function initHqPanel() {
@@ -1814,12 +1869,13 @@ function initHqPanel() {
   if (hq.fit) hq.fit.fit();
   hq.term.onData((data) => {
     if (!hq.running) return;
-    postAction('/hq/input', { data: hqBytesToB64(data) });
+    hq.pending += data;
+    hqFlushInput();
   });
   window.addEventListener('resize', () => {
     if (!hq.fit || hq.collapsed) return;
     hq.fit.fit();
-    if (hq.running) postAction('/hq/resize', { cols: hq.term.cols, rows: hq.term.rows });
+    if (hq.running) hqPostWithRetry('/hq/resize', { cols: hq.term.cols, rows: hq.term.rows });
   });
   const startBtn = $('hq-start');
   if (startBtn) startBtn.addEventListener('click', hqStart);
@@ -1831,16 +1887,22 @@ function initHqPanel() {
     collapseBtn.setAttribute('aria-expanded', String(!hq.collapsed));
     if (!hq.collapsed && hq.fit) hq.fit.fit();
   });
-  // Resume an existing session, or auto-start when the launcher asked for it.
-  fetch('/hq/status', { cache: 'no-store' }).then((r) => r.json()).then((st) => {
+  setInterval(refreshCsrf, 20 * 60 * 1000);
+  // Wait for the token, then resume an existing session or auto-start when the
+  // launcher asked for it. The start parameter is consumed once: a reload or a
+  // browser session restore must not start HQ again on its own.
+  hqTokenReady().then(() => fetch('/hq/status', { cache: 'no-store' })).then((r) => r.json()).then((st) => {
+    const params = new URLSearchParams(window.location.search);
+    const wantStart = params.get('start') === 'hq';
+    if (wantStart) {
+      params.delete('start');
+      const qs = params.toString();
+      history.replaceState({}, '', window.location.pathname + (qs ? `?${qs}` : ''));
+    }
     if (st && st.running) {
       hq.running = true; if (startBtn) startBtn.hidden = true; hqOpenStream(); return;
     }
-    const wantStart = new URLSearchParams(window.location.search).get('start') === 'hq';
-    if (wantStart) {
-      const tryStart = () => { if (csrfToken) hqStart(); else setTimeout(tryStart, 100); };
-      tryStart();
-    }
+    if (wantStart) hqStart();
   }).catch(() => { /* status unreachable: the poll will say so */ });
 }
 
@@ -1855,14 +1917,20 @@ function renderHqPanel(snapshot) {
     const kb = hp.transcript_bytes != null ? `${(hp.transcript_bytes / 1024).toFixed(0)} KB` : '';
     const parts = ['running', age ? `${age} open` : '', kb ? `${kb} transcript` : '',
       hp.listening ? 'listening' : 'not listening (Phase 3)'];
-    if (note) note.textContent = parts.filter(Boolean).join(' · ');
-    if (!hq.running) {
-      hq.running = true; if (startBtn) startBtn.hidden = true; if (!hq.es) hqOpenStream();
+    if (note && !/refused/.test(note.textContent)) note.textContent = parts.filter(Boolean).join(' · ');
+    if (!hq.running) { hq.running = true; if (startBtn) startBtn.hidden = true; }
+    // Reopen whenever the stream is gone (a closed source after an expired
+    // token, a page that resumed before its token arrived).
+    if (hp.running && !hq.es && csrfToken) hqOpenStream();
+    if (!hq.resumedResize && hq.term && csrfToken) {
+      hq.resumedResize = true;
+      hqPostWithRetry('/hq/resize', { cols: hq.term.cols, rows: hq.term.rows });
     }
   } else {
     if (note) note.textContent = hp.last_exit != null ? `not running (last exit ${hp.last_exit})` : 'not running';
     if (startBtn) startBtn.hidden = false;
     hq.running = false;
+    hq.resumedResize = false;
   }
   if (banner) banner.hidden = !hp.over_24h;
 }

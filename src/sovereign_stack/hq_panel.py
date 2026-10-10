@@ -121,6 +121,7 @@ class HQSession:
         self._started_at: float | None = None
         self._last_exit: int | None = None
         self._transcript_bytes = 0
+        self._starting = False
 
     # ── configuration ──
     @staticmethod
@@ -155,9 +156,21 @@ class HQSession:
             return self._seq
 
     def start(self, cols: int, rows: int) -> tuple[bool, str]:
+        # The running check, the guard and the spawn are ONE critical section
+        # (review 2026-10-09): two tabs starting at once must get one claude.
         with self._lock:
             if self._proc is not None and self._proc.poll() is None:
                 return False, f"a panel session is already running (pid {self._proc.pid})"
+            if self._starting:
+                return False, "a panel session is already starting"
+            self._starting = True
+        try:
+            return self._start_locked_out(cols, rows)
+        finally:
+            with self._lock:
+                self._starting = False
+
+    def _start_locked_out(self, cols: int, rows: int) -> tuple[bool, str]:
         seat = self._seat_finder()
         if seat:
             return (
@@ -242,14 +255,17 @@ class HQSession:
         finally:
             code = proc.wait()
             with self._cond:
-                self._last_exit = code
-                self._proc = None
                 with contextlib.suppress(OSError):
                     os.close(fd)
-                self._fd = None
-                # A final tick so streams waiting on wait_for wake and see running=False.
-                self._seq += 1
-                self._cond.notify_all()
+                # Only the reader of the LIVE process clears the session (review
+                # 2026-10-09): a reader for any other child must not flip it.
+                if self._proc is proc:
+                    self._last_exit = code
+                    self._proc = None
+                    self._fd = None
+                    # A final tick so streams waiting on wait_for wake and see running=False.
+                    self._seq += 1
+                    self._cond.notify_all()
 
     def replay(self, after: int) -> tuple[list[tuple[int, bytes]], int | None]:
         with self._lock:

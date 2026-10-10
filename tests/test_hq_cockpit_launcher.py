@@ -55,6 +55,12 @@ def arg_after(flag):
 if name == "curl":
     if "/hq/status" in argv[-1]:
         st = state / "hq_status"
+        c_file = state / "hq_status_count"
+        c = int(c_file.read_text()) + 1 if c_file.exists() else 1
+        c_file.write_text(str(c))
+        if (state / "panel_starts_late").exists() and c > 20:
+            print('{"running": true, "pid": 9002}')
+            sys.exit(0)
         print(st.read_text() if st.exists() else '{"running": false}')
         sys.exit(0)
     n_file = state / "curl_count"
@@ -522,3 +528,14 @@ def test_default_mode_is_panel(h):
     assert r.returncode == 0, r.stdout + r.stderr
     assert h.do_script_count() == 0
     assert [c["argv"] for c in h.calls("open")] == [["http://127.0.0.1:3435/?start=hq"]]
+
+
+def test_panel_mode_rechecks_before_falling_back_when_the_panel_started_late(h):
+    """Review finding (Important 2): the page's start may land after the 10 s window;
+    the launcher must look again before it starts a Terminal seat."""
+    h.scenario()
+    (h.state / "panel_starts_late").write_text("1")
+    r = h.run(env_extra={"HQ_COCKPIT_MODE": "panel"})
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert h.do_script_count() == 0, r.stdout
+    assert "started late" in r.stdout

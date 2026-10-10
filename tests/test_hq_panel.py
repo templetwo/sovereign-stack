@@ -219,3 +219,54 @@ def test_find_live_hq_seat_rules(monkeypatch):
     seat2 = hq_panel.find_live_hq_seat(home=home, exclude_pids={12})
     assert seat2["pid"] == 13 and seat2["kind"] == "app"
     assert hq_panel.find_live_hq_seat(home=home, exclude_pids={12, 13}) is None
+
+
+def test_two_concurrent_starts_spawn_exactly_one_child(monkeypatch, tmp_path):
+    """Review finding (Important 1): the running check, the guard and the spawn must be
+    one critical section, or two tabs starting at once get two claudes."""
+    import threading
+
+    monkeypatch.setenv("HQ_PANEL_COMMAND", ECHO)
+    monkeypatch.setenv("HQ_PANEL_CWD", str(tmp_path))
+
+    def slow_guard():
+        time.sleep(0.3)
+        return
+
+    s = hq_panel.HQSession(seat_finder=slow_guard)
+    results = []
+
+    def go():
+        results.append(s.start(80, 24))
+
+    threads = [threading.Thread(target=go) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(5)
+    try:
+        oks = [ok for ok, _ in results]
+        assert oks.count(True) == 1, results
+        assert any("already" in reason for ok, reason in results if not ok), results
+        assert s.running
+    finally:
+        s._terminate_for_tests()
+
+
+def test_reader_of_an_orphaned_child_never_clears_the_live_session(monkeypatch, tmp_path):
+    """The reader's cleanup must only clear state for ITS process."""
+    monkeypatch.setenv("HQ_PANEL_COMMAND", ECHO)
+    monkeypatch.setenv("HQ_PANEL_CWD", str(tmp_path))
+    s = hq_panel.HQSession(seat_finder=lambda: None)
+    try:
+        assert s.start(80, 24)[0]
+        live = s._proc
+        import subprocess
+
+        other = subprocess.Popen(["/bin/sh", "-c", "exit 3"])
+        fd = os.open(os.devnull, os.O_RDONLY)
+        s._read_loop(fd, other)  # a reader for a process that is NOT the session's
+        assert s._proc is live and s.running
+        assert s.status()["last_exit"] is None
+    finally:
+        s._terminate_for_tests()

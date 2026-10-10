@@ -168,6 +168,10 @@ elif [ "$MODE" = panel ]; then
   for _ in $(seq 1 20); do panel_running && { started=1; break; }; sleep 0.5; done
   if [ "$started" = 1 ]; then
     echo "HQ is running in the console panel."
+  elif panel_running || hq_running; then
+    # The page's start may land after the window (review 2026-10-09): look again
+    # before starting a Terminal seat, or two seats share one outbox.
+    echo "HQ started late (the panel or another seat came up during the wait); not starting a Terminal seat."
   else
     echo "The panel did not start HQ within 10 s; falling back to Terminal."
     osascript <<'APPLESCRIPT'
