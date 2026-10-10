@@ -1992,8 +1992,8 @@ async function hqStart() {
 // A file dragged onto the terminal used to reach HQ as a Finder icon, not the
 // bytes. Each dropped File is POSTed raw to /hq/drop (same §2a substrate as
 // /hq/input); the server writes it under ~/.local/share/hq-cockpit/drops/ and
-// answers its absolute path, which goes into the SAME input queue as the
-// keystrokes so it lands at the prompt in order. The server's checks are the
+// answers its absolute path, which is pasted through xterm (onData, the SAME
+// input queue as the keystrokes) so it lands at the prompt in order. The server's checks are the
 // rule; the ones here only spare a doomed upload.
 const HQ_DROP_MAX_BYTES = 25 * 1024 * 1024;
 const HQ_DROP_EXT = new Set(['txt', 'md', 'json', 'jsonl', 'csv', 'log', 'png', 'jpg', 'jpeg', 'gif',
@@ -2035,8 +2035,10 @@ async function hqDropFiles(files) {
       hqNote(`drop refused: ${file.name} (${why})`);
       continue;
     }
-    hq.pending += `${res.data.path} `;
-    hqFlushInput();
+    // Pasted, not typed: xterm wraps it in bracketed-paste markers when the
+    // app has that mode on, and it still arrives through onData and the
+    // pending queue, in order with the keystrokes.
+    if (hq.term) hq.term.paste(`${res.data.path} `);
     // Cleared by the next poll's renderHqPanel, which rewrites the note.
     hqNote(`dropped ${res.data.name}, ${res.data.bytes} B`);
   }

@@ -589,12 +589,14 @@ class TestPolish:
             "function hqInitDrop",
             "'/hq/drop'",
             "'X-Filename': encodeURIComponent(file.name)",
-            "hq.pending += `${res.data.path} `;",
+            "hq.term.paste(`${res.data.path} `)",
             "dropped ${res.data.name}, ${res.data.bytes} B",
             "ev.preventDefault();  // else the browser navigates to the dropped file",
         ):
             assert needle in js, needle
         assert re.search(r"\.innerHTML\s*=", js) is None
+        drop = js[js.index("async function hqDropFiles") : js.index("function hqIsFileDrag")]
+        assert "hq.pending +=" not in drop  # pasted, never typed
 
     def test_hq_buttons_have_a_style(self):
         css = (STATIC / "style.css").read_text()
