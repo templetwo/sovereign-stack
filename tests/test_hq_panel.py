@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 import time
+from pathlib import Path
 
 import pytest
 
@@ -308,3 +309,84 @@ def test_refusal_for_a_code_tab_seat_names_the_escape(monkeypatch, tmp_path):
     ok, reason = s.start(80, 24)
     assert not ok
     assert "close it" in reason and "claude -n HQ" in reason
+
+
+PROBE = (
+    "import os, signal, sys, time\n"
+    "out = open(sys.argv[1], 'w')\n"
+    "try:\n"
+    "    os.close(os.open('/dev/tty', os.O_RDWR))\n"
+    "    out.write('devtty=OK\\n')\n"
+    "except OSError as e:\n"
+    "    out.write('devtty=FAIL %s\\n' % e.errno)\n"
+    "out.flush()\n"
+    "signal.signal(signal.SIGHUP, lambda *_: (out.write('HUP\\n'), out.flush(), os._exit(129)))\n"
+    "out.write('READY\\n'); out.flush()\n"
+    "time.sleep(10)\n"
+    "out.write('TIMEOUT\\n'); out.flush()\n"
+)
+
+
+def _wait_for(path, needle, timeout=4.0):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if path.exists() and needle in path.read_text():
+            return path.read_text()
+        time.sleep(0.05)
+    return path.read_text() if path.exists() else ""
+
+
+def test_raw_child_has_a_controlling_terminal(monkeypatch, tmp_path):
+    """Seat 3/3's G2 measurement (mesh-20261009, helix 53718): under the original spawn a
+    /bin/sh child acquired the terminal by itself but a raw non-shell child did not
+    (/dev/tty ENXIO). The panel's `claude` is the raw case, so the spawn must make the
+    pty the child's controlling terminal (TIOCSCTTY)."""
+    import sys
+
+    probe = tmp_path / "probe.py"
+    probe.write_text(PROBE)
+    receipt = tmp_path / "receipt.txt"
+    monkeypatch.setenv("HQ_PANEL_COMMAND", json.dumps([sys.executable, str(probe), str(receipt)]))
+    monkeypatch.setenv("HQ_PANEL_CWD", str(tmp_path))
+    s = hq_panel.HQSession(seat_finder=lambda: None)
+    try:
+        assert s.start(80, 24)[0]
+        text = _wait_for(receipt, "READY")
+        assert "devtty=OK" in text, text
+    finally:
+        s._terminate_for_tests()
+
+
+def test_raw_child_gets_hup_when_the_console_process_dies(tmp_path):
+    """Seat 3/3's second finding: with no controlling terminal the raw child outlived a
+    closed master. The console is a separate process, so its death is simulated by a
+    driver process that starts the session and exits; the kernel must HUP the child."""
+    import subprocess
+    import sys
+
+    probe = tmp_path / "probe.py"
+    probe.write_text(PROBE)
+    receipt = tmp_path / "receipt.txt"
+    driver = tmp_path / "driver.py"
+    driver.write_text(
+        "import json, os, sys, time\n"
+        "from sovereign_stack import hq_panel\n"
+        "s = hq_panel.HQSession(seat_finder=lambda: None)\n"
+        "ok, reason = s.start(80, 24)\n"
+        "assert ok, reason\n"
+        "deadline = time.time() + 4\n"
+        "while time.time() < deadline:\n"
+        "    p = sys.argv[1]\n"
+        "    if os.path.exists(p) and 'READY' in open(p).read():\n"
+        "        break\n"
+        "    time.sleep(0.05)\n"
+        "os._exit(0)  # the console dies: every fd closes, the master included\n"
+    )
+    env = dict(os.environ)
+    env["HQ_PANEL_COMMAND"] = json.dumps([sys.executable, str(probe), str(receipt)])
+    env["HQ_PANEL_CWD"] = str(tmp_path)
+    src = str(Path(hq_panel.__file__).resolve().parent.parent)
+    env["PYTHONPATH"] = src + os.pathsep + env.get("PYTHONPATH", "")
+    subprocess.run([sys.executable, str(driver), str(receipt)], env=env, timeout=15, check=True)
+    text = _wait_for(receipt, "HUP")
+    assert "devtty=OK" in text and "HUP" in text and "TIMEOUT" not in text, text

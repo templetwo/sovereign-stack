@@ -98,6 +98,16 @@ def chat_db_readable(path: Path | None = None) -> bool:
         return False
 
 
+def _acquire_controlling_tty() -> None:
+    """Runs in the child after setsid (start_new_session) and before exec: make the pty
+    slave on fd 0 the controlling terminal. Seat 3/3 measured (mesh-20261009) that a
+    shell child acquires the terminal by itself but a raw non-shell child, which is
+    what `claude` is, does not: /dev/tty failed with ENXIO and a closed console left
+    the child alive with no SIGHUP. This is what the stdlib's own pty.fork does."""
+    with contextlib.suppress(OSError):
+        fcntl.ioctl(0, termios.TIOCSCTTY, 0)
+
+
 def _utc(ts: float | None) -> str | None:
     if ts is None:
         return None
@@ -213,6 +223,7 @@ class HQSession:
                 env=env,
                 start_new_session=True,
                 close_fds=True,
+                preexec_fn=_acquire_controlling_tty,
             )
         except OSError as e:
             os.close(master)
