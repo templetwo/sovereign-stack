@@ -828,10 +828,17 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
         if path.startswith("/static/"):
             name = path[len("/static/") :]
-            # Path traversal guard.
-            if "/" in name or ".." in name or name.startswith("."):
+            # Path traversal guard. One subdirectory is allowed, `vendor/`,
+            # which holds the pinned xterm.js files (Phase 2 of the cockpit);
+            # any other slash, any `..`, any dotfile, and an empty segment stay 404.
+            if ".." in name or name.startswith(".") or not name:
                 self._send_json(404, {"error": "not found"})
                 return
+            if "/" in name:
+                head, _, tail = name.partition("/")
+                if head != "vendor" or not tail or "/" in tail or tail.startswith("."):
+                    self._send_json(404, {"error": "not found"})
+                    return
             body = _read_static(name)
             if body is None:
                 self._send_json(404, {"error": "not found"})
