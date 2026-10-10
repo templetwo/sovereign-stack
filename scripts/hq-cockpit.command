@@ -45,6 +45,18 @@ CONSOLE_LOG="${HQ_COCKPIT_CONSOLE_LOG:-$HOME/.cache/sovereign-dashboard/web.log}
 CONSOLE_PORT="${CONSOLE_URL##*:}"   # HQ review (draft 3): the last-resort nohup follows the URL's port
 DOMAIN="gui/$(id -u)"
 
+# Phase 2 (2026-10-09): HQ starts INSIDE the console's terminal panel by default. The page
+# starts it with its own security token when opened with ?start=hq; this script only waits
+# for /hq/status to say running, and falls back to a Terminal seat if it never does.
+# HQ_COCKPIT_MODE=terminal keeps the Phase 1 behaviour (HQ in a Terminal window).
+MODE="${HQ_COCKPIT_MODE:-panel}"
+[ "$MODE" != "terminal" ] && MODE=panel
+OPENED=0
+
+panel_running() {
+  curl -s --max-time 2 "$CONSOLE_URL/hq/status" | grep -qE '"running": *true'
+}
+
 console_up() {
   # HQ review (draft 3): match the status field, not the bare word, so a body that merely
   # mentions "healthy" (for example "healthy": false) does not read as up.
@@ -144,6 +156,27 @@ if hq_running; then
     echo "HQ is already running in Terminal (pid $HQ_PID). Bringing Terminal forward instead of starting a second seat."
     osascript -e 'tell application "Terminal" to activate'
   fi
+elif [ "$MODE" = panel ]; then
+  if [ "$DRY_RUN" = 1 ]; then
+    say "hq: none found; would open $CONSOLE_URL/?start=hq and wait up to 10 s for /hq/status running=true; would fall back to Terminal (cd ~ && claude -n HQ '/hq-boot') if the panel does not start"
+    exit 0
+  fi
+  echo "Starting HQ inside the console..."
+  open "$CONSOLE_URL/?start=hq"
+  OPENED=1
+  started=0
+  for _ in $(seq 1 20); do panel_running && { started=1; break; }; sleep 0.5; done
+  if [ "$started" = 1 ]; then
+    echo "HQ is running in the console panel."
+  else
+    echo "The panel did not start HQ within 10 s; falling back to Terminal."
+    osascript <<'APPLESCRIPT'
+tell application "Terminal"
+  activate
+  do script "cd ~ && claude -n HQ '/hq-boot'"
+end tell
+APPLESCRIPT
+  fi
 elif [ "$DRY_RUN" = 1 ]; then
   say "hq: none found; would start HQ in Terminal: cd ~ && claude -n HQ '/hq-boot'"
 else
@@ -163,4 +196,4 @@ if [ "$DRY_RUN" = 1 ]; then
   say "browser: would open $CONSOLE_URL"
   exit 0
 fi
-open "$CONSOLE_URL"
+[ "$OPENED" = 1 ] || open "$CONSOLE_URL"

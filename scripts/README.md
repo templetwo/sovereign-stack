@@ -53,6 +53,8 @@ rather than a loose copy elsewhere, so it stays the reviewed, tested version. Te
 
 ## Session Capture Scripts
 
+**Phase 2 (2026-10-09):** by default HQ starts inside the console's terminal panel (the launcher opens the console with `?start=hq` and waits for `/hq/status` to report running). Set `HQ_COCKPIT_MODE=terminal` to keep HQ in a Terminal window. If the panel does not report running within 10 s, the launcher falls back to Terminal.
+
 ### quick_capture.py (Recommended)
 **Use this when:** Claude Desktop or remote Claude sessions can't connect to the stack directly.
 

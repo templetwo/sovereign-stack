@@ -53,6 +53,10 @@ def arg_after(flag):
     return argv[argv.index(flag) + 1] if flag in argv else None
 
 if name == "curl":
+    if "/hq/status" in argv[-1]:
+        st = state / "hq_status"
+        print(st.read_text() if st.exists() else '{"running": false}')
+        sys.exit(0)
     n_file = state / "curl_count"
     n = int(n_file.read_text()) + 1 if n_file.exists() else 1
     n_file.write_text(str(n))
@@ -107,6 +111,10 @@ elif name == "osascript":
 elif name == "nohup":
     (state / "nohup_started").write_text("1")
     sys.exit(0)
+elif name == "open":
+    if argv and "start=hq" in argv[-1] and (state / "panel_starts").exists():
+        (state / "hq_status").write_text('{"running": true, "pid": 9001}')
+    sys.exit(0)
 elif name == "sudo":
     sys.exit(1)
 sys.exit(0)
@@ -156,6 +164,8 @@ class Harness:
             "HQ_COCKPIT_CONSOLE_PLIST": str(self.plist),
             "HQ_COCKPIT_CONSOLE_BIN": str(self.home / "fake-console-bin"),
             "HQ_COCKPIT_CONSOLE_LOG": str(self.log),
+            # Phase 1 cases pin the Terminal path; panel-mode tests override this.
+            "HQ_COCKPIT_MODE": "terminal",
         }
         env.update(env_extra or {})
         return subprocess.run(
@@ -196,10 +206,10 @@ def h(tmp_path):
     return Harness(tmp_path)
 
 
-def dry(h: Harness) -> str:
+def dry(h: Harness, env_extra=None) -> str:
     """Run --dry-run, assert it acted on nothing, return stdout. Resets the call log."""
     h.reset_calls()
-    r = h.run("--dry-run")
+    r = h.run("--dry-run", env_extra=env_extra)
     assert r.returncode == 0, r.stdout + r.stderr
     assert_no_action(h)
     h.reset_calls()
@@ -463,3 +473,52 @@ def test_dry_run_acts_on_nothing(h, sc, how):
     assert_no_action(h)
     assert "[dry-run] browser: would open" in r.stdout
     assert not h.log.parent.exists()
+
+
+# ── Phase 2: the launcher starts HQ through the console panel ───────────────
+
+
+def test_panel_mode_opens_start_url_and_waits_then_no_terminal(h):
+    h.scenario()
+    (h.state / "panel_starts").write_text("1")
+    r = h.run(env_extra={"HQ_COCKPIT_MODE": "panel"})
+    assert r.returncode == 0, r.stdout + r.stderr
+    opens = [c["argv"] for c in h.calls("open")]
+    assert opens == [["http://127.0.0.1:3435/?start=hq"]]
+    assert h.do_script_count() == 0
+    assert any("/hq/status" in c["argv"][-1] for c in h.calls("curl"))
+
+
+def test_panel_mode_falls_back_to_terminal_when_panel_never_starts(h):
+    h.scenario()
+    r = h.run(env_extra={"HQ_COCKPIT_MODE": "panel"})
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert h.do_script_count() == 1
+    assert "falling back to Terminal" in r.stdout
+    opens = [c["argv"] for c in h.calls("open")]
+    assert opens == [["http://127.0.0.1:3435/?start=hq"]]
+
+
+def test_panel_mode_with_hq_live_brings_it_forward_and_opens_console(h):
+    h.scenario(procs=[h.proc(501, args="claude -n HQ /hq-boot")])
+    r = h.run(env_extra={"HQ_COCKPIT_MODE": "panel"})
+    assert r.returncode == 0
+    assert h.do_script_count() == 0 and h.activate_only_count() == 1
+    assert [c["argv"] for c in h.calls("open")] == [["http://127.0.0.1:3435"]]
+
+
+def test_panel_mode_dry_run_names_both_paths(h):
+    h.scenario()
+    out = dry(h, env_extra={"HQ_COCKPIT_MODE": "panel"})
+    assert "would open http://127.0.0.1:3435/?start=hq" in out
+    assert "fall back to Terminal" in out
+    assert h.calls("open") == [] and h.do_script_count() == 0
+
+
+def test_default_mode_is_panel(h):
+    h.scenario()
+    (h.state / "panel_starts").write_text("1")
+    r = h.run(env_extra={"HQ_COCKPIT_MODE": ""})
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert h.do_script_count() == 0
+    assert [c["argv"] for c in h.calls("open")] == [["http://127.0.0.1:3435/?start=hq"]]
