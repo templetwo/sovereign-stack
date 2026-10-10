@@ -36,6 +36,7 @@ import math
 import os
 import re
 import secrets
+import stat
 import subprocess
 import sys
 import threading
@@ -800,11 +801,16 @@ _HQ_INPUT_MAX_BYTES = 65536
 # A file dragged onto the panel used to reach the seat as a Finder icon, not the
 # bytes (measured twice). The page now POSTs each dropped file's raw bytes here
 # with its name in X-Filename (percent-encoded); the server writes it under
-# $SOVEREIGN_ROOT/hq/cockpit/drops/<YYYYMMDD>/ and the page types the absolute
-# path into the pty. The name is sanitized to [A-Za-z0-9._-] so the typed path
+# ~/.local/share/hq-cockpit/drops/<YYYYMMDD>/ (HQ_DROP_ROOT overrides, for
+# tests) and the page pastes the absolute path into the pty. NOT under
+# ~/.sovereign: that tree is mirrored to the Jetson every 6 h, and a drop can
+# be anything Anthony drags in (review 2026-10-10). Files older than
+# HQ_DROP_RETENTION_DAYS are swept from the root on every successful drop. The name is sanitized to [A-Za-z0-9._-] so the typed path
 # needs no quoting at the prompt and can carry no control byte (a newline in a
 # name typed into a pty would submit the line).
 HQ_DROP_MAX_BYTES = 25 * 1024 * 1024
+HQ_DROP_RETENTION_DAYS = 30
+HQ_DROP_READ_TIMEOUT_S = 10.0
 HQ_DROP_EXTENSIONS = frozenset(
     {
         "txt", "md", "json", "jsonl", "csv", "log", "png", "jpg", "jpeg", "gif", "pdf",
@@ -835,9 +841,43 @@ def _hq_drop_name(raw: str) -> tuple[str | None, str | None]:
     return f"{stem}.{ext.lower()}", None
 
 
+def _hq_drop_root() -> Path:
+    """Resolved per call so HQ_DROP_ROOT (tests) is honoured."""
+    raw = os.environ.get("HQ_DROP_ROOT")
+    return Path(raw) if raw else Path.home() / ".local" / "share" / "hq-cockpit" / "drops"
+
+
 def _hq_drop_dir() -> Path:
-    root = Path(os.environ.get("SOVEREIGN_ROOT") or Path.home() / ".sovereign")
-    return root / "hq" / "cockpit" / "drops" / time.strftime("%Y%m%d")
+    return _hq_drop_root() / time.strftime("%Y%m%d")
+
+
+def _hq_drop_sweep(root: Path, max_age_days: float = HQ_DROP_RETENTION_DAYS) -> int:
+    """Delete regular files older than `max_age_days` under `root`, then any
+    date dir left empty. Never follows a symlink: a symlinked root is not
+    swept at all, symlinked dirs are not entered, and a symlink is never
+    deleted or stat'ed through. Returns the number of files removed; an
+    error on one entry skips that entry, never the drop."""
+    try:
+        if stat.S_ISLNK(os.lstat(root).st_mode) or not root.is_dir():
+            return 0
+    except OSError:
+        return 0
+    cutoff = time.time() - max_age_days * 86400
+    removed = 0
+    for dirpath, _dirnames, filenames in os.walk(root, topdown=False, followlinks=False):
+        for fn in filenames:
+            fp = os.path.join(dirpath, fn)
+            try:
+                st = os.lstat(fp)
+                if stat.S_ISREG(st.st_mode) and st.st_mtime < cutoff:
+                    os.unlink(fp)
+                    removed += 1
+            except OSError:
+                continue
+        if os.path.abspath(dirpath) != os.path.abspath(root):
+            with contextlib.suppress(OSError):
+                os.rmdir(dirpath)  # succeeds only when empty
+    return removed
 
 
 def _hq_drop_open(directory: Path, name: str) -> tuple[int, Path]:
@@ -1328,6 +1368,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return
         digest = hashlib.sha256()
         remaining = length
+        # A stalled sender must not hold a handler thread and a half-written
+        # file forever: the body read times out and the partial file goes.
+        with contextlib.suppress(OSError):
+            self.connection.settimeout(HQ_DROP_READ_TIMEOUT_S)
         try:
             with os.fdopen(fd, "wb") as f:
                 while remaining > 0:
@@ -1337,6 +1381,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     digest.update(chunk)
                     f.write(chunk)
                     remaining -= len(chunk)
+        except TimeoutError:
+            with contextlib.suppress(OSError):
+                target.unlink()
+            refuse(408, "timed out reading the file body")
+            return
         except OSError as e:
             with contextlib.suppress(OSError):
                 target.unlink()
@@ -1347,6 +1396,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 target.unlink()
             refuse(400, "body shorter than Content-Length")
             return
+        _hq_drop_sweep(_hq_drop_root())
         self._send_json(
             200,
             {

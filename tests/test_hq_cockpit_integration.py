@@ -44,6 +44,7 @@ def running_server(monkeypatch, tmp_path):
         lambda url, timeout=2.0: {"http_status": None, "body": "", "error": "m"},
     )
     monkeypatch.setenv("SOVEREIGN_ROOT", str(tmp_path))
+    monkeypatch.setenv("HQ_DROP_ROOT", str(tmp_path / "drops"))
     monkeypatch.setenv("HQ_PANEL_STATUS_INTERVAL_S", "3600")
     server = web.serve(host="127.0.0.1", port=0)
     host, port = server.server_address[:2]
@@ -102,7 +103,7 @@ def _drop(host, port, token, name, data=b"hello\n", extra=None):
 
 
 def _drops_dir(root: Path) -> Path:
-    return root / "hq" / "cockpit" / "drops"
+    return root / "drops"  # HQ_DROP_ROOT in the running_server fixture
 
 
 def _all_drops(root: Path) -> list[Path]:
@@ -226,6 +227,8 @@ class TestDropRoute:
         assert out["sha256"] == hashlib.sha256(data).hexdigest()
         assert p.parent.parent == _drops_dir(tmp_path)
         assert p.parent.name == time.strftime("%Y%m%d") and p.name == "shot.png"
+        # Nothing under the mirrored tree.
+        assert not (tmp_path / "hq" / "cockpit" / "drops").exists()
 
     def test_second_drop_of_the_same_name_never_overwrites(self, running_server, panel, tmp_path):
         host, port = running_server
@@ -596,3 +599,95 @@ class TestPolish:
     def test_hq_buttons_have_a_style(self):
         css = (STATIC / "style.css").read_text()
         assert ".panel-hq .panel-head .btn {" in css
+
+
+# ── Review fixes 3 and 7: drop root off ~/.sovereign, retention, read timeout ──
+
+
+class TestDropRootAndRetention:
+    def test_default_root_is_local_share_not_sovereign(self, monkeypatch):
+        monkeypatch.delenv("HQ_DROP_ROOT", raising=False)
+        root = web._hq_drop_root()
+        assert root == Path.home() / ".local" / "share" / "hq-cockpit" / "drops"
+        assert ".sovereign" not in root.parts
+        assert web._hq_drop_dir().parent == root
+
+    def test_env_override_is_honoured(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("HQ_DROP_ROOT", str(tmp_path / "x"))
+        assert web._hq_drop_root() == tmp_path / "x"
+
+    def test_sweep_removes_old_files_only_and_never_follows_symlinks(self, tmp_path):
+        import os
+
+        root = tmp_path / "drops"
+        old_dir, new_dir = root / "20260801", root / time.strftime("%Y%m%d")
+        old_dir.mkdir(parents=True)
+        new_dir.mkdir(parents=True)
+        aged = time.time() - 31 * 86400
+        old_f, new_f = old_dir / "old.txt", new_dir / "new.txt"
+        old_f.write_text("old")
+        new_f.write_text("new")
+        os.utime(old_f, (aged, aged))
+        # Outside the root: an old file reached by a file symlink and by a dir symlink.
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        target = outside / "keep.txt"
+        target.write_text("keep")
+        os.utime(target, (aged, aged))
+        (new_dir / "link.txt").symlink_to(target)
+        os.utime(new_dir / "link.txt", (aged, aged), follow_symlinks=False)
+        (root / "dirlink").symlink_to(outside, target_is_directory=True)
+        assert web._hq_drop_sweep(root) == 1
+        assert not old_f.exists() and not old_dir.exists()  # emptied date dir goes
+        assert new_f.exists() and target.exists()
+        assert (new_dir / "link.txt").is_symlink() and (root / "dirlink").is_symlink()
+
+    def test_a_symlinked_root_is_not_swept(self, tmp_path):
+        import os
+
+        real = tmp_path / "real"
+        (real / "20260801").mkdir(parents=True)
+        f = real / "20260801" / "old.txt"
+        f.write_text("x")
+        aged = time.time() - 31 * 86400
+        os.utime(f, (aged, aged))
+        link = tmp_path / "drops"
+        link.symlink_to(real, target_is_directory=True)
+        assert web._hq_drop_sweep(link) == 0 and f.exists()
+
+    def test_a_successful_drop_sweeps_old_files(self, running_server, panel, tmp_path):
+        import os
+
+        old = _drops_dir(tmp_path) / "20260801" / "stale.md"
+        old.parent.mkdir(parents=True)
+        old.write_text("stale")
+        aged = time.time() - 40 * 86400
+        os.utime(old, (aged, aged))
+        host, port = running_server
+        assert panel.start(80, 24)[0]
+        status, body, _ = _drop(host, port, _token(host, port), "fresh.md", b"fresh")
+        assert status == 200, body
+        assert not old.exists() and Path(json.loads(body)["path"]).exists()
+
+    def test_a_stalled_body_times_out_and_leaves_no_partial_file(
+        self, running_server, panel, tmp_path, monkeypatch
+    ):
+        import socket
+
+        monkeypatch.setattr(web, "HQ_DROP_READ_TIMEOUT_S", 0.5)
+        host, port = running_server
+        assert panel.start(80, 24)[0]
+        token = _token(host, port)
+        s = socket.create_connection((host, port), timeout=5)
+        try:
+            head = (
+                f"POST /hq/drop HTTP/1.1\r\nHost: {host}:{port}\r\n"
+                f"Origin: http://{host}:{port}\r\nX-CSRF-Token: {token}\r\n"
+                "X-Filename: slow.txt\r\nContent-Length: 1000\r\n\r\n"
+            )
+            s.sendall(head.encode() + b"only ten b")
+            resp = s.recv(4096)
+        finally:
+            s.close()
+        assert b" 408 " in resp.split(b"\r\n", 1)[0]
+        assert _all_drops(tmp_path) == []

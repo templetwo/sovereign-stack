@@ -1991,7 +1991,7 @@ async function hqStart() {
 // ── File drop to path (cockpit integration, 2026-10-10) ──
 // A file dragged onto the terminal used to reach HQ as a Finder icon, not the
 // bytes. Each dropped File is POSTed raw to /hq/drop (same §2a substrate as
-// /hq/input); the server writes it under ~/.sovereign/hq/cockpit/drops/ and
+// /hq/input); the server writes it under ~/.local/share/hq-cockpit/drops/ and
 // answers its absolute path, which goes into the SAME input queue as the
 // keystrokes so it lands at the prompt in order. The server's checks are the
 // rule; the ones here only spare a doomed upload.
