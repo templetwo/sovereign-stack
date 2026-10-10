@@ -36,7 +36,6 @@ import math
 import os
 import re
 import secrets
-import stat
 import subprocess
 import sys
 import threading
@@ -842,41 +841,70 @@ def _hq_drop_name(raw: str) -> tuple[str | None, str | None]:
 
 
 def _hq_drop_root() -> Path:
-    """Resolved per call so HQ_DROP_ROOT (tests) is honoured."""
+    """Resolved per call so HQ_DROP_ROOT (tests) is honoured. A relative
+    override resolves against the home directory, never the cwd."""
     raw = os.environ.get("HQ_DROP_ROOT")
-    return Path(raw) if raw else Path.home() / ".local" / "share" / "hq-cockpit" / "drops"
+    if not raw:
+        return Path.home() / ".local" / "share" / "hq-cockpit" / "drops"
+    root = Path(raw).expanduser()
+    return root if root.is_absolute() else Path.home() / root
 
 
 def _hq_drop_dir() -> Path:
     return _hq_drop_root() / time.strftime("%Y%m%d")
 
 
+_RE_DROP_DATE_DIR = re.compile(r"^\d{8}$")
+
+
 def _hq_drop_sweep(root: Path, max_age_days: float = HQ_DROP_RETENTION_DAYS) -> int:
-    """Delete regular files older than `max_age_days` under `root`, then any
-    date dir left empty. Never follows a symlink: a symlinked root is not
-    swept at all, symlinked dirs are not entered, and a symlink is never
-    deleted or stat'ed through. Returns the number of files removed; an
-    error on one entry skips that entry, never the drop."""
+    """Delete regular files older than `max_age_days` of EXACTLY the shape
+    <root>/<8-digit date dir>/<regular file>, then those date dirs left empty.
+    Never descends further, never removes any other folder, never follows or
+    deletes a symlink (review pass 2, 2026-10-10).
+
+    Sweeps nothing, silently, when the configured root contains a symlink
+    anywhere (its realpath differs from its absolute expanded path), or when
+    the resolved root is `/`, the home directory, or any parent of it.
+    Returns the number of files removed; an error on one entry skips it."""
     try:
-        if stat.S_ISLNK(os.lstat(root).st_mode) or not root.is_dir():
-            return 0
-    except OSError:
+        configured = Path(os.path.abspath(os.path.expanduser(str(root))))
+        resolved = Path(os.path.realpath(configured))
+        home = Path(os.path.realpath(Path.home()))
+    except (OSError, ValueError):
+        return 0
+    if resolved != configured:
+        return 0
+    if resolved == Path("/") or resolved == home or resolved in home.parents:
+        return 0
+    if not resolved.is_dir():
         return 0
     cutoff = time.time() - max_age_days * 86400
     removed = 0
-    for dirpath, _dirnames, filenames in os.walk(root, topdown=False, followlinks=False):
-        for fn in filenames:
-            fp = os.path.join(dirpath, fn)
+    try:
+        date_dirs = [
+            e
+            for e in os.scandir(resolved)
+            if _RE_DROP_DATE_DIR.match(e.name) and e.is_dir(follow_symlinks=False)
+        ]
+    except OSError:
+        return 0
+    for d in date_dirs:
+        try:
+            entries = list(os.scandir(d.path))
+        except OSError:
+            continue
+        for f in entries:
             try:
-                st = os.lstat(fp)
-                if stat.S_ISREG(st.st_mode) and st.st_mtime < cutoff:
-                    os.unlink(fp)
+                if not f.is_file(follow_symlinks=False):
+                    continue  # sub-dirs and symlinks are never touched
+                if f.stat(follow_symlinks=False).st_mtime < cutoff:
+                    os.unlink(f.path)
                     removed += 1
             except OSError:
                 continue
-        if os.path.abspath(dirpath) != os.path.abspath(root):
-            with contextlib.suppress(OSError):
-                os.rmdir(dirpath)  # succeeds only when empty
+        with contextlib.suppress(OSError):
+            os.rmdir(d.path)  # succeeds only when the date dir is empty
     return removed
 
 

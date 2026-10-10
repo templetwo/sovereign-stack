@@ -2186,12 +2186,10 @@ const HQ_STILL_S = 20;
 // never the previous value.
 async function hqFetchStatus() {
   try {
-    const r = await fetch('/hq/status', { cache: 'no-store' });
-    if (!r.ok) return null;
-    const st = await r.json();
+    const st = await fetchJsonTimed('/hq/status');
     return st && typeof st === 'object' ? st : null;
   } catch (_) {
-    return null;
+    return null;  // error, non-200 or the 5 s abort: the same failure path
   }
 }
 
@@ -2523,14 +2521,30 @@ function renderLatencyCard(snapshot) {
 }
 
 // ── Poll loop ─────────────────────────────────────────────────────────────
+// Both page fetches (snapshot and /hq/status) abort after POLL_FETCH_TIMEOUT_MS
+// (review pass 2, 2026-10-10): a hung console must reach the failure path
+// ("unknown", "comms unavailable", UNREACHABLE), not freeze the poll loop.
+// The timer covers the body read too, and a non-200 throws like an error.
+const POLL_FETCH_TIMEOUT_MS = 5000;
+
+async function fetchJsonTimed(url, ms = POLL_FETCH_TIMEOUT_MS) {
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), ms);
+  try {
+    const r = await fetch(url, { cache: 'no-store', signal: ac.signal });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    return await r.json();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function poll() {
   const status = $('poll-status');
   const t0 = performance.now();
   try {
-    const r = await fetch('/snapshot.json', { cache: 'no-store' });
+    const snapshot = await fetchJsonTimed('/snapshot.json');
     const rtt = performance.now() - t0;
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    const snapshot = await r.json();
     hq.status = await hqFetchStatus();
 
     state.latencyBuf.push(rtt);

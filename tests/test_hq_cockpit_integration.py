@@ -706,3 +706,81 @@ class TestRefusedNoteExpires:
         ):
             assert needle in js, needle
         assert "!/refused/.test(note.textContent)) note.textContent" not in js
+
+
+# ── Review pass 2: the sweep's scope is exact ──────────────────────────────
+
+
+def _aged(path: Path, days: float = 40) -> Path:
+    import os
+
+    t = time.time() - days * 86400
+    os.utime(path, (t, t), follow_symlinks=False)
+    return path
+
+
+def _old_file(root: Path, rel: str) -> Path:
+    p = root / rel
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("x")
+    return _aged(p)
+
+
+class TestSweepScope:
+    def test_a_symlinked_parent_sweeps_nothing(self, tmp_path):
+        real = tmp_path / "real"
+        f = _old_file(real, "drops/20260801/old.txt")
+        (tmp_path / "via").symlink_to(real, target_is_directory=True)
+        assert web._hq_drop_sweep(tmp_path / "via" / "drops") == 0
+        assert f.exists()
+
+    def test_a_root_of_home_or_its_parent_sweeps_nothing(self, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        monkeypatch.setenv("HOME", str(home))
+        assert Path.home() == home
+        f = _old_file(home, "20260801/old.txt")
+        g = _old_file(tmp_path, "20260801/old.txt")
+        assert web._hq_drop_sweep(home) == 0
+        assert web._hq_drop_sweep(Path("~")) == 0
+        assert web._hq_drop_sweep(tmp_path) == 0  # a parent of home
+        assert web._hq_drop_sweep(Path("/")) == 0
+        assert f.exists() and g.exists()
+
+    def test_depth_3_and_non_date_dirs_are_untouched(self, tmp_path):
+        root = tmp_path / "drops"
+        deep = _old_file(root, "20260801/sub/deep.txt")
+        other = _old_file(root, "notes/old.txt")
+        short = _old_file(root, "2026081/old.txt")  # seven digits
+        loose = _old_file(root, "loose.txt")  # depth 1
+        swept = _old_file(root, "20260802/old.txt")
+        assert web._hq_drop_sweep(root) == 1
+        assert not swept.exists() and not swept.parent.exists()
+        for p in (deep, other, short, loose):
+            assert p.exists(), p
+        assert (root / "20260801").is_dir()  # not empty: kept
+        assert (root / "notes").is_dir()
+
+    def test_a_relative_override_resolves_against_home(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.chdir("/")
+        monkeypatch.setenv("HQ_DROP_ROOT", "rel/drops")
+        assert web._hq_drop_root() == tmp_path / "rel" / "drops"
+        monkeypatch.setenv("HQ_DROP_ROOT", "~/x")
+        assert web._hq_drop_root() == tmp_path / "x"
+
+
+class TestFetchTimeouts:
+    def test_both_page_fetches_abort_after_5_s(self):
+        js = (STATIC / "app.js").read_text()
+        for needle in (
+            "new AbortController()",
+            "const POLL_FETCH_TIMEOUT_MS = 5000;",
+            "signal: ac.signal",
+            "const snapshot = await fetchJsonTimed('/snapshot.json');",
+            "const st = await fetchJsonTimed('/hq/status');",
+        ):
+            assert needle in js, needle
+        assert (
+            "fetch('/snapshot.json'" not in js
+            and "fetch('/hq/status'" not in js.split("function initHqPanel")[0]
+        )
