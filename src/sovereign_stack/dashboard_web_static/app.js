@@ -2014,7 +2014,8 @@ function hqLinkWord(hp) {
   return hp.listening ? 'push link on' : 'no push link yet';
 }
 
-const HQ_PROBE_STALE_S = 120;
+// Three missed probe cycles: HQ_PANEL_STATUS_INTERVAL_S defaults to 300 s on the server.
+const HQ_PROBE_STALE_S = 900;
 
 // `why` names the two different absences: the console itself unreachable (the
 // poll failed) versus the console up but its hq_panel section missing.
@@ -2062,6 +2063,7 @@ function renderHqPanel(snapshot) {
   const note = $('hq-note');
   const banner = $('hq-banner');
   const startBtn = $('hq-start');
+  if (note) note.classList.remove('is-muted');  // set by the poll-failure path
   renderHqHeader(hp || null, 'section');
   if (!hp) { if (note) note.textContent = 'status unavailable'; return; }
   if (hp.running) {
@@ -2361,6 +2363,9 @@ async function poll() {
     // The page's own rule: never keep a previous value beside UNREACHABLE.
     renderHqHeader(null);
     renderAttentionStrip(null);
+    // Same rule for the panel note; the terminal itself is left alone.
+    const hqNoteEl = $('hq-note');
+    if (hqNoteEl) { hqNoteEl.textContent = 'console unreachable'; hqNoteEl.classList.add('is-muted'); }
   } finally {
     setTimeout(poll, POLL_MS);
   }

@@ -448,6 +448,8 @@ class TestPageAssets:
             "g.issue_count === 0",
             "renderHqHeader(null)",
             "renderAttentionStrip(null)",
+            "const HQ_PROBE_STALE_S = 900;",
+            "hqNoteEl.textContent = 'console unreachable'",
         )
         for needle in needles:
             assert needle in js, needle
@@ -479,6 +481,7 @@ class TestPageAssets:
         assert hidden is None, hidden and hidden.group(0)
         # Locked focus fills the single row; the calc is only the fallback.
         assert "grid-template-rows: minmax(0, 1fr)" in css
+        assert ".stat-hq-block .stat-value.is-stale {" in css
         assert "body.hq-focus .app.is-locked .col-center { height: auto; min-height: 0; }" in css
 
 

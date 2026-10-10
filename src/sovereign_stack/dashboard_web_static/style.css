@@ -1627,6 +1627,10 @@ input::placeholder { color: var(--text-faint); }
 .stat-hq-block .stat-value { font-size: 11px; display: block; white-space: nowrap; }
 .stat-hq-block .stat-value.is-live { color: var(--accent); }
 .stat-hq-block .stat-value.is-down { color: var(--down); }
+/* A chat.db probe older than three cycles: muted AND italic, so the word
+   "(stale)" is not the only signal. */
+.stat-hq-block .stat-value.is-stale { color: var(--text-faint); font-style: italic; }
+.panel-hq .panel-note.is-muted { color: var(--text-faint); }
 
 /* ACTIVITY as a side-of-HQ feed: one line per event, the detail still opens on
    click; the 24h brush stays (Anthony, 2026-08-30: "use as much time as you
