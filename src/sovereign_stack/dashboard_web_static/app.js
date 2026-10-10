@@ -1850,6 +1850,54 @@ function hqIsFocusKey(ev) {
   return ev.type === 'keydown' && ev.ctrlKey && ev.shiftKey && !ev.altKey && !ev.metaKey && ev.code === 'KeyF';
 }
 
+// ── Terminal text size (cockpit integration, 2026-10-10) ──
+// Buttons and Ctrl+Shift+= / Ctrl+Shift+- (by ev.code, like the focus key),
+// caught before xterm turns them into bytes. Every change refits and posts the
+// size through hqRefit(true): the person just acted here. Remembered per
+// viewer in localStorage; a missing or blocked store falls back to 13.
+const HQ_FONT_MIN = 9, HQ_FONT_MAX = 24, HQ_FONT_DEFAULT = 13;
+const HQ_FONT_KEY = 'ss-hq-font';
+
+function hqSavedFontSize() {
+  let v = NaN;
+  try { v = parseInt(localStorage.getItem(HQ_FONT_KEY) || '', 10); } catch (_) { /* blocked */ }
+  return Number.isFinite(v) && v >= HQ_FONT_MIN && v <= HQ_FONT_MAX ? v : HQ_FONT_DEFAULT;
+}
+
+function hqSetFontSize(n) {
+  if (!hq.term) return;
+  const v = Math.max(HQ_FONT_MIN, Math.min(HQ_FONT_MAX, Math.round(n)));
+  if (v === hq.term.options.fontSize) return;
+  hq.term.options.fontSize = v;
+  try { localStorage.setItem(HQ_FONT_KEY, String(v)); } catch (_) { /* blocked */ }
+  hqRefit(true);
+}
+
+// +1, -1, or 0 for a keydown that is not a font key.
+function hqFontKeyStep(ev) {
+  if (ev.type !== 'keydown' || !ev.ctrlKey || !ev.shiftKey || ev.altKey || ev.metaKey) return 0;
+  if (ev.code === 'Equal' || ev.code === 'NumpadAdd') return 1;
+  if (ev.code === 'Minus' || ev.code === 'NumpadSubtract') return -1;
+  return 0;
+}
+
+// ── Copy on select ──
+// The selection goes to the clipboard once it settles (the event fires on
+// every drag step). Write only; the page never reads the clipboard.
+let hqCopyTimer = null;
+function hqCopySelection() {
+  clearTimeout(hqCopyTimer);
+  hqCopyTimer = setTimeout(() => {
+    if (!hq.term || !hq.term.hasSelection()) return;
+    const sel = hq.term.getSelection();
+    if (!sel || !navigator.clipboard || !navigator.clipboard.writeText) return;
+    navigator.clipboard.writeText(sel).then(
+      () => hqNote(`copied ${sel.length} characters`),
+      () => { /* no clipboard permission: nothing copied, nothing claimed */ },
+    );
+  }, 150);
+}
+
 function hqB64ToBytes(b64) {
   const bin = atob(b64);
   const out = new Uint8Array(bin.length);
@@ -2035,7 +2083,7 @@ function hqTokenReady() {
 function initHqPanel() {
   const host = $('hq-term');
   if (!host || typeof Terminal === 'undefined') return;
-  hq.term = new Terminal({ cursorBlink: true, scrollback: 5000, fontSize: 13, convertEol: false });
+  hq.term = new Terminal({ cursorBlink: true, scrollback: 5000, fontSize: hqSavedFontSize(), convertEol: false });
   if (typeof FitAddon !== 'undefined') {
     hq.fit = new FitAddon.FitAddon();
     hq.term.loadAddon(hq.fit);
@@ -2054,13 +2102,25 @@ function initHqPanel() {
       if (!ev.repeat) hqSetFocus(!hq.focused);
       return false;
     }
+    const step = hqFontKeyStep(ev);
+    if (step) {
+      ev.preventDefault();
+      hqSetFontSize(hq.term.options.fontSize + step);
+      return false;
+    }
     return true;
   });
+  hq.term.onSelectionChange(hqCopySelection);
   // The same key anywhere else on the page (the terminal does not have focus).
   document.addEventListener('keydown', (ev) => {
     if (hqIsFocusKey(ev) && !host.contains(ev.target)) {
       ev.preventDefault();
       if (!ev.repeat) hqSetFocus(!hq.focused);
+    }
+    const step = hqFontKeyStep(ev);
+    if (step && !host.contains(ev.target)) {
+      ev.preventDefault();
+      hqSetFontSize(hq.term.options.fontSize + step);
     }
   });
   hqInitDrop(host);
@@ -2078,6 +2138,9 @@ function initHqPanel() {
   }
   const startBtn = $('hq-start');
   if (startBtn) startBtn.addEventListener('click', hqStart);
+  const fontDown = $('hq-font-down'), fontUp = $('hq-font-up');
+  if (fontDown) fontDown.addEventListener('click', () => hqSetFontSize(hq.term.options.fontSize - 1));
+  if (fontUp) fontUp.addEventListener('click', () => hqSetFontSize(hq.term.options.fontSize + 1));
   const focusBtn = $('hq-focus');
   if (focusBtn) focusBtn.addEventListener('click', () => hqSetFocus(!hq.focused));
   setInterval(refreshCsrf, 20 * 60 * 1000);
@@ -2193,8 +2256,19 @@ function renderHqComms(snapshot) {
   line.className = 'hq-comms' + (spoolBad ? ' is-stale' : '');
 }
 
+// The panel's border follows the same word as the header: accent while HQ's
+// output moves, muted once it has been still for HQ_STILL_S. The transition is
+// killed under prefers-reduced-motion (the global §13 rule and the panel's own).
+function hqSetActivityClass(word) {
+  const panel = $('hq-panel');
+  if (!panel) return;
+  panel.classList.toggle('is-working', word === 'working');
+  panel.classList.toggle('is-waiting', word === 'waiting');
+}
+
 function renderHqPanel(snapshot) {
   renderHqComms(snapshot);
+  hqSetActivityClass(hqActivityWord(snapshot && snapshot.hq_panel));
   const hp = snapshot && snapshot.hq_panel;
   const note = $('hq-note');
   const banner = $('hq-banner');
@@ -2500,6 +2574,7 @@ async function poll() {
     renderHqHeader(null);
     renderAttentionStrip(null);
     renderHqComms(null);
+    hqSetActivityClass('off');
     // Same rule for the panel note; the terminal itself is left alone.
     const hqNoteEl = $('hq-note');
     if (hqNoteEl) { hqNoteEl.textContent = 'console unreachable'; hqNoteEl.classList.add('is-muted'); }

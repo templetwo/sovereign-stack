@@ -458,3 +458,59 @@ class TestCommsReader:
         body = js[js.index("function renderHqComms") : js.index("function renderHqPanel")]
         assert "answered" not in body
         assert re.search(r"\bc\.text\b", body) is None  # never the message body
+
+
+# ── Item 4: polish (static checks; no browser in this suite) ───────────────
+
+
+class TestPolish:
+    def test_font_size_buttons_keys_and_persistence(self):
+        js = (STATIC / "app.js").read_text()
+        html = (STATIC / "index.html").read_text()
+        assert 'id="hq-font-down"' in html and 'id="hq-font-up"' in html
+        for needle in (
+            "function hqSetFontSize",
+            "function hqFontKeyStep",
+            "ev.code === 'Equal'",
+            "ev.code === 'Minus'",
+            "hq.term.options.fontSize = v;",
+            "hqRefit(true);",
+            "const HQ_FONT_KEY = 'ss-hq-font';",
+            "fontSize: hqSavedFontSize()",
+        ):
+            assert needle in js, needle
+        # localStorage is touched only inside try blocks in the font helpers.
+        body = js[js.index("function hqSavedFontSize") : js.index("function hqFontKeyStep")]
+        assert body.count("localStorage.") == body.count("try { ") == 2
+        # The focus key is unchanged.
+        assert "ev.code === 'KeyF'" in js
+
+    def test_copy_on_select_writes_and_never_reads_the_clipboard(self):
+        js = (STATIC / "app.js").read_text()
+        assert "hq.term.onSelectionChange(hqCopySelection)" in js
+        assert "navigator.clipboard.writeText(sel)" in js
+        assert "clipboard.readText" not in js and "clipboard.read(" not in js
+
+    def test_waiting_state_is_quiet_and_respects_reduced_motion(self):
+        js = (STATIC / "app.js").read_text()
+        css = (STATIC / "style.css").read_text()
+        assert "function hqSetActivityClass" in js
+        assert ".panel-hq.is-working {" in css and ".panel-hq.is-waiting {" in css
+        assert "@media (prefers-reduced-motion: reduce) { .panel-hq { transition: none; } }" in css
+
+    def test_drop_handler_is_wired_without_innerhtml(self):
+        js = (STATIC / "app.js").read_text()
+        for needle in (
+            "function hqInitDrop",
+            "'/hq/drop'",
+            "'X-Filename': encodeURIComponent(file.name)",
+            "hq.pending += `${res.data.path} `;",
+            "dropped ${res.data.name}, ${res.data.bytes} B",
+            "ev.preventDefault();  // else the browser navigates to the dropped file",
+        ):
+            assert needle in js, needle
+        assert re.search(r"\.innerHTML\s*=", js) is None
+
+    def test_hq_buttons_have_a_style(self):
+        css = (STATIC / "style.css").read_text()
+        assert ".panel-hq .panel-head .btn {" in css

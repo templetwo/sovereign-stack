@@ -1684,3 +1684,17 @@ body.hq-focus .app.is-locked .col-center { height: auto; min-height: 0; }
 /* COMMS line: one muted line, fixed height so the terminal box never moves. */
 .hq-comms { flex: 0 0 auto; height: 16px; line-height: 16px; font-size: 11px; color: var(--text-faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .hq-comms.is-stale { color: var(--degraded); }
+/* Working / waiting: accent while HQ's output moves, the quiet border once it
+   has been still 20 s. Off (not running) keeps the panel's own border. */
+.panel-hq { transition: border-color .6s ease, box-shadow .6s ease; }
+.panel-hq.is-working { border-color: var(--accent-a40, var(--accent)); }
+.panel-hq.is-waiting { border-color: var(--border); box-shadow: none; }
+@media (prefers-reduced-motion: reduce) { .panel-hq { transition: none; } }
+/* `.btn` / `.btn-sm` had no rule anywhere in this file, so Start HQ and Focus
+   rendered as the browser's default button (found 2026-10-10). Scoped to the
+   HQ panel head so no other panel changes. */
+.panel-hq .panel-head .btn { background: var(--bg-raised); border: 1px solid var(--border-strong); border-radius: var(--r-sm); color: var(--text-dim); font-size: 11px; line-height: 1.4; padding: 3px 9px; cursor: pointer; }
+.panel-hq .panel-head .btn:hover { color: var(--text-primary); border-color: var(--text-faint); }
+.panel-hq .panel-head .btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+/* Text size buttons: compact, beside Focus (after the .btn rule, same weight + 1). */
+.panel-hq .panel-head .btn.hq-font-btn { min-width: 28px; padding-left: 6px; padding-right: 6px; font-variant-numeric: tabular-nums; }
