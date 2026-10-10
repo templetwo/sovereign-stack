@@ -238,3 +238,96 @@ class TestDropRoute:
         name = json.loads(body)["name"]
         assert name.endswith(".png")
         assert all(c.isalnum() or c in "._-" for c in name), name
+
+
+# ── Item 2: working / waiting, from the server's clock ─────────────────────
+
+
+@pytest.fixture
+def session(monkeypatch, tmp_path):
+    monkeypatch.setenv("HQ_PANEL_COMMAND", ECHO_CMD)
+    monkeypatch.setenv("HQ_PANEL_CWD", str(tmp_path))
+    s = hq_panel.HQSession(seat_finder=lambda: None)
+    yield s
+    s._terminate_for_tests()
+
+
+def _wait(pred, timeout=3.0):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if pred():
+            return True
+        time.sleep(0.05)
+    return False
+
+
+class TestWorkingWaitingFields:
+    def test_fields_are_present_and_none_before_any_output(self, session):
+        st = session.status()
+        assert {"seq_changed_at", "seq_idle_seconds", "last_input_at"} <= set(st)
+        assert st["seq_changed_at"] is None and st["seq_idle_seconds"] is None
+        assert st["last_input_at"] is None
+
+    def test_output_stamps_seq_changed_at_and_idle_grows_from_it(self, session):
+        before = time.time()
+        assert session.start(80, 24)[0]
+        assert _wait(lambda: session.status()["seq_changed_at"] is not None)
+        st = session.status()
+        from datetime import datetime
+
+        stamped = datetime.fromisoformat(st["seq_changed_at"]).timestamp()
+        assert before - 1 <= stamped <= time.time() + 1
+        assert isinstance(st["seq_idle_seconds"], float) and st["seq_idle_seconds"] >= 0
+        # Pretend the last output was 30 s ago: idle reads >= 20 (the "waiting" side).
+        session._seq_changed_at -= 30
+        assert session.status()["seq_idle_seconds"] >= 30
+
+    def test_input_stamps_last_input_at_only_when_written(self, session):
+        session.write(b"ignored\n")  # not running: nothing written, no stamp
+        assert session.status()["last_input_at"] is None
+        assert session.start(80, 24)[0]
+        assert _wait(lambda: session.status()["seq"] >= 1)
+        session.write(b"ping\n")
+        assert session.status()["last_input_at"] is not None
+
+    def test_input_route_stamps_last_input_at(self, running_server, panel):
+        import base64
+
+        host, port = running_server
+        assert panel.start(80, 24)[0]
+        token = _token(host, port)
+        payload = json.dumps({"data": base64.b64encode(b"x").decode()}).encode()
+        hdr = {
+            "Origin": f"http://{host}:{port}",
+            "X-CSRF-Token": token,
+            "Content-Type": "application/json",
+        }
+        status, _, _ = _raw(host, port, "POST", "/hq/input", payload, hdr)
+        assert status == 200
+        status, body, _ = _raw(host, port, "GET", "/hq/status")
+        assert json.loads(body)["last_input_at"] is not None
+
+    def test_a_new_start_clears_the_previous_sessions_stamps(self, session, monkeypatch):
+        assert session.start(80, 24)[0]
+        assert _wait(lambda: session.status()["seq_changed_at"] is not None)
+        session.write(b"x\n")
+        session._terminate_for_tests()
+        assert _wait(lambda: not session.running)
+        monkeypatch.setenv("HQ_PANEL_COMMAND", json.dumps(["/bin/sh", "-c", "sleep 5"]))
+        assert session.start(80, 24)[0]
+        st = session.status()
+        assert st["seq_changed_at"] is None and st["last_input_at"] is None
+
+    def test_page_derives_one_word_from_the_server_fields(self):
+        js = (STATIC / "app.js").read_text()
+        for needle in (
+            "function hqActivityWord",
+            "const HQ_STILL_S = 20;",
+            "hp.seq_idle_seconds",
+            "'unknown'",
+            "'working'",
+            "'waiting'",
+            "DOWN · exit ${exit}",
+        ):
+            assert needle in js, needle
+        assert "LIVE · " not in js

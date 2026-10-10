@@ -440,7 +440,7 @@ class TestPageAssets:
             "ev.preventDefault()",
             "chat.db not probed",
             "chat.db blocked",
-            "HQ off",
+            "'off'",  # was "HQ off"; the one-word state since 2026-10-10
             "HQ unreachable",
             "console unreachable",
             "signals, all sources",

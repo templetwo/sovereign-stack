@@ -162,6 +162,11 @@ class HQSession:
         self._transcript_bytes = 0
         self._starting = False
         self._last_started_pid: int | None = None
+        # Working / waiting (cockpit integration, 2026-10-10): the server's own
+        # clock values, stamped where they happen, so the page never infers
+        # "HQ is idle" from a client timer alone.
+        self._seq_changed_at: float | None = None
+        self._last_input_at: float | None = None
 
     # ── configuration ──
     @staticmethod
@@ -271,6 +276,8 @@ class HQSession:
             self._buf_bytes = 0
             self._truncated_before = None
             self._transcript_bytes = 0
+            self._seq_changed_at = None
+            self._last_input_at = None
         self._set_winsize(cols, rows)
         self._reader = threading.Thread(target=self._read_loop, args=(master, proc), daemon=True)
         self._reader.start()
@@ -293,8 +300,12 @@ class HQSession:
         fd = self._fd
         if fd is None or not self.running:
             return
-        with contextlib.suppress(OSError):
+        try:
             os.write(fd, data)
+        except OSError:
+            return
+        with self._lock:
+            self._last_input_at = time.time()
 
     def _read_loop(self, fd: int, proc: subprocess.Popen) -> None:
         cap = self._cap()
@@ -308,6 +319,7 @@ class HQSession:
                     break
                 with self._cond:
                     self._seq += 1
+                    self._seq_changed_at = time.time()
                     self._buf.append((self._seq, chunk))
                     self._buf_bytes += len(chunk)
                     self._transcript_bytes += len(chunk)
@@ -329,6 +341,7 @@ class HQSession:
                     self._fd = None
                     # A final tick so streams waiting on wait_for wake and see running=False.
                     self._seq += 1
+                    self._seq_changed_at = time.time()
                     self._cond.notify_all()
 
     def replay(self, after: int) -> tuple[list[tuple[int, bytes]], int | None]:
@@ -344,10 +357,15 @@ class HQSession:
 
     def status(self) -> dict:
         with self._lock:
+            now = time.time()
             proc = self._proc
             running = proc is not None and proc.poll() is None
             started = self._started_at if running else None
-            age = (time.time() - started) if started else None
+            age = (now - started) if started else None
+            changed = self._seq_changed_at
+            # How long the output has been still, on THIS clock. None when no
+            # output has arrived yet (unknown, not "idle since forever").
+            idle = round(max(0.0, now - changed), 1) if changed is not None else None
             return {
                 "running": running,
                 "pid": proc.pid if running else None,
@@ -361,6 +379,9 @@ class HQSession:
                 "checked_at": _LAST_PROBE.get("checked_at"),
                 "truncated_before": self._truncated_before,
                 "last_exit": self._last_exit,
+                "seq_changed_at": _utc(changed),
+                "seq_idle_seconds": idle,
+                "last_input_at": _utc(self._last_input_at),
             }
 
     def _terminate_for_tests(self) -> None:

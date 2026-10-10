@@ -2110,6 +2110,22 @@ function hqLinkWord(hp) {
 // Three missed probe cycles: HQ_PANEL_STATUS_INTERVAL_S defaults to 300 s on the server.
 const HQ_PROBE_STALE_S = 900;
 
+// WORKING / WAITING (cockpit integration, 2026-10-10). One word from the
+// server's own clock: `seq_idle_seconds` is how long the pty output has been
+// still, measured in the console process. Under HQ_STILL_S it is "working";
+// at or past it HQ is at its prompt or holding: "waiting". No field (an older
+// server, no output yet) is "unknown", never a guess from a client timer.
+// Typing and resizes also produce output, so a keystroke reads as working
+// for HQ_STILL_S; that is the honest cost of reading only the byte stream.
+const HQ_STILL_S = 20;
+
+function hqActivityWord(hp) {
+  if (!hp || !hp.running) return 'off';
+  const idle = hp.seq_idle_seconds;
+  if (typeof idle !== 'number' || !Number.isFinite(idle)) return 'unknown';
+  return idle < HQ_STILL_S ? 'working' : 'waiting';
+}
+
 // `why` names the two different absences: the console itself unreachable (the
 // poll failed) versus the console up but its hq_panel section missing.
 function renderHqHeader(hp, why) {
@@ -2122,32 +2138,33 @@ function renderHqHeader(hp, why) {
     return;
   }
   const exit = hp.last_exit;
+  const word = hqActivityWord(hp);
   if (hp.running) {
-    main.textContent = `LIVE · ${hp.age_seconds != null ? fmtAge(hp.age_seconds) : '—'} open`;
-    main.className = 'stat-value is-live';
+    main.textContent = `${word} · ${hp.age_seconds != null ? fmtAge(hp.age_seconds) : '—'} open`;
+    main.className = 'stat-value ' + (word === 'working' ? 'is-live' : 'is-muted');
   } else if (typeof exit === 'number' && exit !== 0) {
     main.textContent = `DOWN · exit ${exit}`;
     main.className = 'stat-value is-down';
   } else if (exit === 0) {
-    main.textContent = 'HQ ended · exit 0';
+    main.textContent = 'off · exit 0';
     main.className = 'stat-value is-muted';
   } else {
-    main.textContent = 'HQ off';
+    main.textContent = 'off';
     main.className = 'stat-value is-muted';
   }
   // chat_db_readable is fail-closed on the server once probed (false on ANY
   // failure); null means the probe has not run yet, which is not "blocked".
   const r = hp.chat_db_readable;
-  let word = r === true ? 'chat.db ok' : r === false ? 'chat.db blocked' : 'chat.db not probed';
+  let dbWord = r === true ? 'chat.db ok' : r === false ? 'chat.db blocked' : 'chat.db not probed';
   // A dead probe thread must not read "ok" forever: an old or unparseable
   // checked_at marks the word stale (fail-closed on a bad timestamp).
   let stale = false;
   if (r === true || r === false) {
     const t = Date.parse(hp.checked_at || '');
     stale = !Number.isFinite(t) || (Date.now() - t) / 1000 > HQ_PROBE_STALE_S;
-    if (stale) word += ' (stale)';
+    if (stale) dbWord += ' (stale)';
   }
-  sub.textContent = `${word} · ${hqLinkWord(hp)}`;
+  sub.textContent = `${dbWord} · ${hqLinkWord(hp)}`;
   sub.className = 'stat-value is-muted' + (stale ? ' is-stale' : '');
 }
 
