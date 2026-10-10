@@ -1945,6 +1945,86 @@ async function hqStart() {
   hqOpenStream();
 }
 
+// ── File drop to path (cockpit integration, 2026-10-10) ──
+// A file dragged onto the terminal used to reach HQ as a Finder icon, not the
+// bytes. Each dropped File is POSTed raw to /hq/drop (same §2a substrate as
+// /hq/input); the server writes it under ~/.sovereign/hq/cockpit/drops/ and
+// answers its absolute path, which goes into the SAME input queue as the
+// keystrokes so it lands at the prompt in order. The server's checks are the
+// rule; the ones here only spare a doomed upload.
+const HQ_DROP_MAX_BYTES = 25 * 1024 * 1024;
+const HQ_DROP_EXT = new Set(['txt', 'md', 'json', 'jsonl', 'csv', 'log', 'png', 'jpg', 'jpeg', 'gif',
+  'pdf', 'py', 'js', 'ts', 'html', 'css', 'yaml', 'yml', 'toml', 'patch', 'diff']);
+
+async function hqPostDrop(file) {
+  const send = () => {
+    const headers = {
+      'Content-Type': 'application/octet-stream',
+      // fetch refuses a non-Latin-1 header value; the server unquotes.
+      'X-Filename': encodeURIComponent(file.name),
+    };
+    if (csrfToken) headers['X-CSRF-Token'] = csrfToken;
+    return fetch('/hq/drop', { method: 'POST', headers, body: file, cache: 'no-store' })
+      .then(async (r) => {
+        let data = null;
+        try { data = await r.json(); } catch (_) { /* no JSON body */ }
+        return { ok: r.ok, status: r.status, data };
+      });
+  };
+  let res = await send();
+  if (res.status === 403 && res.data && /csrf/i.test(res.data.error || '')) {
+    await refreshCsrf();
+    res = await send();
+  }
+  return res;
+}
+
+async function hqDropFiles(files) {
+  for (const file of files) {
+    const ext = (file.name.split('.').pop() || '').toLowerCase();
+    if (!file.name.includes('.') || !HQ_DROP_EXT.has(ext)) { hqNote(`drop refused: ${file.name} (file type not allowed)`); continue; }
+    if (file.size > HQ_DROP_MAX_BYTES) { hqNote(`drop refused: ${file.name} (over 25 MB)`); continue; }
+    if (!hq.running) { hqNote('drop refused: HQ is not running'); return; }
+    let res;
+    try { res = await hqPostDrop(file); } catch (_) { res = null; }
+    if (!res || !res.ok || !res.data || !res.data.path) {
+      const why = res && res.data && res.data.error ? res.data.error : (res ? `status ${res.status}` : 'no response');
+      hqNote(`drop refused: ${file.name} (${why})`);
+      continue;
+    }
+    hq.pending += `${res.data.path} `;
+    hqFlushInput();
+    // Cleared by the next poll's renderHqPanel, which rewrites the note.
+    hqNote(`dropped ${res.data.name}, ${res.data.bytes} B`);
+  }
+}
+
+function hqIsFileDrag(ev) {
+  const types = ev.dataTransfer && ev.dataTransfer.types;
+  return !!types && Array.prototype.indexOf.call(types, 'Files') !== -1;
+}
+
+function hqInitDrop(host) {
+  const over = (ev) => {
+    if (!hqIsFileDrag(ev)) return;
+    ev.preventDefault();  // else the browser navigates to the dropped file
+    if (ev.dataTransfer) ev.dataTransfer.dropEffect = hq.running ? 'copy' : 'none';
+    host.classList.add('is-drop-target');
+  };
+  host.addEventListener('dragenter', over);
+  host.addEventListener('dragover', over);
+  host.addEventListener('dragleave', (ev) => {
+    if (!host.contains(ev.relatedTarget)) host.classList.remove('is-drop-target');
+  });
+  host.addEventListener('drop', (ev) => {
+    if (!hqIsFileDrag(ev)) return;
+    ev.preventDefault();
+    host.classList.remove('is-drop-target');
+    const files = Array.from((ev.dataTransfer && ev.dataTransfer.files) || []);
+    if (files.length) hqDropFiles(files);
+  });
+}
+
 function hqTokenReady() {
   return new Promise((resolve) => {
     const tick = () => { if (csrfToken) resolve(); else setTimeout(tick, 100); };
@@ -1983,6 +2063,7 @@ function initHqPanel() {
       if (!ev.repeat) hqSetFocus(!hq.focused);
     }
   });
+  hqInitDrop(host);
   // A click into the terminal makes this viewer the size owner (see hqPostSize).
   if (hq.term.textarea) hq.term.textarea.addEventListener('focus', () => hqPostSize(true));
   window.addEventListener('resize', () => hqRefit(false));

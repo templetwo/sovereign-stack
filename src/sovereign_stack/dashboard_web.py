@@ -27,6 +27,8 @@ from __future__ import annotations
 
 import argparse
 import base64
+import contextlib
+import hashlib
 import hmac
 import ipaddress
 import json
@@ -741,10 +743,76 @@ CONTENT_TYPES = {
 # the query string because EventSource cannot set a header.
 
 _POST_ONLY_ROUTES = frozenset(
-    {"/actions/ack", "/actions/tail", "/actions/restart", "/hq/start", "/hq/input", "/hq/resize"}
+    {
+        "/actions/ack",
+        "/actions/tail",
+        "/actions/restart",
+        "/hq/start",
+        "/hq/input",
+        "/hq/resize",
+        "/hq/drop",
+    }
 )
 _HQ_STREAM_KEEPALIVE_S = 15
 _HQ_INPUT_MAX_BYTES = 65536
+
+# ── /hq/drop (cockpit integration, 2026-10-10) ──
+# A file dragged onto the panel used to reach the seat as a Finder icon, not the
+# bytes (measured twice). The page now POSTs each dropped file's raw bytes here
+# with its name in X-Filename (percent-encoded); the server writes it under
+# $SOVEREIGN_ROOT/hq/cockpit/drops/<YYYYMMDD>/ and the page types the absolute
+# path into the pty. The name is sanitized to [A-Za-z0-9._-] so the typed path
+# needs no quoting at the prompt and can carry no control byte (a newline in a
+# name typed into a pty would submit the line).
+HQ_DROP_MAX_BYTES = 25 * 1024 * 1024
+HQ_DROP_EXTENSIONS = frozenset(
+    {
+        "txt", "md", "json", "jsonl", "csv", "log", "png", "jpg", "jpeg", "gif", "pdf",
+        "py", "js", "ts", "html", "css", "yaml", "yml", "toml", "patch", "diff",
+    }
+)  # fmt: skip
+_HQ_DROP_NAME_MAX = 120
+_RE_DROP_UNSAFE = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+def _hq_drop_name(raw: str) -> tuple[str | None, str | None]:
+    """(sanitized name, None) or (None, reason). Decodes first, then validates,
+    so an encoded %2F or %00 is caught after decoding."""
+    name = urllib.parse.unquote(raw or "")
+    if not name.strip():
+        return None, "filename is required"
+    if "/" in name or "\\" in name or "\x00" in name:
+        return None, "filename may not contain a path separator or NUL"
+    if any(ord(c) < 32 or ord(c) == 127 for c in name):
+        return None, "filename may not contain control characters"
+    if name.startswith(".") or ".." in name:
+        return None, "dotfiles and '..' are refused"
+    stem, dot, ext = name.rpartition(".")
+    if not dot or not stem or ext.lower() not in HQ_DROP_EXTENSIONS:
+        return None, "file type not allowed"
+    stem = _RE_DROP_UNSAFE.sub("_", stem).strip("_.") or "file"
+    stem = stem[: _HQ_DROP_NAME_MAX - len(ext) - 1]
+    return f"{stem}.{ext.lower()}", None
+
+
+def _hq_drop_dir() -> Path:
+    root = Path(os.environ.get("SOVEREIGN_ROOT") or Path.home() / ".sovereign")
+    return root / "hq" / "cockpit" / "drops" / time.strftime("%Y%m%d")
+
+
+def _hq_drop_open(directory: Path, name: str) -> tuple[int, Path]:
+    """Create the file exclusively, never overwriting: name.ext, name-2.ext, ..."""
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    stem, _, ext = name.rpartition(".")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    for n in range(1, 1000):
+        candidate = directory / (name if n == 1 else f"{stem}-{n}.{ext}")
+        try:
+            return os.open(candidate, flags, 0o600), candidate
+        except FileExistsError:
+            continue
+    raise FileExistsError("too many files with this name today")
+
 
 _HQ_STATUS_WRITER_ROOTS: set[str] = set()
 _hq_status_lock = threading.Lock()
@@ -967,6 +1035,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._send_json(403, {"error": reason}, cors=False)
             return
 
+        # Raw bytes, not JSON: routed before the JSON body read.
+        if path == "/hq/drop":
+            self._hq_drop()
+            return
+
         body, err = self._read_json_body()
         if err is not None:
             self._send_json(400, {"error": err}, cors=False)
@@ -1176,6 +1249,74 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return
         session.write(data)
         self._send_json(200, {"status": "ok", "bytes": len(data)}, cors=False)
+
+    def _hq_drop(self) -> None:
+        """Write one dropped file under the drops dir; answer {path, bytes, sha256}.
+        Every refusal happens before a byte of the body is read, and a refused
+        request closes the connection, so an unread body cannot be misparsed as
+        the next request."""
+
+        def refuse(code: int, error: str) -> None:
+            self.close_connection = True
+            self._send_json(code, {"error": error}, cors=False)
+
+        if (self.headers.get("Transfer-Encoding") or "").strip():
+            refuse(411, "Transfer-Encoding is not supported; send Content-Length")
+            return
+        raw_len = self.headers.get("Content-Length")
+        try:
+            length = int(raw_len) if raw_len is not None else -1
+        except ValueError:
+            length = -1
+        if length < 0:
+            refuse(411, "Content-Length is required")
+            return
+        if length > HQ_DROP_MAX_BYTES:
+            refuse(413, f"file exceeds {HQ_DROP_MAX_BYTES // (1024 * 1024)} MB")
+            return
+        name, why = _hq_drop_name(self.headers.get("X-Filename") or "")
+        if name is None:
+            refuse(400, why)
+            return
+        if not hq_panel.get_session().running:
+            refuse(409, "no panel session is running")
+            return
+        try:
+            fd, target = _hq_drop_open(_hq_drop_dir(), name)
+        except OSError as e:
+            refuse(500, f"could not create the drop file: {type(e).__name__}")
+            return
+        digest = hashlib.sha256()
+        remaining = length
+        try:
+            with os.fdopen(fd, "wb") as f:
+                while remaining > 0:
+                    chunk = self.rfile.read(min(65536, remaining))
+                    if not chunk:
+                        break
+                    digest.update(chunk)
+                    f.write(chunk)
+                    remaining -= len(chunk)
+        except OSError as e:
+            with contextlib.suppress(OSError):
+                target.unlink()
+            refuse(500, f"could not write the drop file: {type(e).__name__}")
+            return
+        if remaining > 0:
+            with contextlib.suppress(OSError):
+                target.unlink()
+            refuse(400, "body shorter than Content-Length")
+            return
+        self._send_json(
+            200,
+            {
+                "path": str(target),
+                "name": target.name,
+                "bytes": length,
+                "sha256": digest.hexdigest(),
+            },
+            cors=False,
+        )
 
     def _hq_resize(self, body: dict) -> None:
         try:
