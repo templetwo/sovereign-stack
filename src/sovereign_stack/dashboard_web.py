@@ -26,6 +26,7 @@ Design notes (frontend):
 from __future__ import annotations
 
 import argparse
+import base64
 import hmac
 import json
 import math
@@ -41,7 +42,7 @@ from collections import deque
 from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from pathlib import Path
 
-from . import connectivity, dashboard, dashboard_readers, nape_daemon
+from . import connectivity, dashboard, dashboard_readers, hq_panel, nape_daemon
 from .signal_ledger import heartbeat_field
 
 # ── Shared activity feed + background watcher ──────────────────────────────
@@ -692,6 +693,38 @@ CONTENT_TYPES = {
 }
 
 
+# ── Cockpit Phase 2 (2026-10-09): HQ inside the dashboard ───────────────────
+#
+# The /hq routes put a full shell on the Studio behind the §2a substrate.
+# Method discipline covers them with the action routes; no /hq response
+# carries the CORS wildcard; the stream verifies the page's CSRF token from
+# the query string because EventSource cannot set a header.
+
+_POST_ONLY_ROUTES = frozenset(
+    {"/actions/ack", "/actions/tail", "/actions/restart", "/hq/start", "/hq/input", "/hq/resize"}
+)
+_HQ_STREAM_KEEPALIVE_S = 15
+_HQ_INPUT_MAX_BYTES = 65536
+
+_HQ_STATUS_WRITER_ROOTS: set[str] = set()
+_hq_status_lock = threading.Lock()
+
+
+def _ensure_hq_status_writer() -> None:
+    """Start the console's own chat.db probe writer once per SOVEREIGN_ROOT (Phase 2
+    hard rule: message access is watched; the HQ module audit reads this file)."""
+    root = Path(os.environ.get("SOVEREIGN_ROOT") or Path.home() / ".sovereign")
+    with _hq_status_lock:
+        if str(root) in _HQ_STATUS_WRITER_ROOTS:
+            return
+        _HQ_STATUS_WRITER_ROOTS.add(str(root))
+    try:
+        interval = int(os.environ.get("HQ_PANEL_STATUS_INTERVAL_S", "300"))
+    except ValueError:
+        interval = 300
+    hq_panel.start_status_writer(root / "hq" / "cockpit" / "console_status.json", interval)
+
+
 class DashboardHandler(BaseHTTPRequestHandler):
     """Serves the dashboard page + snapshot endpoint + SSE feed."""
 
@@ -794,9 +827,21 @@ class DashboardHandler(BaseHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
 
-        # Method discipline (§2a): the three action routes are POST-only.
-        if path in ("/actions/ack", "/actions/tail", "/actions/restart"):
+        # Method discipline (§2a): the action routes and the /hq mutating routes are POST-only.
+        if path in _POST_ONLY_ROUTES:
             self._send_json(405, {"error": "method not allowed, POST only"}, cors=False)
+            return
+
+        if path == "/hq/status":
+            # Phase 2: read-only, same-machine only (Host pin), never CORS.
+            if not self._host_ok():
+                self._send_json(403, {"error": "host not allowlisted"}, cors=False)
+                return
+            self._send_json(200, hq_panel.get_session().status(), cors=False)
+            return
+
+        if path == "/hq/stream":
+            self._hq_stream(parsed)
             return
 
         if path == "/session":
@@ -858,7 +903,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
 
-        if path not in ("/actions/ack", "/actions/tail", "/actions/restart"):
+        if path not in _POST_ONLY_ROUTES:
             self._send_json(404, {"error": "not found", "path": path}, cors=False)
             return
 
@@ -878,6 +923,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._handle_tail(body)
         elif path == "/actions/restart":
             self._handle_restart(body)
+        elif path == "/hq/start":
+            self._hq_start(body)
+        elif path == "/hq/input":
+            self._hq_input(body)
+        elif path == "/hq/resize":
+            self._hq_resize(body)
 
     # ── /actions/ack — §2b, ship ENABLED ──
 
@@ -960,6 +1011,124 @@ class DashboardHandler(BaseHTTPRequestHandler):
             cors=False,
         )
 
+    # ── /hq/* — cockpit Phase 2: HQ inside the dashboard ──
+
+    def _hq_stream_gate(self, parsed) -> str | None:
+        """Host, then Origin (Referer fallback), then the CSRF token carried as the
+        `token` query parameter; the same three checks as _substrate_check."""
+        if not self._host_ok():
+            return "host not allowlisted"
+        origin = self.headers.get("Origin") or ""
+        if not origin:
+            m = _RE_ORIGIN_FROM_REFERER.match(self.headers.get("Referer") or "")
+            origin = m.group(1) if m else ""
+        if origin not in self._expected_origins():
+            return "origin not allowlisted"
+        qs = urllib.parse.parse_qs(parsed.query)
+        token = (qs.get("token") or [""])[0]
+        if not _verify_csrf(token):
+            return "csrf token invalid or missing"
+        return None
+
+    def _hq_stream(self, parsed) -> None:
+        reason = self._hq_stream_gate(parsed)
+        if reason is not None:
+            self._send_json(403, {"error": reason}, cors=False)
+            return
+        qs = urllib.parse.parse_qs(parsed.query)
+        try:
+            after = max(0, int((qs.get("after") or ["0"])[0]))
+        except ValueError:
+            after = 0
+        session = hq_panel.get_session()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "keep-alive")
+        self.send_header("X-Accel-Buffering", "no")
+        self.end_headers()
+
+        def emit(event: str | None, data: str, seq: int | None = None) -> None:
+            parts = []
+            if event:
+                parts.append(f"event: {event}")
+            if seq is not None:
+                parts.append(f"id: {seq}")
+            parts.append(f"data: {data}")
+            self.wfile.write(("\n".join(parts) + "\n\n").encode("utf-8"))
+            self.wfile.flush()
+
+        try:
+            chunks, truncated_before = session.replay(after)
+            st = session.status()
+            hello = {"after": after, "truncated_before": truncated_before, "running": st["running"]}
+            emit("hello", json.dumps(hello))
+            last = after
+            for seq, chunk in chunks:
+                emit(None, base64.b64encode(chunk).decode("ascii"), seq)
+                last = seq
+            while True:
+                if session.wait_for(last, _HQ_STREAM_KEEPALIVE_S):
+                    chunks, _ = session.replay(last)
+                    for seq, chunk in chunks:
+                        emit(None, base64.b64encode(chunk).decode("ascii"), seq)
+                        last = seq
+                    if not chunks:
+                        last = session.last_seq  # the final tick carries no bytes
+                else:
+                    self.wfile.write(b": keepalive\n\n")
+                    self.wfile.flush()
+                if not session.running:
+                    emit("exit", json.dumps({"last_exit": session.status()["last_exit"]}))
+                    return
+        except (BrokenPipeError, ConnectionResetError):
+            return
+        except Exception:
+            return
+
+    def _hq_start(self, body: dict) -> None:
+        try:
+            cols, rows = int(body.get("cols", 80)), int(body.get("rows", 24))
+        except (TypeError, ValueError):
+            self._send_json(400, {"error": "cols and rows must be integers"}, cors=False)
+            return
+        session = hq_panel.get_session()
+        ok, reason = session.start(cols, rows)
+        if not ok:
+            self._send_json(409, {"error": reason}, cors=False)
+            return
+        _GLOBAL_FEED.add(dashboard.CAT_DEPLOY, "HQ panel session started")
+        self._send_json(200, {"status": "started", "pid": session.status()["pid"]}, cors=False)
+
+    def _hq_input(self, body: dict) -> None:
+        session = hq_panel.get_session()
+        if not session.running:
+            self._send_json(409, {"error": "no panel session is running"}, cors=False)
+            return
+        raw = body.get("data")
+        if not isinstance(raw, str):
+            self._send_json(400, {"error": "data (base64) is required"}, cors=False)
+            return
+        try:
+            data = base64.b64decode(raw, validate=True)
+        except (ValueError, TypeError):
+            self._send_json(400, {"error": "data is not valid base64"}, cors=False)
+            return
+        if len(data) > _HQ_INPUT_MAX_BYTES:
+            self._send_json(400, {"error": "input exceeds 64 KB"}, cors=False)
+            return
+        session.write(data)
+        self._send_json(200, {"status": "ok", "bytes": len(data)}, cors=False)
+
+    def _hq_resize(self, body: dict) -> None:
+        try:
+            cols, rows = int(body.get("cols")), int(body.get("rows"))
+        except (TypeError, ValueError):
+            self._send_json(400, {"error": "cols and rows must be integers"}, cors=False)
+            return
+        hq_panel.get_session().resize(cols, rows)
+        self._send_json(200, {"status": "ok"}, cors=False)
+
     def _stream_events(self) -> None:
         """SSE stream that pushes snapshot updates every 3 seconds."""
         self.send_response(200)
@@ -995,6 +1164,7 @@ def serve(host: str = "127.0.0.1", port: int = DEFAULT_PORT) -> HTTPServer:
     parallel with poll requests. Starts the activity-watcher thread on
     first call."""
     _ensure_watcher()
+    _ensure_hq_status_writer()
     return ThreadingHTTPServer((host, port), DashboardHandler)
 
 

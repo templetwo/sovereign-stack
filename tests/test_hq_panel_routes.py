@@ -96,3 +96,196 @@ class TestVendor:
         host, port = running_server
         status, _, _ = _req(f"http://{host}:{port}/static/{bad}")
         assert status == 404
+
+
+# ── Task 3: the /hq/* routes on the substrate ───────────────────────────────
+
+ECHO_CMD = json.dumps(["/bin/sh", "-c", "echo READY; cat"])
+
+
+@pytest.fixture
+def panel_env(monkeypatch, tmp_path):
+    """A fresh session per test, /bin/sh child, no real guard."""
+    from sovereign_stack import hq_panel
+
+    monkeypatch.setenv("HQ_PANEL_COMMAND", ECHO_CMD)
+    monkeypatch.setenv("HQ_PANEL_CWD", str(tmp_path))
+    monkeypatch.setenv("HQ_PANEL_STATUS_INTERVAL_S", "3600")
+    fresh = hq_panel.HQSession(seat_finder=lambda: None)
+    monkeypatch.setattr(hq_panel, "_SESSION", fresh)
+    yield fresh
+    fresh._terminate_for_tests()
+
+
+def _token(host, port):
+    status, body, _ = _req(f"http://{host}:{port}/session")
+    assert status == 200
+    return json.loads(body)["csrf_token"]
+
+
+def _good_headers(host, port, token):
+    return {"Origin": f"http://{host}:{port}", "X-CSRF-Token": token}
+
+
+def _start(host, port, token, cols=80, rows=24):
+    return _req(
+        f"http://{host}:{port}/hq/start",
+        "POST",
+        {"cols": cols, "rows": rows},
+        _good_headers(host, port, token),
+    )
+
+
+class TestHqRoutes:
+    def test_status_shape_and_no_cors(self, running_server, panel_env):
+        host, port = running_server
+        status, body, hdr = _req(f"http://{host}:{port}/hq/status")
+        assert status == 200
+        data = json.loads(body)
+        assert data["running"] is False and data["listening"] is False
+        assert "Access-Control-Allow-Origin" not in hdr
+
+    def test_status_never_carries_token(self, running_server, panel_env):
+        host, port = running_server
+        token = _token(host, port)
+        _, body, _ = _req(f"http://{host}:{port}/hq/status")
+        assert token not in body.decode()
+        _, snap, _ = _req(f"http://{host}:{port}/snapshot.json")
+        assert token not in snap.decode()
+
+    @pytest.mark.parametrize("route", ["/hq/start", "/hq/input", "/hq/resize"])
+    def test_get_on_post_routes_is_405(self, running_server, panel_env, route):
+        host, port = running_server
+        status, _, hdr = _req(f"http://{host}:{port}{route}")
+        assert status == 405 and "Access-Control-Allow-Origin" not in hdr
+
+    @pytest.mark.parametrize("route", ["/hq/start", "/hq/input", "/hq/resize"])
+    def test_post_without_token_is_403_and_spawns_nothing(self, running_server, panel_env, route):
+        host, port = running_server
+        hdr = {"Origin": f"http://{host}:{port}"}
+        status, body, _ = _req(
+            f"http://{host}:{port}{route}", "POST", {"cols": 80, "rows": 24}, hdr
+        )
+        assert status == 403 and b"csrf" in body
+        assert panel_env.running is False
+
+    def test_post_wrong_origin_is_403(self, running_server, panel_env):
+        host, port = running_server
+        token = _token(host, port)
+        hdr = {"Origin": "http://evil.example", "X-CSRF-Token": token}
+        status, body, _ = _req(
+            f"http://{host}:{port}/hq/start", "POST", {"cols": 80, "rows": 24}, hdr
+        )
+        assert status == 403 and b"origin" in body and panel_env.running is False
+
+    def test_wrong_host_is_403_on_every_hq_route(self, running_server, panel_env):
+        host, port = running_server
+        token = _token(host, port)
+        hdr = {
+            "Host": "stack.templetwo.com",
+            "Origin": f"http://{host}:{port}",
+            "X-CSRF-Token": token,
+        }
+        cases = (
+            ("/hq/status", "GET", None),
+            ("/hq/stream?token=" + token, "GET", None),
+            ("/hq/start", "POST", {"cols": 80, "rows": 24}),
+        )
+        for route, method, body in cases:
+            status, _, _ = _req(f"http://{host}:{port}{route}", method, body, hdr)
+            assert status == 403, route
+
+    def test_stream_refuses_without_token(self, running_server, panel_env):
+        host, port = running_server
+        hdr = {"Origin": f"http://{host}:{port}"}
+        status, body, rh = _req(f"http://{host}:{port}/hq/stream", headers=hdr)
+        assert status == 403 and "Access-Control-Allow-Origin" not in rh
+        status, _, _ = _req(f"http://{host}:{port}/hq/stream?token=deadbeef", headers=hdr)
+        assert status == 403
+
+    def test_start_then_stream_then_input(self, running_server, panel_env):
+        import base64
+
+        host, port = running_server
+        token = _token(host, port)
+        status, body, hdr = _start(host, port, token, 100, 30)
+        assert status == 200, body
+        assert json.loads(body)["status"] == "started"
+        assert "Access-Control-Allow-Origin" not in hdr
+        url = f"http://{host}:{port}/hq/stream?token={token}&after=0"
+        opener_req = urllib.request.Request(url, headers={"Origin": f"http://{host}:{port}"})
+        with urllib.request.urlopen(opener_req, timeout=5) as r:
+            assert "text/event-stream" in r.headers.get("Content-Type", "")
+            assert r.headers.get("Access-Control-Allow-Origin") is None
+            seen, deadline, hello, buf = b"", time.time() + 3, None, b""
+            while time.time() < deadline and b"READY" not in seen:
+                line = r.readline()
+                buf += line
+                if line == b"\n":
+                    block = buf.decode()
+                    buf = b""
+                    if "event: hello" in block:
+                        data_lines = [ln for ln in block.splitlines() if ln.startswith("data:")]
+                        hello = json.loads(data_lines[0][5:])
+                    else:
+                        for ln in block.splitlines():
+                            if ln.startswith("data:"):
+                                seen += base64.b64decode(ln[5:].strip())
+            assert hello is not None and hello["running"] is True
+            assert b"READY" in seen
+        payload = {"data": base64.b64encode(b"pong\n").decode()}
+        status, body, _ = _req(
+            f"http://{host}:{port}/hq/input", "POST", payload, _good_headers(host, port, token)
+        )
+        assert status == 200 and json.loads(body)["bytes"] == 5
+        deadline = time.time() + 3
+        while time.time() < deadline:
+            chunks, _ = panel_env.replay(0)
+            if b"pong" in b"".join(c for _, c in chunks):
+                break
+            time.sleep(0.05)
+        else:
+            raise AssertionError("input did not reach the child")
+        status, body, _ = _req(
+            f"http://{host}:{port}/hq/resize",
+            "POST",
+            {"cols": 120, "rows": 40},
+            _good_headers(host, port, token),
+        )
+        assert status == 200
+
+    def test_second_start_is_409_and_spawns_nothing(self, running_server, panel_env):
+        host, port = running_server
+        token = _token(host, port)
+        _start(host, port, token)
+        pid1 = panel_env.status()["pid"]
+        status, body, _ = _start(host, port, token)
+        assert status == 409 and b"already running" in body
+        assert panel_env.status()["pid"] == pid1
+
+    def test_start_refused_409_when_a_seat_is_live(self, running_server, panel_env):
+        host, port = running_server
+        seat = {"pid": 77, "comm": "claude", "cwd": "/h", "exe": "/e", "kind": "terminal"}
+        panel_env._seat_finder = lambda: seat
+        token = _token(host, port)
+        status, body, _ = _start(host, port, token)
+        assert status == 409 and b"77" in body and panel_env.running is False
+
+    def test_input_before_start_is_409_and_bad_base64_is_400(self, running_server, panel_env):
+        host, port = running_server
+        token = _token(host, port)
+        hdr = _good_headers(host, port, token)
+        status, _, _ = _req(f"http://{host}:{port}/hq/input", "POST", {"data": "cGluZw=="}, hdr)
+        assert status == 409
+        _start(host, port, token)
+        status, _, _ = _req(f"http://{host}:{port}/hq/input", "POST", {"data": "@@@not-b64"}, hdr)
+        assert status == 400
+
+    def test_status_writer_file_appears_under_sovereign_root(self, running_server, tmp_path):
+        p = tmp_path / "hq" / "cockpit" / "console_status.json"
+        deadline = time.time() + 3
+        while not p.exists() and time.time() < deadline:
+            time.sleep(0.05)
+        assert p.exists()
+        rec = json.loads(p.read_text())
+        assert isinstance(rec["ok"], bool) and rec["checked_at"]
