@@ -1643,23 +1643,22 @@ input::placeholder { color: var(--text-faint); }
 /* (the clicked row's .feed-detail carries the full message, unchanged) */
 
 /* FOCUS: HQ fills the cockpit; the side columns and ACTIVITY step out of the
-   way. The attention strip STAYS: it carries guardian, watchman and arrival
-   items that never reach the incident strip. `body.hq-focus .cockpit`
+   way. The attention strip STAYS: it carries the signal ledger, guardian and
+   watchman, which never reach the incident strip (the arrival gate panel
+   stays hidden with its column). `body.hq-focus .cockpit`
    outranks every breakpoint rule on `.cockpit` by specificity, so no
    !important. */
 body.hq-focus .cockpit { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); grid-template-areas: "act"; align-items: stretch; overflow: hidden; }
 body.hq-focus .cockpit-col:not(.col-center), body.hq-focus .panel-act { display: none; }
 body.hq-focus .col-center { height: auto; min-height: 0; align-self: stretch; }
 body.hq-focus .col-center > .panel-hq { flex: 1 1 0; }
-@media (max-width: 1379px) {
-  /* FALLBACK ONLY, for an unlocked page (short window) that scrolls: give
-     the column the viewport minus the chrome. */
-  body.hq-focus .col-center { height: calc(100vh - 190px); min-height: 420px; }
-  /* Locked (.app is 100vh; .shell and .cockpit are flex:1 inside it), the single
-     minmax(0, 1fr) row is exactly the space left under the header and the
-     strips, whatever they wrap to, so no magic number. */
-  body.hq-focus .app.is-locked .col-center { height: auto; min-height: 0; }
-}
+/* FALLBACK ONLY, for an unlocked page (any width; short or narrow window)
+   that scrolls: give the column the viewport minus the chrome. */
+body.hq-focus .app:not(.is-locked) .col-center { height: calc(100vh - 190px); min-height: 420px; }
+/* Locked (.app is 100vh; .shell and .cockpit are flex:1 inside it), the single
+   minmax(0, 1fr) row is exactly the space left under the header and the
+   strips, whatever they wrap to, so no magic number. */
+body.hq-focus .app.is-locked .col-center { height: auto; min-height: 0; }
 
 /* NEEDS A LOOK strip (cockpit layout, 2026-10-10): read-only counts. */
 .attention-strip {

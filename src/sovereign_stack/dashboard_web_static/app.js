@@ -1765,7 +1765,7 @@ const hq = {
   // repeat of an unchanged size is a redraw storm (review 1, item 5). A FORCED
   // post always goes: another viewer may have resized the shared pty while this
   // page's own size never changed, so lastPosted is not the pty's size.
-  lastPosted: null, refitPending: false, refitForce: false,
+  lastPosted: null, refitPending: false, refitForce: false, forcedThisFrame: false,
 };
 
 // The pty has ONE size and this page may be one of several viewers of it (the
@@ -1781,10 +1781,19 @@ function hqPostSize(force) {
   if (!force && !document.hasFocus()) return false;
   const size = { cols: hq.term.cols, rows: hq.term.rows };
   const last = hq.lastPosted;
-  if (!force && last && last.cols === size.cols && last.rows === size.rows) return false;
-  // Set BEFORE the request goes out, so a second caller in the same frame (the
-  // textarea focus listener firing from term.focus()) is deduped against it.
+  const same = !!last && last.cols === size.cols && last.rows === size.rows;
+  if (!force && same) return false;
+  // Forced posts that land in one animation frame merge into one (window focus
+  // and the textarea refocus fire together when the window comes forward).
+  // The first one went out, so the reclaim stands.
+  if (force && same && hq.forcedThisFrame) return true;
+  // Set BEFORE the request goes out, so a second caller in the same frame is
+  // compared against it.
   hq.lastPosted = size;
+  if (force && !hq.forcedThisFrame) {
+    hq.forcedThisFrame = true;
+    requestAnimationFrame(() => { hq.forcedThisFrame = false; });
+  }
   const clear = () => { if (hq.lastPosted === size) hq.lastPosted = null; };
   hqPostWithRetry('/hq/resize', size).then((res) => { if (!res || !res.ok) clear(); }, clear);
   return true;
@@ -1906,6 +1915,9 @@ async function hqOpenStream() {
   es.addEventListener('exit', () => {
     if (hq.term) hq.term.writeln('\r\n\x1b[2m[HQ session ended]\x1b[0m');
     es.close(); hq.es = null; hq.running = false;
+    // If another viewer restarts HQ before the next poll, this page must
+    // still send its resume post against the new pty.
+    hq.lastPosted = null; hq.resumedResize = false;
     const btn = $('hq-start'); if (btn) btn.hidden = false;
   });
   es.onerror = () => {

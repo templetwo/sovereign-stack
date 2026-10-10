@@ -433,7 +433,9 @@ class TestPageAssets:
             "new ResizeObserver(",
             "lastPosted",
             "window.addEventListener('focus', () => hqPostSize(true))",
-            "if (!force && last &&",  # dedupe is for unforced posts only
+            "if (!force && same) return false;",  # dedupe is for unforced posts only
+            "hq.forcedThisFrame",  # forced posts in one frame merge
+            "hq.lastPosted = null; hq.resumedResize = false;",  # stream exit
             "ev.repeat",
             "ev.preventDefault()",
             "chat.db not probed",
@@ -483,6 +485,13 @@ class TestPageAssets:
         assert "grid-template-rows: minmax(0, 1fr)" in css
         assert ".stat-hq-block .stat-value.is-stale {" in css
         assert "body.hq-focus .app.is-locked .col-center { height: auto; min-height: 0; }" in css
+        # The fallback covers every unlocked width, outside any width query.
+        fallback = (
+            "body.hq-focus .app:not(.is-locked) .col-center "
+            "{ height: calc(100vh - 190px); min-height: 420px; }"
+        )
+        assert fallback in css
+        assert "@media (max-width: 1379px) {\n  body.hq-focus" not in css
 
 
 class TestPageFixPass:
