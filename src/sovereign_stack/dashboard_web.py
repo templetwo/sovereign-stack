@@ -423,13 +423,11 @@ def build_snapshot() -> dict:
                           A malformed file degrades this key alone; the 18
                           above keep rendering.
 
-    ── Keys 20..22 (cockpit) ──
-    honk_counts and hq_panel (Phase 2, 2026-10-09), then comms (cockpit
-    integration, 2026-10-10): dashboard_readers.read_comms over the launchd
-    iMessage spool's status file and inbound.jsonl tail. Spool health and
-    the newest inbound row's time and rowid only; never the text, handle or
-    chat guid, and never an answered/unanswered claim (the spool holds
-    inbound rows only). 22 keys in all; count the dict.
+    ── Keys 20..21 (cockpit Phase 2) ── honk_counts and hq_panel. 21 keys in
+    all; count the dict. The cockpit integration's timing stamps and comms
+    line are deliberately NOT here: this route sends the CORS wildcard and
+    has no Host check, so they are served only by the Studio-only
+    GET /hq/status (adversarial review, 2026-10-10).
 
     EVERY ONE OF THE SEVEN IS INDIVIDUALLY NULLABLE and individually
     fail-soft: a reader that raises yields null for its own key and cannot
@@ -517,13 +515,42 @@ def build_snapshot() -> dict:
             "ledger_label": "open honk signals in the signal ledger (pacemaker of 2026-09-07)",
             "ledger_since": "2026-09-07",
         },
-        "hq_panel": _safe_section(lambda: hq_panel.get_session().status()),
-        # ── Key 22 (cockpit integration, 2026-10-10): the comms line ──
-        # The launchd iMessage spool's health and the time of the newest
-        # inbound row. No body, no handle, no guid; null when the spool
-        # status file is missing, so the panel says "comms unavailable".
-        "comms": _safe_section(dashboard_readers.read_comms),
+        # Exactly the d9b5f64 field set: the activity stamps and the comms
+        # line are Studio-only and live on GET /hq/status (review 2026-10-10).
+        "hq_panel": _safe_section(_snapshot_hq_panel),
     }
+
+
+# Fields of hq_panel.status() that never enter /snapshot.json: when Anthony
+# last typed and when HQ last printed are activity data, and the snapshot is
+# readable from any origin. They ride GET /hq/status only.
+_HQ_STATUS_ONLY_FIELDS = ("seq_changed_at", "seq_idle_seconds", "last_input_at")
+
+# The comms reader's fields the page renders; the rest stay on the server.
+_HQ_COMMS_FIELDS = (
+    "spool_ok",
+    "spool_age_s",
+    "spool_stale",
+    "inbound_readable",
+    "last_inbound_at",
+    "last_inbound_age_s",
+)
+
+
+def _snapshot_hq_panel() -> dict:
+    st = hq_panel.get_session().status()
+    for key in _HQ_STATUS_ONLY_FIELDS:
+        st.pop(key, None)
+    return st
+
+
+def _hq_status_payload() -> dict:
+    """GET /hq/status: the full session status plus a nested `comms` object
+    (None when the spool reader has nothing or fails)."""
+    st = hq_panel.get_session().status()
+    comms = _safe_section(dashboard_readers.read_comms)
+    st["comms"] = {k: comms.get(k) for k in _HQ_COMMS_FIELDS} if isinstance(comms, dict) else None
+    return st
 
 
 # ── §2a Shared security substrate (all three actions call it first) ────────
@@ -967,7 +994,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if not self._host_ok():
                 self._send_json(403, {"error": "host not allowlisted"}, cors=False)
                 return
-            self._send_json(200, hq_panel.get_session().status(), cors=False)
+            self._send_json(200, _hq_status_payload(), cors=False)
             return
 
         if path == "/hq/stream":

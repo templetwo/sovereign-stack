@@ -89,11 +89,7 @@ INDEX_KEYS = ["open_threads_index"]
 # the HQ panel's status. Appended, never inserted; see tests/test_hq_panel_routes.py.
 PHASE2_KEYS = ["honk_counts", "hq_panel"]
 
-# Key 22, cockpit integration (2026-10-10): the comms line. Appended after
-# hq_panel; see tests/test_hq_cockpit_integration.py.
-COCKPIT_KEYS = ["comms"]
-
-SNAPSHOT_KEYS = LEGACY_KEYS + V2_KEYS + INDEX_KEYS + PHASE2_KEYS + COCKPIT_KEYS
+SNAPSHOT_KEYS = LEGACY_KEYS + V2_KEYS + INDEX_KEYS + PHASE2_KEYS
 
 
 @pytest.fixture(autouse=True)

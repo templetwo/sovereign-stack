@@ -334,7 +334,7 @@ class TestWorkingWaitingFields:
         for needle in (
             "function hqActivityWord",
             "const HQ_STILL_S = 20;",
-            "hp.seq_idle_seconds",
+            "st.seq_idle_seconds",
             "'unknown'",
             "'working'",
             "'waiting'",
@@ -427,20 +427,74 @@ class TestCommsReader:
         (d / "inbound.jsonl").write_text('{"rowid": 1, "torn\n' + good + "\nnot json\n")
         assert readers.read_comms()["last_inbound_rowid"] == 7
 
-    def test_snapshot_carries_comms_last_and_never_the_text(self, running_server, panel, tmp_path):
-        host, port = running_server
+    def test_missing_inbound_file_is_its_own_unreadable_state(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("SOVEREIGN_ROOT", str(tmp_path))
+        _spool(tmp_path, {"ok": True, "last_poll": time.time()}, None)
+        c = readers.read_comms()
+        assert c["inbound_readable"] is False and c["last_inbound_at"] is None
+        _spool(tmp_path, None, [])
+        assert readers.read_comms()["inbound_readable"] is True
+
+    def test_a_last_poll_in_the_future_reads_stale_not_fresh(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("SOVEREIGN_ROOT", str(tmp_path))
+        _spool(tmp_path, {"ok": True, "last_poll": time.time() + 3600}, [])
+        c = readers.read_comms()
+        assert c["spool_stale"] is True and c["spool_age_s"] is None
+
+
+# ── Review fix 1: the timing stamps and comms are Studio-only ──────────────
+
+TIMING_FIELDS = ("seq_changed_at", "seq_idle_seconds", "last_input_at")
+
+
+class TestStudioOnlyActivityAndComms:
+    def _spool_with_row(self, root):
         _spool(
-            tmp_path,
-            {"ok": True, "last_poll": time.time()},
+            root,
+            {"ok": True, "error": "boom", "last_poll": time.time()},
             [_row(5, "2026-10-10 20:00:00", "2026-10-10 16:00:00")],
         )
-        _, body, _ = _raw(host, port, "GET", "/snapshot.json")
-        snap = json.loads(body)
-        assert list(snap)[-1] == "comms" and len(snap) == 22
-        assert snap["comms"]["last_inbound_rowid"] == 5
-        assert SECRET_TEXT not in body.decode()
 
-    def test_snapshot_comms_is_null_when_the_reader_raises(
+    def test_snapshot_has_no_comms_and_no_timing_fields(self, running_server, panel, tmp_path):
+        self._spool_with_row(tmp_path)
+        assert panel.start(80, 24)[0]
+        assert _wait(lambda: panel.status()["seq_changed_at"] is not None)
+        host, port = running_server
+        _, body, hdr = _raw(host, port, "GET", "/snapshot.json")
+        snap = json.loads(body)
+        assert "comms" not in snap and len(snap) == 21
+        assert list(snap)[-2:] == ["honk_counts", "hq_panel"]
+        for f in TIMING_FIELDS:
+            assert f not in snap["hq_panel"], f
+        text = body.decode()
+        assert SECRET_TEXT not in text and "imessage" not in text
+        assert "2026-10-10 16:00:00" not in text  # the inbound stamp
+
+    def test_hq_status_carries_them_under_the_right_host(self, running_server, panel, tmp_path):
+        self._spool_with_row(tmp_path)
+        assert panel.start(80, 24)[0]
+        assert _wait(lambda: panel.status()["seq_changed_at"] is not None)
+        host, port = running_server
+        status, body, hdr = _raw(host, port, "GET", "/hq/status")
+        assert status == 200 and "Access-Control-Allow-Origin" not in hdr
+        st = json.loads(body)
+        for f in TIMING_FIELDS:
+            assert f in st, f
+        assert isinstance(st["seq_idle_seconds"], float)
+        c = st["comms"]
+        assert c["last_inbound_at"] == "2026-10-10 16:00:00" and c["spool_ok"] is True
+        assert c["inbound_readable"] is True
+        for gone in ("source", "last_inbound_rowid", "unanswered_for_s", "spool_error"):
+            assert gone not in c, gone
+        assert SECRET_TEXT not in body.decode() and "+10000000000" not in body.decode()
+
+    def test_hq_status_under_a_wrong_host_is_403(self, running_server, panel, tmp_path):
+        self._spool_with_row(tmp_path)
+        host, port = running_server
+        status, body, _ = _raw(host, port, "GET", "/hq/status", headers={"Host": "evil.example"})
+        assert status == 403 and b"2026-10-10 16:00:00" not in body
+
+    def test_hq_status_comms_is_null_when_the_reader_raises(
         self, running_server, panel, monkeypatch
     ):
         def boom():
@@ -448,9 +502,23 @@ class TestCommsReader:
 
         monkeypatch.setattr(readers, "read_comms", boom)
         host, port = running_server
-        _, body, _ = _raw(host, port, "GET", "/snapshot.json")
-        assert json.loads(body)["comms"] is None
+        status, body, _ = _raw(host, port, "GET", "/hq/status")
+        assert status == 200 and json.loads(body)["comms"] is None
 
+    def test_page_reads_activity_and_comms_from_hq_status(self):
+        js = (STATIC / "app.js").read_text()
+        for needle in (
+            "async function hqFetchStatus",
+            "hq.status = await hqFetchStatus();",
+            "hqActivityWord(hq.status)",
+            "renderHqComms(hq.status)",
+            "hq.status = null;",
+        ):
+            assert needle in js, needle
+        assert "snapshot.comms" not in js and "snapshot && snapshot.comms" not in js
+
+
+class TestCommsPage:
     def test_page_renders_one_line_and_no_answered_claim(self):
         js = (STATIC / "app.js").read_text()
         html = (STATIC / "index.html").read_text()
@@ -465,6 +533,7 @@ class TestCommsReader:
             "renderHqComms(null)",
         ):
             assert needle in js, needle
+        assert "'comms unavailable (inbound spool file unreadable)'" in js
         body = js[js.index("function renderHqComms") : js.index("function renderHqPanel")]
         assert "answered" not in body
         assert re.search(r"\bc\.text\b", body) is None  # never the message body

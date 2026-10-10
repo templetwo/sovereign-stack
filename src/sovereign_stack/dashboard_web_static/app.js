@@ -1766,6 +1766,8 @@ const hq = {
   // post always goes: another viewer may have resized the shared pty while this
   // page's own size never changed, so lastPosted is not the pty's size.
   lastPosted: null, refitPending: false, refitForce: false, forcedThisFrame: false,
+  // The latest GET /hq/status (Studio-only), or null when it failed this poll.
+  status: null,
 };
 
 // The pty has ONE size and this page may be one of several viewers of it (the
@@ -2182,9 +2184,26 @@ const HQ_PROBE_STALE_S = 900;
 // for HQ_STILL_S; that is the honest cost of reading only the byte stream.
 const HQ_STILL_S = 20;
 
-function hqActivityWord(hp) {
-  if (!hp || !hp.running) return 'off';
-  const idle = hp.seq_idle_seconds;
+// The activity stamps and the comms line come from GET /hq/status, which is
+// Studio-only and Host-checked; /snapshot.json is readable from any origin and
+// never carries them (adversarial review, 2026-10-10). Fetched once per poll;
+// any failure leaves null, which renders "unknown" / "comms unavailable",
+// never the previous value.
+async function hqFetchStatus() {
+  try {
+    const r = await fetch('/hq/status', { cache: 'no-store' });
+    if (!r.ok) return null;
+    const st = await r.json();
+    return st && typeof st === 'object' ? st : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function hqActivityWord(st) {
+  if (!st) return 'unknown';
+  if (!st.running) return 'off';
+  const idle = st.seq_idle_seconds;
   if (typeof idle !== 'number' || !Number.isFinite(idle)) return 'unknown';
   return idle < HQ_STILL_S ? 'working' : 'waiting';
 }
@@ -2201,7 +2220,7 @@ function renderHqHeader(hp, why) {
     return;
   }
   const exit = hp.last_exit;
-  const word = hqActivityWord(hp);
+  const word = hqActivityWord(hq.status);
   if (hp.running) {
     main.textContent = `${word} · ${hp.age_seconds != null ? fmtAge(hp.age_seconds) : '—'} open`;
     main.className = 'stat-value ' + (word === 'working' ? 'is-live' : 'is-muted');
@@ -2231,15 +2250,21 @@ function renderHqHeader(hp, why) {
   sub.className = 'stat-value is-muted' + (stale ? ' is-stale' : '');
 }
 
-// COMMS line (cockpit integration, 2026-10-10). From snapshot.comms, which the
-// server builds from the launchd spool files only. HH:MM is sliced from the
-// spool's own Eastern stamp (no browser timezone math); the age is the
-// server's. A missing section is "comms unavailable", never a zero.
-function renderHqComms(snapshot) {
+// COMMS line (cockpit integration, 2026-10-10). From /hq/status's `comms`,
+// which the server builds from the launchd spool files only. HH:MM is sliced
+// from the spool's own Eastern stamp (no browser timezone math); the age is
+// the server's. A missing section is "comms unavailable", never a zero, and an
+// unreadable inbound file is its own "unavailable" state, never "none".
+function renderHqComms(st) {
   const line = $('hq-comms');
   if (!line) return;
-  const c = snapshot && snapshot.comms;
+  const c = st && st.comms;
   if (!c) { line.textContent = 'comms unavailable'; line.className = 'hq-comms is-stale'; return; }
+  if (c.inbound_readable !== true) {
+    line.textContent = 'comms unavailable (inbound spool file unreadable)';
+    line.className = 'hq-comms is-stale';
+    return;
+  }
   const parts = [];
   const at = typeof c.last_inbound_at === 'string' ? c.last_inbound_at : '';
   const hm = /^\d{4}-\d{2}-\d{2}[ T](\d{2}:\d{2})/.exec(at);
@@ -2267,8 +2292,8 @@ function hqSetActivityClass(word) {
 }
 
 function renderHqPanel(snapshot) {
-  renderHqComms(snapshot);
-  hqSetActivityClass(hqActivityWord(snapshot && snapshot.hq_panel));
+  renderHqComms(hq.status);
+  hqSetActivityClass(hqActivityWord(hq.status));
   const hp = snapshot && snapshot.hq_panel;
   const note = $('hq-note');
   const banner = $('hq-banner');
@@ -2511,6 +2536,7 @@ async function poll() {
     const rtt = performance.now() - t0;
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const snapshot = await r.json();
+    hq.status = await hqFetchStatus();
 
     state.latencyBuf.push(rtt);
     if (state.latencyBuf.length > 60) state.latencyBuf.shift();
@@ -2573,8 +2599,9 @@ async function poll() {
     // The page's own rule: never keep a previous value beside UNREACHABLE.
     renderHqHeader(null);
     renderAttentionStrip(null);
+    hq.status = null;
     renderHqComms(null);
-    hqSetActivityClass('off');
+    hqSetActivityClass('unknown');
     // Same rule for the panel note; the terminal itself is left alone.
     const hqNoteEl = $('hq-note');
     if (hqNoteEl) { hqNoteEl.textContent = 'console unreachable'; hqNoteEl.classList.add('is-muted'); }

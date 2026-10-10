@@ -1187,7 +1187,8 @@ def read_comms() -> dict | None:
     timestamps and the spool's health, nothing else.
 
     ``None`` when the status file is absent, unreadable or malformed (the
-    panel renders "comms unavailable", never a zero).
+    panel renders "comms unavailable", never a zero). Served ONLY through
+    the Studio-only GET /hq/status, never /snapshot.json (CORS wildcard).
     """
     spool = _sovereign_root() / "imessage"
     status_path = spool / "daemon_status.json"
@@ -1197,13 +1198,20 @@ def read_comms() -> dict | None:
 
     last_poll = status.get("last_poll")
     if isinstance(last_poll, (int, float)) and not isinstance(last_poll, bool):
-        spool_age = max(0.0, time.time() - float(last_poll))
+        raw_age = time.time() - float(last_poll)
     else:
-        spool_age = _mtime_age(status_path)
+        raw_age = _mtime_age(status_path)
     ok = status.get("ok") is True
+    # A last_poll in the future (a clock jump, a bad write) is not "fresh":
+    # it reads stale, and the age is reported as unknown.
+    future = raw_age is not None and raw_age < 0
+    spool_age = None if future else raw_age
     stale = spool_age is None or spool_age > COMMS_SPOOL_STALE_SECONDS
 
-    rec = _newest_inbound(spool / "inbound.jsonl")
+    inbound = spool / "inbound.jsonl"
+    # A missing or unreadable spool file is its own state, never "no texts".
+    inbound_readable = inbound.is_file() and os.access(inbound, os.R_OK)
+    rec = _newest_inbound(inbound) if inbound_readable else None
     last_at = last_age = last_rowid = None
     if rec is not None:
         eastern = rec.get("date_iso_eastern")
@@ -1220,6 +1228,7 @@ def read_comms() -> dict | None:
         "spool_error": status.get("error") is not None,
         "spool_age_s": round(spool_age, 1) if spool_age is not None else None,
         "spool_stale": stale,
+        "inbound_readable": inbound_readable,
         "last_inbound_at": last_at,
         "last_inbound_age_s": round(last_age) if last_age is not None else None,
         "last_inbound_rowid": last_rowid,
