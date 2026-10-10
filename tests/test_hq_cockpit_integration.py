@@ -9,6 +9,7 @@ import contextlib
 import hashlib
 import http.client
 import json
+import re
 import threading
 import time
 import urllib.parse
@@ -331,3 +332,129 @@ class TestWorkingWaitingFields:
         ):
             assert needle in js, needle
         assert "LIVE · " not in js
+
+
+# ── Item 3: the comms line, from the launchd spool files only ──────────────
+
+SECRET_TEXT = "the body of a text that must never leave the disk"
+
+
+def _spool(root: Path, status: dict | None, rows: list[dict] | None):
+    d = root / "imessage"
+    d.mkdir(parents=True, exist_ok=True)
+    if status is not None:
+        (d / "daemon_status.json").write_text(json.dumps(status))
+    if rows is not None:
+        (d / "inbound.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+    return d
+
+
+def _row(rowid, utc, eastern, from_me=0):
+    return {
+        "rowid": rowid,
+        "date_iso_eastern": eastern,
+        "date_utc": utc,
+        "chat_guid": "any;-;+10000000000",
+        "handle": "+10000000000",
+        "is_from_me": from_me,
+        "text": SECRET_TEXT,
+    }
+
+
+class TestCommsReader:
+    def test_none_when_the_status_file_is_absent(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("SOVEREIGN_ROOT", str(tmp_path))
+        assert readers.read_comms() is None
+        _spool(tmp_path, None, [])
+        assert readers.read_comms() is None
+
+    def test_none_when_the_status_file_is_malformed(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("SOVEREIGN_ROOT", str(tmp_path))
+        d = _spool(tmp_path, None, None)
+        (d / "daemon_status.json").write_text("{ not json")
+        assert readers.read_comms() is None
+
+    def test_healthy_spool_and_newest_inbound_row(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("SOVEREIGN_ROOT", str(tmp_path))
+        now = time.time()
+        from datetime import datetime, timezone
+
+        utc = datetime.fromtimestamp(now - 600, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        rows = [
+            _row(10, "2026-10-01 10:00:00", "2026-10-01 06:00:00"),
+            _row(11, utc, "2026-10-10 16:29:33"),
+            _row(12, utc, "2026-10-10 16:30:00", from_me=1),  # not his: skipped
+        ]
+        _spool(tmp_path, {"ok": True, "error": None, "last_poll": now - 5}, rows)
+        c = readers.read_comms()
+        assert c["spool_ok"] is True and c["spool_stale"] is False and c["spool_error"] is False
+        assert 4 <= c["spool_age_s"] <= 30
+        assert c["last_inbound_rowid"] == 11
+        assert c["last_inbound_at"] == "2026-10-10 16:29:33"
+        # Age from date_utc, not the Eastern stamp (which would be 4 h off).
+        assert 590 <= c["last_inbound_age_s"] <= 640
+        assert c["unanswered_for_s"] is None
+        blob = json.dumps(c)
+        assert SECRET_TEXT not in blob and "+10000000000" not in blob and "any;-;" not in blob
+
+    def test_stale_and_not_ok_are_reported_not_hidden(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("SOVEREIGN_ROOT", str(tmp_path))
+        _spool(tmp_path, {"ok": False, "error": "x", "last_poll": time.time() - 3600}, None)
+        c = readers.read_comms()
+        assert c["spool_ok"] is False and c["spool_error"] is True and c["spool_stale"] is True
+        assert c["last_inbound_at"] is None and c["last_inbound_rowid"] is None
+
+    def test_no_last_poll_falls_back_to_the_file_mtime(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("SOVEREIGN_ROOT", str(tmp_path))
+        _spool(tmp_path, {"ok": True}, None)
+        c = readers.read_comms()
+        assert c["spool_age_s"] is not None and c["spool_age_s"] < 30
+
+    def test_torn_and_malformed_lines_are_skipped(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("SOVEREIGN_ROOT", str(tmp_path))
+        d = _spool(tmp_path, {"ok": True, "last_poll": time.time()}, None)
+        good = json.dumps(_row(7, "2026-10-10 20:00:00", "2026-10-10 16:00:00"))
+        (d / "inbound.jsonl").write_text('{"rowid": 1, "torn\n' + good + "\nnot json\n")
+        assert readers.read_comms()["last_inbound_rowid"] == 7
+
+    def test_snapshot_carries_comms_last_and_never_the_text(self, running_server, panel, tmp_path):
+        host, port = running_server
+        _spool(
+            tmp_path,
+            {"ok": True, "last_poll": time.time()},
+            [_row(5, "2026-10-10 20:00:00", "2026-10-10 16:00:00")],
+        )
+        _, body, _ = _raw(host, port, "GET", "/snapshot.json")
+        snap = json.loads(body)
+        assert list(snap)[-1] == "comms" and len(snap) == 22
+        assert snap["comms"]["last_inbound_rowid"] == 5
+        assert SECRET_TEXT not in body.decode()
+
+    def test_snapshot_comms_is_null_when_the_reader_raises(
+        self, running_server, panel, monkeypatch
+    ):
+        def boom():
+            raise RuntimeError("spool reader exploded")
+
+        monkeypatch.setattr(readers, "read_comms", boom)
+        host, port = running_server
+        _, body, _ = _raw(host, port, "GET", "/snapshot.json")
+        assert json.loads(body)["comms"] is None
+
+    def test_page_renders_one_line_and_no_answered_claim(self):
+        js = (STATIC / "app.js").read_text()
+        html = (STATIC / "index.html").read_text()
+        assert 'id="hq-comms"' in html
+        assert html.index('class="hq-banner-slot"') < html.index('id="hq-comms"')
+        assert html.index('id="hq-comms"') < html.index('id="hq-term"')
+        for needle in (
+            "function renderHqComms",
+            "last text from Anthony: ",
+            "'comms unavailable'",
+            "spool ok",
+            "renderHqComms(null)",
+        ):
+            assert needle in js, needle
+        body = js[js.index("function renderHqComms") : js.index("function renderHqPanel")]
+        assert "answered" not in body
+        assert re.search(r"\bc\.text\b", body) is None  # never the message body

@@ -1138,3 +1138,91 @@ def _fetch_bridge_heartbeat_uncached() -> dict | None:
     }
     _cache_put("heartbeat", result)
     return result
+
+
+# ── COMMS line (cockpit integration, 2026-10-10) ────────────────────────────
+
+#: The launchd spool daemon polls chat.db every few seconds and rewrites its
+#: status file each poll; the HQ module audit's json_key probe uses the same
+#: 60 s freshness bound.
+COMMS_SPOOL_STALE_SECONDS = 60.0
+
+#: How far back from the end of inbound.jsonl to look for the newest inbound
+#: row. Records are a few hundred bytes; this is thousands of them.
+COMMS_TAIL_BYTES = 256 * 1024
+
+
+def _newest_inbound(path: Path) -> dict | None:
+    """The newest is_from_me == 0 record in the spool's tail, or None. Reads a
+    bounded tail; a torn first line from the seek is skipped as malformed."""
+    try:
+        size = path.stat().st_size
+        with path.open("rb") as f:
+            f.seek(max(0, size - COMMS_TAIL_BYTES))
+            tail = f.read()
+    except OSError:
+        return None
+    for line in reversed(tail.splitlines()):
+        try:
+            rec = json.loads(line)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            continue
+        if isinstance(rec, dict) and rec.get("is_from_me") == 0:
+            return rec
+    return None
+
+
+def read_comms() -> dict | None:
+    """The HQ panel's comms line, from the launchd iMessage spool ONLY.
+
+    Sources: ``$SOVEREIGN_ROOT/imessage/daemon_status.json`` and
+    ``inbound.jsonl``, both read-only. chat.db is deliberately not read here.
+
+    WHAT THIS CANNOT KNOW, AND SO NEVER CLAIMS: whether a text was answered.
+    The spool holds inbound rows only, so ``unanswered_for_s`` is always
+    ``None`` (unknown) and the page renders no answered/unanswered claim.
+
+    WHAT NEVER LEAVES THE DISK: the message body, the handle, the chat guid.
+    /snapshot.json carries a CORS wildcard; this section holds a rowid,
+    timestamps and the spool's health, nothing else.
+
+    ``None`` when the status file is absent, unreadable or malformed (the
+    panel renders "comms unavailable", never a zero).
+    """
+    spool = _sovereign_root() / "imessage"
+    status_path = spool / "daemon_status.json"
+    status = _read_json(status_path)
+    if not isinstance(status, dict):
+        return None
+
+    last_poll = status.get("last_poll")
+    if isinstance(last_poll, (int, float)) and not isinstance(last_poll, bool):
+        spool_age = max(0.0, time.time() - float(last_poll))
+    else:
+        spool_age = _mtime_age(status_path)
+    ok = status.get("ok") is True
+    stale = spool_age is None or spool_age > COMMS_SPOOL_STALE_SECONDS
+
+    rec = _newest_inbound(spool / "inbound.jsonl")
+    last_at = last_age = last_rowid = None
+    if rec is not None:
+        eastern = rec.get("date_iso_eastern")
+        last_at = eastern if isinstance(eastern, str) else None
+        # Age from the UTC stamp: _parse_ts reads a naive stamp as UTC, so
+        # handing it the Eastern one would be four hours off.
+        last_age = _age_seconds(rec.get("date_utc"))
+        rowid = rec.get("rowid")
+        last_rowid = rowid if isinstance(rowid, int) and not isinstance(rowid, bool) else None
+
+    return {
+        "source": str(spool),
+        "spool_ok": ok,
+        "spool_error": status.get("error") is not None,
+        "spool_age_s": round(spool_age, 1) if spool_age is not None else None,
+        "spool_stale": stale,
+        "last_inbound_at": last_at,
+        "last_inbound_age_s": round(last_age) if last_age is not None else None,
+        "last_inbound_rowid": last_rowid,
+        "unanswered_for_s": None,
+        "age_seconds": round(spool_age, 1) if spool_age is not None else None,
+    }

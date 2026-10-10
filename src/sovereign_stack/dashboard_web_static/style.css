@@ -1681,3 +1681,6 @@ body.hq-focus .app.is-locked .col-center { height: auto; min-height: 0; }
 /* ── Cockpit integration (2026-10-10) ── */
 /* File drop to path: the terminal shows it will take the file. */
 #hq-term.is-drop-target { outline: 2px dashed var(--accent); outline-offset: -2px; }
+/* COMMS line: one muted line, fixed height so the terminal box never moves. */
+.hq-comms { flex: 0 0 auto; height: 16px; line-height: 16px; font-size: 11px; color: var(--text-faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.hq-comms.is-stale { color: var(--degraded); }

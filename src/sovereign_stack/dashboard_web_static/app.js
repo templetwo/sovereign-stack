@@ -2168,7 +2168,33 @@ function renderHqHeader(hp, why) {
   sub.className = 'stat-value is-muted' + (stale ? ' is-stale' : '');
 }
 
+// COMMS line (cockpit integration, 2026-10-10). From snapshot.comms, which the
+// server builds from the launchd spool files only. HH:MM is sliced from the
+// spool's own Eastern stamp (no browser timezone math); the age is the
+// server's. A missing section is "comms unavailable", never a zero.
+function renderHqComms(snapshot) {
+  const line = $('hq-comms');
+  if (!line) return;
+  const c = snapshot && snapshot.comms;
+  if (!c) { line.textContent = 'comms unavailable'; line.className = 'hq-comms is-stale'; return; }
+  const parts = [];
+  const at = typeof c.last_inbound_at === 'string' ? c.last_inbound_at : '';
+  const hm = /^\d{4}-\d{2}-\d{2}[ T](\d{2}:\d{2})/.exec(at);
+  if (hm) {
+    const ago = typeof c.last_inbound_age_s === 'number' ? ` (${fmtAge(c.last_inbound_age_s)} ago)` : '';
+    parts.push(`last text from Anthony: ${hm[1]}${ago}`);
+  } else {
+    parts.push('last text from Anthony: none in spool');
+  }
+  const spoolAge = typeof c.spool_age_s === 'number' ? `, ${fmtAge(c.spool_age_s)} old` : '';
+  const spoolBad = !c.spool_ok || c.spool_stale;
+  parts.push(c.spool_ok && !c.spool_stale ? 'spool ok' : `spool ${c.spool_ok ? 'stale' : 'not ok'}${spoolAge}`);
+  line.textContent = parts.join(' · ');
+  line.className = 'hq-comms' + (spoolBad ? ' is-stale' : '');
+}
+
 function renderHqPanel(snapshot) {
+  renderHqComms(snapshot);
   const hp = snapshot && snapshot.hq_panel;
   const note = $('hq-note');
   const banner = $('hq-banner');
@@ -2473,6 +2499,7 @@ async function poll() {
     // The page's own rule: never keep a previous value beside UNREACHABLE.
     renderHqHeader(null);
     renderAttentionStrip(null);
+    renderHqComms(null);
     // Same rule for the panel note; the terminal itself is left alone.
     const hqNoteEl = $('hq-note');
     if (hqNoteEl) { hqNoteEl.textContent = 'console unreachable'; hqNoteEl.classList.add('is-muted'); }

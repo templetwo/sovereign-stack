@@ -423,6 +423,14 @@ def build_snapshot() -> dict:
                           A malformed file degrades this key alone; the 18
                           above keep rendering.
 
+    ── Keys 20..22 (cockpit) ──
+    honk_counts and hq_panel (Phase 2, 2026-10-09), then comms (cockpit
+    integration, 2026-10-10): dashboard_readers.read_comms over the launchd
+    iMessage spool's status file and inbound.jsonl tail. Spool health and
+    the newest inbound row's time and rowid only; never the text, handle or
+    chat guid, and never an answered/unanswered claim (the spool holds
+    inbound rows only). 22 keys in all; count the dict.
+
     EVERY ONE OF THE SEVEN IS INDIVIDUALLY NULLABLE and individually
     fail-soft: a reader that raises yields null for its own key and cannot
     take /snapshot.json down with it. Each non-null section carries a
@@ -510,6 +518,11 @@ def build_snapshot() -> dict:
             "ledger_since": "2026-09-07",
         },
         "hq_panel": _safe_section(lambda: hq_panel.get_session().status()),
+        # ── Key 22 (cockpit integration, 2026-10-10): the comms line ──
+        # The launchd iMessage spool's health and the time of the newest
+        # inbound row. No body, no handle, no guid; null when the spool
+        # status file is missing, so the panel says "comms unavailable".
+        "comms": _safe_section(dashboard_readers.read_comms),
     }
 
 

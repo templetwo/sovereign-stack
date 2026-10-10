@@ -322,7 +322,8 @@ class TestSnapshotKeys:
         host, port = running_server
         _, body, _ = _req(f"http://{host}:{port}/snapshot.json")
         keys = list(json.loads(body).keys())
-        assert keys[-2:] == ["honk_counts", "hq_panel"]
+        assert keys[19:21] == ["honk_counts", "hq_panel"]
+        assert keys[21:] == ["comms"]  # key 22, cockpit integration 2026-10-10
         assert keys[:19] == FIRST_19_KEYS
 
     def test_honk_counts_are_two_labelled_numbers_never_folded(
