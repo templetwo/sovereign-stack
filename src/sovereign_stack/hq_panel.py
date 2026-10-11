@@ -7,6 +7,15 @@ reload picks up where it left off, and the newest output wakes waiting SSE strea
 
 Permission parity (Anthony, 2026-10-09): the child is started with NO permission
 flag; `claude` inherits ~/.claude/settings.json exactly as the Terminal seat does.
+
+Phase 3 (push link, 2026-10-10) adds ONE flag that is not a permission: the
+default command carries `--settings {"crossSessionInbound":"hold"}`, the inbound
+setting made explicit as the plan asks. A bypass-mode session holds an unattested
+peer message for review (measured on 2.1.296), so console batches wait in the
+panel's review queue. `accept` is never the default: 2.1.296 has no sender
+allowlist, so it would admit every same-user peer unheld. HQ_PANEL_INBOUND=accept
+is Anthony's switch (gate-shape:channel-trust); see hq_push. Flag settings for
+this one process: ~/.claude/settings.json and the Terminal seat are untouched.
 """
 
 from __future__ import annotations
@@ -28,6 +37,9 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+from . import hq_push
+
+#: The command before the Phase 3 inbound flag; default_command() inserts it.
 DEFAULT_COMMAND = ["claude", "-n", "HQ", "/hq-boot"]
 DEFAULT_BUFFER_BYTES = 256 * 1024
 OVER_24H_SECONDS = 24 * 3600
@@ -167,16 +179,25 @@ class HQSession:
         # "HQ is idle" from a client timer alone.
         self._seq_changed_at: float | None = None
         self._last_input_at: float | None = None
+        # Phase 3: what was actually spawned and when, so the push link binds to
+        # this child alone and reads its inbound setting from the real argv.
+        self._last_command: list[str] | None = None
+        self._spawned_at: float | None = None
 
     # ── configuration ──
     @staticmethod
-    def _command() -> list[str]:
+    def default_command() -> list[str]:
+        """`claude -n HQ --settings {"crossSessionInbound":...} /hq-boot`."""
+        return [*DEFAULT_COMMAND[:-1], *hq_push.inbound_settings_arg(), DEFAULT_COMMAND[-1]]
+
+    @classmethod
+    def _command(cls) -> list[str]:
         raw = os.environ.get("HQ_PANEL_COMMAND")
         if raw:
             cmd = json.loads(raw)
             if isinstance(cmd, list) and cmd and all(isinstance(c, str) for c in cmd):
                 return cmd
-        return list(DEFAULT_COMMAND)
+        return cls.default_command()
 
     @staticmethod
     def _cwd() -> str:
@@ -201,6 +222,18 @@ class HQSession:
         so a caller that reads it after a short-lived child still gets the pid."""
         with self._lock:
             return self._last_started_pid
+
+    @property
+    def last_command(self) -> list[str] | None:
+        """The argv start() most recently spawned (None before the first start)."""
+        with self._lock:
+            return list(self._last_command) if self._last_command else None
+
+    @property
+    def spawned_at(self) -> float | None:
+        """The console's clock when start() spawned the current child."""
+        with self._lock:
+            return self._spawned_at
 
     @property
     def last_seq(self) -> int:
@@ -247,12 +280,14 @@ class HQSession:
         master, slave = pty.openpty()
         env = panel_env(os.environ)
         env.update({"TERM": "xterm-256color", "COLUMNS": str(cols), "LINES": str(rows)})
+        command = self._command()
+        spawned_at = time.time()
         try:
             # preexec_fn runs between fork and exec in a threaded server; CPython
             # warns it can deadlock if it touches a lock another thread holds. It
             # is one ioctl on fd 0 and takes no lock (web seat review, 2026-10-10).
             proc = subprocess.Popen(
-                self._command(),
+                command,
                 cwd=self._cwd(),
                 stdin=slave,
                 stdout=slave,
@@ -270,6 +305,8 @@ class HQSession:
         with self._lock:
             self._proc, self._fd = proc, master
             self._last_started_pid = proc.pid
+            self._last_command = list(command)
+            self._spawned_at = spawned_at
             self._started_at = time.time()
             self._last_exit = None
             self._buf.clear()
@@ -374,7 +411,9 @@ class HQSession:
                 "transcript_bytes": self._transcript_bytes,
                 "seq": self._seq,
                 "over_24h": bool(age is not None and age >= OVER_24H_SECONDS),
-                "listening": False,  # Phase 3: the cross-session socket; not wired yet
+                # Phase 3: the push link's own answer is folded in by the console
+                # (dashboard_web), which owns the poller; this module alone cannot know.
+                "listening": False,
                 "chat_db_readable": _LAST_PROBE.get("ok"),
                 "checked_at": _LAST_PROBE.get("checked_at"),
                 "truncated_before": self._truncated_before,

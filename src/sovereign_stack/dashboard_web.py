@@ -45,7 +45,7 @@ from collections import deque
 from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from pathlib import Path
 
-from . import connectivity, dashboard, dashboard_readers, hq_panel, nape_daemon
+from . import connectivity, dashboard, dashboard_readers, hq_panel, hq_push, nape_daemon
 from .signal_ledger import heartbeat_field
 
 # ── Shared activity feed + background watcher ──────────────────────────────
@@ -424,7 +424,8 @@ def build_snapshot() -> dict:
                           above keep rendering.
 
     ── Keys 20..21 (cockpit Phase 2) ── honk_counts and hq_panel. 21 keys in
-    all; count the dict. The cockpit integration's timing stamps and comms
+    all; count the dict. Phase 3 fills hq_panel.listening (one boolean) from the
+    push link; the link's detail rides GET /hq/status only. The cockpit integration's timing stamps and comms
     line are deliberately NOT here: this route sends the CORS wildcard and
     has no Host check, so they are served only by the Studio-only
     GET /hq/status (adversarial review, 2026-10-10).
@@ -541,15 +542,22 @@ def _snapshot_hq_panel() -> dict:
     st = hq_panel.get_session().status()
     for key in _HQ_STATUS_ONLY_FIELDS:
         st.pop(key, None)
+    # Phase 3: the push link's state as ONE boolean. Its reason, counts and the
+    # last hand-over time are activity data and ride GET /hq/status only.
+    st["listening"] = hq_push.get_link().listening()
     return st
 
 
 def _hq_status_payload() -> dict:
     """GET /hq/status: the full session status plus a nested `comms` object
-    (None when the spool reader has nothing or fails)."""
+    (None when the spool reader has nothing or fails) and the `push` object
+    (Phase 3: link state, reason, events waiting, last hand-over HH:MM)."""
     st = hq_panel.get_session().status()
     comms = _safe_section(dashboard_readers.read_comms)
     st["comms"] = {k: comms.get(k) for k in _HQ_COMMS_FIELDS} if isinstance(comms, dict) else None
+    link = hq_push.get_link()
+    st["listening"] = link.listening()
+    st["push"] = _safe_section(link.status)
     return st
 
 
@@ -924,6 +932,28 @@ def _hq_drop_open(directory: Path, name: str) -> tuple[int, Path]:
 
 _HQ_STATUS_WRITER_ROOTS: set[str] = set()
 _hq_status_lock = threading.Lock()
+
+
+_HQ_PUSH_STARTED = False
+
+
+def _ensure_hq_push() -> None:
+    """Start the Phase 3 push poller once per console process. It reads the
+    spool and counters, and writes only to HQ's own messaging socket, only while
+    the panel child this console spawned is running (see hq_push). There is no
+    HTTP route into it; HQ_PUSH_DISABLED=1 keeps it off."""
+    global _HQ_PUSH_STARTED
+    if os.environ.get("HQ_PUSH_DISABLED") == "1":
+        return
+    with _hq_status_lock:
+        if _HQ_PUSH_STARTED:
+            return
+        _HQ_PUSH_STARTED = True
+    try:
+        poll = max(5.0, float(os.environ.get("HQ_PUSH_POLL_S", hq_push.DEFAULT_POLL_S)))
+    except ValueError:
+        poll = float(hq_push.DEFAULT_POLL_S)
+    hq_push.start_poller(hq_push.get_link(hq_panel.get_session()), poll)
 
 
 def _ensure_hq_status_writer() -> None:
@@ -1425,6 +1455,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
             refuse(400, "body shorter than Content-Length")
             return
         _hq_drop_sweep(_hq_drop_root())
+        # Phase 3: a notice, not a second paste. The byte count only; the name
+        # and path never enter a push batch.
+        with contextlib.suppress(Exception):
+            hq_push.get_link().note_drop(length)
         self._send_json(
             200,
             {
@@ -1481,6 +1515,7 @@ def serve(host: str = "127.0.0.1", port: int = DEFAULT_PORT) -> HTTPServer:
     first call."""
     _ensure_watcher()
     _ensure_hq_status_writer()
+    _ensure_hq_push()
     return ThreadingHTTPServer((host, port), DashboardHandler)
 
 

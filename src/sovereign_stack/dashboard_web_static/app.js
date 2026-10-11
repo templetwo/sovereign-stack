@@ -2159,12 +2159,24 @@ function initHqPanel() {
   }).catch(() => { /* status unreachable: the poll will say so */ });
 }
 
-// `listening` is the Phase 3 channels flag — whether the console can push
-// signals INTO HQ's session — not the iMessage listener. It is a phase marker,
-// so it gets plain words, never a fault (the Phase 2 wording read as one; HQ,
-// 2026-10-10).
-function hqLinkWord(hp) {
-  return hp.listening ? 'push link on' : 'no push link yet';
+// `listening` is the Phase 3 push link — whether the console can hand batches
+// INTO HQ's session over Claude Code's cross-session socket — not the iMessage
+// listener. The snapshot carries only the boolean; the reason, the waiting count
+// and the last hand-over time come from the Studio-only GET /hq/status `push`
+// object (fixed server vocabulary, rendered as text). "handed", never
+// "delivered": the socket returns no receipt to the console.
+function hqLinkWord(hp, detail) {
+  const p = hq.status && hq.status.push;
+  const waiting = p && typeof p.events_waiting === 'number' && p.events_waiting > 0
+    ? ` · ${p.events_waiting} waiting` : '';
+  if (hp.listening) {
+    // Inbound hold (the default): batches reach HQ's review queue, not its turn.
+    const held = p && p.inbound === 'hold' ? ', held for review' : '';
+    const last = detail && p && typeof p.last_handed_at === 'string' ? ` · last handed ${p.last_handed_at}` : '';
+    return `push link on${held}${last}${waiting}`;
+  }
+  const why = detail && p && typeof p.reason === 'string' && p.reason ? ` (${p.reason})` : '';
+  return `push link off${why}${waiting}`;
 }
 
 // Three missed probe cycles: HQ_PANEL_STATUS_INTERVAL_S defaults to 300 s on the server.
@@ -2297,7 +2309,7 @@ function renderHqPanel(snapshot) {
   if (hp.running) {
     const age = hp.age_seconds != null ? fmtAge(hp.age_seconds) : '';
     const kb = hp.transcript_bytes != null ? `${(hp.transcript_bytes / 1024).toFixed(0)} KB` : '';
-    const parts = ['running', age ? `${age} open` : '', kb ? `${kb} transcript` : '', hqLinkWord(hp)];
+    const parts = ['running', age ? `${age} open` : '', kb ? `${kb} transcript` : '', hqLinkWord(hp, true)];
     if (note && !hqHoldRefusedNote(note)) note.textContent = parts.filter(Boolean).join(' · ');
     if (!hq.running) { hq.running = true; if (startBtn) startBtn.hidden = true; }
     // Reopen whenever the stream is gone (a closed source after an expired

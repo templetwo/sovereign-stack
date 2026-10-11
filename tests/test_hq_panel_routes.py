@@ -145,6 +145,19 @@ class TestHqRoutes:
         data = json.loads(body)
         assert data["running"] is False and data["listening"] is False
         assert "Access-Control-Allow-Origin" not in hdr
+        # Phase 3: the push link's detail rides this Studio-only route.
+        push = data["push"]
+        assert push["listening"] is False and isinstance(push["reason"], str)
+        assert set(push) == {
+            "listening",
+            "reason",
+            "inbound",
+            "batches_handed",
+            "last_handed_at",
+            "events_waiting",
+            "min_interval_s",
+            "last_error",
+        }
 
     def test_status_never_carries_token(self, running_server, panel_env):
         host, port = running_server
@@ -354,6 +367,8 @@ class TestSnapshotKeys:
         _, body, _ = _req(f"http://{host}:{port}/snapshot.json")
         hp = json.loads(body)["hq_panel"]
         assert hp["running"] is False and hp["listening"] is False and "over_24h" in hp
+        # Only the boolean crosses into the CORS-wildcard snapshot (PR #11 lesson).
+        assert "push" not in hp and "reason" not in hp and "last_handed_at" not in hp
 
 
 # ── Task 5: the page assets ─────────────────────────────────────────────────
@@ -428,7 +443,10 @@ class TestPageAssets:
             "function hqPostSize",
             "document.hasFocus()",
             "function renderAttentionStrip",
-            "no push link yet",
+            "push link on",  # Phase 3 (2026-10-10): the link word from the push poller
+            "push link off",
+            ", held for review",
+            "last handed",
             # Review 1 fixes (2026-10-10).
             "new ResizeObserver(",
             "lastPosted",

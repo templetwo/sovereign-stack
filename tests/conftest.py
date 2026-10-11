@@ -58,6 +58,12 @@ from unittest.mock import MagicMock
 
 import pytest
 
+# The console's Phase 3 push poller (hq_push) is a daemon thread that web.serve()
+# would start in whichever test first builds a server, and that would keep ticking
+# against the real ~/.sovereign after the test's SOVEREIGN_ROOT is gone. The push
+# tests drive PushLink.tick() directly; the poller stays off for the suite.
+os.environ.setdefault("HQ_PUSH_DISABLED", "1")
+
 # ── AUTOUSE GUARD 1 of 6: the live-audit tripwire ───────────────────────────
 #
 # COUNT UPDATED 2026-09-06 (was "1 of 4", and "1 of 2" before that). Three more
