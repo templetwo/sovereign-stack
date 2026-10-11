@@ -180,6 +180,12 @@ BASE_TOOLS: frozenset[str] = frozenset(
         # control/protected-drawer shape — same classification as record_insight.
         "the_ground",
         "record_catch",
+        # THE DESCENT — the close index (2026-10-08). descend is a pure read
+        # over the close store through the same supersession + protected filter
+        # The Ground uses, the same kind of tool as the_ground. Held at step-up
+        # from its landing until Anthony classified it BASE on 2026-10-10
+        # (20:3x EDT, relayed by HQ). Lifted out of HELD_UNCLASSIFIED below.
+        "descend",
         # Heartbeat — the call-first boot tool. Read-only liveness + grounding +
         # routing, no side effects, no credentials. It is the SAFE first call on
         # the connector and MUST stay callable untapped, so it is base tier
@@ -229,15 +235,13 @@ def step_up_reason(tool_name: str) -> str | None:
 #   outside Claude surface. Anthony's trusted-seat surface is the bridge's seat
 #   path, not the remote base tier. Held pending an explicit classification.
 #
-#   descend — THE DESCENT's read tool (2026-10-08). A pure read, the same kind
-#   as the_ground (BASE since 2026-07-13 on Anthony's word), but a new base
-#   classification is a human's under this module's contract, so it is held:
-#   step-up on the remote claude.ai surface until Anthony classifies it.
+#   descend — HELD 2026-10-08 → 2026-10-10, now CLASSIFIED BASE (see
+#   BASE_TOOLS). Anthony's word on 2026-10-10: classify it BASE, the same as
+#   the_ground. The hold did its job: the classification is his, recorded.
 HELD_UNCLASSIFIED: frozenset[str] = frozenset(
     {
         "signals_summary",
         "signal_ack",
-        "descend",
     }
 )
 

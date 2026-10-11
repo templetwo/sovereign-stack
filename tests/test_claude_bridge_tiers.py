@@ -66,6 +66,22 @@ class TestClassify:
     def test_unknown_tool_fails_closed(self):
         assert classify("definitely_not_a_registered_tool") == TIER_STEP_UP
 
+    def test_descend_is_base_the_same_as_the_ground(self):
+        """Anthony, 2026-10-10: classify `descend` BASE, the same as
+        `the_ground`. Both are pure reads over the chronicle through the same
+        protected filter; the remote seat reaches both untapped.
+
+        Before that ruling descend sat in HELD_UNCLASSIFIED and classify()
+        returned step_up, so this test is red on the old tiers and green on
+        the new ones.
+        """
+        from claude_bridge.tiers import HELD_UNCLASSIFIED
+
+        assert "descend" in BASE_TOOLS
+        assert "descend" not in DESTRUCTIVE_TOOLS
+        assert "descend" not in HELD_UNCLASSIFIED
+        assert classify("descend") == classify("the_ground") == TIER_BASE
+
 
 class TestRegistryDriftGuard:
     def test_frozen_sets_match_live_registry(self):
