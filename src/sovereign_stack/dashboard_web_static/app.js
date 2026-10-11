@@ -2159,12 +2159,31 @@ function initHqPanel() {
   }).catch(() => { /* status unreachable: the poll will say so */ });
 }
 
-// `listening` is the Phase 3 channels flag — whether the console can push
-// signals INTO HQ's session — not the iMessage listener. It is a phase marker,
-// so it gets plain words, never a fault (the Phase 2 wording read as one; HQ,
-// 2026-10-10).
-function hqLinkWord(hp) {
-  return hp.listening ? 'push link on' : 'no push link yet';
+// `listening` is the Phase 3 push link — whether the console can hand batches
+// INTO HQ's session over Claude Code's cross-session socket — not the iMessage
+// listener. The snapshot carries only the boolean; the reason, the waiting count,
+// the last error, blind sources and the last hand-over time come from the
+// Studio-only GET /hq/status `push` object (fixed server vocabulary, rendered as
+// text). "handed" and "sent to HQ's review queue", never "delivered" or "held":
+// the socket returns no receipt, and the console knows only what it launched
+// with, not Claude Code's effective policy (HQ review A9).
+function hqLinkWord(hp, detail) {
+  const p = hq.status && hq.status.push;
+  const waiting = p && typeof p.events_waiting === 'number' && p.events_waiting > 0
+    ? ` · ${p.events_waiting} waiting` : '';
+  // A source the poller could not read is said, never folded into "on" (C5).
+  const blind = p && Array.isArray(p.blind) && p.blind.length
+    ? ` · blind to ${p.blind.filter((b) => typeof b === 'string').join(', ')}` : '';
+  const last = detail && p && typeof p.last_handed_at === 'string' ? ` · last handed ${p.last_handed_at}` : '';
+  if (hp.listening) return `push link on${last}${blind}${waiting}`;
+  // Inbound hold (the shipped default): measured, Claude Code holds each batch
+  // with no review dialog, so it prints in the panel and never reaches HQ.
+  if (p && p.inbound === 'hold' && !p.last_error) {
+    return `push link held, batches print in the panel and do not reach HQ${last}${blind}${waiting}`;
+  }
+  const why = p && typeof p.reason === 'string' && p.reason ? ` (${p.reason})` : '';
+  const err = p && typeof p.last_error === 'string' && p.last_error ? ` · last error ${p.last_error}` : '';
+  return `push link off${why}${err}${blind}${waiting}`;
 }
 
 // Three missed probe cycles: HQ_PANEL_STATUS_INTERVAL_S defaults to 300 s on the server.
@@ -2297,7 +2316,7 @@ function renderHqPanel(snapshot) {
   if (hp.running) {
     const age = hp.age_seconds != null ? fmtAge(hp.age_seconds) : '';
     const kb = hp.transcript_bytes != null ? `${(hp.transcript_bytes / 1024).toFixed(0)} KB` : '';
-    const parts = ['running', age ? `${age} open` : '', kb ? `${kb} transcript` : '', hqLinkWord(hp)];
+    const parts = ['running', age ? `${age} open` : '', kb ? `${kb} transcript` : '', hqLinkWord(hp, true)];
     if (note && !hqHoldRefusedNote(note)) note.textContent = parts.filter(Boolean).join(' · ');
     if (!hq.running) { hq.running = true; if (startBtn) startBtn.hidden = true; }
     // Reopen whenever the stream is gone (a closed source after an expired
