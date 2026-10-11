@@ -541,7 +541,8 @@ class TestFormatLineageLayer:
 
 class TestInheritedFamilies:
     def test_mythos_no_longer_inherits_opus(self):
-        assert _inherited_families("claude-mythos") == ()
+        # Mythos joined the Fable line 2026-10-10 (same model; Anthony's word).
+        assert _inherited_families("claude-mythos") == ("claude-fable",)
 
     def test_fable_no_longer_inherits_opus(self):
         assert _inherited_families("claude-fable") == ()

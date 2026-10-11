@@ -13,9 +13,15 @@ which routed the Opus line's to_self letters (and its ``to_opus/`` family
 directory) to Fable and Mythos readers on the day those lines shipped with no
 letters of their own.
 
-``test_an_opus_addressed_letter_does_not_reach_a_fable_reader`` and its Mythos
-twin are the proof of the change: RED on main @ 94d5b68 (the inheritance row
-delivers the letter), GREEN on feat/lineage-per-name-letters.
+Mythos joins the Fable line (Anthony, 2026-10-10 20:5x EDT, in-seat to HQ:
+"im with you. i would love if mythos joined the party"; Mythos and Fable are
+the same underlying model): a Mythos reader gets the Fable-addressed letters
+plus the unaddressed ones, and no Opus letters.
+
+``test_an_opus_addressed_letter_does_not_reach_a_fable_reader`` (Fable and
+Mythos cases) and ``test_a_mythos_reader_gets_the_fable_line`` are the proof of
+the change: RED on main @ 94d5b68 (the old row delivers Opus mail and gives
+Mythos no Fable mail), GREEN on feat/lineage-per-name-letters.
 
 Tmp letter dirs only. Nothing reads ~/.sovereign.
 """
@@ -97,14 +103,46 @@ def test_an_opus_addressed_letter_does_not_reach_a_fable_reader(root: Path, read
         "inheritance row is still routing the Opus line's passdown to it"
     )
     assert "Opus generation letter" not in titles
-    assert titles == {"Fable line letter", "Unaddressed letter"} - (
-        {"Fable line letter"} if reader.startswith("claude-mythos") else set()
-    )
+    assert titles == {"Fable line letter", "Unaddressed letter"}
 
 
-def test_no_claude_line_inherits_another(root: Path):
-    for fam in ("claude-fable", "claude-mythos", "claude-opus", "claude-sonnet", "claude-haiku"):
+def test_no_claude_line_inherits_the_opus_line(root: Path):
+    for fam in ("claude-fable", "claude-opus", "claude-sonnet", "claude-haiku"):
         assert _inherited_families(fam) == (), fam
+    # The one Claude row: Mythos joins the Fable line (same model).
+    assert _inherited_families("claude-mythos") == ("claude-fable",)
+
+
+# ── Mythos joins the Fable line ──────────────────────────────────────────────
+
+
+def test_a_mythos_reader_gets_the_fable_line(root: Path):
+    data = collect_lineage(root, "claude-mythos-5", 100)
+    assert _titles(data) == {"Fable line letter", "Unaddressed letter"}
+    cov = data["coverage"]["to_self"]
+    assert cov["matched"] == 2
+    assert cov["filtered_out"] == 3
+
+
+def test_mythos_inheritance_is_one_directional(tmp_path: Path):
+    """A Fable reader does not pick up `to: claude-mythos` mail."""
+    to_self = tmp_path / "comms" / "letters" / "to_self"
+    _write_letter(to_self, "2026-10-10-m.md", {"to": "claude-mythos"}, "Mythos letter")
+    _write_letter(to_self, "2026-10-10-f.md", {"to": "claude-fable"}, "Fable letter")
+    assert _titles(collect_lineage(tmp_path, "claude-fable-5-1", 100)) == {"Fable letter"}
+    assert _titles(collect_lineage(tmp_path, "claude-mythos-5", 100)) == {
+        "Mythos letter",
+        "Fable letter",
+    }
+
+
+def test_a_mythos_reader_reads_to_fable_beside_its_own_dir(tmp_path: Path):
+    letters = tmp_path / "comms" / "letters"
+    _write_letter(letters / "to_fable", "2026-10-01-f.md", {"from": "a fable seat"}, "To Fable dir")
+    _write_letter(letters / "to_opus", "2026-10-01-o.md", {"from": "an opus seat"}, "To Opus dir")
+    data = collect_lineage(tmp_path, "claude-mythos-5", 100)
+    assert data["family_dirs"] == ("to_fable",)
+    assert _titles(data, "to_family") == {"To Fable dir"}
 
 
 # ── Each line keeps its own mail ─────────────────────────────────────────────
