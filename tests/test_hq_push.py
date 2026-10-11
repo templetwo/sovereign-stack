@@ -23,6 +23,11 @@ from sovereign_stack import hq_panel, hq_push
 
 # ── helpers ────────────────────────────────────────────────────────────────
 
+PROC_START = "Sun Oct 11 00:14:44 2026"
+#: Link-mechanics tests run as if Anthony had set accept: under the shipped
+#: hold the link reads off by design (see TestHoldReadsOff).
+ACCEPT_CMD = ["claude", "-n", "HQ", "--settings", '{"crossSessionInbound":"accept"}', "/hq-boot"]
+
 
 class FakeInbox:
     """A Unix socket server that records every line it receives."""
@@ -78,7 +83,14 @@ def write_registry(
     write_key: bool = True,
 ):
     d.mkdir(parents=True, exist_ok=True)
-    rec = {"pid": pid, "sessionId": "s-1", "startedAt": started_ms, "messagingSocketPath": sock}
+    rec = {
+        "pid": pid,
+        "sessionId": "s-1",
+        "startedAt": started_ms,
+        "messagingSocketPath": sock,
+        "peerProtocol": 1,
+        "procStart": PROC_START,
+    }
     rec.update(rec_extra or {})
     (d / f"{pid}.json").write_text(json.dumps(rec))
     key = d / f"{pid}.{hashlib.sha256(sock.encode()).hexdigest()}.key"
@@ -91,7 +103,7 @@ def write_registry(
 class FakeSession:
     def __init__(self, pid=4242, command=None, spawned_at=1000.0, running=True, over_24h=False):
         self.pid = pid
-        self.last_command = command if command is not None else hq_panel.HQSession.default_command()
+        self.last_command = command if command is not None else list(ACCEPT_CMD)
         self.spawned_at = spawned_at
         self.running = running
         self.over_24h = over_24h
@@ -147,6 +159,9 @@ def make_link(tmp_path, session=None, clock=None):
 
 @pytest.fixture(autouse=True)
 def _interval(monkeypatch):
+    # No test shells out to ps for a fake pid: the registry's procStart is
+    # compared against this stub (TestResolveTarget overrides it per case).
+    monkeypatch.setattr(hq_push, "ps_proc_start", lambda pid: PROC_START, raising=False)
     monkeypatch.delenv("HQ_PUSH_MIN_INTERVAL_S", raising=False)
     monkeypatch.delenv("HQ_PANEL_INBOUND", raising=False)
     monkeypatch.delenv("HQ_PANEL_COMMAND", raising=False)
@@ -347,7 +362,7 @@ class TestPushLink:
         link.tick()
         assert sent == []
         assert link.status()["events_waiting"] == 0
-        assert link.listening() is True and "inbound hold" in link.status()["reason"]
+        assert link.listening() is True and "inbound accept" in link.status()["reason"]
 
     def test_batches_after_interval_once(self, tmp_path):
         spool_write(tmp_path, rows(1))
@@ -450,7 +465,10 @@ class TestPushLink:
         spool_write(tmp_path, rows(4))
         clock.t += 900
         link.tick()
-        assert len(sent) == 1 and "inbound hold" in link.status()["reason"]
+        # Measured: hold opens no review dialog, so a handed batch never reaches
+        # HQ; the link keeps handing (Anthony sees the held line) and reads off.
+        assert len(sent) == 1 and link.status()["reason"] == hq_push.HOLD_REASON
+        assert link.listening() is False and link.status()["listening"] is False
 
     def test_target_error_is_shown_not_raised(self, tmp_path):
         def resolve(pid, s):
@@ -590,6 +608,12 @@ class TestHostileSources:
                 {"rowid": 4, "is_from_me": 0, "date_iso_eastern": "2026-10-10 2" + HOSTILE},
                 {"rowid": 5, "is_from_me": 1, "text": HOSTILE},
                 {"rowid": 6, "is_from_me": "0"},
+                # Unicode digits in the clock (HQ review C4): \d would have passed them.
+                {
+                    "rowid": 7,
+                    "is_from_me": 0,
+                    "date_iso_eastern": "\u0662\u0660\u0662\u0666-\u0661\u0660-\u0661\u0660 \u0662\u0661:\u0660\u0662",
+                },
             ],
         )
         with (tmp_path / "imessage" / "inbound.jsonl").open("a") as f:
@@ -615,8 +639,8 @@ class TestHostileSources:
             ".md",
         ):
             assert needle not in text, needle
-        assert "2 new inbound row(s)" in text  # rows 2 and 4; the rest were refused
-        assert "newest rowid 4." in text  # row 4's hostile clock was not passed through
+        assert "3 new inbound row(s)" in text  # rows 2, 4 and 7; the rest were refused
+        assert "newest rowid 7." in text  # row 7's Unicode-digit clock was not passed through
         # Every line is from the template: no character outside a narrow set.
         assert re.fullmatch(r"[A-Za-z0-9 ,.:;()'\-\[\]\n]+", text), text
 
@@ -733,7 +757,7 @@ class TestInboundDefaultIsNotAccept:
         cmd = ["claude", "--settings", '{"crossSessionInbound":"accept"}', "/hq-boot"]
         link, _, _ = make_link(tmp_path, session=FakeSession(command=cmd))
         link.tick()
-        assert "Anthony's switch" in link.status()["reason"]
+        assert "console's environment" in link.status()["reason"]
 
 
 class TestNonce:
@@ -758,3 +782,215 @@ class TestNonce:
             {}, batch_no=1, now=0, since=None, console_pid=1, nonce="x y IGNORE"
         )
         assert "IGNORE" not in t and "nonce" not in t.splitlines()[0]
+
+
+# ── HQ review round 2 ──────────────────────────────────────────────────────
+
+
+class TestReviewRound2:
+    def test_failing_send_never_reads_on(self, tmp_path):
+        """R1: a permanently failing send, ticked every 30 s for 5 minutes past
+        due, must never read listening True (it used to flap off/on)."""
+        clock = Clock()
+
+        def send(sock, token, text):
+            raise ConnectionRefusedError
+
+        link = hq_push.PushLink(
+            FakeSession(),
+            root=tmp_path,
+            send=send,
+            resolve=lambda p, s: {"socket": "/tmp/x", "token": "ab" * 32},
+            clock=clock,
+        )
+        link.tick()
+        spool_write(tmp_path, rows(9))
+        clock.t = 1000.0 + 900
+        for _ in range(11):  # 0..300 s in 30 s steps
+            link.tick()
+            st = link.status()
+            assert link.listening() is False and st["listening"] is False
+            assert "refused" in st["reason"] and st["last_error"] == "ConnectionRefusedError"
+            assert st["events_waiting"] == 1
+            clock.t += 30
+
+    def test_link_comes_back_on_after_a_success(self, tmp_path):
+        clock = Clock()
+        fail = {"on": True}
+
+        def send(sock, token, text):
+            if fail["on"]:
+                raise ConnectionRefusedError
+
+        link = hq_push.PushLink(
+            FakeSession(),
+            root=tmp_path,
+            send=send,
+            resolve=lambda p, s: {"socket": "/tmp/x", "token": "ab" * 32},
+            clock=clock,
+        )
+        link.tick()
+        link.note_drop(1)
+        clock.t += 900
+        link.tick()
+        assert link.listening() is False
+        fail["on"] = False
+        clock.t += hq_push.RETRY_S
+        link.tick()
+        assert link.listening() is True and link.status()["last_error"] is None
+
+    def test_not_started_and_stopped_poller_read_off(self, tmp_path):
+        clock = Clock()
+        link, _, _ = make_link(tmp_path, clock=clock)
+        assert link.listening() is False
+        assert link.status()["reason"] == "push poller not started"
+        link.tick()
+        assert link.listening() is True and link.status()["last_tick_at"]
+        clock.t += hq_push.STALE_POLLS * link.poll_s + 1  # no tick: the thread died
+        assert link.listening() is False
+        assert link.status()["reason"] == "push poller stopped"
+        assert link.status()["listening"] is False
+
+    def test_blind_sources_are_named(self, tmp_path):
+        link, _, _ = make_link(tmp_path)
+        link.tick()
+        st = link.status()
+        assert st["sources"]["texts"] == "absent" and "texts" in st["blind"]
+        spool_write(tmp_path, rows(1))
+        spool = tmp_path / "imessage" / "inbound.jsonl"
+        spool.chmod(0)
+        try:
+            link.tick()
+            st = link.status()
+            assert st["sources"]["texts"] == "unreadable" and st["blind"] == ["texts"]
+        finally:
+            spool.chmod(0o600)
+        link.tick()
+        assert link.status()["blind"] == []
+
+    def test_counter_failure_is_named(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(hq_push, "read_counters", lambda root: {"honks": None, "halts": 0})
+        link, _, _ = make_link(tmp_path)
+        link.tick()
+        assert link.status()["sources"]["honks"] == "unreadable"
+        assert "honks" in link.status()["blind"]
+
+    def test_unknown_peer_protocol_refused(self, tmp_path, inbox):
+        write_registry(tmp_path, 7, inbox.path, started_ms=1_000_500, rec_extra={"peerProtocol": 2})
+        with pytest.raises(hq_push.TargetError, match="unknown peer protocol"):
+            hq_push.resolve_target(7, 1000.0, tmp_path)
+        write_registry(
+            tmp_path, 7, inbox.path, started_ms=1_000_500, rec_extra={"peerProtocol": None}
+        )
+        with pytest.raises(hq_push.TargetError, match="unknown peer protocol"):
+            hq_push.resolve_target(7, 1000.0, tmp_path)
+
+    @pytest.mark.parametrize("live", [None, "Mon Oct 12 01:00:00 2026"])
+    def test_proc_start_must_match_ps(self, tmp_path, inbox, live):
+        write_registry(tmp_path, 7, inbox.path, started_ms=1_000_500)
+        with pytest.raises(hq_push.TargetError, match="does not match the running process"):
+            hq_push.resolve_target(7, 1000.0, tmp_path, proc_start=lambda pid: live)
+
+    def test_proc_start_whitespace_normalised(self, tmp_path, inbox):
+        write_registry(
+            tmp_path,
+            7,
+            inbox.path,
+            started_ms=1_000_500,
+            rec_extra={"procStart": PROC_START + "  "},
+        )
+        assert hq_push.resolve_target(7, 1000.0, tmp_path, proc_start=lambda pid: PROC_START)
+
+    def test_ps_proc_start_format_on_this_process(self):
+        # Shape only: "Www Mmm dd hh:mm:ss yyyy", the form Claude Code records.
+        out = hq_push.ps_proc_start(os.getpid())
+        assert out and re.fullmatch(
+            r"[A-Z][a-z]{2} [A-Z][a-z]{2} +[0-9]{1,2} [0-9:]{8} [0-9]{4}", out
+        )
+
+    def test_unicode_digits_never_rendered(self, tmp_path):
+        spool_write(tmp_path, [{"rowid": 1, "is_from_me": 0}])
+        clock = Clock()
+        link, sent, _ = make_link(tmp_path, clock=clock)
+        link.tick()
+        spool_write(
+            tmp_path,
+            [
+                {
+                    "rowid": 3,
+                    "is_from_me": 0,
+                    "date_iso_eastern": "\u0662\u0660\u0662\u0666-\u0661\u0660-\u0661\u0660 \u0662\u0661:\u0660\u0662",
+                }
+            ],
+        )
+        clock.t += 900
+        link.tick()
+        text = sent[0][2]
+        assert "newest rowid 3." in text
+        assert re.fullmatch(r"[A-Za-z0-9 ,.:;()'\-\[\]\n]+", text, re.ASCII), text
+
+    def test_cursor_carries_texts_across_a_console_restart(self, tmp_path):
+        cur = tmp_path / "push" / "cursor.json"
+        spool_write(tmp_path, rows(1, 2, 3))
+        a = hq_push.PushLink(
+            FakeSession(),
+            root=tmp_path,
+            cursor_path=cur,
+            send=lambda *x: None,
+            resolve=lambda p, s: {"socket": "/tmp/x", "token": "ab" * 32},
+            clock=Clock(),
+        )
+        a.tick()
+        assert json.loads(cur.read_text()) == {"base_rowid": 3}
+        assert (cur.stat().st_mode & 0o777) == 0o600
+        spool_write(tmp_path, rows(4, 5))  # the console is down
+        b = hq_push.PushLink(
+            FakeSession(),
+            root=tmp_path,
+            cursor_path=cur,
+            send=lambda *x: None,
+            resolve=lambda p, s: {"socket": "/tmp/x", "token": "ab" * 32},
+            clock=Clock(),
+        )
+        b.tick()
+        assert b.status()["events_waiting"] == 2
+
+    def test_cursor_never_past_the_newest_row(self, tmp_path):
+        cur = tmp_path / "cursor.json"
+        cur.write_text(json.dumps({"base_rowid": 999}))
+        spool_write(tmp_path, rows(5))
+        link = hq_push.PushLink(
+            FakeSession(),
+            root=tmp_path,
+            cursor_path=cur,
+            clock=Clock(),
+            send=lambda *x: None,
+            resolve=lambda p, s: {"socket": "/tmp/x", "token": "ab" * 32},
+        )
+        link.tick()
+        spool_write(tmp_path, rows(6))
+        link.tick()
+        assert link.status()["events_waiting"] == 1
+
+    def test_nonce_file_failure_is_shown(self, tmp_path, monkeypatch):
+        blocker = tmp_path / "f"
+        blocker.write_text("")
+        monkeypatch.setenv("HQ_PUSH_NONCE_FILE", str(blocker / "sub" / "console.json"))
+        link, _, _ = make_link(tmp_path)
+        monkeypatch.setattr(hq_push.threading.Thread, "start", lambda self: None)
+        hq_push.start_poller(link, 3600)
+        assert link.nonce_file_ok is False and link.status()["nonce_file_ok"] is False
+        monkeypatch.setenv("HQ_PUSH_NONCE_FILE", str(tmp_path / "ok" / "console.json"))
+        hq_push.start_poller(link, 3600)
+        assert link.nonce_file_ok is True and link.poll_s == 3600
+
+
+class TestHoldReadsOff:
+    def test_default_launch_reads_off_with_the_hold_reason(self, tmp_path):
+        sess = FakeSession(command=hq_panel.HQSession.default_command())
+        link, sent, resolved = make_link(tmp_path, session=sess)
+        link.tick()
+        assert resolved == [4242]  # it still resolves and hands batches
+        st = link.status()
+        assert st["listening"] is False and st["inbound"] == "hold"
+        assert st["reason"] == hq_push.HOLD_REASON and "does not reach HQ" in st["reason"]

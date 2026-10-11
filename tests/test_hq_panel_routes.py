@@ -157,7 +157,13 @@ class TestHqRoutes:
             "events_waiting",
             "min_interval_s",
             "last_error",
+            "last_tick_at",
+            "sources",
+            "blind",
+            "nonce_file_ok",
         }
+        # Never ticked (the suite keeps the poller off): it says so (HQ review A6).
+        assert push["reason"] == "push poller not started"
 
     def test_status_never_carries_token(self, running_server, panel_env):
         host, port = running_server
@@ -445,7 +451,9 @@ class TestPageAssets:
             "function renderAttentionStrip",
             "push link on",  # Phase 3 (2026-10-10): the link word from the push poller
             "push link off",
-            ", held for review",
+            "push link held, batches print in the panel and do not reach HQ",
+            "blind to ",
+            "last error ",
             "last handed",
             # Review 1 fixes (2026-10-10).
             "new ResizeObserver(",

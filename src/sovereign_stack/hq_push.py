@@ -26,8 +26,18 @@ and the two probe transcripts):
 * ``accept`` is NEVER the default (HQ review, 2026-10-10). Claude Code 2.1.296 has
   no sender allowlist: accept would admit every same-user peer (another claude, a
   watch shell, any process that reads the 0600 key, or none at all, since macOS
-  auth is optional) into a bypass-mode HQ with no hold. ``HQ_PANEL_INBOUND=accept``
-  is Anthony's switch (gate-shape:channel-trust), off unless he sets it.
+  auth is optional) into a bypass-mode HQ with no hold. Accept is reachable only
+  through the console's environment: ``HQ_PANEL_INBOUND=accept`` or an
+  ``HQ_PANEL_COMMAND`` that sets it. Anthony's switch (gate-shape:channel-trust).
+* The inbound word on the page is what the console LAUNCHED with, not Claude
+  Code's effective policy: a managed setting or the runtime kill switch outranks
+  the flag silently. Hence "sent to HQ's review queue", never "held".
+* MEASURED (2026-10-10, probe_hold_peer.txt): under an explicit ``hold`` a batch
+  is held with NO review dialog; Claude Code prints it in the panel as "Held peer
+  message ... preview ... not delivered to Claude" and only a change of the
+  setting to accept would release it. The dialog (Deliver / Deny) exists only
+  for the unset case. So under hold the link reports OFF with ``HOLD_REASON``
+  and keeps handing batches, which Anthony sees as held lines in the panel.
 * Each batch's first line names the console pid and a per-console nonce, also
   written to a 0600 file (``nonce_file``) HQ can read, so a held batch is
   recognisable in the review queue. That is recognition, not authentication: any
@@ -62,6 +72,7 @@ import re
 import secrets
 import socket
 import stat
+import subprocess
 import threading
 import time
 import uuid
@@ -83,6 +94,10 @@ CONNECT_TIMEOUT_S = 2.0
 SOCK_PATH_MAX = 103
 #: The value the console attests as its sender label (origin.from on the receiver).
 SENDER = "hq-console"
+#: The only registry peerProtocol this sender speaks (measured on 2.1.296).
+PEER_PROTOCOL = 1
+#: A poller that has not ticked for this many polls reads off.
+STALE_POLLS = 3
 
 INBOUND_ENV = "HQ_PANEL_INBOUND"
 INBOUND_VALUES = ("accept", "hold", "refuse")
@@ -92,7 +107,8 @@ DEFAULT_INBOUND = "hold"  # never "accept" by default: see the module docstring
 SPOOL_TAIL_BYTES = 256 * 1024
 
 _RE_HEX_TOKEN = re.compile(r"^[0-9a-f]{16,256}$")
-_RE_EASTERN_HM = re.compile(r"^\d{4}-\d{2}-\d{2}[ T](\d{2}):(\d{2})")
+# [0-9], never \d: \d matches every Unicode digit (HQ review C4).
+_RE_EASTERN_HM = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}[ T]([0-9]{2}):([0-9]{2})")
 
 
 def inbound_value(env: dict | None = None) -> str:
@@ -164,7 +180,30 @@ def _private_owned(st: os.stat_result) -> bool:
     return st.st_uid == os.getuid() and (st.st_mode & 0o077) == 0
 
 
-def resolve_target(pid: int, spawned_at: float | None, sessions_dir: Path | None = None) -> dict:
+def ps_proc_start(pid: int) -> str | None:
+    """`ps -o lstart=` for `pid` in UTC with the C locale, whitespace-normalised:
+    the same text Claude Code writes as the registry's procStart (measured:
+    80949 -> "Sun Oct 11 00:14:44 2026"). None when ps fails or the pid is gone."""
+    try:
+        out = subprocess.run(
+            ["/bin/ps", "-o", "lstart=", "-p", str(int(pid))],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            env={"TZ": "UTC", "LC_ALL": "C", "PATH": "/usr/bin:/bin"},
+        ).stdout
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+    norm = " ".join(out.split())
+    return norm or None
+
+
+def resolve_target(
+    pid: int,
+    spawned_at: float | None,
+    sessions_dir: Path | None = None,
+    proc_start=None,
+) -> dict:
     """The socket path and peer token for the panel child `pid`. Raises
     TargetError with a fixed reason on any doubt. `spawned_at` is the console's
     own clock at spawn: a registry record older than the spawn belongs to an
@@ -176,13 +215,25 @@ def resolve_target(pid: int, spawned_at: float | None, sessions_dir: Path | None
     except OSError:
         raise TargetError("HQ has not registered its inbox yet") from None
     if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid() or st.st_size > 65536:
-        raise TargetError("session record is not a private file of this user")
+        raise TargetError("session record is not a regular file of this user")
     try:
         rec = json.loads(rec_path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         raise TargetError("session record unreadable") from None
     if not isinstance(rec, dict) or rec.get("pid") != pid:
         raise TargetError("session record names another process")
+    if rec.get("peerProtocol") != PEER_PROTOCOL:
+        raise TargetError("HQ's inbox speaks an unknown peer protocol")
+    # Bind to the process, not just the pid (HQ review C7): the record's
+    # procStart must equal what ps says for this pid right now.
+    rec_start = rec.get("procStart")
+    live_start = (proc_start or ps_proc_start)(pid)
+    if (
+        not isinstance(rec_start, str)
+        or live_start is None
+        or " ".join(rec_start.split()) != live_start
+    ):
+        raise TargetError("session record does not match the running process")
     started_ms = rec.get("startedAt")
     if spawned_at is not None and (not _is_int(started_ms) or started_ms / 1000.0 < spawned_at - 5):
         raise TargetError("session record predates the panel child")
@@ -304,6 +355,32 @@ def nonce_file() -> Path:
     )
 
 
+def cursor_file() -> Path:
+    return Path(os.environ.get("HQ_PUSH_CURSOR_FILE") or nonce_file().parent / "cursor.json")
+
+
+def _write_private_json(path: Path, obj: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    os.chmod(path.parent, 0o700)
+    tmp = path.with_suffix(".tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        json.dump(obj, f)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
+
+
+def read_cursor(path: Path | None) -> int | None:
+    """The persisted spool rowid baseline, or None (no file, unreadable, junk)."""
+    if path is None:
+        return None
+    try:
+        v = json.loads(path.read_text(encoding="utf-8")).get("base_rowid")
+    except (OSError, ValueError, AttributeError):
+        return None
+    return v if _is_int(v) and v >= 0 else None
+
+
 def write_nonce_file(path: Path, nonce: str, console_pid: int) -> None:
     """The console's recognition stamp, 0600 in a 0700 dir, written atomically."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -350,7 +427,11 @@ def format_batch(
     if t and int(t.get("count", 0)) > 0:
         newest = t.get("newest_rowid")
         hm = t.get("newest_hm")
-        at = f" at {hm} Eastern" if isinstance(hm, str) and re.fullmatch(r"\d{2}:\d{2}", hm) else ""
+        at = (
+            f" at {hm} Eastern"
+            if isinstance(hm, str) and re.fullmatch(r"[0-9]{2}:[0-9]{2}", hm)
+            else ""
+        )
         lines.append(
             f"- iMessage spool: {int(t['count'])} new inbound row(s) on Anthony's thread, "
             f"newest rowid {int(newest)}{at}. Rows can be echoes of HQ's own outbound SMS "
@@ -376,6 +457,29 @@ def format_batch(
     return "\n".join(lines)
 
 
+#: Under an explicit hold Claude Code 2.1.296 opens NO Deliver/Deny dialog (it
+#: does so only for the mode-mismatch and no-mode-asserted causes, measured and
+#: read at ~217107417): the batch prints as a held line in the panel and never
+#: reaches HQ's turn unless the setting becomes accept. So hold reads OFF.
+HOLD_REASON = (
+    "on hold as launched: each batch prints in the panel as a held line and does "
+    "not reach HQ (inbound hold)"
+)
+
+
+def _on_reason(inbound: str | None) -> str:
+    return (
+        HOLD_REASON
+        if inbound == "hold"
+        else "push link on (inbound accept, set in the console's environment)"
+    )
+
+
+def _link_on(inbound: str | None) -> bool:
+    """True only when a handed batch can reach HQ's turn: inbound accept."""
+    return inbound == "accept"
+
+
 def _has_events(p: dict) -> bool:
     return bool(
         (p.get("texts") or {}).get("count")
@@ -399,8 +503,21 @@ class PushLink:
     the whole backlog. Sources are observed on every tick, panel running or not,
     so a text that lands between two panel sessions is handed to the next one."""
 
-    def __init__(self, session, *, root: Path | None = None, send=None, resolve=None, clock=None):
+    def __init__(
+        self,
+        session,
+        *,
+        root: Path | None = None,
+        send=None,
+        resolve=None,
+        clock=None,
+        cursor_path: Path | None = None,
+        poll_s: float = DEFAULT_POLL_S,
+    ):
         self._session = session
+        self._cursor_path = cursor_path
+        self.poll_s = float(poll_s)
+        self.nonce_file_ok: bool | None = None
         self._root = root
         self._send = send or send_frame
         self._resolve = resolve or resolve_target
@@ -420,7 +537,10 @@ class PushLink:
         self._over_24h_sent = False
         # Shown on /hq/status:
         self._listening = False
-        self._reason = "no panel session"
+        self._reason = "push poller not started"
+        self._send_failing = False  # a send failed and none has succeeded since
+        self._last_tick_at: float | None = None
+        self._sources: dict = {"texts": "unknown", "honks": "unknown", "halts": "unknown"}
         self._last_error: str | None = None
         self._last_handed_at: float | None = None
         self._handed_total = 0
@@ -455,30 +575,50 @@ class PushLink:
         self._batches = 0
         self._over_24h_sent = False
         self._last_error = None
+        self._send_failing = False
         # Drops and the 24 h notice belonged to the session that ended.
         self._pending.pop("drops", None)
         self._pending.pop("over_24h", None)
         if not _has_events(self._pending):
             self._pending_since = None
 
-    def _observe(self) -> None:
-        """Fold the file sources into pending (under the lock)."""
+    def _read_sources(self) -> dict:
+        """The file reads, OUTSIDE the lock (a snapshot poll must not wait on them)."""
         root = self.root()
         spool = root / "imessage" / "inbound.jsonl"
         rows = read_inbound_rows(spool)
-        if rows is None and self._base_rowid is None and not spool.exists():
+        return {"rows": rows, "spool_exists": spool.exists(), "counters": read_counters(root)}
+
+    def _set_base(self, rowid: int) -> None:
+        self._base_rowid = rowid
+        if self._cursor_path is not None:
+            with contextlib.suppress(OSError):
+                _write_private_json(self._cursor_path, {"base_rowid": int(rowid)})
+
+    def _fold(self, src: dict) -> None:
+        """Fold one read of the sources into pending (under the lock)."""
+        rows, counters = src["rows"], src["counters"]
+        if rows is not None:
+            self._sources["texts"] = "ok"
+        else:
+            self._sources["texts"] = "unreadable" if src["spool_exists"] else "absent"
+        if rows is None and self._base_rowid is None and not src["spool_exists"]:
             # No spool file yet means no texts yet: baseline at zero, so the
             # first rows written later all count. An unreadable file that does
             # exist sets no baseline (unknown, not zero).
-            self._base_rowid = 0
-        counters = read_counters(root)
+            self._set_base(0)
         first = not self._observed
         self._observed = True
         if rows is not None:
             newest = max((r for r, _ in rows), default=None)
             if self._base_rowid is None:
-                self._base_rowid = newest if newest is not None else 0
-            else:
+                # A cursor persisted by the previous console process carries the
+                # texts that landed during a restart (HQ review A5); never past
+                # the newest row on disk.
+                saved = read_cursor(self._cursor_path)
+                top = newest if newest is not None else 0
+                self._set_base(min(saved, top) if saved is not None else top)
+            if newest is not None:
                 fresh = [(r, hm) for r, hm in rows if r > self._base_rowid]
                 if fresh:
                     r, hm = max(fresh)
@@ -486,12 +626,14 @@ class PushLink:
                     t["count"] += len(fresh)
                     t["newest_rowid"] = r
                     t["newest_hm"] = hm
-                    self._base_rowid = r
+                    self._set_base(r)
                     self._mark_pending()
         for key in ("honks", "halts"):
             now_v = counters.get(key)
             if now_v is None:
+                self._sources[key] = "unreadable"
                 continue
+            self._sources[key] = "ok"
             prev = self._last.get(key)
             if not first and prev is not None and now_v > prev:
                 c = self._pending.setdefault(key, {"new": 0, "now": now_v})
@@ -500,11 +642,14 @@ class PushLink:
                 self._mark_pending()
             elif key in self._pending:
                 self._pending[key]["now"] = now_v
-            # A drop (an ack, a removed note) lowers the baseline silently.
+            # Level-triggered: a drop (an ack, a removed note) lowers the baseline
+            # silently, and an ack plus a new honk inside one poll nets to zero.
             self._last[key] = now_v
 
     def tick(self) -> None:
-        """One poll: observe, then hand over a batch when one is due. Never raises."""
+        """One poll: observe, then hand over a batch when one is due. Never raises
+        an Exception; a thread killed some other way shows as "push poller
+        stopped" once last_tick_at is STALE_POLLS polls old."""
         try:
             self._tick()
         except Exception as e:  # a poller that dies silently is the failure to avoid
@@ -512,14 +657,18 @@ class PushLink:
                 self._listening = False
                 self._reason = "push poller error"
                 self._last_error = type(e).__name__
+        finally:
+            with self._lock:
+                self._last_tick_at = self._clock()
 
     def _tick(self) -> None:
         session = self._session
         st = session.status()
         running = bool(st.get("running"))
         pid = st.get("pid") if running else None
+        src = self._read_sources()
         with self._lock:
-            self._observe()
+            self._fold(src)
             if not running or not _is_int(pid):
                 self._listening = False
                 self._reason = "no panel session"
@@ -553,12 +702,14 @@ class PushLink:
         with self._lock:
             if self._pid != pid:  # the session changed while we resolved
                 return
-            self._listening = True
-            self._reason = (
-                "each batch waits for review in the panel (inbound hold)"
-                if inbound == "hold"
-                else "push link on (inbound accept, Anthony's switch)"
-            )
+            if self._send_failing:
+                # HQ review R1: the target resolving is not the link working.
+                # Until a send succeeds the link stays off with the failure
+                # reason, between retries too.
+                self._listening = False
+            else:
+                self._listening = _link_on(inbound)
+                self._reason = _on_reason(inbound)
             due = (
                 _has_events(self._pending)
                 and (self._last_sent_at is None or now - self._last_sent_at >= _min_interval())
@@ -583,6 +734,7 @@ class PushLink:
         except OSError as e:
             with self._lock:
                 self._listening = False
+                self._send_failing = True
                 self._reason = "HQ's inbox refused the connection; events kept"
                 self._last_error = type(e).__name__
             return
@@ -595,6 +747,9 @@ class PushLink:
             self._batches = batch_no
             self._handed_total += 1
             self._last_error = None
+            self._send_failing = False
+            self._listening = _link_on(inbound)
+            self._reason = _on_reason(inbound)
 
     def _clear_rendered(self, rendered: dict) -> None:
         """Subtract exactly what was rendered; anything that arrived mid-send stays."""
@@ -617,9 +772,14 @@ class PushLink:
             self._pending.pop("over_24h", None)
 
     # ── status ──
+    def _stale_locked(self) -> bool:
+        if self._last_tick_at is None:
+            return True
+        return self._clock() - self._last_tick_at > STALE_POLLS * self.poll_s
+
     def listening(self) -> bool:
         with self._lock:
-            return self._listening
+            return self._listening and not self._stale_locked()
 
     def status(self) -> dict:
         """For the Studio-only GET /hq/status. Fixed vocabulary, no paths, no token."""
@@ -630,9 +790,24 @@ class PushLink:
             waiting += int((p.get("halts") or {}).get("new", 0))
             waiting += int((p.get("drops") or {}).get("count", 0))
             waiting += 1 if p.get("over_24h") else 0
+            if self._last_tick_at is None:
+                reason = "push poller not started"
+            elif self._stale_locked():
+                reason = "push poller stopped"
+            else:
+                reason = self._reason
+            blind = sorted(k for k, v in self._sources.items() if v not in ("ok", "unknown"))
             return {
-                "listening": self._listening,
-                "reason": self._reason,
+                "listening": self._listening and not self._stale_locked(),
+                "reason": reason,
+                "last_tick_at": (
+                    datetime.fromtimestamp(self._last_tick_at).strftime("%H:%M:%S")
+                    if self._last_tick_at
+                    else None
+                ),
+                "sources": dict(self._sources),
+                "blind": blind,
+                "nonce_file_ok": self.nonce_file_ok,
                 "inbound": command_inbound(getattr(self._session, "last_command", None)),
                 "batches_handed": self._handed_total,
                 "last_handed_at": _hm(self._last_handed_at) if self._last_handed_at else None,
@@ -654,13 +829,17 @@ def get_link(session=None) -> PushLink:
                 from . import hq_panel
 
                 session = hq_panel.get_session()
-            _LINK = PushLink(session)
+            _LINK = PushLink(session, cursor_path=cursor_file())
         return _LINK
 
 
 def start_poller(link: PushLink, interval_s: float = DEFAULT_POLL_S) -> threading.Thread:
-    with contextlib.suppress(OSError):
+    link.poll_s = float(interval_s)
+    try:
         write_nonce_file(nonce_file(), link.nonce, os.getpid())
+        link.nonce_file_ok = True
+    except OSError:
+        link.nonce_file_ok = False  # shown on /hq/status: HQ cannot cross-check the nonce
 
     def loop():
         while True:

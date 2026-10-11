@@ -2161,22 +2161,29 @@ function initHqPanel() {
 
 // `listening` is the Phase 3 push link — whether the console can hand batches
 // INTO HQ's session over Claude Code's cross-session socket — not the iMessage
-// listener. The snapshot carries only the boolean; the reason, the waiting count
-// and the last hand-over time come from the Studio-only GET /hq/status `push`
-// object (fixed server vocabulary, rendered as text). "handed", never
-// "delivered": the socket returns no receipt to the console.
+// listener. The snapshot carries only the boolean; the reason, the waiting count,
+// the last error, blind sources and the last hand-over time come from the
+// Studio-only GET /hq/status `push` object (fixed server vocabulary, rendered as
+// text). "handed" and "sent to HQ's review queue", never "delivered" or "held":
+// the socket returns no receipt, and the console knows only what it launched
+// with, not Claude Code's effective policy (HQ review A9).
 function hqLinkWord(hp, detail) {
   const p = hq.status && hq.status.push;
   const waiting = p && typeof p.events_waiting === 'number' && p.events_waiting > 0
     ? ` · ${p.events_waiting} waiting` : '';
-  if (hp.listening) {
-    // Inbound hold (the default): batches reach HQ's review queue, not its turn.
-    const held = p && p.inbound === 'hold' ? ', held for review' : '';
-    const last = detail && p && typeof p.last_handed_at === 'string' ? ` · last handed ${p.last_handed_at}` : '';
-    return `push link on${held}${last}${waiting}`;
+  // A source the poller could not read is said, never folded into "on" (C5).
+  const blind = p && Array.isArray(p.blind) && p.blind.length
+    ? ` · blind to ${p.blind.filter((b) => typeof b === 'string').join(', ')}` : '';
+  const last = detail && p && typeof p.last_handed_at === 'string' ? ` · last handed ${p.last_handed_at}` : '';
+  if (hp.listening) return `push link on${last}${blind}${waiting}`;
+  // Inbound hold (the shipped default): measured, Claude Code holds each batch
+  // with no review dialog, so it prints in the panel and never reaches HQ.
+  if (p && p.inbound === 'hold' && !p.last_error) {
+    return `push link held, batches print in the panel and do not reach HQ${last}${blind}${waiting}`;
   }
-  const why = detail && p && typeof p.reason === 'string' && p.reason ? ` (${p.reason})` : '';
-  return `push link off${why}${waiting}`;
+  const why = p && typeof p.reason === 'string' && p.reason ? ` (${p.reason})` : '';
+  const err = p && typeof p.last_error === 'string' && p.last_error ? ` · last error ${p.last_error}` : '';
+  return `push link off${why}${err}${blind}${waiting}`;
 }
 
 // Three missed probe cycles: HQ_PANEL_STATUS_INTERVAL_S defaults to 300 s on the server.
