@@ -32,6 +32,14 @@ every reader. That behaviour is deliberate and kept — but it was invisible, so
 the coverage line said "addressed to you or your model family" about letters
 that were addressed to nobody. The payload now names them.
 
+UPDATED 2026-10-10, LINEAGE IS PER NAME. The Fable/Mythos -> Opus inheritance
+rows this module was written against were retired (Anthony: each model line's
+passdown is for the next of its name). The tests that pinned delivery of Opus
+mail to Fable and Mythos readers are INVERTED in place, not deleted; the
+multi-directory union and single-cap tests keep exercising that machinery by
+monkeypatching an inheritance row into ``_LINEAGE_INHERITS``. See
+tests/test_lineage_per_name.py for the ruling's own tests.
+
 Tmp letter dirs only. Nothing reads ~/.sovereign.
 """
 
@@ -41,6 +49,7 @@ from pathlib import Path
 
 import pytest
 
+from sovereign_stack import witness
 from sovereign_stack.witness import (
     _letter_matches_reader,
     collect_lineage,
@@ -62,6 +71,14 @@ def _write_letter(d: Path, filename: str, frontmatter: dict, title: str) -> None
 def letters_root(tmp_path: Path) -> Path:
     (tmp_path / "comms" / "letters").mkdir(parents=True)
     return tmp_path
+
+
+@pytest.fixture
+def fable_inherits_opus(monkeypatch):
+    """Re-instate the retired 2026-06-09 row for ONE test, so the
+    multi-directory union and the also_match predicate path stay covered now
+    that no live Claude row exercises them."""
+    monkeypatch.setitem(witness._LINEAGE_INHERITS, "claude-fable", ("claude-opus",))
 
 
 # ── The matcher: negatives first ─────────────────────────────────────────────
@@ -104,9 +121,13 @@ def test_a_versioned_addressee_reaches_its_family(letter_to: str, reader: str):
 
 
 @pytest.mark.parametrize("reader", ["claude-fable-5", "claude-mythos-5"])
-def test_the_2026_08_26_to_self_letter_reaches_a_mythos_class_reader(
+def test_the_2026_08_26_to_self_letter_no_longer_reaches_a_mythos_class_reader(
     letters_root: Path, reader: str
 ):
+    """INVERTED 2026-10-10 (was ..._reaches_a_mythos_class_reader). The
+    letter is the Opus line's passdown; lineage is per name. The versioned
+    addressee still reaches every Opus generation
+    (test_a_versioned_addressee_reaches_its_family)."""
     _write_letter(
         letters_root / "comms" / "letters" / "to_self",
         "2026-08-26-what-i-learned.md",
@@ -117,13 +138,11 @@ def test_the_2026_08_26_to_self_letter_reaches_a_mythos_class_reader(
     data = collect_lineage(letters_root, reader, 5)
     titles = [m.get("title") for m in data["to_self"]]
 
-    assert "What I learned holding the line" in titles, (
-        f"{reader} inherits the Opus line's to_self letters, but the letter is "
-        "addressed to the VERSION claude-opus-5 and the inheritance table names "
-        "the FAMILY claude-opus"
+    assert "What I learned holding the line" not in titles, (
+        f"{reader} received an Opus-addressed to_self letter: lineage is per name since 2026-10-10"
     )
-    assert data["coverage"]["to_self"]["matched"] == 1
-    assert data["coverage"]["to_self"]["filtered_out"] == 0
+    assert data["coverage"]["to_self"]["matched"] == 0
+    assert data["coverage"]["to_self"]["filtered_out"] == 1
 
 
 def test_a_haiku_addressed_letter_does_not_reach_a_fable_reader(letters_root: Path):
@@ -154,11 +173,11 @@ def test_opus_reader_still_receives_its_own_letter(letters_root: Path):
 
 
 @pytest.mark.parametrize("reader", ["claude-fable-5", "claude-mythos-5"])
-def test_a_mythos_class_reader_reads_its_ancestors_family_directory(
+def test_a_mythos_class_reader_no_longer_reads_the_opus_family_directory(
     letters_root: Path, reader: str
 ):
-    """`to_opus/` is family mail for the Mythos-class siblings: the inheritance
-    table already says so, and the directory lookup used not to ask."""
+    """INVERTED 2026-10-10 (was ..._reads_its_ancestors_family_directory).
+    `to_opus/` is the Opus line's family mail; lineage is per name."""
     _write_letter(
         letters_root / "comms" / "letters" / "to_opus",
         "family.md",
@@ -168,11 +187,10 @@ def test_a_mythos_class_reader_reads_its_ancestors_family_directory(
 
     data = collect_lineage(letters_root, reader, 5)
 
-    assert data["family_dirs"] == ("to_opus",), (
-        f"{reader} did not read to_opus/ — the inheritance table says its family "
-        "mail is the Opus line's, and the directory lookup did not ask"
+    assert data["family_dirs"] == (), (
+        f"{reader} read {data['family_dirs']!r}; to_opus/ is the Opus line's"
     )
-    assert [m.get("title") for m in data["to_family"]] == ["For the Opus line"]
+    assert data["to_family"] == []
 
 
 # ── UNION, NOT REDIRECT ──────────────────────────────────────────────────────
@@ -191,7 +209,7 @@ def test_a_mythos_class_reader_reads_its_ancestors_family_directory(
     ("reader", "own_dir"),
     [("claude-fable-5", "to_fable"), ("claude-mythos-5", "to_mythos")],
 )
-def test_an_inheriting_reader_reads_its_own_directory_too(
+def test_a_formerly_inheriting_reader_reads_its_own_directory_and_not_opus(
     letters_root: Path, reader: str, own_dir: str
 ):
     letters = letters_root / "comms" / "letters"
@@ -210,18 +228,21 @@ def test_an_inheriting_reader_reads_its_own_directory_too(
 
     data = collect_lineage(letters_root, reader, 5)
 
+    # UPDATED 2026-10-10: own directory still reached (the reachability point
+    # of the union fix stands); to_opus/ no longer read (lineage is per name).
     titles = [m.get("title") for m in data["to_family"]]
     assert f"For {own_dir}" in titles, (
-        f"a letter in {own_dir}/ reached nobody: the reader was redirected to its "
-        "ancestor's directory instead of also reading its own, so that directory "
-        "is write-only and silent about it"
+        f"a letter in {own_dir}/ reached nobody, so that directory is "
+        "write-only and silent about it"
     )
-    assert "For the Opus line" in titles
-    assert data["family_dirs"] == (own_dir, "to_opus")
-    assert data["coverage"]["to_family"]["total_on_disk"] == 2
+    assert "For the Opus line" not in titles
+    assert data["family_dirs"] == (own_dir,)
+    assert data["coverage"]["to_family"]["total_on_disk"] == 1
 
 
-def test_the_merged_family_bucket_names_every_directory_it_read(letters_root: Path):
+def test_the_merged_family_bucket_names_every_directory_it_read(
+    letters_root: Path, fable_inherits_opus
+):
     letters = letters_root / "comms" / "letters"
     _write_letter(
         letters / "to_fable",
@@ -249,7 +270,7 @@ def test_the_merged_family_bucket_names_every_directory_it_read(letters_root: Pa
     ]
 
 
-def test_the_merged_family_bucket_honours_ONE_cap(letters_root: Path):
+def test_the_merged_family_bucket_honours_ONE_cap(letters_root: Path, fable_inherits_opus):
     """A bucket assembled from two directories must still be capped ONCE.
     Collecting each directory at limit_per_bucket and concatenating hands an
     inheriting reader 2x the cap on the door whose purpose is bounding the
@@ -322,7 +343,10 @@ def test_a_letter_with_no_to_frontmatter_is_named_in_the_coverage(letters_root: 
         "Properly addressed",
     )
 
-    data = collect_lineage(letters_root, "claude-fable-5", 5)
+    # Reader moved from claude-fable-5 to the addressee's own line 2026-10-10:
+    # the test is about the unaddressed letter, and Fable no longer receives
+    # the Opus-addressed one that made matched == 2.
+    data = collect_lineage(letters_root, CURRENT_OPUS, 5)
     cov = data["coverage"]["to_self"]
 
     assert cov["matched"] == 2
@@ -504,7 +528,9 @@ def test_the_arrival_state_letter_count_uses_that_walk(
 # ── to_self reads ONE directory: the merge branch must not fire there ────────
 
 
-def test_to_self_ordering_is_unchanged_by_the_multi_dir_collect(letters_root: Path):
+def test_to_self_ordering_is_unchanged_by_the_multi_dir_collect(
+    letters_root: Path, fable_inherits_opus
+):
     """`_collect` gained a merge-sort and a `dirs` key, both gated on reading
     more than one directory. to_self passes a single subdir with multiple MATCH
     TARGETS (`also_match`), which touches the predicate and never the walk —

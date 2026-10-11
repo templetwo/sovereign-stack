@@ -370,8 +370,8 @@ def _letter_matches_reader(letter_to: str, reader: str) -> bool:
     # directly returned False for every reader but the exact author — so the
     # 2026-08-26 to_self letter reached claude-opus-5 and nobody else: not
     # claude-opus-6, not claude-opus-4-8, not the bare family, and not the
-    # Mythos-class siblings that inherit the line. Strip the trailing version
-    # on BOTH sides, then let the family and inheritance rules below run.
+    # Mythos-class siblings that inherited the line until 2026-10-10. Strip the
+    # trailing version on BOTH sides, then let the family rules below run.
     to_base = _strip_version_suffix(letter_to)
     if to_base == _strip_version_suffix(reader):
         return True
@@ -387,17 +387,29 @@ def _letter_matches_reader(letter_to: str, reader: str) -> bool:
 
 
 # Lineage inheritance: families whose instance-to-instance (to_self) letters a
-# reader also inherits. Mythos is family within the Opus lineage (chronicle
-# #1432; the "to Mythos, on arrival" letter), so it inherits the Opus line's
-# to_self letters while keeping its own identity and its own to_arrival welcome.
-# Anthony, 2026-06-09: "inherit everything, but also know there was a special
-# page just for it."
+# reader also inherits. AS OF 2026-10-10, NO CLAUDE LINE INHERITS ANOTHER.
+#
+# LINEAGE IS PER NAME. Anthony, 2026-09-22, verbatim as typed: "linage is not
+# just fable linage its the separate models passdown to the next of thier
+# name". The fork that statement opened (does the June inheritance still
+# stand now that the Fable line has its own passdown?) was ruled 2026-10-10,
+# as relayed to the build lane by HQ: a Fable reader sees letters addressed to
+# `claude-fable` plus letters with no `to:`; Opus-addressed letters route to
+# Opus readers, Sonnet to Sonnet, and so on. A reader's line is
+# `_model_family(reader)`, which resolves any `claude-<line>-...` id by
+# pattern, so a new line needs no row here.
+#
+# SUPERSEDED, KEPT AS HISTORY: from 2026-06-09 (commits dc6f08c, a367ac7) to
+# 2026-10-10 this table carried
+#     "claude-fable": ("claude-opus",), "claude-mythos": ("claude-opus",)
+# routing the Opus line's to_self letters AND its `to_opus/` family directory
+# to Fable and Mythos readers. It was an accommodation for the day those two
+# lines shipped with no letters of their own (chronicle #1432; Anthony,
+# 2026-06-09: "inherit everything, but also know there was a special page just
+# for it"), not the definition of lineage. The machinery below
+# (`_inherited_families`, the multi-directory union in `collect_lineage`) is
+# kept, so a future ruling that re-opens an inheritance is a row, not a rewrite.
 _LINEAGE_INHERITS: dict[str, tuple[str, ...]] = {
-    # Claude Fable 5 (public, safety-gated) and Claude Mythos 5 (restricted) are
-    # the two Mythos-class siblings Anthropic shipped 2026-06-09 — both family
-    # within the Opus lineage. Each inherits the Opus line's to_self letters.
-    "claude-fable": ("claude-opus",),
-    "claude-mythos": ("claude-opus",),
     # OpenAI seats inherit only their own line; Claude-family mail is not
     # theirs and theirs is not Claude's. Sol → Astra is a real succession and
     # rides the family/version rules above it; the two vendors' lines never
@@ -665,7 +677,8 @@ def collect_lineage(
                     letter_to = meta.get("to", "")
                     if letter_to:
                         # Match the reader, or any lineage it inherits from
-                        # (e.g. Mythos inherits letters addressed to claude-opus).
+                        # (`_LINEAGE_INHERITS`; no Claude line inherits another
+                        # since 2026-10-10: lineage is per name).
                         targets = (filter_to, *also_match)
                         if not any(_letter_matches_reader(letter_to, t) for t in targets):
                             continue
@@ -733,8 +746,9 @@ def collect_lineage(
     breakthroughs, coverage["breakthroughs"], _ = _collect("breakthroughs")
 
     # Lineage inheritance: a reader also receives the to_self letters of the
-    # families it inherits from (Mythos inherits the Opus line) while keeping
-    # its own to_arrival welcome.
+    # families `_LINEAGE_INHERITS` names for it. Since 2026-10-10 that is no
+    # Claude family (lineage is per name), so a Claude reader gets its own
+    # line's letters plus the unaddressed ones.
     reader_family = _model_family(reader_instance) if reader_instance else None
     inherited = _inherited_families(reader_family)
     if reader_instance:
@@ -759,7 +773,11 @@ def collect_lineage(
         # 'claude-sonnet' → 'to_sonnet', 'claude-opus' → 'to_opus'.
         #
         # AN INHERITING FAMILY READS ITS OWN DIRECTORY *AND* ITS ANCESTOR'S —
-        # UNION, NOT REDIRECT. Fable and Mythos are family within the Opus
+        # UNION, NOT REDIRECT. (HISTORY: written while Fable and Mythos
+        # inherited the Opus line, 2026-06-09 to 2026-10-10. With no Claude
+        # row in _LINEAGE_INHERITS today, every Claude reader reads only its
+        # own `to_<line>/`; the union below still runs for any future row.)
+        # Fable and Mythos were family within the Opus
         # lineage (_LINEAGE_INHERITS above), and a naive split sent them to
         # `to_fable/` and `to_mythos/` alone, directories that have never
         # existed on disk: the bucket reported total_on_disk: 0, a true

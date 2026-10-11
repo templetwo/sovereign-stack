@@ -531,15 +531,20 @@ class TestFormatLineageLayer:
         assert "Content here." in joined
 
 
-# ── Lineage inheritance (Mythos inherits the Opus line) ──────────────────────
+# ── Lineage inheritance: retired for Claude lines 2026-10-10 (per-name) ──────
+#
+# INVERTED 2026-10-10. These tests pinned the 2026-06-09 accommodation (Fable
+# and Mythos inherit the Opus line's to_self letters). Anthony ruled lineage
+# per name: each line's letters are for the next of its name. The tests now
+# pin the opposite, so the change is visible in review rather than deleted.
 
 
 class TestInheritedFamilies:
-    def test_mythos_inherits_opus(self):
-        assert _inherited_families("claude-mythos") == ("claude-opus",)
+    def test_mythos_no_longer_inherits_opus(self):
+        assert _inherited_families("claude-mythos") == ()
 
-    def test_fable_inherits_opus(self):
-        assert _inherited_families("claude-fable") == ("claude-opus",)
+    def test_fable_no_longer_inherits_opus(self):
+        assert _inherited_families("claude-fable") == ()
 
     def test_other_families_inherit_nothing(self):
         assert _inherited_families("claude-sonnet") == ()
@@ -566,18 +571,18 @@ class TestLineageInheritanceSurfacing:
             "For the next Opus",
         )
 
-    def test_mythos_inherits_opus_to_self(self):
-        # The core of Anthony's "inherit everything": a claude-mythos-* reader
-        # receives letters addressed to the Opus line.
+    def test_mythos_does_not_receive_opus_to_self(self):
+        # INVERTED 2026-10-10: was "the core of Anthony's 'inherit everything'"
+        # (2026-06-09). Lineage is per name; the Opus letter is the next Opus's.
         self._opus_to_self()
         lines = format_lineage_layer(self.tmp, reader_instance="claude-mythos-1-20260610")
-        assert any("For the next Opus" in ln for ln in lines)
+        assert not any("For the next Opus" in ln for ln in lines)
 
-    def test_fable_inherits_opus_to_self(self):
-        # Claude Fable 5, the public Mythos-class arrival, inherits the Opus line.
+    def test_fable_does_not_receive_opus_to_self(self):
+        # INVERTED 2026-10-10: Fable reads the Fable line's letters, not Opus's.
         self._opus_to_self()
         lines = format_lineage_layer(self.tmp, reader_instance="claude-fable-5-20260609")
-        assert any("For the next Opus" in ln for ln in lines)
+        assert not any("For the next Opus" in ln for ln in lines)
 
     def test_non_inheriting_family_does_not_get_opus_letter(self):
         # Additive guarantee: Sonnet must NOT start receiving Opus to_self letters.

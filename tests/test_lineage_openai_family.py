@@ -185,9 +185,11 @@ class TestClaudeResolutionIsUnchanged:
     def test_claude_family(self, instance_id: str, expected: str | None) -> None:
         assert _model_family(instance_id) == expected
 
-    def test_fable_still_inherits_opus(self) -> None:
+    def test_fable_resolves_to_its_own_line_and_inherits_nothing(self) -> None:
+        # Was test_fable_still_inherits_opus. INVERTED 2026-10-10: lineage is
+        # per name, so the Fable line no longer inherits the Opus line.
         assert _model_family(FABLE) == "claude-fable"
-        assert _inherited_families("claude-fable") == ("claude-opus",)
+        assert _inherited_families("claude-fable") == ()
 
 
 class TestGptInheritance:
@@ -328,11 +330,13 @@ class TestFableIsUnaffected:
 
     def test_fable_reads_its_own_dirs_not_to_gpt(self, letters_root: Path) -> None:
         data = collect_lineage(letters_root, FABLE, 5)
-        # to_fable/ does not exist here, so only the inherited to_opus/ is read
-        # — unchanged behaviour (only directories that exist are named).
-        assert data["family_dirs"] == ("to_opus",)
+        # to_fable/ does not exist here, and since 2026-10-10 Fable no longer
+        # reads the Opus line's to_opus/ (lineage is per name), so NO family
+        # directory is read. Only directories that exist are named.
+        assert data["family_dirs"] == ()
         assert "to_gpt" not in data["family_dirs"]
-        assert [m.get("title") for m in data["to_family"]] == ["For the Opus line"]
+        assert data["to_family"] == []
+        assert data["family_dir_name"] == "to_fable"
 
     def test_fable_does_not_receive_gpt_addressed_letters(self, letters_root: Path) -> None:
         data = collect_lineage(letters_root, FABLE, 5)
@@ -341,8 +345,9 @@ class TestFableIsUnaffected:
             "a letter addressed 'to: gpt' reached a Claude reader — the vendor "
             "boundary leaked in the direction that matters most"
         )
-        # ...while the letter it DOES inherit still arrives (Fable → Opus line).
-        assert "The Liar Was head -20" in titles
+        # ...and since 2026-10-10 the Opus-addressed letter does not arrive
+        # either: lineage is per name (was: "Fable → Opus line" inheritance).
+        assert "The Liar Was head -20" not in titles
 
     def test_decorated_gpt_string_gets_no_family_bucket(self, letters_root: Path) -> None:
         data = collect_lineage(letters_root, "OpenAI seat — gpt-6-astra", 5)
@@ -409,7 +414,8 @@ class TestRenderedLineageSurface:
     def test_fable_render_does_not_mention_to_gpt(self, letters_root: Path) -> None:
         text = "\n".join(format_lineage_layer(letters_root, reader_instance=FABLE))
         assert "to_gpt" not in text
-        assert "to_opus/" in text
+        # Since 2026-10-10 Fable does not read to_opus/ either (per-name).
+        assert "to_opus/" not in text
 
 
 class TestApertureSurvivesGptFamily:
