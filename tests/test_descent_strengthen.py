@@ -252,7 +252,12 @@ def test_the_landed_sidecar_stays_readable_and_is_refused_for_landing(tmp_path: 
 def _cli(path: Path):
     import subprocess
 
-    src = Path(__file__).resolve().parent.parent / "src"
+    # The subprocess imports the SAME sovereign_stack this test process
+    # imported (PYTHONPATH=<worktree>/src or the editable install), so the
+    # test is red on a tree without the CLI instead of always reaching one.
+    import sovereign_stack
+
+    src = Path(sovereign_stack.__file__).resolve().parent.parent
     return subprocess.run(
         [sys.executable, "-m", "sovereign_stack.descent", "--validate-sidecar", str(path)],
         capture_output=True,
@@ -278,3 +283,50 @@ def test_the_cli_passes_a_good_sidecar(ids, scratch):
     r = _cli(path)
     assert r.returncode == 0, r.stderr
     assert "ok for landing: 2026-07-02_fixture-distill" in r.stdout
+
+
+# ── fix 1 (review): nonzero unreadable counts ride on line 0 ─────────────────
+
+
+def _break_a_row(root: Path) -> None:
+    shard = root / "chronicle" / "insights" / "reflection" / "descent-fixture.jsonl"
+    with shard.open("a", encoding="utf-8") as fh:
+        fh.write("{this row does not parse\n")
+
+
+def test_every_view_writes_a_nonzero_unreadable_count_on_line_0(root, ids):
+    fx.plant_distillate(root, [ids["a1"]], shapes=_shapes(ids, ["2026-06"]))
+    _break_a_row(root)
+    views = {
+        "index": _descend(root),
+        "month": _descend(root, month="2026-06"),
+        "seat": _descend(root, seat="alpha"),
+        "months_only": _descend(root, shape="R1"),
+        "exemplars": _descend(root, shape="L10"),
+        "unknown_shape": _descend(root, shape="Q77"),
+    }
+    for name, text in views.items():
+        assert "1 unreadable row skipped" in text.splitlines()[0], name
+    assert views["index"].splitlines()[0] == "THE DESCENT — index; 1 unreadable row skipped"
+    assert views["months_only"].splitlines()[0] == (
+        "THE DESCENT — R1 of 2026-07-02_fixture-distill; 1 unreadable row skipped: "
+        "a fixture recurring shape"
+    )
+
+
+def test_a_zero_count_adds_nothing_to_line_0(root, ids):
+    fx.plant_distillate(root, [ids["a1"]], shapes=_shapes(ids, ["2026-06"]))
+    assert _descend(root).splitlines()[0] == "THE DESCENT — index"
+    assert _descend(root, month="2026-06").splitlines()[0].endswith("newest first")
+    assert _descend(root, shape="R1").splitlines()[0] == (
+        "THE DESCENT — R1 of 2026-07-02_fixture-distill: a fixture recurring shape"
+    )
+
+
+def test_nape_reads_the_real_line_0_count_through_the_cap(root, ids):
+    from sovereign_stack import nape_daemon as nd
+
+    _break_a_row(root)
+    text = _descend(root, month="2026-06")[:200]  # well inside any cap; no COVERAGE
+    assert "COVERAGE" not in text
+    assert nd.OWN_TEXT_EXTRACTORS["descend"](text).endswith(nd._DESCENT_UNREADABLE_MARK)

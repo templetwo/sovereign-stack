@@ -562,11 +562,6 @@ _DESCENT_PREFIX = "THE DESCENT"
 # "[n] ", the column-0 COVERAGE line, or the next label. Never at a blank line.
 _DESCENT_BLOCK_LABEL_RE = re.compile(r"^  (?:LEARNED|SURPRISED|HANDED FORWARD)$")
 _DESCENT_CLOSE_HEAD_RE = re.compile(r"^\[\d+\] ")
-# The joined-leg notes descend writes IN PLACE of a missing body. They are the
-# tool's own failure report, not quoted record, so they survive extraction.
-_DESCENT_OWN_NOTE_RE = re.compile(
-    r"^\s*\(none joined; \d+ (?:handoff files?|surprise rows?) could not be read\)$"
-)
 # Shape titles are the distillate's quoted reading, rendered in three places.
 _DESCENT_SHAPE_TITLE = "<shape title>"
 _DESCENT_INDEX_SHAPE_RE = re.compile(
@@ -578,12 +573,17 @@ _DESCENT_INDEX_SHAPE_RE = re.compile(
 _DESCENT_INDEX_SHAPE_CUT_RE = re.compile(
     r"^(    [A-Z]\d{1,3}\s+(?:recurring|once|learned|surprised)\s+)(?!\s)(?!<shape title>).*$"
 )
-_DESCENT_SHAPE_HEAD_RE = re.compile(r"^(THE DESCENT — [A-Z]\d{1,3} of \S+): .*$")
+# A distillate id holds no ";" or ":", and descend writes any nonzero counts
+# ("; N unreadable rows skipped") between the id and the title, so the title
+# is everything after the first ": " that follows them.
+_DESCENT_SHAPE_HEAD_RE = re.compile(r"^(THE DESCENT — [A-Z]\d{1,3} of [^\s;:]+(?:; [^;:]+)*): .*$")
 _DESCENT_SELECTION_SHAPE_RE = re.compile(
     r"^(  Selection: shape [A-Z]\d{1,3} of \S+): .*?"
     r"(?=; month \d{4}-\d{2} \(Eastern\)|; \d+ seat names?:|; no (?:stored )?seat name|\.$)"
 )
-# Nonzero unreadable counts in the tool's own framing (index header, COVERAGE).
+# Nonzero unreadable counts, read ONLY from line 0 (after the title strip) and
+# from lines starting "COVERAGE:". Never from a body, a [n] line, the Selection
+# or Note line, or an index seat row: those carry stored text that can mimic it.
 _DESCENT_UNREADABLE_RE = re.compile(
     r"(?<!\d)[1-9]\d* (?:unreadable rows? skipped|handoff files? unreadable)"
 )
@@ -595,20 +595,20 @@ def _descend_own_text(result_str: str) -> str:
 
     Kept: the header line, the Selection / Note / explanatory lines, each
     "[n] <date> · <seat> · thread … · close … · distilled" line, the block
-    LABELS, the joined-leg "could not be read" notes, the index's counts, and
-    the COVERAGE line. Dropped: the LEARNED / SURPRISED / HANDED FORWARD bodies
-    and every distillate shape title. Text that does not begin "THE DESCENT"
-    (the auto-hook's "ERROR: {exc}") is returned unchanged.
+    LABELS, the index's counts, and the COVERAGE line. Dropped: every line of
+    the LEARNED / SURPRISED / HANDED FORWARD bodies (all of it quoted record,
+    including any line that looks like one of the tool's own notes) and every
+    distillate shape title. Text that does not begin "THE DESCENT" (the
+    auto-hook's "ERROR: {exc}") is returned unchanged.
 
     The tool reports unreadable input as "N unreadable rows skipped" / "N
-    handoff files unreadable" / "(none joined; N … could not be read)", none of
-    which contains an ERROR_WORD, so when any count is above zero a marker
-    carrying "error" is appended. ERROR_WORDS itself is not widened (that would
-    change every other tool, and "0 unreadable rows skipped" would always trip).
-    The marker is derived from the in-body "could not be read" notes as well
-    as from COVERAGE because the auto-hook caps result_str at 4000 characters
-    (server.py:3080, _flatten_result): a long descend result loses its
-    COVERAGE line, while the notes sit beside the close they belong to.
+    handoff files unreadable", which contains no ERROR_WORD, so when a count
+    above zero appears a marker carrying "error" is appended. ERROR_WORDS
+    itself is not widened (that would change every other tool, and "0
+    unreadable rows skipped" would always trip). Nonzero unreadable counts are
+    written on line 0 by descend itself, which survives the 4000-character
+    result cap (server.py:3080); the COVERAGE line is a second source when it
+    survives. No other line is scanned for counts.
     """
     if not result_str.startswith(_DESCENT_PREFIX):
         return result_str
@@ -622,9 +622,6 @@ def _descend_own_text(result_str: str) -> str:
         if in_block:
             if _DESCENT_CLOSE_HEAD_RE.match(line) or line.startswith("COVERAGE:"):
                 in_block = False
-            elif _DESCENT_OWN_NOTE_RE.match(line):
-                kept.append(line)
-                continue
             else:
                 continue
         line = _DESCENT_INDEX_SHAPE_RE.sub(rf"\1{_DESCENT_SHAPE_TITLE}\2", line)
@@ -633,7 +630,8 @@ def _descend_own_text(result_str: str) -> str:
         line = _DESCENT_SELECTION_SHAPE_RE.sub(rf"\1: {_DESCENT_SHAPE_TITLE}", line)
         kept.append(line)
     text = "\n".join(kept)
-    if _DESCENT_UNREADABLE_RE.search(text) or any(_DESCENT_OWN_NOTE_RE.match(x) for x in kept):
+    sources = [kept[0]] + [x for x in kept[1:] if x.startswith("COVERAGE:")] if kept else []
+    if any(_DESCENT_UNREADABLE_RE.search(x) for x in sources):
         text += "\n" + _DESCENT_UNREADABLE_MARK
     return text
 

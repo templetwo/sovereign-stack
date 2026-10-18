@@ -163,16 +163,94 @@ def test_unreadable_handoff_files_count_too(daemon):
     assert [h["pattern"] for h in _honks(daemon)] == ["premature_summary"]
 
 
-def test_a_could_not_be_read_note_inside_a_block_survives_truncation(daemon):
-    """The COVERAGE line is often cut by the 4000-character cap; the joined-leg
-    note the tool writes in place of a pick-up is its own text and must count."""
-    text = _selection(ZERO).replace(
-        "    (no handoff joined)", "    (none joined; 2 handoff files could not be read)"
+def _capped(line0_tail: str) -> str:
+    """A long month view cut at the 4000-character cap: no COVERAGE survives."""
+    body = "invented filler for length. " * 200
+    text = _selection(ZERO, learned=body).replace(
+        "showing 1-1, newest first", "showing 1-1, newest first" + line0_tail, 1
     )
-    text = text.rsplit("\n", 1)[0]  # drop COVERAGE, as truncation does
+    return text[:4000]
+
+
+def test_a_capped_view_with_a_nonzero_count_on_line_0_still_counts(daemon):
+    text = _capped("; 2 unreadable rows skipped; 1 handoff file unreadable")
+    assert "COVERAGE:" not in text
+    _obs(daemon, "descend", text)
     _obs(daemon, "descend", text)
     _obs(daemon, "handoff", HANDOFF_RESULT)
-    assert [h["pattern"] for h in _honks(daemon)] == ["premature_summary"]
+    assert sorted(h["pattern"] for h in _honks(daemon)) == [
+        "premature_summary",
+        "repeated_mistake",
+    ]
+
+
+def test_a_capped_view_with_no_count_on_line_0_is_not_an_error(daemon):
+    text = _capped("")
+    _obs(daemon, "descend", text)
+    _obs(daemon, "descend", text)
+    _obs(daemon, "handoff", HANDOFF_RESULT)
+    assert _honks(daemon) == []
+
+
+def test_a_stored_body_that_mimics_the_tools_note_is_not_an_error(daemon):
+    """Reviewer input D: a close body holding the tool's own note text."""
+    text = _selection(ZERO, learned="(none joined; 1 handoff file could not be read)")
+    _obs(daemon, "descend", text, {"month": "2026-06"})
+    _obs(daemon, "descend", text, {"month": "2026-06"})
+    _obs(daemon, "handoff", HANDOFF_RESULT)
+    assert _honks(daemon) == []
+
+
+def test_a_stored_seat_name_that_mimics_a_count_is_not_an_error(daemon):
+    """Reviewer input E: a seat name on the [n] line and in the index seat list."""
+    seat = "seat 2 handoff files unreadable"
+    view = _selection(ZERO).replace("· fixture-seat ·", f"· {seat} ·")
+    index = "\n".join(
+        [
+            "THE DESCENT — index",
+            "  3 closes on record (close_session entries in chronicle domain 'reflection'), "
+            "2026-06-02 to 2026-07-03 (Eastern). 0 unreadable rows skipped.",
+            "  Seat names (2; 0 closes unnamed) → descend(seat='part of a name'):",
+            f"       2  {seat}",
+            "       1  fixture-seat",
+        ]
+    )
+    for text in (view, view, index, index):
+        _obs(daemon, "descend", text)
+    _obs(daemon, "handoff", HANDOFF_RESULT)
+    assert _honks(daemon) == []
+
+
+def test_a_selection_line_never_supplies_a_count(daemon):
+    text = _selection(ZERO).replace(
+        "  Selection: month 2026-06 (Eastern).",
+        "  Selection: 1 seat name: seat 3 unreadable rows skipped.",
+    )
+    _obs(daemon, "descend", text)
+    _obs(daemon, "handoff", HANDOFF_RESULT)
+    assert _honks(daemon) == []
+
+
+def test_a_shape_header_count_before_the_title_survives_the_title_strip():
+    ex = _nd().OWN_TEXT_EXTRACTORS["descend"]
+    head = (
+        "THE DESCENT — R1 of 2099-01-01_synthetic-distill; 1 unreadable row skipped: "
+        "a title that says 9 handoff files unreadable"
+    )
+    out = ex(head)
+    assert out.splitlines()[0] == (
+        "THE DESCENT — R1 of 2099-01-01_synthetic-distill; 1 unreadable row skipped: <shape title>"
+    )
+    assert out.endswith(_nd()._DESCENT_UNREADABLE_MARK)
+    clean = ex("THE DESCENT — R1 of 2099-01-01_synthetic-distill: 9 handoff files unreadable")
+    assert _nd()._DESCENT_UNREADABLE_MARK not in clean
+
+
+def test_an_extractor_returning_a_non_string_scores_the_full_text(daemon, monkeypatch):
+    """Kills the mutant where _scored_text returns "" instead of the full text."""
+    monkeypatch.setitem(_nd().OWN_TEXT_EXTRACTORS, "descend", lambda _t: None)
+    _obs(daemon, "descend", _selection(ZERO, learned="verified"))
+    assert [h["pattern"] for h in _honks(daemon)] == ["declare_before_verify"]
 
 
 def test_a_zero_unreadable_count_is_not_an_error(daemon):
@@ -183,8 +261,10 @@ def test_a_zero_unreadable_count_is_not_an_error(daemon):
 
 
 def test_the_autohook_error_text_passes_through_unchanged(daemon):
-    """Guard (also green on 8800960): a raising descend is recorded by the
-    auto-hook as "ERROR: {exc}", and the extractor must hand it through."""
+    """A raising descend is recorded by the auto-hook as "ERROR: {exc}", and
+    the extractor must hand it through unchanged. Its honk half (repeated_mistake
+    and premature_summary on that text) also holds on 8800960; its first assert
+    does not exist there, since OWN_TEXT_EXTRACTORS is new."""
     assert _nd().OWN_TEXT_EXTRACTORS["descend"]("ERROR: store unreadable") == (
         "ERROR: store unreadable"
     )

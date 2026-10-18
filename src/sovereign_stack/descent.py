@@ -1544,10 +1544,26 @@ def _refuse(why: str) -> str:
     return f"{DESCENT_LABEL} — refused: {why}. Nothing was read."
 
 
+def _line0_counts(state: DescentState) -> str:
+    """Nonzero unreadable counts for a view's FIRST line, or "" when both are 0.
+
+    Line 0 is the one line the auto-hook's 4000-character result cap
+    (server.py:3080) can never cut, and it holds no stored free text, so Nape
+    reads a view's own failure report there (nape_daemon._descend_own_text)
+    instead of from anywhere a quoted body or a stored seat name could mimic
+    it. The longer statements (index line 1, COVERAGE) stay as they are."""
+    parts = []
+    if state.skipped_rows:
+        parts.append(f"{_plural(state.skipped_rows, 'unreadable row')} skipped")
+    if state.handoffs_unreadable:
+        parts.append(f"{_plural(state.handoffs_unreadable, 'handoff file')} unreadable")
+    return "".join(f"; {x}" for x in parts)
+
+
 def _index_view(state: DescentState, now: datetime) -> str:
     closes = state.closes
     n = len(closes)
-    lines = [f"{DESCENT_LABEL} — index"]
+    lines = [f"{DESCENT_LABEL} — index{_line0_counts(state)}"]
     if not closes:
         lines.append(
             "  No close is on record in this store (close_session entries in chronicle domain "
@@ -1722,15 +1738,16 @@ def descend(
         dist = state.distillate
         if dist is None:
             return (
-                f"{DESCENT_LABEL} — no distillate is in force, so there are no shapes to descend into. "
-                "descend(month='YYYY-MM') or descend(seat='part of a name') reaches every close."
+                f"{DESCENT_LABEL} — no distillate is in force, so there are no shapes to descend "
+                f"into{_line0_counts(state)}. descend(month='YYYY-MM') or "
+                "descend(seat='part of a name') reaches every close."
             )
         match = next((s for s in dist.shapes if s.id == sid), None)
         if match is None:
             ids = ", ".join(s.id for s in dist.shapes) or "none"
             return (
-                f"{DESCENT_LABEL} — {dist.id} has no shape with that id. Its shapes: {ids} "
-                "(descend() lists them with titles)."
+                f"{DESCENT_LABEL} — {dist.id} has no shape with that id{_line0_counts(state)}. "
+                f"Its shapes: {ids} (descend() lists them with titles)."
             )
         where.append(f"shape {match.id} of {dist.id}: {match.title}")
         if not match.close_ids:
@@ -1746,7 +1763,10 @@ def descend(
             )
             return "\n".join(
                 [
-                    f"{DESCENT_LABEL} — {match.id} of {dist.id}: {match.title}",
+                    # Counts BEFORE the title: the title is stored text and
+                    # the extractor strips everything after the first ": ".
+                    f"{DESCENT_LABEL} — {match.id} of {dist.id}{_line0_counts(state)}: "
+                    f"{match.title}",
                     f"  {why}, so there are no closes to return here.",
                     f"  Its months: {months}. descend(month='YYYY-MM') returns the closes of a month.",
                 ]
@@ -1800,7 +1820,8 @@ def descend(
     page = picked[offset : offset + limit]
     lines = [
         f"{DESCENT_LABEL} — {total} close{'' if total == 1 else 's'} in this selection; "
-        + (f"showing {offset + 1}-{offset + len(page)}, newest first" if page else "none shown"),
+        + (f"showing {offset + 1}-{offset + len(page)}, newest first" if page else "none shown")
+        + _line0_counts(state),
         "  Selection: " + "; ".join(where) + ".",
         "  A close is a close_session entry in chronicle domain 'reflection', joined to its "
         "surprise and its handoff by session and a 10-second window. Each is its seat's own "
