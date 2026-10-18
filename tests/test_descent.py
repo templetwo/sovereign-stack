@@ -602,7 +602,9 @@ def test_descend_names_the_newest_distillate_in_force():
 def test_descend_stays_out_of_nape_readonly_tools():
     """Green on main by design: it pins a decision. descend FAILS the call on an
     unreadable store, so clause 3 of Nape's membership test does not hold; it
-    stays visible to the honk detectors, and stored close text may honk."""
+    stays visible to the honk detectors. Since lane 2026-10-17_descent-
+    strengthen the detectors score it through OWN_TEXT_EXTRACTORS (its framing,
+    not the closes it quotes); see tests/test_nape_own_text.py."""
     from sovereign_stack.nape_daemon import READONLY_TOOL_NAMES
 
     assert "descend" not in READONLY_TOOL_NAMES

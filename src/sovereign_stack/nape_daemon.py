@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import re
 import uuid
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -514,6 +515,152 @@ def _result_has_error_word(result_str: str) -> bool:
     only the empty forms of the `error` key are removed first."""
     scanned = strip_null_error_fields(result_str).lower()
     return any(word in scanned for word in ERROR_WORDS)
+
+
+# =============================================================================
+# OWN-TEXT EXTRACTORS: score a quoted-record read tool by its OWN words
+# =============================================================================
+#
+# READONLY_TOOL_NAMES above is a three-detector EXEMPTION, and its membership
+# test has three clauses. Some read tools fail it for good reasons and still
+# quote other seats' words at length. descend (THE DESCENT, descent.py) is the
+# case that earned this registry, lane 2026-10-17_descent-strengthen: six
+# successful descend() calls on 2026-10-17 drew seven honks (declare_before_
+# verify sharp x3, repeated_mistake uneasy x4) and the handoff after them drew
+# premature_summary, because the detectors scanned the closes descend QUOTED
+# ("failed", "verified", "refused", written by other seats months earlier) as
+# this seat's own completion and error text.
+#
+# descend cannot simply join the exemption set:
+#   clause 2 - its result carries text the caller can steer (the Selection
+#     line follows the caller's filters; the stored seat names are other
+#     seats' free text);
+#   clause 3 - it reports its OWN failures in-band (a refusal, a COVERAGE line
+#     counting unreadable rows, a "could not be read" note) and RAISES on an
+#     unreadable store, which the auto-hook records as "ERROR: {exc}".
+#     Exempting it would blind repeated_mistake to exactly those.
+#
+# So instead of exempting the tool, the detectors read only the tool's own
+# words. For a tool registered here, _detect_declare_before_verify,
+# _detect_premature_summary's error scan and _detect_repeated_mistake scan
+# OWN_TEXT_EXTRACTORS[tool](result_str) instead of result_str. The stored
+# observation is unchanged; only what is SCORED changes. A tool that is not
+# registered is scored exactly as before, and the registry is keyed by tool
+# NAME, never by the shape of the text (a different tool emitting descend-
+# shaped text is scored in full).
+#
+# Rules for an extractor: it must be total (never raise; _scored_text falls
+# back to the full text if it does), it must hand through unchanged any text
+# that is not the tool's own rendering (above all the auto-hook's
+# "ERROR: {exc}"), and it may only DROP quoted record. It may ADD a marker
+# only to make one of the tool's own failure reports visible to ERROR_WORDS.
+
+_DESCENT_PREFIX = "THE DESCENT"
+# A quoted block opens at one of these labels (2-space indent) and its body is
+# every following line indented 4 spaces OR blank (_render_close renders a
+# blank body line as ""), so a block ends only at a column-0 close header
+# "[n] ", the column-0 COVERAGE line, or the next label. Never at a blank line.
+_DESCENT_BLOCK_LABEL_RE = re.compile(r"^  (?:LEARNED|SURPRISED|HANDED FORWARD)$")
+_DESCENT_CLOSE_HEAD_RE = re.compile(r"^\[\d+\] ")
+# The joined-leg notes descend writes IN PLACE of a missing body. They are the
+# tool's own failure report, not quoted record, so they survive extraction.
+_DESCENT_OWN_NOTE_RE = re.compile(
+    r"^\s*\(none joined; \d+ (?:handoff files?|surprise rows?) could not be read\)$"
+)
+# Shape titles are the distillate's quoted reading, rendered in three places.
+_DESCENT_SHAPE_TITLE = "<shape title>"
+_DESCENT_INDEX_SHAPE_RE = re.compile(
+    r"^(    [A-Z]\d{1,3}\s+(?:recurring|once|learned|surprised)\s+).*"
+    r"( — (?:named in |count |no count recorded).*)$"
+)
+# The same row cut short by the 4000-character observation cap (no " — named
+# in" tail survives): the rest of the line is title, so it goes too.
+_DESCENT_INDEX_SHAPE_CUT_RE = re.compile(
+    r"^(    [A-Z]\d{1,3}\s+(?:recurring|once|learned|surprised)\s+)(?!\s)(?!<shape title>).*$"
+)
+_DESCENT_SHAPE_HEAD_RE = re.compile(r"^(THE DESCENT — [A-Z]\d{1,3} of \S+): .*$")
+_DESCENT_SELECTION_SHAPE_RE = re.compile(
+    r"^(  Selection: shape [A-Z]\d{1,3} of \S+): .*?"
+    r"(?=; month \d{4}-\d{2} \(Eastern\)|; \d+ seat names?:|; no (?:stored )?seat name|\.$)"
+)
+# Nonzero unreadable counts in the tool's own framing (index header, COVERAGE).
+_DESCENT_UNREADABLE_RE = re.compile(
+    r"(?<!\d)[1-9]\d* (?:unreadable rows? skipped|handoff files? unreadable)"
+)
+_DESCENT_UNREADABLE_MARK = "[nape: descend reported unreadable input in its own text; error]"
+
+
+def _descend_own_text(result_str: str) -> str:
+    """descend's own words: framing kept, quoted closes and shape titles dropped.
+
+    Kept: the header line, the Selection / Note / explanatory lines, each
+    "[n] <date> · <seat> · thread … · close … · distilled" line, the block
+    LABELS, the joined-leg "could not be read" notes, the index's counts, and
+    the COVERAGE line. Dropped: the LEARNED / SURPRISED / HANDED FORWARD bodies
+    and every distillate shape title. Text that does not begin "THE DESCENT"
+    (the auto-hook's "ERROR: {exc}") is returned unchanged.
+
+    The tool reports unreadable input as "N unreadable rows skipped" / "N
+    handoff files unreadable" / "(none joined; N … could not be read)", none of
+    which contains an ERROR_WORD, so when any count is above zero a marker
+    carrying "error" is appended. ERROR_WORDS itself is not widened (that would
+    change every other tool, and "0 unreadable rows skipped" would always trip).
+    The marker is derived from the in-body "could not be read" notes as well
+    as from COVERAGE because the auto-hook caps result_str at 4000 characters
+    (server.py:3080, _flatten_result): a long descend result loses its
+    COVERAGE line, while the notes sit beside the close they belong to.
+    """
+    if not result_str.startswith(_DESCENT_PREFIX):
+        return result_str
+    kept: list[str] = []
+    in_block = False
+    for line in result_str.splitlines():
+        if _DESCENT_BLOCK_LABEL_RE.match(line):
+            kept.append(line)
+            in_block = True
+            continue
+        if in_block:
+            if _DESCENT_CLOSE_HEAD_RE.match(line) or line.startswith("COVERAGE:"):
+                in_block = False
+            elif _DESCENT_OWN_NOTE_RE.match(line):
+                kept.append(line)
+                continue
+            else:
+                continue
+        line = _DESCENT_INDEX_SHAPE_RE.sub(rf"\1{_DESCENT_SHAPE_TITLE}\2", line)
+        line = _DESCENT_INDEX_SHAPE_CUT_RE.sub(rf"\1{_DESCENT_SHAPE_TITLE}", line)
+        line = _DESCENT_SHAPE_HEAD_RE.sub(rf"\1: {_DESCENT_SHAPE_TITLE}", line)
+        line = _DESCENT_SELECTION_SHAPE_RE.sub(rf"\1: {_DESCENT_SHAPE_TITLE}", line)
+        kept.append(line)
+    text = "\n".join(kept)
+    if _DESCENT_UNREADABLE_RE.search(text) or any(_DESCENT_OWN_NOTE_RE.match(x) for x in kept):
+        text += "\n" + _DESCENT_UNREADABLE_MARK
+    return text
+
+
+OWN_TEXT_EXTRACTORS: dict[str, Callable[[str], str]] = {
+    "descend": _descend_own_text,
+}
+
+
+def _scored_text(obs: dict) -> str:
+    """The text the detectors score for one observation.
+
+    The full result_str for any tool not in OWN_TEXT_EXTRACTORS; the
+    extractor's output for one that is. Fail-safe toward the old behaviour: an
+    extractor that raises or returns a non-string scores the full text, since
+    observe() runs inside contextlib.suppress and a raising detector would
+    silently blind every later check whose window holds that observation.
+    """
+    text = obs.get("result_str", "") or ""
+    extractor = OWN_TEXT_EXTRACTORS.get(obs.get("tool_name") or "")
+    if extractor is None:
+        return text
+    try:
+        out = extractor(text)
+    except Exception:  # noqa: BLE001 - see the docstring
+        return text
+    return out if isinstance(out, str) else text
 
 
 # Pattern name → honk level mapping. Source of truth for the gesture vocabulary.
@@ -1060,7 +1207,8 @@ class NapeDaemon:
         # Those are opposite behaviours. Only that stamp is stripped; anything
         # the caller authored, including the vantage and the domain tags in the
         # path, is left in and still counts as a declaration.
-        result_str = strip_system_stamps(latest.get("result_str", ""))
+        # A tool in OWN_TEXT_EXTRACTORS is scored by its own words only.
+        result_str = strip_system_stamps(_scored_text(latest))
 
         # Check whether any declare word appears in this result as a whole
         # token. Substring matching read "unresolved" as "resolved" and
@@ -1139,7 +1287,7 @@ class NapeDaemon:
             obs
             for obs in preceding
             if obs.get("tool_name") not in READONLY_TOOL_NAMES
-            and _result_has_error_word(obs.get("result_str", ""))
+            and _result_has_error_word(_scored_text(obs))
         ]
 
         if not error_obs:
@@ -1234,7 +1382,7 @@ class NapeDaemon:
         if trigger_tool in READONLY_TOOL_NAMES:
             return []
 
-        if not _result_has_error_word(latest.get("result_str", "")):
+        if not _result_has_error_word(_scored_text(latest)):
             return []
 
         session_id = latest.get("session_id")
@@ -1246,8 +1394,7 @@ class NapeDaemon:
         earlier_errors = [
             obs
             for obs in preceding
-            if obs.get("tool_name") == trigger_tool
-            and _result_has_error_word(obs.get("result_str", ""))
+            if obs.get("tool_name") == trigger_tool and _result_has_error_word(_scored_text(obs))
         ]
 
         if not earlier_errors:
