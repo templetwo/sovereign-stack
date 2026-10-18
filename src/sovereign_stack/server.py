@@ -3246,6 +3246,45 @@ def _signal_actor() -> str | None:
     return None
 
 
+def _earlier_handoff_nudge(record: dict) -> str:
+    """One added result line when this seat already handed off on this thread.
+
+    THE DESCENT marks a corrected pick-up only through `supersedes`, and few
+    handoffs ever pass it (10 of 418 on disk, 2026-10-17). When the caller did
+    not pass it and the same source_instance has an earlier handoff on the same
+    thread, name the newest such file so the correction is one argument away.
+    Display only: nothing is written or linked. Any failure to scan the store
+    costs the nudge, never the handoff, which has already been written.
+    """
+    try:
+        own = Path(record["_path"]).name
+        seat, thread = record["source_instance"], record["thread"]
+        earlier: list[str] = []
+        for fp in handoff_engine.root.glob("*.json"):
+            if fp.name == own:
+                continue
+            try:
+                data = json.loads(fp.read_text())
+            except (OSError, ValueError):
+                continue
+            if (
+                isinstance(data, dict)
+                and data.get("source_instance") == seat
+                and data.get("thread") == thread
+            ):
+                earlier.append(fp.name)
+        earlier = [n for n in earlier if n < own]
+        if not earlier:
+            return ""
+        name = max(earlier)
+        return (
+            f"\nEarlier handoff by this seat on this thread: {name}. "
+            f"If this one corrects its pick-up, pass supersedes={name}."
+        )
+    except Exception:  # noqa: BLE001 - see the docstring
+        return ""
+
+
 async def _dispatch_tool(name: str, arguments: dict):
     """Inner dispatcher — contains the original handle_tool body.
 
@@ -3722,6 +3761,7 @@ async def _dispatch_registered_tool(name: str, arguments: dict):
             # 28 of 122 handoffs (23%) died silently while reporting success
             # (mesh-20260719, lane 3/3 forensics).
             raise ValueError(f"Handoff rejected: {e}") from e
+        nudge = "" if supersedes is not None else _earlier_handoff_nudge(record)
         return [
             TextContent(
                 type="text",
@@ -3734,7 +3774,8 @@ async def _dispatch_registered_tool(name: str, arguments: dict):
                     if record.get("supersedes")
                     else ""
                 )
-                + f"  note: {record['note'][:120]}{'...' if len(record['note']) > 120 else ''}",
+                + f"  note: {record['note'][:120]}{'...' if len(record['note']) > 120 else ''}"
+                + nudge,
             )
         ]
 
