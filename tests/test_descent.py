@@ -354,7 +354,7 @@ def test_descend_refuses_bad_input_without_echoing_it(root, ids, kw):
 def test_descend_never_echoes_the_seat_filter(root, ids):
     text = _descend(root, seat=CALLER_TEXT)
     assert CALLER_TEXT not in text
-    assert "no seat name matches" in text
+    assert "0 seat names: no stored seat name matches" in text
     assert "THE DESCENT — 0 closes in this selection; none shown" in text
 
 

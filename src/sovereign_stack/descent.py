@@ -111,6 +111,7 @@ import json
 import os
 import re
 import stat
+import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1037,6 +1038,60 @@ def _validate_doc(doc: object, stem: str) -> Distillate | Withdrawal:
     return Distillate(did, cursor, frozenset(close_ids), tuple(shapes), tuple(w))
 
 
+def validate_sidecar_for_landing(doc: object, stem: str) -> Distillate | Withdrawal:
+    """The LANDING gate: everything _validate_doc checks, plus write-time rules.
+
+    Write-time only, never applied by load_distillates: a sidecar already
+    landed stays readable (its out-of-record months are MARKED on read, see
+    _mark_month), and only a sidecar not yet landed is refused here. Rule
+    added 2026-10-17 (lane descent-strengthen): every shape month must fall
+    inside [first, last] month of the corpus the sidecar claims to have read
+    (its own corpus.by_month, months with a count above zero). The landed
+    2026-10-04_close-distill names 2026-02 for shape L10 while its corpus
+    begins 2026-04; this gate refuses that shape of sidecar by name.
+    """
+    out = _validate_doc(doc, stem)
+    if isinstance(out, Withdrawal):
+        return out
+    assert isinstance(doc, dict)  # _validate_doc proved it
+    read = sorted(m for m, k in doc["corpus"]["by_month"].items() if k > 0)
+    _need(bool(read), "corpus.by_month names no month with a close")
+    first, last = read[0], read[-1]
+    for s in doc["shapes"]:
+        for m in s["months"]:
+            _need(
+                first <= m <= last,
+                f"shape {s['id']}: month {m} is outside the corpus it read ({first} to {last})",
+            )
+    return out
+
+
+def _landing_main(argv: list[str] | None = None) -> int:
+    """`python -m sovereign_stack.descent --validate-sidecar <path>`.
+
+    Exit 0 and one line when the sidecar passes the landing gate; exit 1 with
+    the named reason when it does not; exit 2 on usage. Reads the file only.
+    """
+    import argparse
+
+    ap = argparse.ArgumentParser(prog="python -m sovereign_stack.descent")
+    ap.add_argument("--validate-sidecar", required=True, metavar="PATH")
+    a = ap.parse_args(argv)
+    path = Path(a.validate_sidecar)
+    stem = path.name[: -len(INDEX_SUFFIX)] if path.name.endswith(INDEX_SUFFIX) else path.stem
+    try:
+        doc = json.loads(path.read_bytes().decode("utf-8"))
+        out = validate_sidecar_for_landing(doc, stem)
+    except DistillateIndexError as exc:
+        print(f"REFUSED for landing: {exc}", file=sys.stderr)
+        return 1
+    except (OSError, ValueError) as exc:
+        print(f"REFUSED for landing: could not read ({type(exc).__name__})", file=sys.stderr)
+        return 1
+    print(f"ok for landing: {out.id}")
+    return 0
+
+
 def load_distillates(
     chronicle_root: str | Path,
 ) -> tuple[Distillate | None, frozenset[str], int, int]:
@@ -1246,11 +1301,39 @@ def _surprises_unread_text(k: int) -> str:
     return f"(none joined; {_plural(k, 'surprise row')} could not be read)"
 
 
-def _months_phrase(months: tuple[str, ...]) -> str:
+def _record_span(state: DescentState) -> tuple[str, str] | None:
+    """(first, last) Eastern month of the live closes on record, or None."""
+    if not state.closes:
+        return None
+    return state.closes[-1].month, state.closes[0].month
+
+
+def _mark_month(m: str, span: tuple[str, str] | None) -> str:
+    """A month as itself, or marked when it falls outside the record's span.
+
+    A distillate's shape months are its own reading; a month before the first
+    close or after the last one cannot be a month of the record, and is shown
+    as such rather than silently (the landed 2026-10-04 sidecar names 2026-02
+    for shape L10, two months before the first close on record)."""
+    if span is None:
+        return m
+    first, last = span
+    if m < first:
+        return f"{m} (outside the record, which begins {first})"
+    if m > last:
+        return f"{m} (outside the record, which ends {last})"
+    return m
+
+
+def _months_phrase(months: tuple[str, ...], span: tuple[str, str] | None = None) -> str:
     """One month as itself; a run of consecutive months as "first to last";
-    anything else listed, so a gap is never drawn over."""
+    anything else listed, so a gap is never drawn over. With the record's span,
+    a month outside it is marked, and the list is never folded into a run (a
+    run would swallow the mark)."""
     if not months:
         return "no month named"
+    if span is not None and any(_mark_month(m, span) != m for m in months):
+        return ", ".join(_mark_month(m, span) for m in months)
     if len(months) == 1:
         return months[0]
     nums = [int(m[:4]) * 12 + int(m[5:]) for m in months]
@@ -1395,7 +1478,10 @@ def render_descent(
     if recurring:
         lines.append("  Its recurring shapes, the distillate's own reading:")
         for s in recurring[:VOICE_SHAPES]:
-            lines.append(f"    · {s.id} {s.title} ({_count_phrase(s)}, {_months_phrase(s.months)})")
+            lines.append(
+                f"    · {s.id} {s.title} ({_count_phrase(s)}, "
+                f"{_months_phrase(s.months, _record_span(state))})"
+            )
         if len(recurring) > VOICE_SHAPES:
             lines.append(
                 f"    (+{len(recurring) - VOICE_SHAPES} more: descend() lists every shape)"
@@ -1511,7 +1597,7 @@ def _index_view(state: DescentState, now: datetime) -> str:
         for s in dist.shapes:
             lines.append(
                 f"    {s.id:<4} {s.kind:<9} {s.title} — {_count_phrase(s)}, "
-                f"{_months_phrase(s.months)}; {_where(s)}"
+                f"{_months_phrase(s.months, _record_span(state))}; {_where(s)}"
             )
     return "\n".join(lines)
 
@@ -1648,7 +1734,9 @@ def descend(
             )
         where.append(f"shape {match.id} of {dist.id}: {match.title}")
         if not match.close_ids:
-            months = ", ".join(match.months) or "none named"
+            months = (
+                ", ".join(_mark_month(m, _record_span(state)) for m in match.months) or "none named"
+            )
             why = (
                 "The distillate recorded this shape by month only, with no closes beneath it "
                 "(membership was not recorded)"
@@ -1680,6 +1768,13 @@ def descend(
                 "the distillate recorded exemplars, not membership: these are the closes it "
                 f"quoted{gone_txt}"
             )
+        outside = [
+            _mark_month(m, _record_span(state))
+            for m in match.months
+            if _mark_month(m, _record_span(state)) != m
+        ]
+        if outside:
+            note.append(f"the distillate names {', '.join(outside)} for this shape")
     if month is not None:
         picked = [c for c in picked if c.month == month]
         where.append(f"month {month} (Eastern)")
@@ -1698,7 +1793,8 @@ def descend(
             )
             where.append(f"{len(names)} seat name{'' if len(names) == 1 else 's'}: {listed}")
         else:
-            where.append("no seat name matches")
+            # The count and a fixed phrase only: the query itself is never echoed.
+            where.append("0 seat names: no stored seat name matches")
 
     total = len(picked)
     page = picked[offset : offset + limit]
@@ -1826,3 +1922,7 @@ def handle_descent_tool(
         limit=arguments.get("limit", DESCEND_DEFAULT_LIMIT),
         offset=arguments.get("offset", 0),
     )
+
+
+if __name__ == "__main__":
+    raise SystemExit(_landing_main())
