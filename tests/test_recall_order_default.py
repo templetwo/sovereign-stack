@@ -17,7 +17,12 @@ A query of only whitespace is a bare browse. The library splits the query on
 whitespace, so such a query applies no term at all, and "relevance" over no
 term would be a label with nothing behind it. str.strip() and str.split()
 share one definition of whitespace, so the dispatch's test and the library's
-tokenizer agree (checked across every code point on 2026-10-22).
+tokenizer agree (checked across every code point, and pinned below).
+
+STOP-CHARACTERS, RULED 2026-10-22 (the plan's Review Focus 2): the library has
+no stop set, so the characters its tokenizer drops are exactly whitespace. A
+punctuation-only query such as "," is a term that filters, and defaults to
+relevance; a browse label on it would disagree with the filter applied.
 
 THE ENVELOPE NAMES THE ORDER: `order_used` is the order the library actually
 applied (an explicit "relevance" with no term sorts newest, and says so), and
@@ -36,7 +41,9 @@ it onto the tmp root.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
+import sys
 
 import pytest
 
@@ -125,3 +132,134 @@ def test_explicit_relevance_without_a_term_reports_newest(chronicle, arguments):
     assert envelope["order_used"] == "newest"
     assert envelope["order_defaulted"] is False
     assert _contents(envelope) == NEWEST_FIRST
+
+
+# ---------------------------------------------------------------------------
+# Pins added in the review's fix round (2026-10-22). Each one is the evidence
+# for a question the Task 2 review could not settle from the diff.
+# ---------------------------------------------------------------------------
+
+
+def _live_order_schema() -> dict:
+    """The `order` property exactly as the tool publishes it, from the same
+    live registry the contract walker reads."""
+    tools = asyncio.run(srv.list_tools())
+    (tool,) = [t for t in tools if t.name == "recall_insights"]
+    return tool.inputSchema["properties"]["order"]
+
+
+ORDER_ENUM = tuple(_live_order_schema()["enum"])
+
+
+def _whitespace_disagreements(blank_a, blank_b) -> list[int]:
+    return [cp for cp in range(sys.maxunicode + 1) if blank_a(chr(cp)) != blank_b(chr(cp))]
+
+
+def test_strip_and_split_agree_on_whitespace_for_every_code_point():
+    """THE BASIS OF THE STOP-CHARACTER RULING (Review Focus 2, ruled 2026-10-22).
+
+    The dispatch decides "bare browse" with str.strip(); the library decides
+    which terms filter with str.split() (memory.py, `query_terms`), and it has
+    no stop set. So the plan's "stop-characters" are exactly the characters
+    split() drops, which is whitespace. If the two disagreed on any code point,
+    a query of that character would be labelled one way and filtered another.
+    """
+    assert _whitespace_disagreements(lambda c: not c.strip(), lambda c: not c.split()) == []
+    # Control: the same walk against an ASCII-only idea of whitespace finds the
+    # gap that idea would open (NBSP, the ideographic space), so the zero above
+    # is a measurement and can fail.
+    ascii_only = _whitespace_disagreements(lambda c: not c.strip(), lambda c: c in " \t\n\r\v\f")
+    assert 0xA0 in ascii_only and 0x3000 in ascii_only
+
+
+@pytest.mark.parametrize(
+    ("query", "expected"),
+    [(",", [NEW_CALIB[1]]), ("...", [])],
+    ids=["comma-matches-one", "ellipsis-matches-none"],
+)
+def test_punctuation_is_a_term_not_a_browse(chronicle, query, expected):
+    """RULED 2026-10-22 (Review Focus 2): a punctuation-only query is a term.
+
+    The library filters by it like any other token, so the envelope says
+    relevance and the items are the filtered ones. A browse would have returned
+    all three entries; the comma is in exactly one (NEW_CALIB) and the ellipsis
+    in none. Labelling these a browse would need the library's tokenizer to drop
+    them too, or the label and the filter would disagree.
+    """
+    envelope = _recall({"query": query})
+    assert envelope["order_used"] == "relevance"
+    assert envelope["order_defaulted"] is True
+    assert _contents(envelope) == expected
+    assert envelope["total_matched"] == len(expected)
+
+
+def test_the_library_default_stays_newest(chronicle):
+    """The brief's "leave memory.py's own default untouched" (step 3) names the
+    library signature, and it is untouched: a direct ExperientialMemory call
+    with a query and no `order` still sorts newest first. Only the tool's
+    default moved, in the dispatch."""
+    order_param = inspect.signature(ExperientialMemory.recall_insights).parameters["order"]
+    assert order_param.default == "newest"
+    items = chronicle.recall_insights(query=QUERY, domain=DOMAIN)
+    assert [item["content"] for item in items] == NEWEST_FIRST
+
+
+def test_the_published_order_declares_no_default(chronicle):
+    """The tool schema's `default` key on `order` was removed, and must stay
+    removed, because no declared value can hold.
+
+    The contract walker calls recall_insights with no arguments and requires
+    that omitting a declared default equal passing it explicitly. Whatever the
+    value, `order_defaulted` differs between the two by construction. Explicit
+    "relevance" with no query even returns the same items and `order_used` as
+    omission; `order_defaulted` alone tells them apart.
+    """
+    assert "default" not in _live_order_schema()
+    omitted = _recall({})
+    assert omitted["order_defaulted"] is True
+    for value in ORDER_ENUM:
+        explicit = _recall({"order": value})
+        assert explicit["order_defaulted"] is False
+        assert explicit != omitted, value  # the comparison the walker would make
+    relevance = _recall({"order": "relevance"})
+    assert relevance["items"] == omitted["items"]
+    assert relevance["order_used"] == omitted["order_used"] == "newest"
+
+
+# The three sorts put the seed in three distinct sequences, so the order the
+# library applied can be read off the items without re-deriving it.
+_ORDER_BY_SEQUENCE = {
+    tuple(NEWEST_FIRST): "newest",
+    tuple(OLDEST_FIRST): "oldest",
+    tuple(RELEVANCE_FIRST): "relevance",
+}
+
+
+@pytest.mark.parametrize("order", [None, *ORDER_ENUM], ids=lambda o: f"order-{o or 'omitted'}")
+@pytest.mark.parametrize("query", [None, QUERY, "   "], ids=["no-query", "query", "blank-query"])
+def test_order_used_names_the_order_the_items_are_in(chronicle, order, query):
+    """`order_used` is the order the library applied, observed from the items,
+    for every value the schema publishes (and omission), with and without a
+    term.
+
+    The dispatch mirrors the library's sort branches to name the order
+    (server.py, `order_used`). A new order mode, or a changed fallback in
+    memory.py, either puts the items in a sequence this table does not know or
+    names the wrong one, and this fails.
+    """
+    assert len(_ORDER_BY_SEQUENCE) == 3  # the seed keeps the sorts apart
+    arguments = {}
+    if query is not None:
+        arguments["query"] = query
+    if order is not None:
+        arguments["order"] = order
+    envelope = _recall(arguments)
+    contents = _contents(envelope)
+    observed = _ORDER_BY_SEQUENCE.get(tuple(contents))
+    assert observed is not None, (
+        f"the items came back in an order no known sort produces: {contents}. A new "
+        "order mode reached the library: teach the dispatch's order_used mirror "
+        "(server.py) and this table."
+    )
+    assert envelope["order_used"] == observed
+    assert envelope["order_defaulted"] is (order is None)

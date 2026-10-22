@@ -74,9 +74,36 @@ class TestTheApertureBlock:
     def test_names_what_no_parameter_can_reach(self):
         assert "NOT REACHABLE BY ANY PARAMETER" in _aperture_text()
 
-    def test_warns_that_the_default_order_is_recency(self):
-        """RULE ZERO's finding, delivered where an arriving seat will see it."""
-        assert "relevance" in _aperture_text().lower()
+    def test_names_the_query_dependent_default(self, tmp_path):
+        """Design B1 moved the tool's default: a query that carries a term ranks
+        by relevance, and a bare browse stays newest-first. The insights surface
+        travels in /api/heartbeat and its note is printed on the full door, so
+        both must say so, and the note must reach the rendered block.
+
+        Was `test_warns_that_the_default_order_is_recency`, which read the live
+        store and asserted only the word "relevance": the old note, the new
+        note and `widen_with` all carry it, so it pinned none of the claims.
+        Hermetic now, on the seed `TestTheThreadCountReachesNestedShards` uses.
+        """
+        from datetime import datetime, timezone
+
+        from sovereign_stack.aperture import measure_aperture
+
+        root = tmp_path / ".sovereign"
+        for sub in ("chronicle/insights", "chronicle/open_threads", "handoffs"):
+            (root / sub).mkdir(parents=True)
+        surface = measure_aperture(datetime.now(timezone.utc), root=root)["surfaces"]["insights"]
+        assert surface["default_order"] == {
+            "query_with_a_term": "relevance",
+            "bare_browse": "newest",
+        }
+        assert set(surface["default_order"].values()) <= set(surface["orders_available"])
+        note = surface["note"]
+        assert "a query ranks by relevance by default" in note
+        assert "a bare browse (domain only, or no query) is newest-first" in note
+        assert "(the given domain, or the whole chronicle)" in note
+        assert "order_used" in note
+        assert f"⚠ {note}" in "\n".join(ast_mod._render_aperture(root=root))
 
 
 class TestItReachesTheDoor:

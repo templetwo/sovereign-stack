@@ -220,16 +220,19 @@ def measure_aperture(
         ),
         # The tool's default moved with design B1: a query that carries a term
         # ranks by relevance, and only a bare browse is newest-first. Both
-        # strings below travel in /api/heartbeat and the note is printed on the
-        # full door, so they say what the dispatch now does.
-        "default_order": "relevance when the query carries a term, newest for a bare browse",
+        # fields travel in /api/heartbeat and the note is printed on the full
+        # door, so they say what the dispatch now does. `default_order` keeps
+        # one machine-readable value per case, each a member of
+        # `orders_available`, as the single token it replaced was.
+        "default_order": {"query_with_a_term": "relevance", "bare_browse": "newest"},
         "orders_available": ["newest", "oldest", "relevance"],
         "envelope": "recall_insights returns total_matched / truncated / continuation",
         "widen_with": "recall_insights(limit=N, order='relevance', offset=N)",
         "note": (
             "a query ranks by relevance by default; a bare browse (domain only, or no "
-            "query) is newest-first, so it returns the newest writing in the house, not "
-            "the most relevant; every response names the order applied in order_used"
+            "query) is newest-first, so it returns the newest writing in its scope (the "
+            "given domain, or the whole chronicle), not the most relevant; every "
+            "response names the order applied in order_used"
         ),
     }
 

@@ -619,12 +619,14 @@ RECALL_INSIGHTS_SCHEMA_EXTENSIONS = {
         ),
     },
     # NO "default" KEY, ON PURPOSE (design B1). The tool's default depends on
-    # `query`: relevance when the query carries a term, newest for a bare
-    # browse. JSON Schema can only state one default, and stating "newest"
-    # here would be a promise the handler breaks on every search, which is
-    # the schema/handler mismatch tests/test_contract_walker.py exists to
-    # catch. This describes the TOOL; the library's own `order="newest"`
-    # default on ExperientialMemory.recall_insights is unchanged.
+    # `query` (relevance when the query carries a term, newest for a bare
+    # browse), and the envelope's `order_defaulted` reports whether `order`
+    # was left out. So no declared default can hold: omitting `order` and
+    # passing any value explicitly always differ in `order_defaulted`, and
+    # tests/test_contract_walker.py requires the two to be equal. "newest"
+    # would also be false in item order on every search. This describes the
+    # TOOL; the library's own `order="newest"` default on
+    # ExperientialMemory.recall_insights is unchanged.
     "order": {
         "type": "string",
         "enum": ["newest", "oldest", "relevance"],

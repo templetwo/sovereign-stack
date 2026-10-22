@@ -132,7 +132,8 @@ _RING1_DESCRIPTIONS: dict[str, str] = {
 # The other ~26 were not refused, which is worse in one specific way: their
 # optional parameters were simply invisible. recall_insights publishes 13
 # properties and the seat could reach none of them — including `order`, whose
-# default ("newest") returns recency noise on any historical query, and
+# default was then "newest" on every call, so any historical query returned
+# recency noise (design B1 later made a query default to relevance), and
 # `domain`. A tool that answers badly is harder to notice than one that errors.
 #
 # Contract mirrored from clients/openai_bridge/tool_adapter.py: source the real
