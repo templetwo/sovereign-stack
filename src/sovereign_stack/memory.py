@@ -623,9 +623,8 @@ RECALL_INSIGHTS_SCHEMA_EXTENSIONS = {
     # browse), and the envelope's `order_defaulted` reports whether `order`
     # was left out. So no declared default can hold: omitting `order` and
     # passing any value explicitly always differ in `order_defaulted`, and
-    # tests/test_contract_walker.py requires the two to be equal. "newest"
-    # would also be false in item order on every search. This describes the
-    # TOOL; the library's own `order="newest"` default on
+    # tests/test_contract_walker.py requires the two to be equal. This
+    # describes the TOOL; the library's own `order="newest"` default on
     # ExperientialMemory.recall_insights is unchanged.
     "order": {
         "type": "string",

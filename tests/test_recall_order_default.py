@@ -19,10 +19,12 @@ term would be a label with nothing behind it. str.strip() and str.split()
 share one definition of whitespace, so the dispatch's test and the library's
 tokenizer agree (checked across every code point, and pinned below).
 
-STOP-CHARACTERS, RULED 2026-10-22 (the plan's Review Focus 2): the library has
-no stop set, so the characters its tokenizer drops are exactly whitespace. A
-punctuation-only query such as "," is a term that filters, and defaults to
-relevance; a browse label on it would disagree with the filter applied.
+STOP-CHARACTERS, A PROPOSED READING (the plan's Review Focus 2; offered
+2026-10-22, not a ruling, HQ's to keep or drop): the library has no stop set,
+so the only characters its tokenizer drops are the whitespace str.split()
+drops. A punctuation-only query such as "," is a term that filters, and
+defaults to relevance; a browse label on it would disagree with the filter
+applied.
 
 THE ENVELOPE NAMES THE ORDER: `order_used` is the order the library actually
 applied (an explicit "relevance" with no term sorts newest, and says so), and
@@ -156,13 +158,14 @@ def _whitespace_disagreements(blank_a, blank_b) -> list[int]:
 
 
 def test_strip_and_split_agree_on_whitespace_for_every_code_point():
-    """THE BASIS OF THE STOP-CHARACTER RULING (Review Focus 2, ruled 2026-10-22).
+    """THE BASIS OF THE PROPOSED STOP-CHARACTER READING (Review Focus 2).
 
     The dispatch decides "bare browse" with str.strip(); the library decides
     which terms filter with str.split() (memory.py, `query_terms`), and it has
-    no stop set. So the plan's "stop-characters" are exactly the characters
-    split() drops, which is whitespace. If the two disagreed on any code point,
-    a query of that character would be labelled one way and filtered another.
+    no stop set. So, read as the characters the tokenizer drops, the plan's
+    "stop-characters" are the whitespace split() drops. If the two disagreed on
+    any code point, a query of that character would be labelled one way and
+    filtered another.
     """
     assert _whitespace_disagreements(lambda c: not c.strip(), lambda c: not c.split()) == []
     # Control: the same walk against an ASCII-only idea of whitespace finds the
@@ -178,7 +181,7 @@ def test_strip_and_split_agree_on_whitespace_for_every_code_point():
     ids=["comma-matches-one", "ellipsis-matches-none"],
 )
 def test_punctuation_is_a_term_not_a_browse(chronicle, query, expected):
-    """RULED 2026-10-22 (Review Focus 2): a punctuation-only query is a term.
+    """Under the proposed reading of Review Focus 2, a punctuation-only query is a term.
 
     The library filters by it like any other token, so the envelope says
     relevance and the items are the filtered ones. A browse would have returned
