@@ -14,6 +14,7 @@ same contract independently; these are the builder's own checks.
 
 import json
 import re
+import socket
 from pathlib import Path
 from unittest.mock import patch
 
@@ -66,7 +67,8 @@ def chronicle(tmp_path):
 
 
 def _assert_schema_v1(env: dict, limit: int):
-    """The 8 invariants, asserted as written."""
+    """The 8 invariants, asserted as written, and the store names design B6
+    added to scope."""
     assert set(env) == {
         "items",
         "returned",
@@ -93,7 +95,15 @@ def _assert_schema_v1(env: dict, limit: int):
     )
     assert (env["partial_reasons"] == []) == complete  # inv 5
     scope = env["scope"]
-    assert set(scope) == {"mode", "domain_query", "domains_searched", "domains_total"}
+    assert set(scope) == {
+        "mode",
+        "domain_query",
+        "domains_searched",
+        "domains_total",
+        "stores_searched",
+        "not_searched",
+        "note",
+    }
     assert scope["mode"] in ("domain", "domain-empty", "all")
     if scope["mode"] == "domain-empty":  # inv 6
         assert scope["domains_searched"] == 0
@@ -103,6 +113,13 @@ def _assert_schema_v1(env: dict, limit: int):
         assert scope["domains_searched"] == scope["domains_total"]
     for reason in env["partial_reasons"]:  # inv 8
         assert _REASON_RE.match(reason), f"reason outside closed vocabulary: {reason}"
+    # Design B6 (thread 8a1d522b), beside the eight, not one of them: the scope
+    # names the one store a recall reads and the ones it cannot reach, and an
+    # empty result says it measured only these.
+    assert scope["stores_searched"] == [f"stack-chronicle:{socket.gethostname()}"]
+    assert scope["not_searched"] == ["t2helix (machine-local)", "other machines' chronicles"]
+    empty_note = "an empty result is a measurement of these stores only"
+    assert scope["note"] == (empty_note if env["total_matched"] == 0 else None)
 
 
 class TestSubsetContainment:

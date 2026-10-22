@@ -17,6 +17,7 @@ import hashlib
 import json
 import os
 import re
+import socket
 from datetime import datetime, timezone
 from glob import glob as glob_files
 from pathlib import Path
@@ -2267,6 +2268,8 @@ class ExperientialMemory:
                     partial_reasons, continuation} instead of a bare list —
                     the read-side sibling of the P1 write fix: the response
                     states its own coverage instead of implying completeness.
+                    Its scope also names the store searched and the stores
+                    it cannot reach (design B6).
             content_class: INCLUDE filter (Phase 1). One class or a list; keep
                     only entries whose content_class is in the set. Untagged
                     entries are DROPPED when this is given (include-mode is how
@@ -2488,6 +2491,22 @@ class ExperientialMemory:
                 "domain_query": domain_query,
                 "domains_searched": len(search_dirs),
                 "domains_total": domains_total,
+                # THE STORES THIS READ SEARCHED, AND THE ONES IT CANNOT REACH
+                # (design B6, thread 8a1d522b). A seat that found nothing here
+                # told Anthony a receipt did not exist, while its own memory
+                # file cited t2helix chronicle numbers: a store this read never
+                # touches. So every envelope names the store it read, by host,
+                # and the two it did not, and an empty result says it measured
+                # only these. The hostname is read on each call. The note keys
+                # on total_matched, not on the page (a page past the end still
+                # matched), and is null otherwise, so the key set never varies.
+                "stores_searched": [f"stack-chronicle:{socket.gethostname()}"],
+                "not_searched": ["t2helix (machine-local)", "other machines' chronicles"],
+                "note": (
+                    "an empty result is a measurement of these stores only"
+                    if total_matched == 0
+                    else None
+                ),
             },
             "truncated": truncated,
             "partial_reasons": partial_reasons,

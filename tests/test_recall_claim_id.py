@@ -212,11 +212,15 @@ class TestNothingElseMoved:
 
         assert set(env) == ENVELOPE_KEYS
         assert set(env_off) == ENVELOPE_KEYS
+        # Design B6 (thread 8a1d522b) added the store names to scope.
         assert set(env["scope"]) == {
             "mode",
             "domain_query",
             "domains_searched",
             "domains_total",
+            "stores_searched",
+            "not_searched",
+            "note",
         }
 
     def test_only_key_added_to_an_item_is_claim_id(self):
