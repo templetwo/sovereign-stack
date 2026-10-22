@@ -83,7 +83,7 @@ def _check_receipt_now(
       and the file is never opened or hashed (the rules' own resolve()
       lstats the path's components): such a receipt predates the rule, and
       re-hashing it would read the very file the rule keeps receipts off.
-      Nothing looked, so the verdict can say neither "missing" nor
+      No hazard check or hash ran, so the verdict can say neither "missing" nor
       "verified"; the refusal travels beside it, so a reader is not left to
       read a bare "unreadable" as bytes intact on a slow mount.
       Otherwise absent -> "missing"; a hazard class or a read that does
@@ -154,8 +154,8 @@ def _receipt_views(entry: dict, chronicle_root: Path, verify_receipts: bool) -> 
     bare "attested", and distinguishing them is this tool's entire job.
 
     refused rides along with checked_now when the write-time rules refuse a
-    file ref today (design C3): checked_now reads "unreadable" because nothing
-    looked, and refused says why, in the rule's own words, the same text
+    file ref today (design C3): checked_now reads "unreadable" because no hazard
+    check or hash ran, and refused says why, in the rule's own words, the same text
     season_review's re-verify row carries. The plugin cache the rules check
     against is located once per call, on the first file receipt, and only when
     verify_receipts asks for a live check.
