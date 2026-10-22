@@ -308,8 +308,13 @@ class TestHygiene:
         assert f"dangling predecessor {('ab' * 32)[:16]}" in report
 
     def test_receipt_reverify_failure_surfaced(self, season_root):
+        # The fixture's receipt was stamped "verified" on an entry dated four
+        # days ago, and its file was written when the fixture ran, so the file
+        # is newer than the write: design C1 calls that "moved_on", not
+        # "mismatch" (the mismatch case is pinned in
+        # tests/test_receipt_reverify_report.py).
         report = review(season_root)
-        assert "re-verifies as mismatch" in report
+        assert "re-verifies as moved_on" in report
 
     def test_unreceipted_sentinels_counted(self, season_root):
         report = review(season_root)

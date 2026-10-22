@@ -1096,7 +1096,9 @@ class ExperientialMemory:
         Args:
             domain: Knowledge domain (e.g., "architecture", "consciousness")
             content: The insight content
-            intensity: Significance level 0.0-1.0
+            intensity: Significance level, a number in [0.0, 1.0]; anything else
+                   (out of range, a string, a bool, NaN) raises ValueError and
+                   nothing is written.
             session_id: Current session identifier
             layer: Chronicle layer - "ground_truth", "hypothesis", or "open_thread"
                    Defaults to "hypothesis" (interpretations should be earned, not inherited)
@@ -1216,6 +1218,25 @@ class ExperientialMemory:
                 # 2026-07-10. Size is not a hazard class — the wall clock bounds
                 # the read, and a big file that hashes fast still verifies.
                 provenance.preflight_file_receipt(receipt, position)
+
+        # Operational intensity (design C4): bounded to [0.0, 1.0], beside the
+        # emotional check below and in the same shape (a ValueError before any
+        # write), with two differences on purpose. The value must already BE a
+        # number: intensity drives surfacing (the boot's >=0.9 markers,
+        # recall's min_intensity) and every reader compares it as one, and no
+        # caller in the record has ever sent a string (live census 2026-10-22:
+        # 4,767 floats, 8 ints, 0 strings), so a numeric string is refused, not
+        # coerced. A bool is refused: True would otherwise pass as 1.0, the
+        # strongest marker the record has, from a type slip. NaN fails the
+        # comparison and is refused with the rest. An in-range value is stored
+        # as given, so an int keeps the bytes it has today. The five April rows
+        # above 1 stay as history; nothing here rewrites a stored row.
+        if (
+            isinstance(intensity, bool)
+            or not isinstance(intensity, (int, float))
+            or not 0.0 <= intensity <= 1.0
+        ):
+            raise ValueError("intensity must be between 0.0 and 1.0")
 
         # Emotional layer (v1.7.2) — light validation, fail fast. Descriptive
         # storage only; nothing here feeds surfacing or ranking.

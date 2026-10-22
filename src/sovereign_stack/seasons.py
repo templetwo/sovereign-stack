@@ -48,7 +48,7 @@ from pathlib import Path
 
 from mcp.types import Tool
 
-from .memory import ExperientialMemory, iter_thread_shards
+from .memory import ExperientialMemory, _parse_iso, _write_instant_of, iter_thread_shards
 from .policies import PolicyRegistry
 from .protected import load_protected_fold
 from .provenance import (
@@ -57,6 +57,7 @@ from .provenance import (
     classify_file_target,
     derive_claim_id,
     display_id,
+    file_mtime_bounded,
     fold_supersessions,
     has_legacy_marker,
     hash_file_bounded,
@@ -68,15 +69,57 @@ from .provenance import (
 )
 from .witness import days_old
 
+# ── Receipt re-verify rows (design C1) ──
 
-def _reverify_file_receipt(path: Path, expected_sha256: str | None) -> str:
+# The status of one stored `file` receipt, re-verified now:
+#   ok              the bytes still hash to the receipt's sha256
+#   moved_on        stamped "verified" at write; the bytes differ now and the
+#                   file's mtime is after the write (an edit after the check)
+#   never_verified  checked_at_write is not "verified": it never matched, or was
+#                   never hashed, so no re-hash today can make it a verification
+#   mismatch        stamped "verified"; the bytes differ and the file is no newer
+#                   than the write (bytes replaced under an older mtime, by a copy
+#                   that kept its source's mtime or a restore): worth a look
+#   missing         the file is gone
+#   unreadable      a hazard class, or a read that did not finish in budget
+REVERIFY_STATUSES = ("ok", "moved_on", "never_verified", "mismatch", "missing", "unreadable")
+
+
+def _written_at(entry: dict) -> float | None:
     """
-    Re-hash one stored file receipt under provenance's wall clock.
+    The epoch second ``entry`` was appended, or None when its stamp will not
+    parse.
+
+    The receipt was checked at the write, so the write instant is what a later
+    edit has to come after. memory._write_instant_of names it: the stored
+    ``timestamp``, or ``occurred_at`` on a backdated row, whose ``timestamp``
+    is an authorship time earlier than the write. A naive stamp reads as UTC,
+    as the original_timestamp validator reads one.
+    """
+    raw = _write_instant_of(entry)
+    parsed = _parse_iso(raw) if isinstance(raw, str) else None
+    if parsed is None:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.timestamp()
+
+
+def _reverify_file_receipt(
+    path: Path, expected_sha256: str | None, written_at: float | None
+) -> str:
+    """
+    Re-hash one stored file receipt that was stamped "verified" at write,
+    under provenance's wall clock, and name what became of it.
 
     season_review walks every receipted entry, so an unbounded read here is
     the 2026-07-10 freeze multiplied by the size of the chronicle. A path
     that cannot be read in budget re-verifies as "unreadable", which the
     caller reports as a hygiene failure — honest, and never a verification.
+
+    Different bytes are "moved_on" only on positive evidence, an mtime after
+    the write. An mtime at or before it, or a write instant that will not
+    parse, leaves them "mismatch", the status that asks for a reader's look.
     """
     try:
         hazard = classify_file_target(path)
@@ -85,11 +128,74 @@ def _reverify_file_receipt(path: Path, expected_sha256: str | None) -> str:
     if hazard is not None:
         return "missing" if "does not exist" in hazard else "unreadable"
     try:
-        return "verified" if hash_file_bounded(path) == expected_sha256 else "mismatch"
+        if hash_file_bounded(path) == expected_sha256:
+            return "ok"
+        modified_at = file_mtime_bounded(path)
     except BoundedIOError:
         return "unreadable"
     except OSError:
         return "missing"
+    if written_at is not None and modified_at > written_at:
+        return "moved_on"
+    return "mismatch"
+
+
+def reverify_file_receipts(entries: list[dict]) -> list[dict]:
+    """
+    One row per stored ``file`` receipt, in entry and receipt order, each with
+    a status from REVERIFY_STATUSES (design C1).
+
+    A row is ``{"claim_id", "ref", "checked_at_write", "status"}``: the
+    entry's derived 64-hex id, the ref as stored, the write-time stamp (None
+    when the row carries none) and the status.
+
+    The write-time stamp is read first, with no IO: a receipt not stamped
+    "verified" is "never_verified" whatever its file looks like today, because
+    a re-hash cannot make a verification of something the server never
+    verified. Only a "verified" receipt is re-hashed.
+
+    Other kinds get no row. archive and claim receipts keep their own verdicts
+    in season_review, and cmd / url / human receipts are stamped "attested" by
+    design: read through the never_verified rule, every one of them would
+    become a failure.
+    """
+    rows: list[dict] = []
+    for entry in entries:
+        receipts = entry.get("verified_by")
+        if not isinstance(receipts, list):
+            continue
+        claim_id: str | None = None
+        for receipt in receipts:
+            if not isinstance(receipt, dict) or receipt.get("kind") != "file":
+                continue
+            if claim_id is None:
+                claim_id = derive_claim_id(entry)
+            ref = str(receipt.get("ref") or "")
+            stamp = receipt.get("checked_at_write")
+            if stamp != "verified":
+                status = "never_verified"
+            else:
+                # Stripped as the write stripped it before hashing.
+                status = _reverify_file_receipt(
+                    Path(ref.strip()).expanduser(), receipt.get("sha256"), _written_at(entry)
+                )
+            rows.append(
+                {"claim_id": claim_id, "ref": ref, "checked_at_write": stamp, "status": status}
+            )
+    return rows
+
+
+def _reverify_row_line(row: dict) -> str:
+    """The hygiene line for one file receipt that did not re-verify ok."""
+    status = row["status"]
+    line = f"  • {display_id(row['claim_id'])} file:{row['ref']} re-verifies as {status}"
+    if status == "moved_on":
+        return line + " (the file changed after the write; the receipt held when checked)"
+    if status == "never_verified":
+        return line + f" (stamped {row['checked_at_write'] or 'nothing'} at write)"
+    if status == "mismatch":
+        return line + " (the bytes differ and the file is no newer than the write)"
+    return line
 
 
 # ── Constants ──
@@ -663,8 +769,10 @@ def season_review(
          normative language) absent from the registry. This IS the
          seeding path; nothing is auto-registered.
       4. Hygiene — dangling supersession pointers, receipt re-verify
-         failures, unreceipted >=0.9 ground_truth sentinels, pin-loss
-         warnings, sentinel-count-vs-boot-budget.
+         failures (file receipts split by status: moved_on, never_verified,
+         mismatch, missing, unreadable; see reverify_file_receipts),
+         unreceipted >=0.9 ground_truth sentinels, pin-loss warnings,
+         sentinel-count-vs-boot-budget.
       5. Dormant domains / fragmentation stats.
 
     Every candidate line includes a ready-to-paste tool call. The pass
@@ -854,7 +962,8 @@ def season_review(
             dangling.append(f"  • dangling successor {display_id(successor)}")
     hyg.extend(dangling or ["  ✓ supersession pointers: all resolve."])
 
-    reverify_failures: list[str] = []
+    file_rows = reverify_file_receipts(entries)
+    reverify_failures = [_reverify_row_line(row) for row in file_rows if row["status"] != "ok"]
     receipted = 0
     for entry in entries:
         receipts = entry.get("verified_by")
@@ -866,10 +975,10 @@ def season_review(
             if not isinstance(receipt, dict):
                 continue
             kind, ref = receipt.get("kind"), str(receipt.get("ref") or "")
+            if kind == "file":
+                continue  # one row each, from reverify_file_receipts above
             if kind == "archive":
                 verdict = verify_archive_ref(ref, root)
-            elif kind == "file":
-                verdict = _reverify_file_receipt(Path(ref).expanduser(), receipt.get("sha256"))
             elif kind == "claim":
                 hits = {cid for cid in ids_present if cid.startswith(ref)}
                 verdict = "cites" if len(hits) == 1 else ("ambiguous" if hits else "dangling")
@@ -877,6 +986,14 @@ def season_review(
                 verdict = "attested"
             if verdict not in ("verified", "cites", "attested"):
                 reverify_failures.append(f"  • {eid} {kind}:{ref} re-verifies as {verdict}")
+    if reverify_failures and file_rows:
+        by_status = Counter(row["status"] for row in file_rows)
+        reverify_failures.insert(
+            0,
+            f"  • file receipts re-verified: {len(file_rows)} ("
+            + ", ".join(f"{by_status[status]} {status}" for status in REVERIFY_STATUSES)
+            + ")",
+        )
     hyg.extend(
         reverify_failures
         or [f"  ✓ receipt re-verify: {receipted} receipted entr(ies), no failures."]
