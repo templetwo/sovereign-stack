@@ -54,6 +54,7 @@ from .protected import load_protected_fold
 from .provenance import (
     LIVED_VANTAGES,
     BoundedIOError,
+    ReceiptError,
     classify_file_target,
     derive_claim_id,
     display_id,
@@ -65,6 +66,7 @@ from .provenance import (
     load_supersessions,
     token_overlap,
     under_chronicle_write_lock,
+    validate_file_ref,
     verify_archive_ref,
 )
 from .witness import days_old
@@ -81,7 +83,10 @@ from .witness import days_old
 #                   than the write (bytes replaced under an older mtime, by a copy
 #                   that kept its source's mtime or a restore): worth a look
 #   missing         the file is gone
-#   unreadable      a hazard class, or a read that did not finish in budget
+#   unreadable      a hazard class, a read that did not finish in budget, or a
+#                   ref the write-time rules refuse today (validate_file_ref:
+#                   a scratch path, the plugin cache, an env-named file), which
+#                   is never read
 REVERIFY_STATUSES = ("ok", "moved_on", "never_verified", "mismatch", "missing", "unreadable")
 
 
@@ -147,12 +152,17 @@ def reverify_file_receipts(entries: list[dict]) -> list[dict]:
 
     A row is ``{"claim_id", "ref", "checked_at_write", "status"}``: the
     entry's derived 64-hex id, the ref as stored, the write-time stamp (None
-    when the row carries none) and the status.
+    when the row carries none) and the status. A row whose ref the rules
+    refused also carries ``"refused"``, the refusal in the rule's own words.
 
     The write-time stamp is read first, with no IO: a receipt not stamped
     "verified" is "never_verified" whatever its file looks like today, because
     a re-hash cannot make a verification of something the server never
-    verified. Only a "verified" receipt is re-hashed.
+    verified. Only a "verified" receipt is re-hashed, and only after its ref
+    passes the write's own rules (validate_file_ref, design C3). A ref the
+    write would refuse today predates the rule; it is "unreadable" and is
+    never stat'd or hashed, because re-hashing it would read the very file the
+    rule keeps receipts off (two live receipts hash an env-named file).
 
     Other kinds get no row. archive and claim receipts keep their own verdicts
     in season_review, and cmd / url / human receipts are stamped "attested" by
@@ -172,16 +182,22 @@ def reverify_file_receipts(entries: list[dict]) -> list[dict]:
                 claim_id = derive_claim_id(entry)
             ref = str(receipt.get("ref") or "")
             stamp = receipt.get("checked_at_write")
+            refused: str | None = None
             if stamp != "verified":
                 status = "never_verified"
             else:
-                # Stripped as the write stripped it before hashing.
-                status = _reverify_file_receipt(
-                    Path(ref.strip()).expanduser(), receipt.get("sha256"), _written_at(entry)
-                )
-            rows.append(
-                {"claim_id": claim_id, "ref": ref, "checked_at_write": stamp, "status": status}
-            )
+                # The path the write hashed: trimmed, a studio: tag naming this
+                # host stripped, ~ expanded. The rules run before any read.
+                try:
+                    path = validate_file_ref(ref)
+                except ReceiptError as exc:
+                    status, refused = "unreadable", str(exc)
+                else:
+                    status = _reverify_file_receipt(path, receipt.get("sha256"), _written_at(entry))
+            row = {"claim_id": claim_id, "ref": ref, "checked_at_write": stamp, "status": status}
+            if refused is not None:
+                row["refused"] = refused
+            rows.append(row)
     return rows
 
 
@@ -189,6 +205,10 @@ def _reverify_row_line(row: dict) -> str:
     """The hygiene line for one file receipt that did not re-verify ok."""
     status = row["status"]
     line = f"  • {display_id(row['claim_id'])} file:{row['ref']} re-verifies as {status}"
+    if row.get("refused"):
+        # The rule's name is the refusal's first clause ("refused by the
+        # scratch-path rule"); the rest restates the ref the line already shows.
+        return line + f" ({row['refused'].split(':', 1)[0]}; the file was not read)"
     if status == "moved_on":
         return line + " (the file changed after the write; the receipt held when checked)"
     if status == "never_verified":
@@ -770,7 +790,8 @@ def season_review(
          seeding path; nothing is auto-registered.
       4. Hygiene — dangling supersession pointers, receipt re-verify
          failures (file receipts split by status: moved_on, never_verified,
-         mismatch, missing, unreadable; see reverify_file_receipts),
+         mismatch, missing, unreadable; a ref the write-time rules refuse
+         reads unreadable and is never read; see reverify_file_receipts),
          unreceipted >=0.9 ground_truth sentinels, pin-loss warnings,
          sentinel-count-vs-boot-budget.
       5. Dormant domains / fragmentation stats.

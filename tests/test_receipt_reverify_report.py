@@ -25,8 +25,10 @@ the chronicle and every evidence file live under tmp_path.
 """
 
 import hashlib
+import json
 import os
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
@@ -170,7 +172,9 @@ def test_never_verified_is_read_from_the_write_stamp_before_any_file_read(
     chronicle, lane, monkeypatch
 ):
     """The stamp decides first, with no IO: a never-matched receipt whose file is
-    also gone is still never_verified, and nothing stats or hashes it."""
+    also gone is still never_verified, and nothing stats, resolves or hashes it.
+    validate_file_ref resolves the path (an lstat per component), so it is IO
+    too: the stamp precedes the rules as well as the reads."""
     never = lane / "never.txt"
     never.write_bytes(b"the caller hashed something else\n")
     _record(chronicle, "never matched, then deleted", never, "f" * 64)
@@ -179,6 +183,7 @@ def test_never_verified_is_read_from_the_write_stamp_before_any_file_read(
     def _no_read(*_args, **_kwargs):
         raise AssertionError("a never-verified receipt was read from disk")
 
+    monkeypatch.setattr(seasons, "validate_file_ref", _no_read)
     monkeypatch.setattr(seasons, "classify_file_target", _no_read)
     monkeypatch.setattr(seasons, "hash_file_bounded", _no_read)
 
@@ -315,3 +320,83 @@ def test_an_mtime_stat_that_never_answers_reads_unreadable(lane, monkeypatch):
         [_verified_row_entry("2026-01-01T00:00:00+00:00", path, "0" * 64)]
     )
     assert row["status"] == "unreadable"
+
+
+# ── The write's rules hold at re-verify (design C3, Task 4 fix round 1) ─────
+#
+# A receipt stamped "verified" before the rules existed can point where the
+# write now refuses to look. Measured read-only on the live record 2026-10-22:
+# 17 such receipts (11 scratch path, 4 plugin cache, 2 env-named file), all
+# stamped verified. Re-hashing them would read the files the rules keep
+# receipts off, so the rules run first and a refused ref is never read.
+
+# Never created: the link's text names it, and resolve() follows the text.
+_NEVER_CREATED = "/private/tmp/sovereign-c1-probe-never-created/evidence.txt"
+
+
+def _env_named(tmp_path, lane, monkeypatch):
+    path = lane / "service.env"
+    path.write_bytes(b"a placeholder, not a credential\n")
+    return path, _sha(path.read_bytes()), "env-named rule"
+
+
+def _scratch_symlink(tmp_path, lane, monkeypatch):
+    link = lane / "evidence.txt"
+    link.symlink_to(_NEVER_CREATED)
+    return link, "0" * 64, "scratch-path rule"
+
+
+def _plugin_cache(tmp_path, lane, monkeypatch):
+    home = tmp_path / "home"
+    cached = home / ".claude" / "plugins" / "cache" / "a-plugin" / "1.0.0" / "SKILL.md"
+    cached.parent.mkdir(parents=True)
+    cached.write_bytes(b"a skill\n")
+    monkeypatch.setenv("HOME", str(home))
+    return cached, _sha(cached.read_bytes()), "plugin-cache rule"
+
+
+@pytest.mark.parametrize(
+    "make",
+    [_env_named, _scratch_symlink, _plugin_cache],
+    ids=["env-named", "scratch-symlink", "plugin-cache"],
+)
+def test_a_verified_receipt_the_rules_refuse_today_is_unreadable_and_never_read(
+    make, tmp_path, lane, monkeypatch
+):
+    """The env-named and plugin-cache files hold the very bytes their receipts
+    name, so a re-hash would say ok: the place decides, not the bytes. The
+    scratch-path link dangles, which a re-hash would call missing."""
+    path, sha256, rule = make(tmp_path, lane, monkeypatch)
+
+    def _no_read(*_args, **_kwargs):
+        raise AssertionError("a ref the rules refuse was read from disk")
+
+    for name in ("classify_file_target", "hash_file_bounded", "file_mtime_bounded"):
+        monkeypatch.setattr(seasons, name, _no_read)
+
+    [row] = seasons.reverify_file_receipts(
+        [_verified_row_entry("2026-01-01T00:00:00+00:00", path, sha256)]
+    )
+    assert row["status"] == "unreadable"
+    assert row["ref"] == str(path)
+    assert f"refused by the {rule}" in row["refused"]
+
+
+def test_season_review_names_the_rule_of_a_refused_ref_and_counts_it_unreadable(chronicle, lane):
+    env_file = lane / "service.env"
+    env_file.write_bytes(b"a placeholder\n")
+    entry = _verified_row_entry("2026-01-01T00:00:00+00:00", env_file, _sha(b"a placeholder\n"))
+    shard = Path(chronicle.root) / "insights" / "receipts" / "session_legacy.jsonl"
+    shard.parent.mkdir(parents=True, exist_ok=True)
+    shard.write_text(json.dumps(entry) + "\n")
+
+    report = seasons.season_review(chronicle_root=chronicle.root)
+
+    assert (
+        f"file:{env_file} re-verifies as unreadable"
+        " (refused by the env-named rule; the file was not read)"
+    ) in report
+    assert (
+        "file receipts re-verified: 1 (0 ok, 0 moved_on, 0 never_verified, 0 mismatch,"
+        " 0 missing, 1 unreadable)"
+    ) in report

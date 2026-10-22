@@ -17,6 +17,11 @@ record other machines read) is accepted when this host is the Studio and stored
 with the tag stripped. On any other host it is refused under the host-tag rule:
 the bytes it names are not on this machine.
 
+The same rules hold wherever a stored receipt is re-hashed later: season_review's
+re-verify (tests/test_receipt_reverify_report.py) and inspect_claim with
+verify_receipts (here). A receipt stamped before the rules existed is checked
+against them first, and a refused ref reads "unreadable" without being read.
+
 Hermetic: every file and symlink lives under tmp_path. HOME points at tmp_path
 wherever ``~`` is expanded, so nothing under the real ~/.claude is read or
 written. The hostname is patched wherever the host matters, so the machine
@@ -24,13 +29,14 @@ running the suite does not decide the result.
 """
 
 import hashlib
+import json
 import os
 import socket
 from pathlib import Path
 
 import pytest
 
-from sovereign_stack import provenance, store_identity
+from sovereign_stack import provenance, provenance_tools, store_identity
 from sovereign_stack.memory import ExperientialMemory
 from sovereign_stack.provenance import iter_chronicle_entries
 
@@ -294,3 +300,76 @@ def test_a_tag_with_no_path_after_it_is_refused(on_host):
     on_host("mac-studio")
     with pytest.raises(ValueError, match="host-tag rule"):
         provenance.validate_file_ref("studio:   ")
+
+
+# ── The rules hold where a stored receipt is re-hashed (Task 4 fix round 1) ──
+
+
+def _seed_legacy(root: Path, receipts: list[dict]) -> str:
+    """One entry shaped like a row written before the rules existed (its file
+    receipts stamped "verified"), stored as the chronicle stores it. Returns its
+    claim id. The write path cannot produce it: it now refuses these refs."""
+    entry = {
+        "timestamp": "2026-01-01T00:00:00+00:00",
+        "domain": "receipts",
+        "content": "receipted before the rules existed",
+        "verified_by": receipts,
+    }
+    shard = root / "insights" / "receipts" / "session_legacy.jsonl"
+    shard.parent.mkdir(parents=True, exist_ok=True)
+    shard.write_text(json.dumps(entry) + "\n")
+    return provenance.derive_claim_id(entry)
+
+
+def _verified(path, sha256: str) -> dict:
+    return {"kind": "file", "ref": str(path), "sha256": sha256, "checked_at_write": "verified"}
+
+
+def _inspect_now(root: Path, claim_id: str) -> list[str]:
+    report = provenance_tools.inspect_claim(
+        claim_id,
+        verify_receipts=True,
+        chronicle_root=root,
+        ledger_path=root / "supersessions.jsonl",
+    )
+    return [receipt["checked_now"] for receipt in report["receipts"]]
+
+
+def test_inspect_claim_re_checks_a_stored_ref_against_the_rules_before_any_read(
+    tmp_path, lane, monkeypatch
+):
+    """An env-named file holding the receipt's exact bytes would re-hash as
+    verified; a lane link into /private/tmp would read missing. Both are refused
+    by place, and nothing stats or hashes either one."""
+    env_file = lane / "service.env"
+    env_file.write_bytes(b"a placeholder\n")
+    link = lane / "evidence.txt"
+    link.symlink_to(Path("/private/tmp") / _PROBE / "evidence.txt")
+    root = tmp_path / "chronicle"
+    claim_id = _seed_legacy(
+        root, [_verified(env_file, _sha(b"a placeholder\n")), _verified(link, "0" * 64)]
+    )
+
+    def _no_read(*_args, **_kwargs):
+        raise AssertionError("a ref the rules refuse was read from disk")
+
+    monkeypatch.setattr(provenance, "classify_file_target", _no_read)
+    monkeypatch.setattr(provenance, "hash_file_bounded", _no_read)
+
+    assert _inspect_now(root, claim_id) == ["unreadable", "unreadable"]
+
+
+def test_inspect_claim_still_verifies_an_ordinary_ref_beside_a_refused_one(tmp_path, lane):
+    """The control: the rules refuse by place, so an ordinary file in the same
+    entry still re-hashes, and still verifies."""
+    plain = lane / "plain.txt"
+    plain.write_bytes(b"plain bytes\n")
+    env_file = lane / "service.env"
+    env_file.write_bytes(b"a placeholder\n")
+    root = tmp_path / "chronicle"
+    claim_id = _seed_legacy(
+        root,
+        [_verified(plain, _sha(b"plain bytes\n")), _verified(env_file, _sha(b"a placeholder\n"))],
+    )
+
+    assert _inspect_now(root, claim_id) == ["verified", "unreadable"]

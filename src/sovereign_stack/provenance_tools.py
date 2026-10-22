@@ -69,7 +69,13 @@ def _check_receipt_now(receipt: dict, chronicle_root: Path) -> str:
       now ambiguous, or bytes gone all collapse to "missing" — the spec
       vocabulary is verified|mismatch|missing, and each means the
       artifact can no longer be found and re-verified.
-    - file: absent/unreadable -> "missing"; present -> re-hash against
+    - file: a ref the write-time rules refuse today (validate_file_ref,
+      design C3: a scratch path, the plugin cache, an env-named file, a
+      studio: tag naming another host) -> "unreadable", and the file is
+      never stat'd or hashed: such a receipt predates the rule, and
+      re-hashing it would read the very file the rule keeps receipts off.
+      Otherwise absent -> "missing"; a hazard class or a read that does
+      not finish in budget -> "unreadable"; present -> re-hash against
       the receipt's sha256 -> "verified"|"mismatch" (a receipt missing
       its sha256 — historically malformed — reads "mismatch": nothing
       to match is a failed match, never a verification).
@@ -92,7 +98,10 @@ def _check_receipt_now(receipt: dict, chronicle_root: Path) -> str:
             return verdict
         return "missing"
     if kind == "file":
-        path = Path(ref).expanduser()
+        try:
+            path = prov.validate_file_ref(ref)
+        except prov.ReceiptError:
+            return "unreadable"
         try:
             hazard = prov.classify_file_target(path)
         except prov.BoundedIOError:
