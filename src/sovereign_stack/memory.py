@@ -17,14 +17,13 @@ import hashlib
 import json
 import os
 import re
-import socket
 from datetime import datetime, timezone
 from glob import glob as glob_files
 from pathlib import Path
 from typing import Any
 
 from . import protected as protected_module
-from . import provenance
+from . import provenance, store_identity
 from .coherence import Coherence
 from .live_store_guard import refuse_if_test_targets_live
 
@@ -2495,12 +2494,15 @@ class ExperientialMemory:
                 # (design B6, thread 8a1d522b). A seat that found nothing here
                 # told Anthony a receipt did not exist, while its own memory
                 # file cited t2helix chronicle numbers: a store this read never
-                # touches. So every envelope names the store it read, by host,
-                # and the two it did not, and an empty result says it measured
-                # only these. The hostname is read on each call. The note keys
+                # touches. So every envelope names the store it read and the
+                # two it did not, and an empty result says it measured only
+                # these. The store is named by its stable label, read from
+                # store_identity on each call (the one label the studio:
+                # receipt tag shares), never by the live hostname, which macOS
+                # can re-derive while the store stays the same. The note keys
                 # on total_matched, not on the page (a page past the end still
                 # matched), and is null otherwise, so the key set never varies.
-                "stores_searched": [f"stack-chronicle:{socket.gethostname()}"],
+                "stores_searched": [f"stack-chronicle:{store_identity.STUDIO_HOST_LABEL}"],
                 "not_searched": ["t2helix (machine-local)", "other machines' chronicles"],
                 "note": (
                     "an empty result is a measurement of these stores only"

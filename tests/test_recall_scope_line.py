@@ -10,7 +10,7 @@ absence in the world when it was an absence in one store
 
 EVERY RECALL NOW NAMES WHAT IT READ, in the envelope's scope:
 
-    stores_searched  ["stack-chronicle:<socket.gethostname()>"]
+    stores_searched  ["stack-chronicle:studio"]
     not_searched     ["t2helix (machine-local)", "other machines' chronicles"]
     note             "an empty result is a measurement of these stores only"
                      when total_matched == 0; null otherwise
@@ -19,6 +19,12 @@ The three keys are on every envelope, a match included, so the scope's key set
 is one fixed set (the same convention as `continuation`, which is null when
 the read is not truncated). The note keys on total_matched, not on the page: a
 page past the end is empty, but the search matched.
+
+THE STORE IS NAMED BY A STABLE LABEL, NOT THE LIVE HOSTNAME (HQ's ruling of
+2026-10-22 from the commit review of B6). "studio" is
+store_identity.STUDIO_HOST_LABEL, the one label the `studio:` receipt tag of
+design C3 shares, so the two cannot drift apart. The label names the store; the
+machine's current network name can change while the store stays the same.
 
 ISOLATION: server.py binds `experiential` at import, so the fixture rebinds it
 onto the tmp root (the pattern of test_recall_order_default.py).
@@ -33,12 +39,14 @@ import socket
 import pytest
 
 from sovereign_stack import server as srv
+from sovereign_stack import store_identity
 from sovereign_stack.memory import ExperientialMemory
 
 SESSION = "recall-scope-line"
 DOMAIN = "scope-line-probe"
 NO_SUCH_TERM = "zebra-no-such-term"
 
+STORES_SEARCHED = ["stack-chronicle:studio"]
 NOT_SEARCHED = ["t2helix (machine-local)", "other machines' chronicles"]
 EMPTY_NOTE = "an empty result is a measurement of these stores only"
 
@@ -57,10 +65,6 @@ def _recall(arguments: dict) -> dict:
     return json.loads(result[0].text)
 
 
-def _stores_searched_here() -> list[str]:
-    return [f"stack-chronicle:{socket.gethostname()}"]
-
-
 @pytest.mark.parametrize(
     "arguments",
     [{"query": NO_SUCH_TERM}, {"domain": "no-such-domain-anywhere"}],
@@ -71,7 +75,7 @@ def test_a_zero_match_recall_names_its_stores(chronicle, arguments):
     assert envelope["total_matched"] == 0
     assert envelope["items"] == []
     scope = envelope["scope"]
-    assert scope["stores_searched"] == _stores_searched_here()
+    assert scope["stores_searched"] == STORES_SEARCHED
     assert scope["not_searched"] == NOT_SEARCHED
     assert scope["note"] == EMPTY_NOTE
 
@@ -80,7 +84,7 @@ def test_a_match_also_carries_the_store_names(chronicle):
     envelope = _recall({"query": "calibration"})
     assert envelope["total_matched"] == 1
     scope = envelope["scope"]
-    assert scope["stores_searched"] == _stores_searched_here()
+    assert scope["stores_searched"] == STORES_SEARCHED
     assert scope["not_searched"] == NOT_SEARCHED
     # Present on a match, and null: the note speaks only for an empty result.
     assert "note" in scope
@@ -96,9 +100,20 @@ def test_the_note_keys_on_total_matched_not_on_the_page(chronicle):
     assert envelope["scope"]["note"] is None
 
 
-def test_the_store_is_named_by_socket_gethostname_at_call_time(chronicle, monkeypatch):
-    """Computed on each call from socket.gethostname(), never a stored name: a
-    hardcoded "mac-studio", or a name cached at import, fails here."""
+def test_the_store_label_does_not_follow_the_live_hostname(chronicle, monkeypatch):
+    """The label names the store, not the machine's current network name: with
+    socket.gethostname() returning another name, the envelope still names the
+    same store. A label read from the hostname fails here on any machine."""
     monkeypatch.setattr(socket, "gethostname", lambda: "probe-host-b6")
     envelope = _recall({"query": NO_SUCH_TERM})
-    assert envelope["scope"]["stores_searched"] == ["stack-chronicle:probe-host-b6"]
+    assert envelope["scope"]["stores_searched"] == STORES_SEARCHED
+
+
+def test_the_store_label_is_the_one_shared_studio_host_label(chronicle, monkeypatch):
+    """Defined once: the envelope reads store_identity.STUDIO_HOST_LABEL when it
+    builds, the label the `studio:` receipt tag (design C3) shares. A second
+    copy of the literal in memory.py, or a name bound at import, fails here."""
+    assert store_identity.STUDIO_HOST_LABEL == "studio"
+    monkeypatch.setattr(store_identity, "STUDIO_HOST_LABEL", "probe-label-b6")
+    envelope = _recall({"query": NO_SUCH_TERM})
+    assert envelope["scope"]["stores_searched"] == ["stack-chronicle:probe-label-b6"]

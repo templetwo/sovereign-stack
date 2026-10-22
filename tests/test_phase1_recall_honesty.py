@@ -14,7 +14,6 @@ same contract independently; these are the builder's own checks.
 
 import json
 import re
-import socket
 from pathlib import Path
 from unittest.mock import patch
 
@@ -116,7 +115,7 @@ def _assert_schema_v1(env: dict, limit: int):
     # Design B6 (thread 8a1d522b), beside the eight, not one of them: the scope
     # names the one store a recall reads and the ones it cannot reach, and an
     # empty result says it measured only these.
-    assert scope["stores_searched"] == [f"stack-chronicle:{socket.gethostname()}"]
+    assert scope["stores_searched"] == ["stack-chronicle:studio"]
     assert scope["not_searched"] == ["t2helix (machine-local)", "other machines' chronicles"]
     empty_note = "an empty result is a measurement of these stores only"
     assert scope["note"] == (empty_note if env["total_matched"] == 0 else None)
