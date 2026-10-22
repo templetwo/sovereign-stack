@@ -279,7 +279,7 @@ class TestThreadFamilyCandidates:
 class TestPolicyCandidates:
     def test_policy_shaped_sentinel_proposed(self, season_root):
         report = review(season_root)
-        assert "3. POLICY CANDIDATES" in report
+        assert "3. POLICY-SHAPED KEYWORD SCREEN" in report
         assert "set_policy(statement=" in report
         assert "Never expand the iMessage allowlist" in report
         assert 'set_by="<approving human>"' in report
@@ -368,7 +368,7 @@ class TestScoping:
         for header in (
             "1. SUPERSESSION CANDIDATES",
             "2. THREAD-FAMILY CANDIDATES",
-            "3. POLICY CANDIDATES",
+            "3. POLICY-SHAPED KEYWORD SCREEN",
             "4. HYGIENE",
             "5. DORMANT DOMAINS / FRAGMENTATION",
         ):

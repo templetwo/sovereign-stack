@@ -14,7 +14,7 @@ The digestion layer. Two surfaces:
 
 2. **season_review** — a READ-ONLY digest: supersession candidates
    (cross-domain token overlap + legacy markers), thread-family
-   candidates, policy candidates (the seeding path), hygiene findings,
+   candidates, a policy-shaped keyword screen (the seeding path), hygiene findings,
    and dormancy/fragmentation stats. Every candidate line carries a
    ready-to-paste tool call. The pass changes nothing — it never even
    instantiates ExperientialMemory (whose constructor mkdirs); all
@@ -255,7 +255,9 @@ SEASON_FOOTER = (
 
 _FAMILY_ID_RE = re.compile(r"^fam_\d{8}_\d{6}_[0-9a-f]{8}$")
 
-# Policy-shaped: normative/imperative language a standing rule would use.
+# Policy-shaped KEYWORD SCREEN (design C5): normative/imperative words a
+# standing rule would use. A hit means one of these words is in the text; it
+# is not a policy, and a count of hits is not a count of policies.
 _POLICY_SHAPE_RE = re.compile(
     r"\b(always|never|must(?: not)?|do not|don't|required?|prefer|policy|non-negotiable)\b",
     re.IGNORECASE,
@@ -740,6 +742,13 @@ def _preview(text: str) -> str:
     return text[:_PREVIEW_CHARS] + ("…" if len(text) > _PREVIEW_CHARS else "")
 
 
+def _policy_shape_matches(text: str) -> list[str]:
+    """The keyword screen's words found in ``text``: lower-cased, each once,
+    in the order they first appear in the text. Empty when the screen does
+    not match (exactly when ``_POLICY_SHAPE_RE.search(text)`` is None)."""
+    return list(dict.fromkeys(m.group(1).lower() for m in _POLICY_SHAPE_RE.finditer(text)))
+
+
 def _load_threads_readonly(chronicle_root: Path) -> list[dict]:
     """
     Unresolved threads, newest first — WITHOUT ExperientialMemory
@@ -799,9 +808,11 @@ def season_review(
          the newer entry; pairs already in the ledger are excluded.
       2. Thread-family candidates — unresolved-question clusters at
          Jaccard >= 0.45 not already co-familied.
-      3. Policy candidates — policy-shaped sentinels (intensity >= 0.9,
-         normative language) absent from the registry. This IS the
-         seeding path; nothing is auto-registered.
+      3. Policy-shaped keyword screen — sentinels (intensity >= 0.9)
+         whose text matches a regex of normative words, absent from the
+         registry. Each line names the words it matched; a hit is not a
+         policy and the section never counts policies (design C5). This
+         IS the seeding path; nothing is auto-registered.
       4. Hygiene — dangling supersession pointers, receipt re-verify
          failures (file receipts split by status: moved_on, never_verified,
          mismatch, missing, unreadable; a ref the write-time rules refuse
@@ -948,13 +959,16 @@ def season_review(
         "none — open threads look atomic (or are already familied).",
     )
 
-    # ── 3. Policy candidates (the seeding path) ──
+    # ── 3. Policy-shaped keyword screen (the seeding path) ──
+    # A regex over sentinel text, NOT a count of policies (design C5): each
+    # line names the screen's words it matched, and the overflow counts matches.
     pol_lines: list[str] = []
     for entry in entries:
         if _intensity(entry) < SENTINEL_INTENSITY:
             continue
         content = entry.get("content", "")
-        if not _POLICY_SHAPE_RE.search(content):
+        matched = _policy_shape_matches(content)
+        if not matched:
             continue
         if not in_window(entry) or not in_domain(entry.get("domain", "")):
             continue
@@ -968,16 +982,16 @@ def season_review(
         statement = json.dumps(content[:200] + ("…" if len(content) > 200 else ""))
         pol_lines.append(
             f"  • {display_id(derive_claim_id(entry))} [{entry.get('domain', '?')}]"
-            f" {_preview(content)}\n"
+            f" {_preview(content)} · matched: {', '.join(matched)}\n"
             f"    → set_policy(statement={statement},"
             f' domain="{entry.get("domain", "general")}", set_by="<approving human>")'
         )
     overflow = len(pol_lines) - max_candidates
     pol_lines = pol_lines[:max_candidates]
     if overflow > 0:
-        pol_lines.append(f"  …and {overflow} more (raise max_candidates to see them).")
+        pol_lines.append(f"  …and {overflow} more matches (keyword screen)")
     lines += _section(
-        "3. POLICY CANDIDATES (policy-shaped sentinels absent from the registry)",
+        "3. POLICY-SHAPED KEYWORD SCREEN (a regex over sentinel text; NOT a count of policies)",
         pol_lines,
         "none — no unregistered policy-shaped sentinels in the window.",
     )
