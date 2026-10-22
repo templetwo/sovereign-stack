@@ -9,6 +9,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+_Nothing yet._
+
+---
+
+## [1.22.0] - 2026-10-22
+
+148 commits since 1.21.0 (2026-08-28). The sections below name what shipped since, newest first; the ten sections after them were written as the work landed.
+
+### One honk counter across both stores; informational honks need no ack (2026-10-22, PR #13)
+
+- One predicate, `nape_daemon.is_informational_honk` (level `satisfied`), read by Nape's own `summary()`, the console's count and preview, and the signal ledger's ingestion. The excluded number is shown under its own name (`informational_unacked`), never hidden.
+- `signal_ack` on a honk-origin signal mirrors the nape ack through `NapeDaemon.ack_once` (file-locked, idempotent, fsynced, read back before it reports `written`); every result carries `nape_ack: written | already_acked | not_applicable | skipped | failed`. The ledger close lands first; the mirror never raises.
+- The push link's honk trigger is edge-triggered on new actionable honk ids, so a close in the same poll no longer hides a new honk.
+- Readers never raise on a torn line, a non-object line, an unhashable id or invalid UTF-8; an unreadable store reads as unknown (`null`), never as a healthy zero. `_append_jsonl` never glues a record onto a line missing its newline.
+- 32 + 22 new tests; the full suite 4249 passed at merge. Deployed 2026-10-22 05:59 EDT on Anthony's word.
+
+### The Descent and Nape hardened (2026-10-17)
+
+- Unreadable counts ride on line 0, and only line 0 / COVERAGE is scanned; no caller echo on a zero seat match; months outside the record are marked and refused; Nape scores `descend` by its own text, not the closes it quotes.
+- A handoff names this seat's earlier handoff on the thread when `supersedes` is not passed.
+
+### Lineage is per model line; `descend` joins the base tier (2026-10-10)
+
+- Letters are for the next seat of the same model name: the Fable/Mythos to Opus inheritance is retired, and Mythos reads the Fable line.
+- `descend` is classified BASE on the Claude connector beside `the_ground`, and joins the bridge read scope.
+
+### The cockpit: HQ's seat lives in the console (2026-10-09 and 2026-10-10, PRs #11 and #12)
+
+- A launcher (`hq-cockpit.command`) starts HQ through the console's panel and falls back to Terminal. The panel is one pty session with a guard, a replay buffer, status and a chat.db probe; `/hq/status`, `/hq/stream` (SSE, token-gated) and `/hq/start|input|resize`; xterm.js 6.0.0 and addon-fit 0.11.0 vendored under `/static/vendor/`. Studio-only is a rule in code; the panel child gets its own controlling terminal, PATH and LANG.
+- The layout: the HQ panel takes the centre, with a focus toggle, header status, a banner slot and an attention strip; a stale threshold of 900 s; file drop to path; a comms line; working / waiting in the header. The snapshot gains `honk_counts` (both stores, labelled) and `hq_panel`.
+- Phase 3, the push link: console events reach the panel HQ as peer turns over the cross-session socket, each batch headed by a fixed line naming the console pid and a nonce the panel verifies against a 0600 file; the link state fails closed and the hold is measured. Accepted by Anthony with the hole in view (2026-10-10).
+
+
 ### THE DESCENT: the closes of the seats before you, as the fifth boot voice
 
 Every close_session writes three things: what the seat learned (chronicle domain
