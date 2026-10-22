@@ -1651,3 +1651,88 @@ class TestReadonlyAdditionsBlastRadius:
             h for h in self.daemon.current_honks(SESSION) if h["pattern"] == "premature_summary"
         ]
         assert len(honks) >= 1, "A declined tool's real error must still count."
+
+
+# =============================================================================
+# ack_once: the idempotent ack the signal ledger's close mirror writes through
+# (2026-10-21). Every write here is under pytest's tmp_path.
+# =============================================================================
+
+
+class TestAckOnce:
+    def _daemon_with_honk(self, tmp_path):
+        from sovereign_stack.nape_daemon import NapeDaemon
+
+        daemon = NapeDaemon(root=str(tmp_path))
+        honk = daemon.emit_external_honk("s", "declare_before_verify", "record_insight", "seen")
+        return daemon, honk["honk_id"]
+
+    def _acks(self, tmp_path):
+        p = tmp_path / "nape" / "acks.jsonl"
+        if not p.exists():
+            return []
+        return [json.loads(x) for x in p.read_text(encoding="utf-8").splitlines() if x.strip()]
+
+    def test_writes_once_then_returns_none(self, tmp_path):
+        daemon, hid = self._daemon_with_honk(tmp_path)
+        first = daemon.ack_once(hid, "first")
+        assert first is not None and first["honk_id"] == hid
+        assert daemon.ack_once(hid, "second") is None
+        assert [a["note"] for a in self._acks(tmp_path)] == ["first"]
+
+    def test_an_existing_plain_ack_counts(self, tmp_path):
+        daemon, hid = self._daemon_with_honk(tmp_path)
+        daemon.ack(hid, "through nape_ack")
+        assert daemon.ack_once(hid, "mirror") is None
+        assert len(self._acks(tmp_path)) == 1
+
+    def test_raises_what_ack_raises(self, tmp_path):
+        daemon, _ = self._daemon_with_honk(tmp_path)
+        with pytest.raises(ValueError, match="No honk found"):
+            daemon.ack_once("not-a-honk", "x")
+
+    def test_absent_store_raises_and_creates_no_file(self, tmp_path):
+        from sovereign_stack.nape_daemon import NapeDaemon
+
+        daemon = NapeDaemon(root=str(tmp_path))
+        with pytest.raises(FileNotFoundError):
+            daemon.ack_once("h", "x")
+        assert list((tmp_path / "nape").iterdir()) == []
+
+    def test_two_racing_callers_write_one_ack_and_the_lock_is_why(self, tmp_path, monkeypatch):
+        """Control first: with flock disabled, a slowed check lets both callers
+        through and two acks land. With the real lock, one does. If the control
+        ever stops producing two, this test is no longer measuring the lock."""
+        import threading
+        import time
+
+        from sovereign_stack import nape_daemon as nd
+
+        orig_acked = nd.NapeDaemon._acked_ids
+
+        def slow_acked(self):
+            out = orig_acked(self)
+            time.sleep(0.2)
+            return out
+
+        monkeypatch.setattr(nd.NapeDaemon, "_acked_ids", slow_acked)
+
+        def race(root):
+            _, hid = self._daemon_with_honk(root)
+            start = threading.Barrier(2)
+
+            def worker():
+                start.wait()
+                nd.NapeDaemon(root=str(root)).ack_once(hid, "racer")
+
+            threads = [threading.Thread(target=worker) for _ in range(2)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(10)
+            return len(self._acks(root))
+
+        with monkeypatch.context() as m:
+            m.setattr(nd.fcntl, "flock", lambda fd, op: None)
+            assert race(tmp_path / "unlocked") == 2
+        assert race(tmp_path / "locked") == 1

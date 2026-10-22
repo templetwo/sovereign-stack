@@ -333,7 +333,11 @@ def read_inbound_rows(path: Path) -> list[tuple[int, str | None]] | None:
 
 def read_counters(root: Path) -> dict:
     """The two console counters the push link watches: all-time unacked nape honks
-    and halt notes on disk. Integers or None (unreadable), never text."""
+    and halt notes on disk. Integers or None (unreadable), never text.
+
+    The honk count is ``dashboard.count_unacked_honks``, which since 2026-10-21
+    counts only honks that want an ack: an informational honk (level satisfied)
+    no longer raises it, so it no longer hands HQ a batch."""
     from . import dashboard  # local import: dashboard is heavy and imports the world
 
     out: dict = {"honks": None, "halts": None}

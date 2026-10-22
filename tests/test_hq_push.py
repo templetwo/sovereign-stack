@@ -994,3 +994,33 @@ class TestHoldReadsOff:
         st = link.status()
         assert st["listening"] is False and st["inbound"] == "hold"
         assert st["reason"] == hq_push.HOLD_REASON and "does not reach HQ" in st["reason"]
+
+
+class TestInformationalHonks:
+    """2026-10-21: a satisfied honk (nape's positive signal, nothing to ack)
+    raised the console counter, and the push link handed HQ a batch for it."""
+
+    def test_informational_honk_is_not_a_push_event(self, tmp_path):
+        honks_write(tmp_path, 2)
+        clock = Clock()
+        link, sent, _ = make_link(tmp_path, clock=clock)
+        link.tick()  # baseline
+        p = tmp_path / "nape" / "honks.jsonl"
+        with p.open("a") as f:
+            f.write(
+                json.dumps(
+                    {"honk_id": "s1", "level": "satisfied", "pattern": "clean_verify_declare"}
+                )
+                + "\n"
+            )
+        clock.t = 1000.0 + 900  # due: 15 minutes since the session spawned
+        link.tick()
+        assert sent == []
+        assert link.status()["events_waiting"] == 0
+        # A real honk after it is still an event, and "in all" counts only
+        # the honks that want an ack.
+        honks_write(tmp_path, 1)
+        clock.t += 1000
+        link.tick()
+        assert len(sent) == 1
+        assert "1 new unacked nape honks (now 3 in all)" in sent[0][2]

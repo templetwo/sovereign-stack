@@ -23,6 +23,7 @@ the audit trail intact regardless of what the instance claimed to do.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import re
 import uuid
@@ -673,6 +674,31 @@ PATTERN_LEVELS: dict[str, str] = {
     "unreceipted_ground_truth": "low",  # v1.7.0: sentinel ground_truth with no verified receipt.
 }
 
+# Levels whose honks are INFORMATIONAL: positive signal with nothing to
+# acknowledge. `satisfied` is the only one (clean_verify_declare above). This is
+# the ONE definition every honk counter reads: summary() and current_honks()
+# below, the console's unacked count and preview (dashboard.py), and the signal
+# ledger's honk ingestion (signal_ledger.scan_honks). Added 2026-10-21, when the
+# console was found counting satisfied honks that summary() never had, raising
+# its counter and pushing HQ a batch for each one. A level added here leaves
+# every counter at once instead of one of them.
+INFORMATIONAL_LEVELS: frozenset = frozenset({"satisfied"})
+
+
+def is_informational_honk(rec: Any) -> bool:
+    """True for a honk that needs no acknowledgement (see INFORMATIONAL_LEVELS).
+
+    Keyed on ``level``, which ``_build_honk`` stamps from PATTERN_LEVELS. A
+    record with no level, a non-string level, or a level not listed is NOT
+    informational: a shape this cannot read stays counted as wanting attention
+    rather than quietly leaving the count.
+    """
+    if not isinstance(rec, dict):
+        return False
+    level = rec.get("level")
+    return isinstance(level, str) and level in INFORMATIONAL_LEVELS
+
+
 # The receipt-count suffix record_insight appends when verified_by receipts
 # were supplied: " (receipts: N verified, M attested)". Only the verified
 # count silences the unreceipted_ground_truth honk — attestation is a
@@ -827,8 +853,9 @@ class NapeDaemon:
         limit : int
             Maximum number of honks to return. Defaults to 10.
         include_satisfied : bool
-            When False, satisfied-level honks are excluded from the result.
-            Defaults to True (preserves existing behavior).
+            When False, informational honks (``is_informational_honk``: the
+            satisfied level) are excluded from the result. Defaults to True
+            (preserves existing behavior).
 
         Returns
         -------
@@ -850,7 +877,7 @@ class NapeDaemon:
             for h in honks
             if h.get("honk_id") not in acked_ids
             and (session_id is None or h.get("session_id") == session_id)
-            and (include_satisfied or h.get("level") != "satisfied")
+            and (include_satisfied or not is_informational_honk(h))
         ]
 
         # Newest first.
@@ -976,6 +1003,38 @@ class NapeDaemon:
         _append_jsonl(self._acks_path, ack_record)
         return ack_record
 
+    def ack_once(self, honk_id: str, note: str) -> dict | None:
+        """Acknowledge a honk unless an acknowledgement for it already exists.
+
+        Returns the ack record written, or None when the honk was already
+        acknowledged. Raises what ``ack()`` raises (ValueError for an empty
+        honk_id or a honk not in honks.jsonl), and FileNotFoundError when
+        honks.jsonl is absent.
+
+        Added 2026-10-21 for the signal ledger: a ``signal_ack`` close of a
+        honk-source signal mirrors itself here, so the console's count and the
+        ledger's open count move together. A seat may ack the same signal more
+        than once, so the mirror has to be idempotent, and ``ack()`` is not.
+
+        THE CHECK AND THE APPEND HAPPEN UNDER ONE LOCK, so two ``ack_once``
+        callers racing on one honk write one ack, not two. The lock is an
+        exclusive flock on honks.jsonl opened READ-ONLY, so taking it can never
+        create or change a file. The append still goes through ``ack()``, and
+        so through ``_append_jsonl``, the one funnel every nape store write
+        passes. The lock serializes ``ack_once`` callers only: a plain
+        ``ack()`` (the nape_ack tool) takes no lock and has never deduplicated,
+        so racing one can still leave a duplicate ack row. Every reader folds
+        acks into a set of honk_ids, so a duplicate changes no count.
+        """
+        with self._honks_path.open("rb") as lock_fh:
+            fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
+            try:
+                if honk_id in self._acked_ids():
+                    return None
+                return self.ack(honk_id=honk_id, note=note)
+            finally:
+                fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
+
     def summary(self, session_id: str | None) -> dict:
         """
         Return honk counts broken down by level for a session.
@@ -1004,7 +1063,8 @@ class NapeDaemon:
             level = honk.get("level", "low")
             counts[level] = counts.get(level, 0) + 1
             # Satisfied honks are positive signal — they do not count as backlog.
-            if honk.get("honk_id") not in acked_ids and level != "satisfied":
+            # Same predicate the console and the signal ledger read.
+            if honk.get("honk_id") not in acked_ids and not is_informational_honk(honk):
                 unacked += 1
 
         return {

@@ -506,11 +506,24 @@ def build_snapshot() -> dict:
         # Two honk numbers, each labelled with what it counts; never folded
         # into one (Anthony, 2026-10-09). The ledger figure is None, not 0,
         # when the ledger is blind.
+        #
+        # 2026-10-21: both now count only honks that want an ack. The
+        # informational honks (level satisfied) the console count leaves out
+        # ride beside it as `informational_unacked`, labelled, so the
+        # exclusion is visible. Nested here rather than as a 22nd top-level
+        # key: this is the section of labelled honk numbers, and the
+        # top-level key list is pinned (additive-only, see the docstring).
         "honk_counts": {
             "all_time_unacked": state.unacked_honks,
             "all_time_label": (
                 "unacked nape honks since the nape daemon began "
-                "(nape/honks.jsonl against acks.jsonl)"
+                "(nape/honks.jsonl against acks.jsonl), only those that want "
+                "an ack: informational honks are counted apart"
+            ),
+            "informational_unacked": state.informational_honks_unacked,
+            "informational_label": (
+                "unacked informational nape honks (level satisfied: a verify "
+                "call came before the declaration; nothing to ack, never pushed)"
             ),
             "ledger_open": ledger_open if isinstance(ledger_open, int) else None,
             "ledger_label": "open honk signals in the signal ledger (pacemaker of 2026-09-07)",

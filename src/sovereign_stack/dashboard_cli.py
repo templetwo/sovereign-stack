@@ -97,6 +97,7 @@ def main(argv: list[str] | None = None) -> int:
             "halts_count": state.halts_count,
             "decisions_count": state.decisions_count,
             "unacked_honks": state.unacked_honks,
+            "informational_honks_unacked": state.informational_honks_unacked,
             "listener_stale": state.listener_stale,
         }
         print(json.dumps(snapshot, indent=2))

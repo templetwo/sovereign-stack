@@ -65,6 +65,7 @@ from mcp.types import Tool
 
 from .dispatch_context import REFUSED_IDENTITY_ARGUMENTS, caller_seat
 from .memory import iter_thread_shards
+from .nape_daemon import NapeDaemon, is_informational_honk
 from .provenance import default_sovereign_root
 
 
@@ -1161,6 +1162,8 @@ def ack_signal(
     state: str,
     reason: str | None,
     root: Path | None = None,
+    *,
+    nape_mirror: dict | None = None,
 ) -> dict:
     """Close or acknowledge one signal.
 
@@ -1176,6 +1179,17 @@ def ack_signal(
 
     ``owner`` (assignment) is carried forward from the row being closed. The
     two were one field and are now two facts.
+
+    A CLOSE OF A HONK-SOURCE SIGNAL ALSO WRITES THE NAPE ACK (2026-10-21). The
+    console counts nape/honks.jsonl against nape/acks.jsonl, and the sync
+    between the two stores ran one way only: ``scan_honks`` turns a nape ack
+    into a ledger close, but a ledger close never wrote a nape ack, so every
+    ``signal_ack`` left the console counting a honk the ledger had closed
+    (2026-10-14: console 1064, ledger 59). The mirror runs AFTER the ledger
+    row is appended, and it never raises: the ledger close is the record, and a
+    mirror that cannot land says so in its outcome and in diagnostics.log
+    instead of undoing it. ``nape_mirror``, when given, is an out-parameter
+    filled with that outcome (see ``_mirror_close_to_nape``).
     """
     if state not in CLOSE_STATES:
         raise ValueError(f"state must be one of {CLOSE_STATES}, got {state!r}")
@@ -1201,7 +1215,7 @@ def ack_signal(
                 f"{prev.get('source')!r} producer {producer!r}"
             )
     now = _now()
-    return _append(
+    row = _append(
         _row(
             signal_id=signal_id,
             source=prev["source"],
@@ -1229,6 +1243,97 @@ def ack_signal(
         ),
         root,
     )
+    # LEDGER FIRST, NAPE SECOND, and the order is load-bearing. `scan_honks`
+    # reads acks.jsonl once, then re-tails the ledger before each close it
+    # derives. A scan that can see the nape ack written below can therefore
+    # also see the close appended above, finds the signal no longer open, and
+    # never stamps its own "nape-ack" close over this caller's.
+    outcome = _mirror_close_to_nape(signal_id, prev, actor, state, root)
+    if nape_mirror is not None:
+        nape_mirror.clear()
+        nape_mirror.update(outcome)
+    return row
+
+
+# The closer `scan_honks` stamps when a nape ack closes a signal. A close by
+# this closer was DERIVED from nape/acks.jsonl, so the nape ack is its source
+# and mirroring it back would be an echo.
+NAPE_ACK_CLOSER = "nape-ack"
+
+
+def _mirror_close_to_nape(
+    signal_id: str, prev: dict, actor: str, state: str, root: Path | None
+) -> dict:
+    """Write the nape ack for a honk-source close. NEVER RAISES.
+
+    Returns the outcome, one of five statuses, so no reader has to infer it:
+
+    - ``not_applicable``: the signal is not a nape honk.
+    - ``skipped``: nothing to write, for a stated reason: the close was derived
+      from a nape ack, the row names no honk (no ``origin.native_id``), the
+      nape store is absent, or nape refused the id (not in honks.jsonl).
+      Skipping never creates the store: no NapeDaemon is built for a root
+      whose honks.jsonl does not exist, since its constructor makes the dir.
+    - ``already_acked``: the honk already had a nape ack (re-ack, or an
+      earlier nape_ack); no second row is written.
+    - ``written``: the ack is on disk, with a note naming the signal.
+    - ``failed``: an unexpected error. It is logged to diagnostics.log and
+      the ledger close stands.
+
+    The ack goes through ``NapeDaemon.ack_once``, so through ``ack()`` and
+    ``_append_jsonl``: the same record shape and the same single write funnel
+    as the nape_ack tool. It writes a store file directly and is not a tool
+    call, so Nape never observes it; the ``signal_ack`` call that triggered
+    it is skipped by ``observe`` when it succeeds.
+    """
+    source = prev.get("source")
+    if source != "honk":
+        return {"status": "not_applicable", "reason": f"source {source!r} is not a nape honk"}
+    if actor == NAPE_ACK_CLOSER:
+        return {
+            "status": "skipped",
+            "reason": "close derived from nape/acks.jsonl; the nape ack is its source",
+        }
+    origin = prev.get("origin")
+    honk_id = (
+        _native_id_text(origin.get("native_id"))
+        if isinstance(origin, dict) and origin.get("source") == "honk"
+        else None
+    )
+    if honk_id is None:
+        return {
+            "status": "skipped",
+            "reason": "the signal row carries no origin.native_id, so the honk cannot be named",
+        }
+    note = f"signal ledger close mirrored: signal_id={signal_id} state={state} closed_by={actor}"
+    # EVERY FILESYSTEM TOUCH IS INSIDE THE TRY, the existence check included:
+    # Path.exists() re-raises EACCES instead of answering False, and anything
+    # raised from here would surface AFTER the ledger close was appended,
+    # where the tool would report ok:false for a close that happened.
+    try:
+        nape_root = _root(root)
+        if not (nape_root / "nape" / "honks.jsonl").exists():
+            _log_diagnostic(
+                root,
+                f"nape ack mirror skipped for signal {signal_id}",
+                FileNotFoundError("nape store absent: nape/honks.jsonl"),
+            )
+            return {
+                "status": "skipped",
+                "honk_id": honk_id,
+                "reason": "nape store absent (nape/honks.jsonl)",
+            }
+        record = NapeDaemon(root=str(nape_root)).ack_once(honk_id, note)
+    except ValueError as exc:
+        # Nape's own refusal: the honk is not in honks.jsonl.
+        _log_diagnostic(root, f"nape ack mirror skipped for signal {signal_id}", exc)
+        return {"status": "skipped", "honk_id": honk_id, "reason": str(exc)}
+    except Exception as exc:  # noqa: BLE001 — the ledger close already landed
+        _log_diagnostic(root, f"nape ack mirror failed for signal {signal_id}", exc)
+        return {"status": "failed", "honk_id": honk_id, "error": f"{type(exc).__name__}: {exc}"}
+    if record is None:
+        return {"status": "already_acked", "honk_id": honk_id}
+    return {"status": "written", "honk_id": honk_id, "ack_id": record.get("ack_id")}
 
 
 def _parse_dt(raw: str | None) -> datetime | None:
@@ -1904,24 +2009,35 @@ def scan_honks(
         # ingest opens a new signal, the next cleanup acks that, and the
         # queue doubles. Failed-ack honks stay in honks.jsonl and in nape's
         # detectors; they do not enter the ledger.
-        if rec.get("trigger_tool") != "signal_ack" and open_signal(
-            source="honk",
-            native_id=hid,
-            produced_at=str(produced),
-            owner=owner,
-            root=root,
-            # THE HONK FOLD'S PAYLOAD (review F3). `pattern` is what kind of
-            # drift Nape saw; `observation` is the concern in words. Without
-            # these two the ledger holds an id and a count, and the surviving
-            # reader cannot tell a watch seat what it is being asked to ack.
-            kind=_text_or_none(rec.get("pattern")),
-            concern=_text_or_none(rec.get("observation")),
-            # THE CLAIM REFERENCE THE SCANNER USED TO THROW AWAY (review N1).
-            # A honk about a chronicle claim carries that claim's id; without
-            # it the observation reaches the ledger as anonymous prose and the
-            # protected designation has nothing to bind to.
-            origin_claim_id=_native_id_text(rec.get("claim_id")),
-            origin_path="nape/honks.jsonl",
+        #
+        # AN INFORMATIONAL HONK OPENS NOTHING EITHER (2026-10-21). Level
+        # satisfied means a verify call came before the declaration: nothing
+        # to close, so it is not a signal. Same predicate the console count
+        # uses (nape_daemon.is_informational_honk), or the two counters part
+        # again on the first satisfied honk. Only the OPEN is skipped: the ack
+        # branch below still closes one already open from before this rule.
+        if (
+            rec.get("trigger_tool") != "signal_ack"
+            and not is_informational_honk(rec)
+            and open_signal(
+                source="honk",
+                native_id=hid,
+                produced_at=str(produced),
+                owner=owner,
+                root=root,
+                # THE HONK FOLD'S PAYLOAD (review F3). `pattern` is what kind of
+                # drift Nape saw; `observation` is the concern in words. Without
+                # these two the ledger holds an id and a count, and the surviving
+                # reader cannot tell a watch seat what it is being asked to ack.
+                kind=_text_or_none(rec.get("pattern")),
+                concern=_text_or_none(rec.get("observation")),
+                # THE CLAIM REFERENCE THE SCANNER USED TO THROW AWAY (review N1).
+                # A honk about a chronicle claim carries that claim's id; without
+                # it the observation reaches the ledger as anonymous prose and the
+                # protected designation has nothing to bind to.
+                origin_claim_id=_native_id_text(rec.get("claim_id")),
+                origin_path="nape/honks.jsonl",
+            )
         ):
             n += 1
         if hid in ack_ids:
@@ -1931,7 +2047,7 @@ def scan_honks(
                 with contextlib.suppress(PermissionError):
                     ack_signal(
                         sid,
-                        actor="nape-ack",
+                        actor=NAPE_ACK_CLOSER,
                         state="acknowledged",
                         reason="nape acks.jsonl",
                         root=root,
@@ -3130,7 +3246,10 @@ SIGNAL_TOOLS = [
             "Sending actor, actor_seat, owner, closed_by or source_seat is REFUSED, "
             "not ignored; a call with no resolvable identity is refused rather than "
             "stamped 'seat:None'. The producer of a source cannot close its own "
-            "signal. Get the signal_id from signals_summary(mode='list')."
+            "signal. Get the signal_id from signals_summary(mode='list'). "
+            "Closing a honk signal also writes that honk's nape ack, so the "
+            "console's count moves with the ledger's; the result's nape_ack "
+            "field says whether it was written, already there, or skipped and why."
         ),
         inputSchema={
             "type": "object",
@@ -3552,7 +3671,8 @@ def handle_signal_tool(
                         ),
                     }
                 )
-            row = ack_signal(sid, actor, state, reason, root=root)
+            mirror: dict[str, Any] = {}
+            row = ack_signal(sid, actor, state, reason, root=root, nape_mirror=mirror)
             # THE RETURNED COPY IS GATED; THE LEDGER ROW IS NOT. The record
             # keeps the true concern — it is the record — but this response is
             # a display surface like any other, and review N1's exposure is a
@@ -3571,6 +3691,11 @@ def handle_signal_tool(
                 "row": shown[0],
                 "withheld_protected": withheld,
                 "unprovenanced_concerns": unprovenanced,
+                # WHETHER THE CONSOLE'S COPY MOVED TOO (2026-10-21), on every
+                # ack, `not_applicable` included: a field that appears only
+                # when it is interesting is a field a reader learns to read
+                # as fine. See _mirror_close_to_nape for the five statuses.
+                "nape_ack": mirror,
             }
             if protected_error:
                 payload["error"] = protected_error

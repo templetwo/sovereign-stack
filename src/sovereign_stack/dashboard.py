@@ -41,6 +41,7 @@ from pathlib import Path
 from typing import Any
 
 from . import connectivity, protected
+from .nape_daemon import is_informational_honk
 from .scribe.redactor import redact as _scribe_redact
 
 # ── Defaults / paths ────────────────────────────────────────────────────────
@@ -740,9 +741,77 @@ def _acked_honk_ids(path: Path) -> set:
     return acked_ids
 
 
+def _honk_is_unacked(rec: dict, acked_ids: set) -> bool:
+    """No inline ``ack_id`` and no cross-file ack in the sibling acks.jsonl."""
+    if rec.get("ack_id"):
+        return False
+    return rec.get("honk_id") not in acked_ids
+
+
+def _wants_ack(rec: dict, acked_ids: set) -> bool:
+    """THE predicate the unacked COUNT and the unacked PREVIEW share.
+
+    Unacked (inline or cross-file) AND not informational. An informational honk
+    (``nape_daemon.is_informational_honk``: level ``satisfied``, a verify call
+    came before the declaration) is a positive signal with nothing to ack; Nape's
+    own ``summary()`` never counted it as unacknowledged, and since 2026-10-21
+    neither does the console. One copy of this test, because two copies is how a
+    count and its preview start disagreeing.
+    """
+    return _honk_is_unacked(rec, acked_ids) and not is_informational_honk(rec)
+
+
+def _honk_records(lines):
+    """Parsed honk objects from honks.jsonl lines, newest-last as given.
+
+    Blank and malformed lines are skipped, as before. So is a line that parses
+    to something other than a JSON object: it is not a honk, and ``rec.get`` on
+    it used to raise out of the counter and take the whole snapshot down.
+    """
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(rec, dict):
+            yield rec
+
+
+def _tally_unacked_honks(path: Path) -> tuple[int, int]:
+    """(actionable, informational) unacked honks, from ONE read of the file.
+
+    ``actionable`` is what ``_wants_ack`` accepts. ``informational`` is what the
+    actionable count leaves out on purpose, kept as its own number so the
+    exclusion is visible rather than silent.
+    """
+    if not path.exists():
+        return 0, 0
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return 0, 0
+    acked_ids = _acked_honk_ids(path)
+    actionable = informational = 0
+    for rec in _honk_records(lines):
+        if _wants_ack(rec, acked_ids):
+            actionable += 1
+        elif _honk_is_unacked(rec, acked_ids) and is_informational_honk(rec):
+            informational += 1
+    return actionable, informational
+
+
+def count_informational_unacked_honks(path: Path) -> int:
+    """Unacked informational honks: the number ``count_unacked_honks`` leaves out."""
+    return _tally_unacked_honks(path)[1]
+
+
 def count_unacked_honks(path: Path) -> int:
     """
-    The TRUE number of unacked honks. No limit, no cap, no preview.
+    The TRUE number of unacked honks that want an ack. No limit, no cap, no
+    preview.
 
     2026-08-26: the dashboard previously reported
     `len(read_recent_honks(..., limit=100))` as its unacked count, which
@@ -755,29 +824,14 @@ def count_unacked_honks(path: Path) -> int:
     to be watching for it.
 
     A count and a preview are different questions. This answers the count.
+
+    2026-10-21: informational honks (level ``satisfied``) are no longer in it.
+    They need no acknowledgement, yet every one raised this counter, and the
+    cockpit push link (``hq_push.read_counters``) handed HQ's session a batch
+    for each one. They are counted apart by
+    ``count_informational_unacked_honks``.
     """
-    if not path.exists():
-        return 0
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return 0
-    acked_ids = _acked_honk_ids(path)
-    total = 0
-    for line in lines:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            rec = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if rec.get("ack_id"):
-            continue
-        if rec.get("honk_id") in acked_ids:
-            continue
-        total += 1
-    return total
+    return _tally_unacked_honks(path)[0]
 
 
 def read_recent_honks(path: Path, *, limit: int = 5) -> list[dict]:
@@ -792,6 +846,9 @@ def read_recent_honks(path: Path, *, limit: int = 5) -> list[dict]:
     (which writes to acks.jsonl, not back into honks.jsonl). This
     function now reads both files and excludes honk_ids that appear in
     acks.jsonl as well.
+
+    Informational honks (level ``satisfied``) are excluded too, by the same
+    ``_wants_ack`` predicate ``count_unacked_honks`` uses (2026-10-21).
     """
     if not path.exists():
         return []
@@ -805,20 +862,10 @@ def read_recent_honks(path: Path, *, limit: int = 5) -> list[dict]:
     acked_ids = _acked_honk_ids(path)
 
     out: list[dict] = []
-    for line in reversed(lines):
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            rec = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        # Two ways an ack can be recorded:
-        #   - inline (ack_id field present in the honk record itself)
-        #   - cross-file (honk_id appears as a record in acks.jsonl)
-        if rec.get("ack_id"):
-            continue
-        if rec.get("honk_id") in acked_ids:
+    for rec in _honk_records(reversed(lines)):
+        # The counter's own predicate: unacked (inline ack_id or a cross-file
+        # record in acks.jsonl) and not informational. See _wants_ack.
+        if not _wants_ack(rec, acked_ids):
             continue
         out.append(rec)
         if len(out) >= limit:
@@ -918,6 +965,10 @@ class DashboardState:
     halts_count: int = 0
     decisions_count: int = 0
     unacked_honks: int = 0
+    # Unacked informational honks (level satisfied), which `unacked_honks`
+    # leaves out on purpose since 2026-10-21. Its own number, so the exclusion
+    # can be seen.
+    informational_honks_unacked: int = 0
     # Latest entries by type. Each value is a small preview dict or None.
     # Rendered in the dashboard's "Latest" panel so a watcher sees the
     # most recent substantive content alongside the pulse-of-services.
@@ -985,7 +1036,8 @@ def collect_latest_entries(sovereign_root: Path) -> dict[str, dict | None]:
       handoff       — newest JSON file in handoffs/
       decision      — newest metabolize_*.md in decisions/
       halt          — newest *.md in daemons/halts/
-      honk          — newest unacked honk in nape/honks.jsonl
+      honk          — newest unacked honk in nape/honks.jsonl that wants an
+                      ack (informational honks excluded; see _wants_ack)
     """
     out: dict[str, dict | None] = {}
 
@@ -1172,7 +1224,9 @@ def collect_state(
     # 1,884 — and the capped read here served no other purpose, since the
     # newest-honk PREVIEW is produced by collect_latest_entries() below.
     # A count and a preview are different questions with different callers.
-    unacked = count_unacked_honks(root / "nape" / "honks.jsonl")
+    # One read for both numbers: the actionable count, and the informational
+    # honks it leaves out (2026-10-21), kept beside it rather than dropped.
+    unacked, informational = _tally_unacked_honks(root / "nape" / "honks.jsonl")
 
     latest = collect_latest_entries(root)
 
@@ -1185,6 +1239,7 @@ def collect_state(
         halts_count=halts_count,
         decisions_count=decisions_count,
         unacked_honks=unacked,
+        informational_honks_unacked=informational,
         latest=latest,
     )
 
