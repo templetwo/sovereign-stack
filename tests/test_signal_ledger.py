@@ -1177,3 +1177,95 @@ def test_an_unreadable_nape_store_never_turns_a_landed_close_into_ok_false(tmp_s
     assert out["nape_ack"]["status"] == "failed"
     assert "PermissionError" in out["nape_ack"]["error"]
     assert sl.load_latest(root)[sid]["closed_by"] == ONE_COUNTER_SEAT
+
+
+# ── Review of bfc5507: R1, R2, F4 ───────────────────────────────────────────
+
+
+def test_a_mirrored_ack_is_never_glued_onto_a_line_missing_its_newline(tmp_sovereign_root):
+    """R1. The last ack lacks its newline; the mirror's ack must start a new line.
+    On bfc5507 the two acks fused into one unparseable line, hiding BOTH, and the
+    console count ROSE (1 -> 2) on a close."""
+    root = tmp_sovereign_root
+    _write_jsonl(root / "nape" / "honks.jsonl", [_honk("h-1"), _honk("h-2")])
+    (root / "nape" / "acks.jsonl").write_text(
+        '{"honk_id": "h-1", "note": "nape side"}', encoding="utf-8"
+    )
+    sl.scan_honks(root)
+    assert _console(root) == 1
+    out = _seat_ack(root, sl.signal_id_for("honk", "h-2"))
+    assert out["ok"] is True
+    assert _console(root) == 0
+    assert sorted(a["honk_id"] for a in _ack_rows(root)) == ["h-1", "h-2"]
+
+
+def test_a_mirrored_ack_that_does_not_read_back_is_failed_not_written(
+    tmp_sovereign_root, monkeypatch
+):
+    """R1. A write that did not land must not be reported as `written`."""
+    from sovereign_stack import nape_daemon as nd
+
+    root = tmp_sovereign_root
+    _write_jsonl(root / "nape" / "honks.jsonl", [_honk("h-1")])
+    _write_jsonl(root / "nape" / "acks.jsonl", [{"honk_id": "unrelated"}])
+    sl.scan_honks(root)
+    monkeypatch.setattr(nd, "_append_jsonl", lambda path, record: None)  # a lost write
+    out = _seat_ack(root, sl.signal_id_for("honk", "h-1"))
+    assert out["ok"] is True
+    assert out["nape_ack"]["status"] == "failed"
+    assert _console(root) == 1
+
+
+def _append_bytes(path: Path, data: bytes) -> None:
+    with path.open("ab") as fh:
+        fh.write(data)
+
+
+def test_an_invalid_byte_in_acks_fails_the_mirror_and_is_not_skipped(tmp_sovereign_root):
+    """R2. UnicodeDecodeError is a ValueError; it is a store-read failure, not
+    nape refusing the id, so the outcome is `failed`."""
+    root = tmp_sovereign_root
+    _write_jsonl(root / "nape" / "honks.jsonl", [_honk("h-1")])
+    _write_jsonl(root / "nape" / "acks.jsonl", [{"honk_id": "unrelated"}])
+    sl.scan_honks(root)
+    _append_bytes(root / "nape" / "acks.jsonl", b"\xff\xfe\n")
+    out = _seat_ack(root, sl.signal_id_for("honk", "h-1"))
+    assert out["ok"] is True
+    assert out["nape_ack"]["status"] == "failed"
+    assert "UnicodeDecodeError" in out["nape_ack"]["error"]
+
+
+def test_an_invalid_byte_in_honks_fails_the_mirror_and_is_not_skipped(tmp_sovereign_root):
+    root = tmp_sovereign_root
+    _write_jsonl(root / "nape" / "honks.jsonl", [_honk("h-1")])
+    sl.scan_honks(root)
+    _append_bytes(root / "nape" / "honks.jsonl", b"\xff\xfe\n")
+    out = _seat_ack(root, sl.signal_id_for("honk", "h-1"))
+    assert out["ok"] is True
+    assert out["nape_ack"]["status"] == "failed"
+    assert "UnicodeDecodeError" in out["nape_ack"]["error"]
+
+
+def test_the_nape_ack_is_written_after_the_ledger_close(tmp_sovereign_root, monkeypatch):
+    """F4. Ledger first, nape second: the order the rescan safety rests on. The
+    review's order-swap mutation survived the suite; this kills it."""
+    root = tmp_sovereign_root
+    _write_jsonl(root / "nape" / "honks.jsonl", [_honk("h-1")])
+    sl.scan_honks(root)
+    calls: list[str] = []
+    orig_append = sl._append
+    orig_mirror = sl._mirror_close_to_nape
+
+    def recording_append(row, root=None):
+        calls.append(f"ledger:{row.get('state')}")
+        return orig_append(row, root)
+
+    def recording_mirror(*args, **kwargs):
+        calls.append("nape")
+        return orig_mirror(*args, **kwargs)
+
+    monkeypatch.setattr(sl, "_append", recording_append)
+    monkeypatch.setattr(sl, "_mirror_close_to_nape", recording_mirror)
+    out = _seat_ack(root, sl.signal_id_for("honk", "h-1"))
+    assert out["nape_ack"]["status"] == "written"
+    assert calls == ["ledger:acted", "nape"]

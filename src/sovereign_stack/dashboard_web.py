@@ -513,6 +513,8 @@ def build_snapshot() -> dict:
         # exclusion is visible. Nested here rather than as a 22nd top-level
         # key: this is the section of labelled honk numbers, and the
         # top-level key list is pinned (additive-only, see the docstring).
+        # Both are None, never 0, when the nape store cannot be read (F6);
+        # the page renders that as "honks unreadable".
         "honk_counts": {
             "all_time_unacked": state.unacked_honks,
             "all_time_label": (

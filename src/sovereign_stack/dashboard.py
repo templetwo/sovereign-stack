@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import os
 import re
@@ -711,7 +712,25 @@ def _launchctl_service_states(labels: list[str]) -> dict[str, dict]:
 # ── Source readers (pure: take a path, return events) ───────────────────────
 
 
-def _acked_honk_ids(path: Path) -> set:
+def _store_lines(path: Path) -> list[str] | None:
+    """A nape store file's lines; [] when the file is absent; None when UNREADABLE.
+
+    THE READERS BELOW NEVER RAISE AND NEVER CALL UNKNOWN ZERO (review of
+    bfc5507, F6). Invalid UTF-8 is replaced, not raised: one bad byte becomes
+    one malformed line, skipped like any other, instead of an exception out of
+    the counter that turned /snapshot.json into a 500. A file that exists and
+    cannot be read is None, never []: "no honks" and "could not look" are
+    different facts, and returning 0 for the second is the healthy-zero lie.
+    """
+    try:
+        if not path.exists():
+            return []
+        return path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return None
+
+
+def _acked_honk_ids(path: Path) -> set | None:
     """
     Build the set of acked honk_ids from the SIBLING acks.jsonl.
 
@@ -719,33 +738,38 @@ def _acked_honk_ids(path: Path) -> set:
     counter cannot drift apart in what they consider acknowledged - two
     implementations of "is this acked?" is how a count and a list start
     disagreeing.
+
+    None when acks.jsonl exists and cannot be read: without the acks no honk
+    can be called unacked, and treating an unreadable file as "no acks" made
+    every honk on disk read as a backlog (F6). A line that is not a JSON
+    object, and an id that is not hashable, name no honk and are skipped.
     """
-    acks_path = path.parent / "acks.jsonl"
+    lines = _store_lines(path.parent / "acks.jsonl")
+    if lines is None:
+        return None
     acked_ids: set = set()
-    if not acks_path.exists():
-        return acked_ids
-    try:
-        for line in acks_path.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                rec = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            hid = rec.get("honk_id")
-            if hid:
-                acked_ids.add(hid)
-    except OSError:
-        pass
+    for rec in _honk_records(lines):
+        hid = rec.get("honk_id")
+        if not hid:
+            continue
+        with contextlib.suppress(TypeError):  # unhashable: names no honk
+            acked_ids.add(hid)
     return acked_ids
 
 
 def _honk_is_unacked(rec: dict, acked_ids: set) -> bool:
-    """No inline ``ack_id`` and no cross-file ack in the sibling acks.jsonl."""
+    """No inline ``ack_id`` and no cross-file ack in the sibling acks.jsonl.
+
+    A honk_id that is not hashable can match no ack, so the honk is unacked,
+    exactly as a honk with no id at all has always been counted (F6: it used
+    to raise TypeError out of the counter).
+    """
     if rec.get("ack_id"):
         return False
-    return rec.get("honk_id") not in acked_ids
+    try:
+        return rec.get("honk_id") not in acked_ids
+    except TypeError:
+        return True
 
 
 def _wants_ack(rec: dict, acked_ids: set) -> bool:
@@ -762,7 +786,7 @@ def _wants_ack(rec: dict, acked_ids: set) -> bool:
 
 
 def _honk_records(lines):
-    """Parsed honk objects from honks.jsonl lines, newest-last as given.
+    """Parsed JSON objects from a nape store's lines (honks or acks), in order.
 
     Blank and malformed lines are skipped, as before. So is a line that parses
     to something other than a JSON object: it is not a honk, and ``rec.get`` on
@@ -780,35 +804,64 @@ def _honk_records(lines):
             yield rec
 
 
-def _tally_unacked_honks(path: Path) -> tuple[int, int]:
-    """(actionable, informational) unacked honks, from ONE read of the file.
+def _honk_key(rec: dict) -> str:
+    """A stable identity for one honk record: its honk_id when that is a string,
+    else a digest of the record, so a honk without a usable id still has one."""
+    hid = rec.get("honk_id")
+    if isinstance(hid, str) and hid:
+        return hid
+    raw = json.dumps(rec, sort_keys=True, default=str).encode("utf-8")
+    return "record:" + hashlib.sha256(raw).hexdigest()
+
+
+def _scan_unacked_honks(path: Path) -> tuple[int, int, frozenset] | None:
+    """(actionable, informational, actionable_keys) from ONE read; None when
+    honks.jsonl or acks.jsonl exists and cannot be read.
 
     ``actionable`` is what ``_wants_ack`` accepts. ``informational`` is what the
     actionable count leaves out on purpose, kept as its own number so the
-    exclusion is visible rather than silent.
+    exclusion is visible rather than silent. ``actionable_keys`` names the
+    actionable honks (``_honk_key``) for the push link's edge trigger.
     """
-    if not path.exists():
-        return 0, 0
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return 0, 0
+    lines = _store_lines(path)
+    if lines is None:
+        return None
     acked_ids = _acked_honk_ids(path)
+    if acked_ids is None:
+        return None
     actionable = informational = 0
+    keys: set = set()
     for rec in _honk_records(lines):
         if _wants_ack(rec, acked_ids):
             actionable += 1
+            keys.add(_honk_key(rec))
         elif _honk_is_unacked(rec, acked_ids) and is_informational_honk(rec):
             informational += 1
-    return actionable, informational
+    return actionable, informational, frozenset(keys)
 
 
-def count_informational_unacked_honks(path: Path) -> int:
-    """Unacked informational honks: the number ``count_unacked_honks`` leaves out."""
-    return _tally_unacked_honks(path)[1]
+def count_informational_unacked_honks(path: Path) -> int | None:
+    """Unacked informational honks: the number ``count_unacked_honks`` leaves
+    out. None when the store cannot be read."""
+    scan = _scan_unacked_honks(path)
+    return None if scan is None else scan[1]
 
 
-def count_unacked_honks(path: Path) -> int:
+def actionable_unacked_honks(path: Path) -> tuple[int, frozenset] | None:
+    """(count, keys) of the honks that want an ack, from ONE read; None when the
+    store cannot be read.
+
+    For the cockpit push link (review of bfc5507, R3): it fires on NEW keys,
+    not on a rising count, so a close and a new honk inside one poll no longer
+    net to nothing. The count is ``count_unacked_honks``'s. The keys are honk
+    ids or record digests; they are compared as a set and must never reach any
+    text a seat or a page reads.
+    """
+    scan = _scan_unacked_honks(path)
+    return None if scan is None else (scan[0], scan[2])
+
+
+def count_unacked_honks(path: Path) -> int | None:
     """
     The TRUE number of unacked honks that want an ack. No limit, no cap, no
     preview.
@@ -830,8 +883,12 @@ def count_unacked_honks(path: Path) -> int:
     cockpit push link (``hq_push.read_counters``) handed HQ's session a batch
     for each one. They are counted apart by
     ``count_informational_unacked_honks``.
+
+    None, never 0, when honks.jsonl or acks.jsonl exists and cannot be read
+    (review of bfc5507, F6): an unreadable store is unknown, not empty.
     """
-    return _tally_unacked_honks(path)[0]
+    scan = _scan_unacked_honks(path)
+    return None if scan is None else scan[0]
 
 
 def read_recent_honks(path: Path, *, limit: int = 5) -> list[dict]:
@@ -849,17 +906,18 @@ def read_recent_honks(path: Path, *, limit: int = 5) -> list[dict]:
 
     Informational honks (level ``satisfied``) are excluded too, by the same
     ``_wants_ack`` predicate ``count_unacked_honks`` uses (2026-10-21).
+
+    Empty when either store cannot be read; the count says unreadable (F6).
     """
-    if not path.exists():
-        return []
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError:
+    lines = _store_lines(path)
+    if not lines:
         return []
 
     # Sibling acks file, via the shared helper so the preview and the
     # counter can never disagree about what "acked" means.
     acked_ids = _acked_honk_ids(path)
+    if acked_ids is None:
+        return []
 
     out: list[dict] = []
     for rec in _honk_records(reversed(lines)):
@@ -964,11 +1022,12 @@ class DashboardState:
     listener_stale: bool = False
     halts_count: int = 0
     decisions_count: int = 0
-    unacked_honks: int = 0
+    # None when the nape store cannot be read: unknown, never a healthy 0 (F6).
+    unacked_honks: int | None = 0
     # Unacked informational honks (level satisfied), which `unacked_honks`
     # leaves out on purpose since 2026-10-21. Its own number, so the exclusion
     # can be seen.
-    informational_honks_unacked: int = 0
+    informational_honks_unacked: int | None = 0
     # Latest entries by type. Each value is a small preview dict or None.
     # Rendered in the dashboard's "Latest" panel so a watcher sees the
     # most recent substantive content alongside the pulse-of-services.
@@ -1226,7 +1285,9 @@ def collect_state(
     # A count and a preview are different questions with different callers.
     # One read for both numbers: the actionable count, and the informational
     # honks it leaves out (2026-10-21), kept beside it rather than dropped.
-    unacked, informational = _tally_unacked_honks(root / "nape" / "honks.jsonl")
+    # Both None when the store cannot be read (F6).
+    scan = _scan_unacked_honks(root / "nape" / "honks.jsonl")
+    unacked, informational = (None, None) if scan is None else (scan[0], scan[1])
 
     latest = collect_latest_entries(root)
 
@@ -1345,7 +1406,9 @@ def render_state(
 
     # v1.3.2 indicators
     indicators: list[str] = []
-    if state.unacked_honks:
+    if state.unacked_honks is None:
+        indicators.append(_c("⚠ honks unreadable", _GOLD))
+    elif state.unacked_honks:
         indicators.append(_c(f"⚠ {state.unacked_honks} unacked honk(s)", _GOLD))
     if state.halts_count:
         indicators.append(_c(f"⛔ {state.halts_count} halt note(s)", _RED))

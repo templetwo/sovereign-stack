@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import fcntl
 import json
+import os
 import re
 import uuid
 from collections.abc import Callable
@@ -712,21 +713,50 @@ WINDOW_PREMATURE = 10  # scan back 10 calls for error indicators
 WINDOW_REPEATED = 20  # scan back 20 calls for repeated error class
 
 
+# How a successful signal_ack result BEGINS: handle_signal_tool puts "ok"
+# first. The beginning survives the caps the end does not (review of bfc5507,
+# F2): the autohook flattens a result to 4000 characters (server._flatten_result)
+# and _result_to_str cuts at 4096, so a success whose JSON ran longer arrived
+# truncated, failed to parse, was observed, and minted a honk with trigger_tool
+# signal_ack, one the console counts and the ledger never opens.
+_OK_TRUE_PREFIX = re.compile(r'\s*\{\s*"ok"\s*:\s*true\b')
+
+
 def _successful_signal_ack(tool_name: str, result: Any) -> bool:
-    """True when this is a signal_ack whose result parses as JSON with ok: true.
+    """True when this is a signal_ack whose result is JSON with ok: true.
 
     A successful ack is the close of an old drift. Observing it feeds the
     original concern (and the caller's reason) back through the detectors and
     recurses. Failures (`ok: false`) and unparseable results stay visible so
     repeated_mistake and premature_summary still see real ack failures.
+
+    A result that no longer parses because a cap cut its tail still counts as
+    a success when it BEGINS ``{"ok": true`` (see _OK_TRUE_PREFIX). A failure
+    begins ``{"ok": false`` and stays visible, truncated or not.
     """
     if tool_name != "signal_ack":
         return False
+    text = _result_to_str(result)
     try:
-        payload = json.loads(_result_to_str(result))
+        payload = json.loads(text)
     except json.JSONDecodeError:
-        return False
+        return bool(_OK_TRUE_PREFIX.match(text))
     return isinstance(payload, dict) and payload.get("ok") is True
+
+
+class HonkNotFound(ValueError):
+    """``ack()`` refused: no honk with that honk_id is in honks.jsonl.
+
+    A ValueError, so every existing ``except ValueError`` (the nape_ack tool's
+    handler included) keeps working. It exists so a caller can tell nape
+    REFUSING an id from nape FAILING TO READ its store: UnicodeDecodeError is
+    a ValueError too, and the signal ledger's mirror used to report a store it
+    could not decode as nape refusing the id (review of bfc5507, R2).
+    """
+
+
+class AckNotPersisted(RuntimeError):
+    """``ack_once`` appended an ack and could not read it back from acks.jsonl."""
 
 
 # =============================================================================
@@ -979,7 +1009,13 @@ class NapeDaemon:
         Raises
         ------
         ValueError
-            If honk_id is empty or not found in honks.jsonl.
+            If honk_id is empty.
+        HonkNotFound
+            (a ValueError) if no honk with that id is in honks.jsonl.
+
+        The ack is fsynced before this returns, as the signal ledger's close
+        is: an ack reported as written must survive a crash (review of
+        bfc5507, R1).
         """
         if not honk_id:
             raise ValueError(
@@ -990,7 +1026,7 @@ class NapeDaemon:
         honks = _read_jsonl(self._honks_path)
         matching = [h for h in honks if h.get("honk_id") == honk_id]
         if not matching:
-            raise ValueError(
+            raise HonkNotFound(
                 f"No honk found with honk_id {honk_id!r}. Check current_honks() for valid IDs."
             )
 
@@ -1001,6 +1037,7 @@ class NapeDaemon:
             "acked_at": _now_iso(),
         }
         _append_jsonl(self._acks_path, ack_record)
+        _fsync_path(self._acks_path)
         return ack_record
 
     def ack_once(self, honk_id: str, note: str) -> dict | None:
@@ -1008,8 +1045,17 @@ class NapeDaemon:
 
         Returns the ack record written, or None when the honk was already
         acknowledged. Raises what ``ack()`` raises (ValueError for an empty
-        honk_id or a honk not in honks.jsonl), and FileNotFoundError when
-        honks.jsonl is absent.
+        honk_id, HonkNotFound for a honk not in honks.jsonl), FileNotFoundError
+        when honks.jsonl is absent, a decode error when a store holds bytes
+        that are not UTF-8, and AckNotPersisted when the ack it appended does
+        not read back.
+
+        WRITTEN MEANS READ BACK (review of bfc5507, R1). Still under the lock,
+        the acks are re-read after the append, and the new ack_id must be there
+        with this honk_id. ``ack()`` returning a record proves only that an
+        append was attempted: a write that never landed, or landed where no
+        reader can parse it, would otherwise be reported to the ledger's mirror
+        as ``written`` while the console kept counting the honk.
 
         Added 2026-10-21 for the signal ledger: a ``signal_ack`` close of a
         honk-source signal mirrors itself here, so the console's count and the
@@ -1031,7 +1077,19 @@ class NapeDaemon:
             try:
                 if honk_id in self._acked_ids():
                     return None
-                return self.ack(honk_id=honk_id, note=note)
+                record = self.ack(honk_id=honk_id, note=note)
+                landed = any(
+                    isinstance(a, dict)
+                    and a.get("ack_id") == record["ack_id"]
+                    and a.get("honk_id") == honk_id
+                    for a in _read_jsonl(self._acks_path)
+                )
+                if not landed:
+                    raise AckNotPersisted(
+                        f"ack {record['ack_id']} for honk {honk_id!r} did not read back "
+                        "from acks.jsonl"
+                    )
+                return record
             finally:
                 fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
 
@@ -1623,6 +1681,13 @@ def _append_jsonl(path: Path, record: dict) -> None:
 
     Creates the file if it does not exist. Never truncates or rewrites.
 
+    NEVER GLUED ONTO A PREVIOUS LINE (review of bfc5507, R1). When the file is
+    non-empty and its last byte is not a newline (a writer that died
+    mid-line, a hand edit), a newline goes in first. Without it the new record
+    and the previous one fused into one unparseable line and BOTH vanished
+    from every reader: an ack written that way hid itself and the ack before
+    it, so the console count ROSE on a close.
+
     Parameters
     ----------
     path : Path
@@ -1631,8 +1696,26 @@ def _append_jsonl(path: Path, record: dict) -> None:
         Must be JSON-serializable. A TypeError is raised at json.dumps time
         if it is not — callers should use _safe_truncate() on nested objects.
     """
-    with path.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+    data = (json.dumps(record, ensure_ascii=False) + "\n").encode("utf-8")
+    with path.open("ab+") as fh:
+        end = fh.seek(0, os.SEEK_END)
+        if end:
+            fh.seek(end - 1)
+            if fh.read(1) != b"\n":
+                data = b"\n" + data
+        fh.write(data)
+
+
+def _fsync_path(path: Path) -> None:
+    """Flush a store file to the device. The ack path calls it so an ack that is
+    reported as written survives a crash, as ``signal_ledger._append`` does for
+    a close. A read-only descriptor is enough (fsync flushes the file, not the
+    descriptor), and opening one can never create or change the file."""
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 
 
 def _read_jsonl(path: Path) -> list[dict]:

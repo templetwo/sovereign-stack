@@ -389,6 +389,33 @@ class TestSnapshotKeys:
         # The newest honk is informational; the preview names the newest that wants an ack.
         assert snap["latest"]["honk"]["honk_id"] == "a"
 
+    def test_an_unreadable_honk_store_is_null_not_zero_in_the_snapshot(
+        self, running_server, panel_env, tmp_path
+    ):
+        """F6 (review of bfc5507): unreadable must not read as a healthy zero."""
+        import os
+        import stat
+
+        if os.geteuid() == 0:
+            pytest.skip("root bypasses file permissions, so EACCES cannot be produced")
+        (tmp_path / "nape").mkdir(exist_ok=True)
+        p = tmp_path / "nape" / "honks.jsonl"
+        p.write_text(json.dumps({"honk_id": "a", "level": "sharp"}) + "\n", encoding="utf-8")
+        host, port = running_server
+        mode = stat.S_IMODE(p.stat().st_mode)
+        os.chmod(p, 0)
+        try:
+            status, body, _ = _req(f"http://{host}:{port}/snapshot.json")
+        finally:
+            os.chmod(p, mode)
+        assert status == 200
+        snap = json.loads(body)
+        assert snap["unacked_honks"] is None
+        assert snap["honk_counts"]["all_time_unacked"] is None
+        assert snap["honk_counts"]["informational_unacked"] is None
+        # The page renders the null as a word, not as "null unacked".
+        assert "honks unreadable" in (STATIC / "app.js").read_text(encoding="utf-8")
+
     def test_honk_ledger_count_is_none_when_ledger_blind(
         self, running_server, panel_env, monkeypatch
     ):

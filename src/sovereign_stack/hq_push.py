@@ -335,14 +335,20 @@ def read_counters(root: Path) -> dict:
     """The two console counters the push link watches: all-time unacked nape honks
     and halt notes on disk. Integers or None (unreadable), never text.
 
-    The honk count is ``dashboard.count_unacked_honks``, which since 2026-10-21
+    The honk count is ``dashboard.count_unacked_honks``'s, which since 2026-10-21
     counts only honks that want an ack: an informational honk (level satisfied)
-    no longer raises it, so it no longer hands HQ a batch."""
+    no longer raises it, so it no longer hands HQ a batch. ``honk_keys`` names
+    those honks, from the same single read, for the EDGE trigger (review of
+    bfc5507, R3); it is a set compared against the previous poll's and never
+    reaches the batch text or the status."""
     from . import dashboard  # local import: dashboard is heavy and imports the world
 
-    out: dict = {"honks": None, "halts": None}
+    out: dict = {"honks": None, "honk_keys": None, "halts": None}
     with contextlib.suppress(Exception):
-        out["honks"] = int(dashboard.count_unacked_honks(root / "nape" / "honks.jsonl"))
+        census = dashboard.actionable_unacked_honks(root / "nape" / "honks.jsonl")
+        if census is not None:
+            out["honks"] = int(census[0])
+            out["honk_keys"] = frozenset(census[1])
     with contextlib.suppress(Exception):
         halts = root / "daemons" / "halts"
         out["halts"] = len(list(halts.glob("*.md"))) if halts.is_dir() else 0
@@ -531,6 +537,9 @@ class PushLink:
         self._observed = False
         self._base_rowid: int | None = None
         self._last: dict = {}
+        # The actionable unacked honk keys at the last readable poll: the honk
+        # trigger is EDGE-triggered on these (R3), the halt one stays a count.
+        self._honk_keys: frozenset | None = None
         self._pending: dict = {}
         self._pending_since: float | None = None
         # Per panel session:
@@ -632,7 +641,32 @@ class PushLink:
                     t["newest_hm"] = hm
                     self._set_base(r)
                     self._mark_pending()
-        for key in ("honks", "halts"):
+        # HONKS ARE EDGE-TRIGGERED ON NEW KEYS (review of bfc5507, R3). They
+        # used to share the level trigger halts still use (below): comparing
+        # counts, an ack plus a new honk inside one poll netted to zero and the
+        # new honk was never announced; once a ledger close began writing the
+        # nape ack, that netting was ordinary.
+        # `new` is how many actionable honks appeared since the last readable
+        # poll, however many closed meanwhile; `now` still shows the level. An
+        # unreadable poll changes no baseline, so what lands during it is
+        # announced when the store reads again.
+        honks_now = counters.get("honks")
+        honk_keys = counters.get("honk_keys")
+        if honks_now is None or honk_keys is None:
+            self._sources["honks"] = "unreadable"
+        else:
+            self._sources["honks"] = "ok"
+            prev_keys = self._honk_keys
+            fresh = honk_keys - prev_keys if (not first and prev_keys is not None) else ()
+            if fresh:
+                c = self._pending.setdefault("honks", {"new": 0, "now": honks_now})
+                c["new"] += len(fresh)
+                c["now"] = honks_now
+                self._mark_pending()
+            elif "honks" in self._pending:
+                self._pending["honks"]["now"] = honks_now
+            self._honk_keys = honk_keys
+        for key in ("halts",):
             now_v = counters.get(key)
             if now_v is None:
                 self._sources[key] = "unreadable"
@@ -646,8 +680,8 @@ class PushLink:
                 self._mark_pending()
             elif key in self._pending:
                 self._pending[key]["now"] = now_v
-            # Level-triggered: a drop (an ack, a removed note) lowers the baseline
-            # silently, and an ack plus a new honk inside one poll nets to zero.
+            # Level-triggered: a removed note lowers the baseline silently, and
+            # a removal plus a new note inside one poll nets to zero.
             self._last[key] = now_v
 
     def tick(self) -> None:

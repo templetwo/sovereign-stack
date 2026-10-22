@@ -204,3 +204,48 @@ def test_scan_honks_does_not_open_signal_ack_trigger(tmp_sovereign_root):
     latest = sl.load_latest(root)
     assert sl.signal_id_for("honk", "h-echo-ack") not in latest
     assert latest[sl.signal_id_for("honk", "h-real-drift")]["state"] == "open"
+
+
+def test_a_long_successful_ack_is_not_observed_after_the_autohook_cap(tmp_sovereign_root):
+    """F2 (review of bfc5507). The autohook flattens a result to 4000 characters
+    BEFORE nape parses it, so a successful signal_ack whose JSON ran longer was
+    truncated, failed the ok:true parse, got observed, and minted a honk with
+    trigger_tool signal_ack: one the console counts and the ledger never opens.
+    A 4,049-character success must neither be observed nor honk."""
+    from mcp.types import TextContent
+
+    import sovereign_stack.server as server
+    from sovereign_stack.dispatch_context import reset_caller_seat, set_caller_seat
+
+    root = tmp_sovereign_root
+    _write_seed_honk(root)
+    sl.scan_honks(root)
+    sid = sl.signal_id_for("honk", SEED_HONK_ID)
+
+    def payload_for(reason: str) -> str:
+        token = set_caller_seat("seat:watch-2/3")
+        try:
+            return sl.handle_signal_tool(
+                "signal_ack", {"signal_id": sid, "state": "acted", "reason": reason}, root=root
+            )
+        finally:
+            reset_caller_seat(token)
+
+    # Prime once, so every later ack carries the same result shape and the
+    # length calibration below holds (each is a real, successful re-ack).
+    payload_for("prime")
+    words = "the fix is complete and verified; the error is resolved and done. "
+    base = len(payload_for("x"))
+    reason = (words * 200)[: 4049 - base + 1]
+    payload = payload_for(reason)
+    assert len(payload) == 4049
+    assert json.loads(payload)["ok"] is True
+
+    flat = server._flatten_result([TextContent(type="text", text=payload)])
+    assert len(flat) == 4000  # the cap really cut it
+    before = _honk_rows(root)
+    NapeDaemon(root=str(root)).observe(
+        "signal_ack", {"signal_id": sid, "state": "acted", "reason": reason}, flat, SESSION
+    )
+    assert _honk_rows(root) == before, "a long successful ack must not honk"
+    assert [o for o in _obs_rows(root) if o.get("tool_name") == "signal_ack"] == []

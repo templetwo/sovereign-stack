@@ -65,7 +65,7 @@ from mcp.types import Tool
 
 from .dispatch_context import REFUSED_IDENTITY_ARGUMENTS, caller_seat
 from .memory import iter_thread_shards
-from .nape_daemon import NapeDaemon, is_informational_honk
+from .nape_daemon import HonkNotFound, NapeDaemon, is_informational_honk
 from .provenance import default_sovereign_root
 
 
@@ -1276,8 +1276,10 @@ def _mirror_close_to_nape(
       whose honks.jsonl does not exist, since its constructor makes the dir.
     - ``already_acked``: the honk already had a nape ack (re-ack, or an
       earlier nape_ack); no second row is written.
-    - ``written``: the ack is on disk, with a note naming the signal.
-    - ``failed``: an unexpected error. It is logged to diagnostics.log and
+    - ``written``: the ack is on disk (fsynced) and was read back under the
+      lock, with a note naming the signal.
+    - ``failed``: anything else, a store nape cannot read or decode and an ack
+      that did not read back included. It is logged to diagnostics.log and
       the ledger close stands.
 
     The ack goes through ``NapeDaemon.ack_once``, so through ``ack()`` and
@@ -1324,8 +1326,11 @@ def _mirror_close_to_nape(
                 "reason": "nape store absent (nape/honks.jsonl)",
             }
         record = NapeDaemon(root=str(nape_root)).ack_once(honk_id, note)
-    except ValueError as exc:
-        # Nape's own refusal: the honk is not in honks.jsonl.
+    except HonkNotFound as exc:
+        # Nape's own refusal, and ONLY that (review of bfc5507, R2): the honk is
+        # not in honks.jsonl. Caught by its own type, not as ValueError, because
+        # UnicodeDecodeError is a ValueError too, and a store nape cannot decode
+        # is a failed read, not a refused id.
         _log_diagnostic(root, f"nape ack mirror skipped for signal {signal_id}", exc)
         return {"status": "skipped", "honk_id": honk_id, "reason": str(exc)}
     except Exception as exc:  # noqa: BLE001 — the ledger close already landed

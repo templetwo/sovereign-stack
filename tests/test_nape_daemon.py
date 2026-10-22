@@ -1736,3 +1736,63 @@ class TestAckOnce:
             m.setattr(nd.fcntl, "flock", lambda fd, op: None)
             assert race(tmp_path / "unlocked") == 2
         assert race(tmp_path / "locked") == 1
+
+
+# =============================================================================
+# R1 (review of bfc5507): an ack is never glued onto a previous line, an
+# ack_once that cannot read its own ack back does not report success, and the
+# ack is fsynced. Each test failed on bfc5507.
+# =============================================================================
+
+
+class TestAckDurability:
+    def _rows(self, path):
+        return [json.loads(x) for x in path.read_text(encoding="utf-8").splitlines() if x.strip()]
+
+    def test_an_append_after_a_record_missing_its_newline_starts_a_new_line(self, tmp_path):
+        from sovereign_stack import nape_daemon as nd
+
+        p = tmp_path / "acks.jsonl"
+        p.write_text('{"honk_id": "h-1"}', encoding="utf-8")  # no trailing newline
+        nd._append_jsonl(p, {"honk_id": "h-2"})
+        assert [r["honk_id"] for r in self._rows(p)] == ["h-1", "h-2"]
+        assert p.read_text(encoding="utf-8").endswith("\n")
+
+    def test_an_append_to_a_well_formed_file_adds_no_blank_line(self, tmp_path):
+        from sovereign_stack import nape_daemon as nd
+
+        p = tmp_path / "acks.jsonl"
+        p.write_text('{"honk_id": "h-1"}\n', encoding="utf-8")
+        nd._append_jsonl(p, {"honk_id": "h-2"})
+        assert p.read_text(encoding="utf-8").count("\n") == 2
+
+    def test_ack_once_does_not_report_an_ack_it_cannot_read_back(self, tmp_path, monkeypatch):
+        from sovereign_stack import nape_daemon as nd
+
+        daemon = nd.NapeDaemon(root=str(tmp_path))
+        honk = daemon.emit_external_honk("s", "declare_before_verify", "record_insight", "seen")
+        # An unrelated ack, so the file exists and only the read-back can tell.
+        (tmp_path / "nape" / "acks.jsonl").write_text('{"honk_id": "other"}\n', encoding="utf-8")
+        monkeypatch.setattr(nd, "_append_jsonl", lambda path, record: None)  # a lost write
+        with pytest.raises(Exception) as excinfo:
+            daemon.ack_once(honk["honk_id"], "mirror")
+        assert type(excinfo.value).__name__ == "AckNotPersisted"
+
+    def test_an_ack_is_fsynced(self, tmp_path, monkeypatch):
+        import os
+
+        from sovereign_stack import nape_daemon as nd
+
+        daemon = nd.NapeDaemon(root=str(tmp_path))
+        honk = daemon.emit_external_honk("s", "declare_before_verify", "record_insight", "seen")
+        acks = tmp_path / "nape" / "acks.jsonl"
+        synced = []
+        real_fsync = os.fsync
+
+        def recording_fsync(fd):
+            synced.append(os.fstat(fd).st_ino)
+            return real_fsync(fd)
+
+        monkeypatch.setattr(os, "fsync", recording_fsync)
+        daemon.ack(honk["honk_id"], "by hand")
+        assert acks.stat().st_ino in synced
