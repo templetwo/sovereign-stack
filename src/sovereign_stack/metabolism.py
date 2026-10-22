@@ -18,6 +18,7 @@ from pathlib import Path
 
 from mcp.types import TextContent, Tool
 
+from .live_store_guard import refuse_if_test_targets_live
 from .memory import iter_thread_shards, load_entries
 from .provenance import (
     append_supersession,
@@ -70,6 +71,7 @@ def _archive_test_artifacts_impl(chronicle_dir: Path) -> dict:
     full original entry plus _archived_at, _archived_reason, _original_file.
     Empty files/domains after cleanup are removed.
     """
+    refuse_if_test_targets_live(chronicle_dir / "insights", store="chronicle/insights")
     insights_dir = chronicle_dir / "insights"
     if not insights_dir.exists():
         return {"archived": 0, "files_modified": 0, "domains_removed": 0}
@@ -637,6 +639,7 @@ async def handle_metabolism_tool(name, arguments):
 
         # Find and retire the hypothesis
         insights_dir = CHRONICLE_DIR / "insights"
+        refuse_if_test_targets_live(insights_dir, store="chronicle/insights")
         retired = False
         retired_entries: list[tuple[str, dict]] = []  # (claim_id, pre-mutation snapshot)
         if not insights_dir.exists():

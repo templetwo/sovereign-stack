@@ -25,6 +25,7 @@ from typing import Any
 from . import protected as protected_module
 from . import provenance
 from .coherence import Coherence
+from .live_store_guard import refuse_if_test_targets_live
 
 # Pattern: "(1) ... (2) ..." with sequential numbered items is a bundle.
 # Requires at least items (1) and (2) so a single parenthetical "(e.g. foo)" is never mistaken.
@@ -1173,6 +1174,7 @@ class ExperientialMemory:
             any receipt verification or ledger write, so a retry can never
             double-write supersession records.
         """
+        refuse_if_test_targets_live(self.insights_dir, store="chronicle/insights")
         # v1.7.0 provenance params — validate SHAPES first (fail fast, before
         # the dedup check); ref resolution and ledger writes happen only
         # after dedup so a retry duplicate never touches the ledger.
@@ -1434,6 +1436,7 @@ class ExperientialMemory:
         Returns:
             Path to the recorded learning
         """
+        refuse_if_test_targets_live(self.learnings_dir, store="chronicle/learnings")
         # FAIL CLOSED ON THE LABEL, and this is the specimen that earned it: a
         # propose_learning proposal filed 2026-08-28 carried a domain with a
         # "/" in it, was approved, and died at commit — this path addresses its
@@ -1484,6 +1487,7 @@ class ExperientialMemory:
         Returns:
             Path to the recorded transformation
         """
+        refuse_if_test_targets_live(self.transformations_dir, store="chronicle/transformations")
         timestamp = datetime.now(timezone.utc)
         session_id = session_id or f"session_{timestamp.strftime('%Y%m%d_%H%M%S')}"
 
@@ -1538,6 +1542,7 @@ class ExperientialMemory:
         Returns:
             Path to the recorded thread
         """
+        refuse_if_test_targets_live(self.threads_dir, store="chronicle/open_threads")
         # Same gate, same reason as record_learning above: this domain becomes
         # a filename, and a "/" in it asked for a directory nothing created.
         domain = _normalize_domain(domain)
@@ -1619,6 +1624,7 @@ class ExperientialMemory:
             Path to the new ground_truth insight, or "" when no unresolved
             thread in `domain` matched `question_fragment`.
         """
+        refuse_if_test_targets_live(self.threads_dir, store="chronicle/open_threads")
         resolved_thread_id: str | None = None
         resolved_timestamp: str | None = None
         now = datetime.now(timezone.utc).isoformat()
@@ -1687,6 +1693,7 @@ class ExperientialMemory:
         Returns:
             Path to the new ground_truth insight (or empty string if not found).
         """
+        refuse_if_test_targets_live(self.threads_dir, store="chronicle/open_threads")
         resolved_domain: str | None = None
         resolved_question: str | None = None
         resolved_timestamp: str | None = None
@@ -1971,6 +1978,9 @@ class ExperientialMemory:
         Raises:
             ValueError: If thread_id or note is empty.
         """
+        refuse_if_test_targets_live(
+            self.thread_touches_file, store="chronicle/thread_touches.jsonl"
+        )
         if not thread_id or not thread_id.strip():
             raise ValueError("thread_id is required")
         if not note or not note.strip():
@@ -2634,6 +2644,7 @@ class ExperientialMemory:
             The stored provenance record (archive_id, descriptor, sha256,
             byte_len, path, source/vector/conversation, tags, timestamp).
         """
+        refuse_if_test_targets_live(self.archives_dir, store="chronicle/archives")
         timestamp = datetime.now(timezone.utc)
         session_id = session_id or f"session_{timestamp.strftime('%Y%m%d_%H%M%S')}"
 

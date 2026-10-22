@@ -41,6 +41,8 @@ from collections.abc import Callable, Iterator
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .live_store_guard import refuse_if_test_targets_live
+
 # ── Constants ────────────────────────────────────────────────────────────────
 
 # ASCII unit separator: cannot appear in JSON-decoded chronicle text by
@@ -988,6 +990,7 @@ def append_supersession(ledger_path: Path, record: dict) -> dict:
     first write, never import). Validates the action/id core so a
     hand-built record can't poison the fold. Returns the record.
     """
+    refuse_if_test_targets_live(ledger_path, store="chronicle/supersessions.jsonl")
     if record.get("action") not in SUPERSESSION_ACTIONS:
         raise SupersessionError(f"invalid supersession action {record.get('action')!r}")
     sid = record.get("superseded_id")

@@ -42,7 +42,7 @@ NOT ENOUGH HERE — `handoff_engine` was constructed at import and keeps its own
 tests would pass for the wrong reason. The singleton itself is replaced.
 
 The corpus is seeded as JSON FILES rather than through `HandoffEngine.write()`
-on purpose: `_refuse_live_store_during_tests` guards that method under pytest,
+on purpose: `refuse_if_test_targets_live` guards that method under pytest,
 and seeding through the writer would couple these tests to the writer's own
 filename and consumption conventions.
 """
