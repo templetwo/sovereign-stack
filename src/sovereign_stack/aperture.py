@@ -218,14 +218,18 @@ def measure_aperture(
         "default_shown": _shown_or_default(
             door_shown.get("insights"), _RECALL_INSIGHTS_DEFAULT_LIMIT
         ),
-        "default_order": "newest",
+        # The tool's default moved with design B1: a query that carries a term
+        # ranks by relevance, and only a bare browse is newest-first. Both
+        # strings below travel in /api/heartbeat and the note is printed on the
+        # full door, so they say what the dispatch now does.
+        "default_order": "relevance when the query carries a term, newest for a bare browse",
         "orders_available": ["newest", "oldest", "relevance"],
         "envelope": "recall_insights returns total_matched / truncated / continuation",
         "widen_with": "recall_insights(limit=N, order='relevance', offset=N)",
         "note": (
-            "the default order is 'newest', which returns recency rather than relevance "
-            "— a query about an old subject is answered with the newest writing in the "
-            "house unless order='relevance' is passed"
+            "a query ranks by relevance by default; a bare browse (domain only, or no "
+            "query) is newest-first, so it returns the newest writing in the house, not "
+            "the most relevant; every response names the order applied in order_used"
         ),
     }
 

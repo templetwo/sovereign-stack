@@ -3601,6 +3601,28 @@ async def _dispatch_registered_tool(name: str, arguments: dict):
         start_date = arguments.get("start_date")
         end_date = arguments.get("end_date")
         since_last_reflection = arguments.get("since_last_reflection", False)
+        # RELEVANCE WHEN THE QUERY CARRIES A TERM, NEWEST FOR A BARE BROWSE
+        # (design B1). The default was "newest" for every call, so a search
+        # with no `order` returned the most recent matches anywhere in the
+        # chronicle instead of the best ones (the 2026-08-06 A/B: 0 of 8 on
+        # topic under newest, 8 of 8 under relevance, same matches). Only the
+        # TOOL's default moves: memory.py's library default stays "newest", so
+        # in-process callers keep their exact payload. A query of only
+        # whitespace is a bare browse: the library splits the query on
+        # whitespace, and str.strip() and str.split() share one definition of
+        # it, so this test is true exactly when the library has a term to
+        # rank by.
+        query_has_term = bool((query or "").strip())
+        order = arguments.get("order") or ("relevance" if query_has_term else "newest")
+        # The order the library actually applies, which is what the envelope
+        # names. It mirrors the library's sort: "oldest"; "relevance" only
+        # when there is a term to rank by; newest for everything else. So an
+        # explicit "relevance" with no term reports "newest", the order the
+        # items are really in.
+        if order == "oldest" or (order == "relevance" and query_has_term):
+            order_used = order
+        else:
+            order_used = "newest"
         result = experiential.recall_insights(
             query=query,
             domain=domain,
@@ -3621,7 +3643,7 @@ async def _dispatch_registered_tool(name: str, arguments: dict):
             with_ids=arguments.get("with_ids", True),
             exclude_superseded=arguments.get("exclude_superseded", False),
             domain_contains=arguments.get("domain_contains"),
-            order=arguments.get("order", "newest"),
+            order=order,
             offset=arguments.get("offset", 0),
             content_class=arguments.get("content_class"),
             exclude_content_class=arguments.get("exclude_content_class"),
@@ -3631,6 +3653,11 @@ async def _dispatch_registered_tool(name: str, arguments: dict):
             # bare array that implies completeness.
             envelope=True,
         )
+        # Added here, not in the library's envelope, so the library's Schema v1
+        # shape stays exactly as its own callers and tests know it, and every
+        # response this tool returns carries both fields.
+        result["order_used"] = order_used
+        result["order_defaulted"] = not arguments.get("order")
         return [TextContent(type="text", text=json.dumps(result, indent=2))]
 
     if name == "check_mistakes":

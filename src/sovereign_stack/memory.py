@@ -618,17 +618,27 @@ RECALL_INSIGHTS_SCHEMA_EXTENSIONS = {
             "are given. Omit (default) to match all domains (backward-compatible)."
         ),
     },
+    # NO "default" KEY, ON PURPOSE (design B1). The tool's default depends on
+    # `query`: relevance when the query carries a term, newest for a bare
+    # browse. JSON Schema can only state one default, and stating "newest"
+    # here would be a promise the handler breaks on every search, which is
+    # the schema/handler mismatch tests/test_contract_walker.py exists to
+    # catch. This describes the TOOL; the library's own `order="newest"`
+    # default on ExperientialMemory.recall_insights is unchanged.
     "order": {
         "type": "string",
         "enum": ["newest", "oldest", "relevance"],
-        "default": "newest",
         "description": (
-            "Sort order for returned insights. "
-            "'newest' (default) — newest-first by timestamp (pre-existing behavior). "
+            "Sort order for returned insights. When omitted: 'relevance' if `query` "
+            "carries a term (any non-whitespace text), 'newest' for a bare browse (no "
+            "query, or a query of only whitespace). The envelope names the order "
+            "actually applied in `order_used` and says in `order_defaulted` whether "
+            "`order` was left out. "
+            "'newest' — newest-first by timestamp. "
             "'oldest' — oldest-first; surfaces entries buried under recent migrations. "
-            "'relevance' — when query is given, ranks by number of query terms matched "
-            "(descending) with no recency boost, so an old exact match outranks a fresh "
-            "partial match. Falls back to 'newest' when no query is given."
+            "'relevance' — ranks by number of query terms matched (descending) with no "
+            "recency boost, so an old exact match outranks a fresh partial match; with "
+            "no query term it sorts newest, and `order_used` says 'newest'."
         ),
     },
     "offset": {

@@ -55,7 +55,9 @@ from tests.test_nape_autohook import _isolated_server
 SESSION = "recall-claim-id"
 DOMAIN = "claim-id-probe"
 
-# The exact envelope contract (Schema v1) this change must not disturb.
+# The tool's exact envelope contract, which this change must not disturb: the
+# eight Schema v1 fields the library builds, plus the two the dispatch adds to
+# name the order (design B1: order_used, order_defaulted).
 ENVELOPE_KEYS = {
     "items",
     "returned",
@@ -65,6 +67,8 @@ ENVELOPE_KEYS = {
     "truncated",
     "partial_reasons",
     "continuation",
+    "order_used",
+    "order_defaulted",
 }
 
 
