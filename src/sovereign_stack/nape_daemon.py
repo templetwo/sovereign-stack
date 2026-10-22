@@ -23,7 +23,9 @@ the audit trail intact regardless of what the instance claimed to do.
 
 from __future__ import annotations
 
+import fcntl
 import json
+import os
 import re
 import uuid
 from collections.abc import Callable
@@ -673,6 +675,31 @@ PATTERN_LEVELS: dict[str, str] = {
     "unreceipted_ground_truth": "low",  # v1.7.0: sentinel ground_truth with no verified receipt.
 }
 
+# Levels whose honks are INFORMATIONAL: positive signal with nothing to
+# acknowledge. `satisfied` is the only one (clean_verify_declare above). This is
+# the ONE definition every honk counter reads: summary() and current_honks()
+# below, the console's unacked count and preview (dashboard.py), and the signal
+# ledger's honk ingestion (signal_ledger.scan_honks). Added 2026-10-21, when the
+# console was found counting satisfied honks that summary() never had, raising
+# its counter and pushing HQ a batch for each one. A level added here leaves
+# every counter at once instead of one of them.
+INFORMATIONAL_LEVELS: frozenset = frozenset({"satisfied"})
+
+
+def is_informational_honk(rec: Any) -> bool:
+    """True for a honk that needs no acknowledgement (see INFORMATIONAL_LEVELS).
+
+    Keyed on ``level``, which ``_build_honk`` stamps from PATTERN_LEVELS. A
+    record with no level, a non-string level, or a level not listed is NOT
+    informational: a shape this cannot read stays counted as wanting attention
+    rather than quietly leaving the count.
+    """
+    if not isinstance(rec, dict):
+        return False
+    level = rec.get("level")
+    return isinstance(level, str) and level in INFORMATIONAL_LEVELS
+
+
 # The receipt-count suffix record_insight appends when verified_by receipts
 # were supplied: " (receipts: N verified, M attested)". Only the verified
 # count silences the unreceipted_ground_truth honk — attestation is a
@@ -686,21 +713,50 @@ WINDOW_PREMATURE = 10  # scan back 10 calls for error indicators
 WINDOW_REPEATED = 20  # scan back 20 calls for repeated error class
 
 
+# How a successful signal_ack result BEGINS: handle_signal_tool puts "ok"
+# first. The beginning survives the caps the end does not (review of bfc5507,
+# F2): the autohook flattens a result to 4000 characters (server._flatten_result)
+# and _result_to_str cuts at 4096, so a success whose JSON ran longer arrived
+# truncated, failed to parse, was observed, and minted a honk with trigger_tool
+# signal_ack, one the console counts and the ledger never opens.
+_OK_TRUE_PREFIX = re.compile(r'\s*\{\s*"ok"\s*:\s*true\b')
+
+
 def _successful_signal_ack(tool_name: str, result: Any) -> bool:
-    """True when this is a signal_ack whose result parses as JSON with ok: true.
+    """True when this is a signal_ack whose result is JSON with ok: true.
 
     A successful ack is the close of an old drift. Observing it feeds the
     original concern (and the caller's reason) back through the detectors and
     recurses. Failures (`ok: false`) and unparseable results stay visible so
     repeated_mistake and premature_summary still see real ack failures.
+
+    A result that no longer parses because a cap cut its tail still counts as
+    a success when it BEGINS ``{"ok": true`` (see _OK_TRUE_PREFIX). A failure
+    begins ``{"ok": false`` and stays visible, truncated or not.
     """
     if tool_name != "signal_ack":
         return False
+    text = _result_to_str(result)
     try:
-        payload = json.loads(_result_to_str(result))
+        payload = json.loads(text)
     except json.JSONDecodeError:
-        return False
+        return bool(_OK_TRUE_PREFIX.match(text))
     return isinstance(payload, dict) and payload.get("ok") is True
+
+
+class HonkNotFound(ValueError):
+    """``ack()`` refused: no honk with that honk_id is in honks.jsonl.
+
+    A ValueError, so every existing ``except ValueError`` (the nape_ack tool's
+    handler included) keeps working. It exists so a caller can tell nape
+    REFUSING an id from nape FAILING TO READ its store: UnicodeDecodeError is
+    a ValueError too, and the signal ledger's mirror used to report a store it
+    could not decode as nape refusing the id (review of bfc5507, R2).
+    """
+
+
+class AckNotPersisted(RuntimeError):
+    """``ack_once`` appended an ack and could not read it back from acks.jsonl."""
 
 
 # =============================================================================
@@ -827,8 +883,9 @@ class NapeDaemon:
         limit : int
             Maximum number of honks to return. Defaults to 10.
         include_satisfied : bool
-            When False, satisfied-level honks are excluded from the result.
-            Defaults to True (preserves existing behavior).
+            When False, informational honks (``is_informational_honk``: the
+            satisfied level) are excluded from the result. Defaults to True
+            (preserves existing behavior).
 
         Returns
         -------
@@ -850,7 +907,7 @@ class NapeDaemon:
             for h in honks
             if h.get("honk_id") not in acked_ids
             and (session_id is None or h.get("session_id") == session_id)
-            and (include_satisfied or h.get("level") != "satisfied")
+            and (include_satisfied or not is_informational_honk(h))
         ]
 
         # Newest first.
@@ -952,7 +1009,13 @@ class NapeDaemon:
         Raises
         ------
         ValueError
-            If honk_id is empty or not found in honks.jsonl.
+            If honk_id is empty.
+        HonkNotFound
+            (a ValueError) if no honk with that id is in honks.jsonl.
+
+        The ack is fsynced before this returns, as the signal ledger's close
+        is: an ack reported as written must survive a crash (review of
+        bfc5507, R1).
         """
         if not honk_id:
             raise ValueError(
@@ -963,7 +1026,7 @@ class NapeDaemon:
         honks = _read_jsonl(self._honks_path)
         matching = [h for h in honks if h.get("honk_id") == honk_id]
         if not matching:
-            raise ValueError(
+            raise HonkNotFound(
                 f"No honk found with honk_id {honk_id!r}. Check current_honks() for valid IDs."
             )
 
@@ -974,7 +1037,61 @@ class NapeDaemon:
             "acked_at": _now_iso(),
         }
         _append_jsonl(self._acks_path, ack_record)
+        _fsync_path(self._acks_path)
         return ack_record
+
+    def ack_once(self, honk_id: str, note: str) -> dict | None:
+        """Acknowledge a honk unless an acknowledgement for it already exists.
+
+        Returns the ack record written, or None when the honk was already
+        acknowledged. Raises what ``ack()`` raises (ValueError for an empty
+        honk_id, HonkNotFound for a honk not in honks.jsonl), FileNotFoundError
+        when honks.jsonl is absent, a decode error when a store holds bytes
+        that are not UTF-8, and AckNotPersisted when the ack it appended does
+        not read back.
+
+        WRITTEN MEANS READ BACK (review of bfc5507, R1). Still under the lock,
+        the acks are re-read after the append, and the new ack_id must be there
+        with this honk_id. ``ack()`` returning a record proves only that an
+        append was attempted: a write that never landed, or landed where no
+        reader can parse it, would otherwise be reported to the ledger's mirror
+        as ``written`` while the console kept counting the honk.
+
+        Added 2026-10-21 for the signal ledger: a ``signal_ack`` close of a
+        honk-source signal mirrors itself here, so the console's count and the
+        ledger's open count move together. A seat may ack the same signal more
+        than once, so the mirror has to be idempotent, and ``ack()`` is not.
+
+        THE CHECK AND THE APPEND HAPPEN UNDER ONE LOCK, so two ``ack_once``
+        callers racing on one honk write one ack, not two. The lock is an
+        exclusive flock on honks.jsonl opened READ-ONLY, so taking it can never
+        create or change a file. The append still goes through ``ack()``, and
+        so through ``_append_jsonl``, the one funnel every nape store write
+        passes. The lock serializes ``ack_once`` callers only: a plain
+        ``ack()`` (the nape_ack tool) takes no lock and has never deduplicated,
+        so racing one can still leave a duplicate ack row. Every reader folds
+        acks into a set of honk_ids, so a duplicate changes no count.
+        """
+        with self._honks_path.open("rb") as lock_fh:
+            fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
+            try:
+                if honk_id in self._acked_ids():
+                    return None
+                record = self.ack(honk_id=honk_id, note=note)
+                landed = any(
+                    isinstance(a, dict)
+                    and a.get("ack_id") == record["ack_id"]
+                    and a.get("honk_id") == honk_id
+                    for a in _read_jsonl(self._acks_path)
+                )
+                if not landed:
+                    raise AckNotPersisted(
+                        f"ack {record['ack_id']} for honk {honk_id!r} did not read back "
+                        "from acks.jsonl"
+                    )
+                return record
+            finally:
+                fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
 
     def summary(self, session_id: str | None) -> dict:
         """
@@ -1004,7 +1121,8 @@ class NapeDaemon:
             level = honk.get("level", "low")
             counts[level] = counts.get(level, 0) + 1
             # Satisfied honks are positive signal — they do not count as backlog.
-            if honk.get("honk_id") not in acked_ids and level != "satisfied":
+            # Same predicate the console and the signal ledger read.
+            if honk.get("honk_id") not in acked_ids and not is_informational_honk(honk):
                 unacked += 1
 
         return {
@@ -1563,6 +1681,13 @@ def _append_jsonl(path: Path, record: dict) -> None:
 
     Creates the file if it does not exist. Never truncates or rewrites.
 
+    NEVER GLUED ONTO A PREVIOUS LINE (review of bfc5507, R1). When the file is
+    non-empty and its last byte is not a newline (a writer that died
+    mid-line, a hand edit), a newline goes in first. Without it the new record
+    and the previous one fused into one unparseable line and BOTH vanished
+    from every reader: an ack written that way hid itself and the ack before
+    it, so the console count ROSE on a close.
+
     Parameters
     ----------
     path : Path
@@ -1571,8 +1696,26 @@ def _append_jsonl(path: Path, record: dict) -> None:
         Must be JSON-serializable. A TypeError is raised at json.dumps time
         if it is not — callers should use _safe_truncate() on nested objects.
     """
-    with path.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+    data = (json.dumps(record, ensure_ascii=False) + "\n").encode("utf-8")
+    with path.open("ab+") as fh:
+        end = fh.seek(0, os.SEEK_END)
+        if end:
+            fh.seek(end - 1)
+            if fh.read(1) != b"\n":
+                data = b"\n" + data
+        fh.write(data)
+
+
+def _fsync_path(path: Path) -> None:
+    """Flush a store file to the device. The ack path calls it so an ack that is
+    reported as written survives a crash, as ``signal_ledger._append`` does for
+    a close. A read-only descriptor is enough (fsync flushes the file, not the
+    descriptor), and opening one can never create or change the file."""
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 
 
 def _read_jsonl(path: Path) -> list[dict]:

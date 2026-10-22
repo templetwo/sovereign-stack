@@ -576,7 +576,9 @@ RETIRED_TOOLS: dict[str, RetiredTool] = {
         "signals_summary(mode='list', source='honk') is the honk queue: one "
         "row per honk with signal_id, kind (the Nape pattern), opened_at, "
         "owner, state and the concern text — the identifier and the body the "
-        "count-only view could not supply. Pass that signal_id to signal_ack.",
+        "count-only view could not supply. Pass that signal_id to signal_ack. "
+        "Informational honks (level satisfied) need no ack and open no row "
+        "since 2026-10-21; nape_summary still counts them.",
     ),
     "nape_honks_with_history": _retired(
         "signals_summary",

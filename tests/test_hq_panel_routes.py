@@ -358,6 +358,64 @@ class TestSnapshotKeys:
         assert "since the nape daemon began" in hc["all_time_label"]
         assert "signal ledger" in hc["ledger_label"]
 
+    def test_honk_counts_carry_informational_honks_apart(
+        self, running_server, panel_env, tmp_path, monkeypatch
+    ):
+        """2026-10-21: the console count leaves informational honks out, and the
+        snapshot carries them as their own labelled number rather than nowhere."""
+        (tmp_path / "nape").mkdir(exist_ok=True)
+        (tmp_path / "nape" / "honks.jsonl").write_text(
+            "".join(
+                json.dumps(h) + "\n"
+                for h in (
+                    {"honk_id": "a", "level": "sharp", "pattern": "declare_before_verify"},
+                    {"honk_id": "s1", "level": "satisfied", "pattern": "clean_verify_declare"},
+                    {"honk_id": "s2", "level": "satisfied", "pattern": "clean_verify_declare"},
+                )
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(
+            web, "heartbeat_field", lambda: {"ingestion": "ok", "by_source": {"honk": 1}}
+        )
+        host, port = running_server
+        _, body, _ = _req(f"http://{host}:{port}/snapshot.json")
+        snap = json.loads(body)
+        hc = snap["honk_counts"]
+        assert snap["unacked_honks"] == hc["all_time_unacked"] == hc["ledger_open"] == 1
+        assert hc["informational_unacked"] == 2
+        assert "satisfied" in hc["informational_label"]
+        assert "informational" in hc["all_time_label"]
+        # The newest honk is informational; the preview names the newest that wants an ack.
+        assert snap["latest"]["honk"]["honk_id"] == "a"
+
+    def test_an_unreadable_honk_store_is_null_not_zero_in_the_snapshot(
+        self, running_server, panel_env, tmp_path
+    ):
+        """F6 (review of bfc5507): unreadable must not read as a healthy zero."""
+        import os
+        import stat
+
+        if os.geteuid() == 0:
+            pytest.skip("root bypasses file permissions, so EACCES cannot be produced")
+        (tmp_path / "nape").mkdir(exist_ok=True)
+        p = tmp_path / "nape" / "honks.jsonl"
+        p.write_text(json.dumps({"honk_id": "a", "level": "sharp"}) + "\n", encoding="utf-8")
+        host, port = running_server
+        mode = stat.S_IMODE(p.stat().st_mode)
+        os.chmod(p, 0)
+        try:
+            status, body, _ = _req(f"http://{host}:{port}/snapshot.json")
+        finally:
+            os.chmod(p, mode)
+        assert status == 200
+        snap = json.loads(body)
+        assert snap["unacked_honks"] is None
+        assert snap["honk_counts"]["all_time_unacked"] is None
+        assert snap["honk_counts"]["informational_unacked"] is None
+        # The page renders the null as a word, not as "null unacked".
+        assert "honks unreadable" in (STATIC / "app.js").read_text(encoding="utf-8")
+
     def test_honk_ledger_count_is_none_when_ledger_blind(
         self, running_server, panel_env, monkeypatch
     ):

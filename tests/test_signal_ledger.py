@@ -793,3 +793,479 @@ class TestSignalsSummarySourceFilter:
         assert out["by_source"]["honk"]["open"] == 1
         bad = json.loads(sl.handle_signal_tool("signals_summary", {"source": "nope"}, root=root))
         assert bad["ok"] is False
+
+
+# ── ONE COUNTER ACROSS TWO STORES (2026-10-21) ──────────────────────────────
+#
+# The console counts nape/honks.jsonl against nape/acks.jsonl; the ledger
+# counts open honk-source signals. The sync was one-way: scan_honks turns a
+# nape ack into a ledger close, but a signal_ack close of a honk signal never
+# wrote a nape ack, so every ledger close left the console counting a honk the
+# ledger called closed (2026-10-14: console 1064, ledger 59). These tests read
+# both counters the way their production callers do: the console through
+# dashboard.count_unacked_honks, the ledger through the latest-row fold.
+
+from sovereign_stack.dashboard import count_unacked_honks  # noqa: E402
+from sovereign_stack.dispatch_context import reset_caller_seat, set_caller_seat  # noqa: E402
+
+ONE_COUNTER_SEAT = "seat:hq-test-seat"
+
+
+def _honk(hid: str, level: str = "sharp", pattern: str = "declare_before_verify") -> dict:
+    return {
+        "honk_id": hid,
+        "session_id": "one-counter-session",
+        "timestamp": "2026-10-21T12:00:00Z",
+        "level": level,
+        "pattern": pattern,
+        "trigger_tool": "record_insight",
+        "observation": f"{hid} observation",
+    }
+
+
+def _console(root: Path) -> int:
+    return count_unacked_honks(root / "nape" / "honks.jsonl")
+
+
+def _ledger_open_honks(root: Path) -> int:
+    return sum(
+        1
+        for row in sl.load_latest(root).values()
+        if row.get("source") == "honk" and row.get("state") == "open"
+    )
+
+
+def _seat_ack(root: Path, sid: str, state: str = "acted", reason: str = "checked by hand") -> dict:
+    token = set_caller_seat(ONE_COUNTER_SEAT)
+    try:
+        return json.loads(
+            sl.handle_signal_tool(
+                "signal_ack", {"signal_id": sid, "state": state, "reason": reason}, root=root
+            )
+        )
+    finally:
+        reset_caller_seat(token)
+
+
+def _ack_rows(root: Path) -> list[dict]:
+    path = root / "nape" / "acks.jsonl"
+    if not path.exists():
+        return []
+    return [json.loads(x) for x in path.read_text(encoding="utf-8").splitlines() if x.strip()]
+
+
+def test_signal_ack_of_a_honk_signal_writes_the_nape_ack(tmp_sovereign_root):
+    """The regression: a ledger close must close the console's honk too."""
+    root = tmp_sovereign_root
+    _write_jsonl(root / "nape" / "honks.jsonl", [_honk("h-sharp")])
+    assert sl.scan_honks(root).opened == 1
+    sid = sl.signal_id_for("honk", "h-sharp")
+    assert _console(root) == 1
+    out = _seat_ack(root, sid)
+    assert out["ok"] is True and out["row"]["state"] == "acted"
+    assert _console(root) == 0
+    acks = _ack_rows(root)
+    assert [a["honk_id"] for a in acks] == ["h-sharp"]
+    assert sid in acks[0]["note"]
+
+
+def test_console_and_ledger_agree_through_scan_and_close(tmp_sovereign_root):
+    """Two actionable honks and one informational: both counters read 2, then 1."""
+    root = tmp_sovereign_root
+    _write_jsonl(
+        root / "nape" / "honks.jsonl",
+        [
+            _honk("h-a"),
+            _honk("h-b", level="uneasy", pattern="repeated_mistake"),
+            _honk("h-s", level="satisfied", pattern="clean_verify_declare"),
+        ],
+    )
+    sl.scan_honks(root)
+    assert _console(root) == _ledger_open_honks(root) == 2
+    out = _seat_ack(root, sl.signal_id_for("honk", "h-a"))
+    assert out["ok"] is True
+    assert _console(root) == _ledger_open_honks(root) == 1
+
+
+def test_re_ack_writes_no_second_nape_ack(tmp_sovereign_root):
+    root = tmp_sovereign_root
+    _write_jsonl(root / "nape" / "honks.jsonl", [_honk("h-1")])
+    sl.scan_honks(root)
+    sid = sl.signal_id_for("honk", "h-1")
+    first = _seat_ack(root, sid)
+    assert first["nape_ack"]["status"] == "written"
+    assert first["nape_ack"]["honk_id"] == "h-1"
+    second = _seat_ack(root, sid, state="dismissed", reason="second look, still fine")
+    assert second["ok"] is True
+    assert second["nape_ack"] == {"status": "already_acked", "honk_id": "h-1"}
+    assert [a["honk_id"] for a in _ack_rows(root)] == ["h-1"]
+
+
+def test_a_honk_nape_acked_before_the_close_is_not_acked_twice(tmp_sovereign_root):
+    """nape_ack lands first (no sweep since), then the seat closes the signal."""
+    from sovereign_stack.nape_daemon import NapeDaemon
+
+    root = tmp_sovereign_root
+    _write_jsonl(root / "nape" / "honks.jsonl", [_honk("h-1")])
+    sl.scan_honks(root)
+    NapeDaemon(root=str(root)).ack("h-1", "acked through the nape_ack tool")
+    out = _seat_ack(root, sl.signal_id_for("honk", "h-1"))
+    assert out["ok"] is True
+    assert out["nape_ack"]["status"] == "already_acked"
+    assert len(_ack_rows(root)) == 1
+
+
+def test_the_nape_ack_note_names_the_signal_state_and_closer(tmp_sovereign_root):
+    root = tmp_sovereign_root
+    _write_jsonl(root / "nape" / "honks.jsonl", [_honk("h-1")])
+    sl.scan_honks(root)
+    sid = sl.signal_id_for("honk", "h-1")
+    out = _seat_ack(root, sid, state="dismissed", reason="false positive")
+    (ack,) = _ack_rows(root)
+    assert ack["ack_id"] == out["nape_ack"]["ack_id"]
+    assert set(ack) == {"ack_id", "honk_id", "note", "acked_at"}  # nape's own shape
+    assert f"signal_id={sid}" in ack["note"]
+    assert "state=dismissed" in ack["note"]
+    assert f"closed_by={ONE_COUNTER_SEAT}" in ack["note"]
+
+
+def test_missing_nape_store_never_raises_and_is_never_created(tmp_sovereign_root):
+    root = tmp_sovereign_root
+    (root / "nape").rmdir()  # the sandbox pre-creates it empty; take it away
+    sl.open_signal(
+        source="honk",
+        native_id="h-gone",
+        produced_at="2026-10-21T12:00:00Z",
+        root=root,
+        origin_path="nape/honks.jsonl",
+    )
+    sid = sl.signal_id_for("honk", "h-gone")
+    out = _seat_ack(root, sid)
+    assert out["ok"] is True and out["row"]["state"] == "acted"
+    assert out["nape_ack"]["status"] == "skipped"
+    assert "nape store absent" in out["nape_ack"]["reason"]
+    assert not (root / "nape").exists(), "skipping must not create the nape store"
+    assert sl.load_latest(root)[sid]["closed_by"] == ONE_COUNTER_SEAT
+    assert "nape ack mirror skipped" in sl.diagnostics_path(root).read_text(encoding="utf-8")
+
+
+def test_a_honk_nape_does_not_know_is_skipped_not_invented(tmp_sovereign_root):
+    root = tmp_sovereign_root
+    _write_jsonl(root / "nape" / "honks.jsonl", [_honk("h-real")])
+    sl.open_signal(
+        source="honk",
+        native_id="h-not-on-disk",
+        produced_at="2026-10-21T12:00:00Z",
+        root=root,
+        origin_path="nape/honks.jsonl",
+    )
+    out = _seat_ack(root, sl.signal_id_for("honk", "h-not-on-disk"))
+    assert out["ok"] is True
+    assert out["nape_ack"]["status"] == "skipped"
+    assert "No honk found" in out["nape_ack"]["reason"]
+    assert _ack_rows(root) == []
+
+
+def test_a_row_with_no_origin_is_skipped_with_a_reason(tmp_sovereign_root):
+    """Rows written before `origin` existed (2026-09-06) cannot name their honk."""
+    root = tmp_sovereign_root
+    _write_jsonl(root / "nape" / "honks.jsonl", [_honk("h-1")])
+    sid = sl.signal_id_for("honk", "h-1")
+    sl._append(
+        sl._row(
+            signal_id=sid,
+            source="honk",
+            produced_at="2026-09-01T00:00:00Z",
+            owner="watch-2/3",
+            state="open",
+            reason=None,
+            closed_by=None,
+            closed_at=None,
+            updated_at="2026-09-01T00:00:00Z",
+        ),
+        root,
+    )
+    out = _seat_ack(root, sid)
+    assert out["ok"] is True
+    assert out["nape_ack"]["status"] == "skipped"
+    assert "origin.native_id" in out["nape_ack"]["reason"]
+    assert _ack_rows(root) == []
+
+
+def test_a_non_honk_close_is_not_applicable_and_touches_no_nape_file(tmp_sovereign_root):
+    root = tmp_sovereign_root
+    sl.open_signal(source="halt", native_id="h1.md", produced_at="2026-10-21T00:00:00Z", root=root)
+    out = _seat_ack(root, sl.signal_id_for("halt", "h1.md"), state="dismissed", reason="stale")
+    assert out["ok"] is True
+    assert out["nape_ack"]["status"] == "not_applicable"
+    assert list((root / "nape").iterdir()) == []
+
+
+def test_a_close_derived_from_a_nape_ack_is_not_mirrored_back(tmp_sovereign_root):
+    root = tmp_sovereign_root
+    _write_jsonl(root / "nape" / "honks.jsonl", [_honk("h-1")])
+    _write_jsonl(root / "nape" / "acks.jsonl", [{"honk_id": "h-1", "note": "nape side"}])
+    sl.scan_honks(root)  # opens, then closes as the nape-ack closer
+    latest = sl.load_latest(root)[sl.signal_id_for("honk", "h-1")]
+    assert latest["closed_by"] == sl.NAPE_ACK_CLOSER
+    assert len(_ack_rows(root)) == 1
+    mirror: dict = {}
+    sl.ack_signal(
+        sl.signal_id_for("honk", "h-1"),
+        actor=sl.NAPE_ACK_CLOSER,
+        state="acknowledged",
+        reason="nape acks.jsonl",
+        root=root,
+        nape_mirror=mirror,
+    )
+    assert mirror["status"] == "skipped"
+    assert len(_ack_rows(root)) == 1
+
+
+def test_rescan_after_the_mirror_leaves_the_seat_close_standing(tmp_sovereign_root):
+    """The nape ack the mirror wrote must not let scan_honks re-close as nape-ack."""
+    root = tmp_sovereign_root
+    _write_jsonl(root / "nape" / "honks.jsonl", [_honk("h-1")])
+    sl.scan_honks(root)
+    sid = sl.signal_id_for("honk", "h-1")
+    _seat_ack(root, sid, state="dismissed", reason="known false positive")
+    sl.scan_honks(root)
+    latest = sl.load_latest(root)[sid]
+    assert latest["closed_by"] == ONE_COUNTER_SEAT
+    assert latest["state"] == "dismissed" and latest["reason"] == "known false positive"
+    rows = [
+        json.loads(x)
+        for x in sl.ledger_path(root).read_text(encoding="utf-8").splitlines()
+        if x.strip()
+    ]
+    assert [r["state"] for r in rows if r["signal_id"] == sid] == ["open", "dismissed"]
+
+
+def test_a_successful_mirrored_ack_is_not_observed_and_honks_nothing(tmp_sovereign_root):
+    from sovereign_stack.nape_daemon import NapeDaemon
+
+    root = tmp_sovereign_root
+    _write_jsonl(root / "nape" / "honks.jsonl", [_honk("h-1")])
+    sl.scan_honks(root)
+    sid = sl.signal_id_for("honk", "h-1")
+    args = {"signal_id": sid, "state": "acted", "reason": "error fixed; the failed write is done"}
+    token = set_caller_seat(ONE_COUNTER_SEAT)
+    try:
+        result = sl.handle_signal_tool("signal_ack", args, root=root)
+    finally:
+        reset_caller_seat(token)
+    assert json.loads(result)["nape_ack"]["status"] == "written"
+    honks_before = (root / "nape" / "honks.jsonl").read_text(encoding="utf-8")
+    NapeDaemon(root=str(root)).observe("signal_ack", args, result, "one-counter-session")
+    assert (root / "nape" / "honks.jsonl").read_text(encoding="utf-8") == honks_before
+    obs = root / "nape" / "observations.jsonl"
+    assert not obs.exists() or "signal_ack" not in obs.read_text(encoding="utf-8")
+    assert sl.scan_honks(root).opened == 0
+    assert _console(root) == _ledger_open_honks(root) == 0
+
+
+def test_a_mirror_failure_is_reported_and_the_close_stands(tmp_sovereign_root, monkeypatch):
+    from sovereign_stack.nape_daemon import NapeDaemon
+
+    root = tmp_sovereign_root
+    _write_jsonl(root / "nape" / "honks.jsonl", [_honk("h-1")])
+    sl.scan_honks(root)
+    sid = sl.signal_id_for("honk", "h-1")
+
+    def boom(self, honk_id, note):
+        raise OSError("disk said no")
+
+    monkeypatch.setattr(NapeDaemon, "ack_once", boom)
+    out = _seat_ack(root, sid)
+    assert out["ok"] is True and out["row"]["state"] == "acted"
+    assert out["nape_ack"]["status"] == "failed"
+    assert "OSError" in out["nape_ack"]["error"]
+    assert sl.load_latest(root)[sid]["state"] == "acted"
+    # Honest about the divergence it could not close: the console still counts it.
+    assert _console(root) == 1
+    assert "nape ack mirror failed" in sl.diagnostics_path(root).read_text(encoding="utf-8")
+
+
+def test_a_direct_library_close_mirrors_too(tmp_sovereign_root):
+    root = tmp_sovereign_root
+    _write_jsonl(root / "nape" / "honks.jsonl", [_honk("h-1")])
+    sl.scan_honks(root)
+    sl.ack_signal(
+        sl.signal_id_for("honk", "h-1"),
+        actor="seat:a-cleanup-script",
+        state="acknowledged",
+        reason=None,
+        root=root,
+    )
+    assert [a["honk_id"] for a in _ack_rows(root)] == ["h-1"]
+    assert _console(root) == 0
+
+
+def test_an_informational_honk_opens_no_signal(tmp_sovereign_root):
+    root = tmp_sovereign_root
+    _write_jsonl(
+        root / "nape" / "honks.jsonl",
+        [_honk("h-s", level="satisfied", pattern="clean_verify_declare")],
+    )
+    assert sl.scan_honks(root).opened == 0
+    assert sl.signal_id_for("honk", "h-s") not in sl.load_latest(root)
+
+
+def test_an_informational_signal_opened_before_the_rule_still_closes(tmp_sovereign_root):
+    """Only the OPEN is skipped: a nape ack still closes one already open."""
+    root = tmp_sovereign_root
+    _write_jsonl(
+        root / "nape" / "honks.jsonl",
+        [_honk("h-s", level="satisfied", pattern="clean_verify_declare")],
+    )
+    sl.open_signal(
+        source="honk",
+        native_id="h-s",
+        produced_at="2026-10-01T00:00:00Z",
+        root=root,
+        kind="clean_verify_declare",
+        origin_path="nape/honks.jsonl",
+    )
+    sid = sl.signal_id_for("honk", "h-s")
+    assert sl.load_latest(root)[sid]["state"] == "open"
+    _write_jsonl(root / "nape" / "acks.jsonl", [{"honk_id": "h-s"}])
+    sl.scan_honks(root)
+    assert sl.load_latest(root)[sid]["state"] == "acknowledged"
+
+
+def test_heartbeat_ledger_count_and_console_agree_after_a_close(tmp_sovereign_root):
+    """The production pair: honk_counts.all_time_unacked reads
+    count_unacked_honks; honk_counts.ledger_open reads heartbeat_field's
+    by_source["honk"]. Both move on one signal_ack."""
+    root = tmp_sovereign_root
+    _write_jsonl(
+        root / "nape" / "honks.jsonl",
+        [
+            _honk("h-a"),
+            _honk("h-b"),
+            _honk("h-s", level="satisfied", pattern="clean_verify_declare"),
+        ],
+    )
+    field = _scan_measured(root)
+    assert field["by_source"]["honk"] == _console(root) == 2
+    _seat_ack(root, sl.signal_id_for("honk", "h-b"))
+    assert sl.heartbeat_field(root)["by_source"]["honk"] == _console(root) == 1
+
+
+def test_an_unreadable_nape_store_never_turns_a_landed_close_into_ok_false(tmp_sovereign_root):
+    """NEVER RAISES, structurally. Path.exists() re-raises EACCES rather than
+    answering False, so a nape dir the process cannot search must land as a
+    `failed` outcome beside ok:true, never as an exception after the ledger
+    close was already appended (which the tool would report as ok:false)."""
+    import os
+    import stat
+
+    if os.geteuid() == 0:
+        pytest.skip("root bypasses directory permissions, so EACCES cannot be produced")
+    root = tmp_sovereign_root
+    _write_jsonl(root / "nape" / "honks.jsonl", [_honk("h-1")])
+    sl.scan_honks(root)
+    sid = sl.signal_id_for("honk", "h-1")
+    nape_dir = root / "nape"
+    mode = stat.S_IMODE(nape_dir.stat().st_mode)
+    os.chmod(nape_dir, 0)
+    try:
+        out = _seat_ack(root, sid)
+    finally:
+        os.chmod(nape_dir, mode)
+    assert out["ok"] is True, out
+    assert out["nape_ack"]["status"] == "failed"
+    assert "PermissionError" in out["nape_ack"]["error"]
+    assert sl.load_latest(root)[sid]["closed_by"] == ONE_COUNTER_SEAT
+
+
+# ── Review of bfc5507: R1, R2, F4 ───────────────────────────────────────────
+
+
+def test_a_mirrored_ack_is_never_glued_onto_a_line_missing_its_newline(tmp_sovereign_root):
+    """R1. The last ack lacks its newline; the mirror's ack must start a new line.
+    On bfc5507 the two acks fused into one unparseable line, hiding BOTH, and the
+    console count ROSE (1 -> 2) on a close."""
+    root = tmp_sovereign_root
+    _write_jsonl(root / "nape" / "honks.jsonl", [_honk("h-1"), _honk("h-2")])
+    (root / "nape" / "acks.jsonl").write_text(
+        '{"honk_id": "h-1", "note": "nape side"}', encoding="utf-8"
+    )
+    sl.scan_honks(root)
+    assert _console(root) == 1
+    out = _seat_ack(root, sl.signal_id_for("honk", "h-2"))
+    assert out["ok"] is True
+    assert _console(root) == 0
+    assert sorted(a["honk_id"] for a in _ack_rows(root)) == ["h-1", "h-2"]
+
+
+def test_a_mirrored_ack_that_does_not_read_back_is_failed_not_written(
+    tmp_sovereign_root, monkeypatch
+):
+    """R1. A write that did not land must not be reported as `written`."""
+    from sovereign_stack import nape_daemon as nd
+
+    root = tmp_sovereign_root
+    _write_jsonl(root / "nape" / "honks.jsonl", [_honk("h-1")])
+    _write_jsonl(root / "nape" / "acks.jsonl", [{"honk_id": "unrelated"}])
+    sl.scan_honks(root)
+    monkeypatch.setattr(nd, "_append_jsonl", lambda path, record: None)  # a lost write
+    out = _seat_ack(root, sl.signal_id_for("honk", "h-1"))
+    assert out["ok"] is True
+    assert out["nape_ack"]["status"] == "failed"
+    assert _console(root) == 1
+
+
+def _append_bytes(path: Path, data: bytes) -> None:
+    with path.open("ab") as fh:
+        fh.write(data)
+
+
+def test_an_invalid_byte_in_acks_fails_the_mirror_and_is_not_skipped(tmp_sovereign_root):
+    """R2. UnicodeDecodeError is a ValueError; it is a store-read failure, not
+    nape refusing the id, so the outcome is `failed`."""
+    root = tmp_sovereign_root
+    _write_jsonl(root / "nape" / "honks.jsonl", [_honk("h-1")])
+    _write_jsonl(root / "nape" / "acks.jsonl", [{"honk_id": "unrelated"}])
+    sl.scan_honks(root)
+    _append_bytes(root / "nape" / "acks.jsonl", b"\xff\xfe\n")
+    out = _seat_ack(root, sl.signal_id_for("honk", "h-1"))
+    assert out["ok"] is True
+    assert out["nape_ack"]["status"] == "failed"
+    assert "UnicodeDecodeError" in out["nape_ack"]["error"]
+
+
+def test_an_invalid_byte_in_honks_fails_the_mirror_and_is_not_skipped(tmp_sovereign_root):
+    root = tmp_sovereign_root
+    _write_jsonl(root / "nape" / "honks.jsonl", [_honk("h-1")])
+    sl.scan_honks(root)
+    _append_bytes(root / "nape" / "honks.jsonl", b"\xff\xfe\n")
+    out = _seat_ack(root, sl.signal_id_for("honk", "h-1"))
+    assert out["ok"] is True
+    assert out["nape_ack"]["status"] == "failed"
+    assert "UnicodeDecodeError" in out["nape_ack"]["error"]
+
+
+def test_the_nape_ack_is_written_after_the_ledger_close(tmp_sovereign_root, monkeypatch):
+    """F4. Ledger first, nape second: the order the rescan safety rests on. The
+    review's order-swap mutation survived the suite; this kills it."""
+    root = tmp_sovereign_root
+    _write_jsonl(root / "nape" / "honks.jsonl", [_honk("h-1")])
+    sl.scan_honks(root)
+    calls: list[str] = []
+    orig_append = sl._append
+    orig_mirror = sl._mirror_close_to_nape
+
+    def recording_append(row, root=None):
+        calls.append(f"ledger:{row.get('state')}")
+        return orig_append(row, root)
+
+    def recording_mirror(*args, **kwargs):
+        calls.append("nape")
+        return orig_mirror(*args, **kwargs)
+
+    monkeypatch.setattr(sl, "_append", recording_append)
+    monkeypatch.setattr(sl, "_mirror_close_to_nape", recording_mirror)
+    out = _seat_ack(root, sl.signal_id_for("honk", "h-1"))
+    assert out["nape_ack"]["status"] == "written"
+    assert calls == ["ledger:acted", "nape"]

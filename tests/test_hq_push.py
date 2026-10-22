@@ -994,3 +994,128 @@ class TestHoldReadsOff:
         st = link.status()
         assert st["listening"] is False and st["inbound"] == "hold"
         assert st["reason"] == hq_push.HOLD_REASON and "does not reach HQ" in st["reason"]
+
+
+class TestInformationalHonks:
+    """2026-10-21: a satisfied honk (nape's positive signal, nothing to ack)
+    raised the console counter, and the push link handed HQ a batch for it."""
+
+    def test_informational_honk_is_not_a_push_event(self, tmp_path):
+        honks_write(tmp_path, 2)
+        clock = Clock()
+        link, sent, _ = make_link(tmp_path, clock=clock)
+        link.tick()  # baseline
+        p = tmp_path / "nape" / "honks.jsonl"
+        with p.open("a") as f:
+            f.write(
+                json.dumps(
+                    {"honk_id": "s1", "level": "satisfied", "pattern": "clean_verify_declare"}
+                )
+                + "\n"
+            )
+        clock.t = 1000.0 + 900  # due: 15 minutes since the session spawned
+        link.tick()
+        assert sent == []
+        assert link.status()["events_waiting"] == 0
+        # A real honk after it is still an event, and "in all" counts only
+        # the honks that want an ack.
+        honks_write(tmp_path, 1)
+        clock.t += 1000
+        link.tick()
+        assert len(sent) == 1
+        assert "1 new unacked nape honks (now 3 in all)" in sent[0][2]
+
+
+class TestEdgeTriggeredHonks:
+    """R3 (review of bfc5507): the honk trigger fires on NEW actionable honk ids,
+    not on a rising count. Level-triggered, a close and a new honk inside one
+    poll netted to zero and the new honk was never announced; with the ledger
+    close now writing the nape ack, that netting became ordinary."""
+
+    @staticmethod
+    def _append_honk(root: Path, hid: str) -> None:
+        p = root / "nape" / "honks.jsonl"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        rec = {
+            "honk_id": hid,
+            "session_id": "push-edge",
+            "timestamp": "2026-10-21T12:00:00Z",
+            "level": "sharp",
+            "pattern": "declare_before_verify",
+            "trigger_tool": "record_insight",
+            "observation": f"{hid} seen",
+        }
+        with p.open("a") as f:
+            f.write(json.dumps(rec) + "\n")
+
+    def test_a_new_honk_and_a_ledger_close_in_one_poll_still_fire_one_batch(self, tmp_path):
+        from sovereign_stack import signal_ledger as sl
+        from sovereign_stack.dispatch_context import reset_caller_seat, set_caller_seat
+
+        self._append_honk(tmp_path, "h1")
+        self._append_honk(tmp_path, "h2")
+        sl.scan_honks(tmp_path)
+        clock = Clock()
+        link, sent, _ = make_link(tmp_path, clock=clock)
+        link.tick()  # baseline: h1, h2
+        self._append_honk(tmp_path, "h3")
+        token = set_caller_seat("seat:push-edge-test")
+        try:
+            out = json.loads(
+                sl.handle_signal_tool(
+                    "signal_ack",
+                    {"signal_id": sl.signal_id_for("honk", "h1"), "state": "acted", "reason": "ok"},
+                    root=tmp_path,
+                )
+            )
+        finally:
+            reset_caller_seat(token)
+        assert out["ok"] is True and out["nape_ack"]["status"] == "written"
+        clock.t = 1000.0 + 900  # due
+        link.tick()
+        assert len(sent) == 1
+        assert "1 new unacked nape honks (now 2 in all)" in sent[0][2]
+
+    def test_one_new_honk_and_two_closes_still_count_one_new(self, tmp_path):
+        for hid in ("h1", "h2", "h3"):
+            self._append_honk(tmp_path, hid)
+        clock = Clock()
+        link, sent, _ = make_link(tmp_path, clock=clock)
+        link.tick()
+        self._append_honk(tmp_path, "h4")
+        with (tmp_path / "nape" / "acks.jsonl").open("a") as f:
+            f.write(json.dumps({"honk_id": "h1"}) + "\n" + json.dumps({"honk_id": "h2"}) + "\n")
+        clock.t = 1000.0 + 900
+        link.tick()
+        assert len(sent) == 1
+        assert "1 new unacked nape honks (now 2 in all)" in sent[0][2]
+
+    def test_closes_alone_are_not_an_event(self, tmp_path):
+        for hid in ("h1", "h2"):
+            self._append_honk(tmp_path, hid)
+        clock = Clock()
+        link, sent, _ = make_link(tmp_path, clock=clock)
+        link.tick()
+        with (tmp_path / "nape" / "acks.jsonl").open("a") as f:
+            f.write(json.dumps({"honk_id": "h1"}) + "\n")
+        clock.t = 1000.0 + 900
+        link.tick()
+        assert sent == [] and link.status()["events_waiting"] == 0
+
+    def test_an_unreadable_honk_store_is_unreadable_not_zero(self, tmp_path):
+        """F6: unreadable is not a healthy zero on the push link either."""
+        import stat
+
+        if os.geteuid() == 0:
+            pytest.skip("root bypasses file permissions, so EACCES cannot be produced")
+        honks_write(tmp_path, 2)
+        p = tmp_path / "nape" / "honks.jsonl"
+        link, sent, _ = make_link(tmp_path)
+        mode = stat.S_IMODE(p.stat().st_mode)
+        os.chmod(p, 0)
+        try:
+            assert hq_push.read_counters(tmp_path)["honks"] is None
+            link.tick()
+            assert link.status()["sources"]["honks"] == "unreadable"
+        finally:
+            os.chmod(p, mode)

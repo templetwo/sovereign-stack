@@ -1651,3 +1651,148 @@ class TestReadonlyAdditionsBlastRadius:
             h for h in self.daemon.current_honks(SESSION) if h["pattern"] == "premature_summary"
         ]
         assert len(honks) >= 1, "A declined tool's real error must still count."
+
+
+# =============================================================================
+# ack_once: the idempotent ack the signal ledger's close mirror writes through
+# (2026-10-21). Every write here is under pytest's tmp_path.
+# =============================================================================
+
+
+class TestAckOnce:
+    def _daemon_with_honk(self, tmp_path):
+        from sovereign_stack.nape_daemon import NapeDaemon
+
+        daemon = NapeDaemon(root=str(tmp_path))
+        honk = daemon.emit_external_honk("s", "declare_before_verify", "record_insight", "seen")
+        return daemon, honk["honk_id"]
+
+    def _acks(self, tmp_path):
+        p = tmp_path / "nape" / "acks.jsonl"
+        if not p.exists():
+            return []
+        return [json.loads(x) for x in p.read_text(encoding="utf-8").splitlines() if x.strip()]
+
+    def test_writes_once_then_returns_none(self, tmp_path):
+        daemon, hid = self._daemon_with_honk(tmp_path)
+        first = daemon.ack_once(hid, "first")
+        assert first is not None and first["honk_id"] == hid
+        assert daemon.ack_once(hid, "second") is None
+        assert [a["note"] for a in self._acks(tmp_path)] == ["first"]
+
+    def test_an_existing_plain_ack_counts(self, tmp_path):
+        daemon, hid = self._daemon_with_honk(tmp_path)
+        daemon.ack(hid, "through nape_ack")
+        assert daemon.ack_once(hid, "mirror") is None
+        assert len(self._acks(tmp_path)) == 1
+
+    def test_raises_what_ack_raises(self, tmp_path):
+        daemon, _ = self._daemon_with_honk(tmp_path)
+        with pytest.raises(ValueError, match="No honk found"):
+            daemon.ack_once("not-a-honk", "x")
+
+    def test_absent_store_raises_and_creates_no_file(self, tmp_path):
+        from sovereign_stack.nape_daemon import NapeDaemon
+
+        daemon = NapeDaemon(root=str(tmp_path))
+        with pytest.raises(FileNotFoundError):
+            daemon.ack_once("h", "x")
+        assert list((tmp_path / "nape").iterdir()) == []
+
+    def test_two_racing_callers_write_one_ack_and_the_lock_is_why(self, tmp_path, monkeypatch):
+        """Control first: with flock disabled, a slowed check lets both callers
+        through and two acks land. With the real lock, one does. If the control
+        ever stops producing two, this test is no longer measuring the lock."""
+        import threading
+        import time
+
+        from sovereign_stack import nape_daemon as nd
+
+        orig_acked = nd.NapeDaemon._acked_ids
+
+        def slow_acked(self):
+            out = orig_acked(self)
+            time.sleep(0.2)
+            return out
+
+        monkeypatch.setattr(nd.NapeDaemon, "_acked_ids", slow_acked)
+
+        def race(root):
+            _, hid = self._daemon_with_honk(root)
+            start = threading.Barrier(2)
+
+            def worker():
+                start.wait()
+                nd.NapeDaemon(root=str(root)).ack_once(hid, "racer")
+
+            threads = [threading.Thread(target=worker) for _ in range(2)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(10)
+            return len(self._acks(root))
+
+        with monkeypatch.context() as m:
+            m.setattr(nd.fcntl, "flock", lambda fd, op: None)
+            assert race(tmp_path / "unlocked") == 2
+        assert race(tmp_path / "locked") == 1
+
+
+# =============================================================================
+# R1 (review of bfc5507): an ack is never glued onto a previous line, an
+# ack_once that cannot read its own ack back does not report success, and the
+# ack is fsynced. Each test failed on bfc5507.
+# =============================================================================
+
+
+class TestAckDurability:
+    def _rows(self, path):
+        return [json.loads(x) for x in path.read_text(encoding="utf-8").splitlines() if x.strip()]
+
+    def test_an_append_after_a_record_missing_its_newline_starts_a_new_line(self, tmp_path):
+        from sovereign_stack import nape_daemon as nd
+
+        p = tmp_path / "acks.jsonl"
+        p.write_text('{"honk_id": "h-1"}', encoding="utf-8")  # no trailing newline
+        nd._append_jsonl(p, {"honk_id": "h-2"})
+        assert [r["honk_id"] for r in self._rows(p)] == ["h-1", "h-2"]
+        assert p.read_text(encoding="utf-8").endswith("\n")
+
+    def test_an_append_to_a_well_formed_file_adds_no_blank_line(self, tmp_path):
+        from sovereign_stack import nape_daemon as nd
+
+        p = tmp_path / "acks.jsonl"
+        p.write_text('{"honk_id": "h-1"}\n', encoding="utf-8")
+        nd._append_jsonl(p, {"honk_id": "h-2"})
+        assert p.read_text(encoding="utf-8").count("\n") == 2
+
+    def test_ack_once_does_not_report_an_ack_it_cannot_read_back(self, tmp_path, monkeypatch):
+        from sovereign_stack import nape_daemon as nd
+
+        daemon = nd.NapeDaemon(root=str(tmp_path))
+        honk = daemon.emit_external_honk("s", "declare_before_verify", "record_insight", "seen")
+        # An unrelated ack, so the file exists and only the read-back can tell.
+        (tmp_path / "nape" / "acks.jsonl").write_text('{"honk_id": "other"}\n', encoding="utf-8")
+        monkeypatch.setattr(nd, "_append_jsonl", lambda path, record: None)  # a lost write
+        with pytest.raises(Exception) as excinfo:
+            daemon.ack_once(honk["honk_id"], "mirror")
+        assert type(excinfo.value).__name__ == "AckNotPersisted"
+
+    def test_an_ack_is_fsynced(self, tmp_path, monkeypatch):
+        import os
+
+        from sovereign_stack import nape_daemon as nd
+
+        daemon = nd.NapeDaemon(root=str(tmp_path))
+        honk = daemon.emit_external_honk("s", "declare_before_verify", "record_insight", "seen")
+        acks = tmp_path / "nape" / "acks.jsonl"
+        synced = []
+        real_fsync = os.fsync
+
+        def recording_fsync(fd):
+            synced.append(os.fstat(fd).st_ino)
+            return real_fsync(fd)
+
+        monkeypatch.setattr(os, "fsync", recording_fsync)
+        daemon.ack(honk["honk_id"], "by hand")
+        assert acks.stat().st_ino in synced

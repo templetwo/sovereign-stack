@@ -418,7 +418,10 @@ function renderHeaderStats(snapshot) {
   const hc = snapshot.honk_counts || null;
   const honksAll = $('stat-honks-alltime'), honksLedger = $('stat-honks-ledger');
   if (honksAll) {
-    honksAll.textContent = hc ? `${hc.all_time_unacked} unacked (all time)` : '—';
+    // null is "could not read the nape store", never zero (review of bfc5507, F6).
+    honksAll.textContent = !hc
+      ? '—'
+      : (hc.all_time_unacked == null ? 'honks unreadable' : `${hc.all_time_unacked} unacked (all time)`);
     honksAll.title = hc ? hc.all_time_label : '';
     honksAll.classList.toggle('is-muted', !hc);
   }
