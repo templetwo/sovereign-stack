@@ -22,6 +22,17 @@ direction: a module-level singleton (``server.experiential``,
 ``server.handoff_engine``, ``server.nape_daemon``) built from the live root at
 import keeps writing there after a test sets SOVEREIGN_ROOT.
 
+WHY IT IGNORES $HOME AND Path.home() TOO. Tests redirect the home directory as
+well: they set HOME or patch Path.home() (seven sites in the suite when this was
+written; the contract walker patches Path.home() for its whole fixture while it
+walks every tool). A root read through either moves to the fake home for as long
+as such a test runs, and that is exactly when a writer still bound to the real
+store at import goes unrefused. So the account's home comes from the password
+database, read on every call. Only a uid with no passwd entry (or a platform
+with no pwd module) falls back to $HOME as it stood when this module was
+imported: the same import-time binding tests/conftest.py gives its own
+_LIVE_SOVEREIGN.
+
 Moved here from ``handoff._refuse_live_store_during_tests``, written
 2026-08-01 to guard the handoff store alone after two test fixtures
 (tests/test_resume_in_context.py and tests/test_nape_autohook.py
@@ -36,6 +47,15 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+
+try:
+    import pwd
+except ImportError:  # not a POSIX platform: _account_home() falls back
+    pwd = None
+
+# $HOME as it stood when this module was first imported, before any test could
+# move it. Read only when the password database has no entry for this account.
+_HOME_AT_IMPORT = Path(os.path.expanduser("~"))
 
 
 class LiveStoreWriteRefused(RuntimeError):
@@ -61,14 +81,32 @@ class LiveStoreWriteRefused(RuntimeError):
         )
 
 
-def live_root() -> Path:
-    """The operator's live store root, resolved on every call (never at import).
+def _account_home() -> Path:
+    """This account's home directory, from the password database, never from $HOME.
 
-    ``Path.home() / ".sovereign"`` and nothing else: SOVEREIGN_ROOT is never
-    consulted (see the module docstring). A module-level function so a test can
-    repoint it at a tmp root to prove a funnel refuses.
+    Falls back to ``_HOME_AT_IMPORT`` only when the database cannot answer: a uid
+    with no passwd entry (some containers), an empty home field, or no pwd module.
     """
-    return (Path.home() / ".sovereign").resolve()
+    if pwd is not None:
+        try:
+            home = pwd.getpwuid(os.getuid()).pw_dir
+        except KeyError:
+            home = ""
+        if home:
+            return Path(home)
+    return _HOME_AT_IMPORT
+
+
+def live_root() -> Path:
+    """The operator's live store root, resolved on every call.
+
+    The account's home plus ``.sovereign``. The home is read from the password
+    database, so a test that sets HOME or patches Path.home() does not move it,
+    and SOVEREIGN_ROOT is never consulted (see the module docstring for both).
+    A module-level function so a test can repoint it at a tmp root to prove a
+    funnel refuses.
+    """
+    return (_account_home() / ".sovereign").resolve()
 
 
 def refuse_if_test_targets_live(path: Path | str, *, store: str) -> None:

@@ -10,7 +10,8 @@ the test, the store and the path.
 
 THREE KINDS OF TEST BELOW:
   1. the guard itself: live refused under pytest, tmp allowed, live allowed
-     outside pytest, the containment edges, SOVEREIGN_ROOT never consulted;
+     outside pytest, the containment edges, SOVEREIGN_ROOT never consulted,
+     and the live root unmoved when a test redirects $HOME or Path.home();
   2. the census, which is the list of record: every funnel's first statement
      is the guard naming its store, and every file write in the guarded
      modules sits inside a funnel or is named as a writer of something that is
@@ -21,8 +22,9 @@ THREE KINDS OF TEST BELOW:
      the census and fails here.
 
 Nothing here writes to the real ~/.sovereign: the tests that name it call the
-guard alone, never a funnel, and every control runs against tmp_sovereign_root
-with live_store_guard.live_root repointed at it.
+guard alone, never a funnel, and every control runs against a tmp root, with
+live_store_guard.live_root repointed at it or the password database stubbed to
+name a tmp account home.
 """
 
 from __future__ import annotations
@@ -30,8 +32,11 @@ from __future__ import annotations
 import ast
 import asyncio
 import json
+import os
+import pwd
 from collections.abc import Callable
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -42,7 +47,15 @@ from sovereign_stack.live_store_guard import LiveStoreWriteRefused, refuse_if_te
 from sovereign_stack.memory import ExperientialMemory
 from sovereign_stack.nape_daemon import NapeDaemon
 
-LIVE = Path.home() / ".sovereign"
+# The account's real store, stated here independently of the guard: its home is
+# read from the password database at collection, before any test can set $HOME
+# or patch Path.home(), so the redirect tests below catch a guard that follows
+# either. A uid with no passwd entry falls back to $HOME, as the guard does.
+try:
+    _ACCOUNT_HOME = Path(pwd.getpwuid(os.getuid()).pw_dir)
+except KeyError:
+    _ACCOUNT_HOME = Path.home()
+LIVE = _ACCOUNT_HOME / ".sovereign"
 TEST_ID = "tests/x.py::t (call)"
 CONTROL_SEAT = "guard-control-seat"
 
@@ -108,6 +121,61 @@ def test_a_symlink_into_the_live_root_is_refused_by_where_it_resolves(tmp_path, 
     link.symlink_to(live, target_is_directory=True)
     with pytest.raises(LiveStoreWriteRefused):
         refuse_if_test_targets_live(link / "chronicle" / "insights", store="chronicle/insights")
+
+
+def test_the_live_root_is_the_accounts_home_from_the_password_database():
+    assert live_store_guard.live_root() == LIVE.resolve()
+
+
+@pytest.mark.parametrize("redirect", ["HOME", "Path.home", "both"])
+def test_redirecting_the_home_directory_leaves_the_real_store_guarded(
+    redirect, tmp_path, monkeypatch
+):
+    # Seven sites in this suite set HOME or patch Path.home() when this was
+    # written; the contract walker patches Path.home() for its whole fixture
+    # while it walks every tool. A root read through either moved to the fake
+    # home for as long as such a test ran, and a writer still bound to the real
+    # store went unrefused there.
+    fake_home = tmp_path / "fake-home"
+    fake_home.mkdir()
+    if redirect in ("HOME", "both"):
+        monkeypatch.setenv("HOME", str(fake_home))
+    if redirect in ("Path.home", "both"):
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: fake_home))
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", TEST_ID)
+    assert Path.home() == fake_home, "the redirect did not take, so this test proves nothing"
+    with pytest.raises(LiveStoreWriteRefused):
+        refuse_if_test_targets_live(
+            LIVE / "chronicle" / "insights" / "probe" / "x.jsonl", store="chronicle/insights"
+        )
+    assert live_store_guard.live_root() == LIVE.resolve()
+    # The fake home is a tmp dir like any other: its .sovereign is not live.
+    refuse_if_test_targets_live(
+        fake_home / ".sovereign" / "chronicle" / "insights" / "x.jsonl", store="chronicle/insights"
+    )
+
+
+def _no_passwd_entry(uid: int):
+    raise KeyError(f"getpwuid(): uid not found: {uid}")
+
+
+@pytest.mark.parametrize("no_entry", ["no-passwd-entry", "no-pwd-module"])
+def test_without_a_passwd_entry_the_root_is_home_as_it_stood_at_import(
+    no_entry, tmp_path, monkeypatch
+):
+    # The one case the password database cannot answer (a uid with no entry,
+    # as in some containers, or a platform with no pwd module) falls back to
+    # $HOME as it was when the guard was imported, never to $HOME now.
+    if no_entry == "no-passwd-entry":
+        monkeypatch.setattr(pwd, "getpwuid", _no_passwd_entry)
+    else:
+        monkeypatch.setattr(live_store_guard, "pwd", None)
+    fake_home = tmp_path / "fake-home"
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: fake_home))
+    root = live_store_guard.live_root()
+    assert root == (live_store_guard._HOME_AT_IMPORT / ".sovereign").resolve()
+    assert tmp_path not in root.parents
 
 
 # ── 2. the census: the list of record ───────────────────────────────────────
@@ -543,3 +611,42 @@ def test_mark_consumed_refuses_a_live_handoff_handed_to_an_engine_rooted_elsewhe
     assert Path(live_handoff).read_bytes() == before
     monkeypatch.setattr(live_store_guard, "live_root", _REAL_LIVE_ROOT)
     assert elsewhere.mark_consumed([live_handoff], consumed_by=CONTROL_SEAT) == 1
+
+
+def test_a_writer_bound_to_the_account_store_is_refused_while_home_is_redirected(
+    tmp_path, monkeypatch
+):
+    # The contract walker's window, end to end through the real live_root(): a
+    # writer built against the account's store before the test moved the home
+    # directory (as a module singleton is at import), then $HOME and
+    # Path.home() redirected. Only the password database is stubbed, to name a
+    # stand-in account home, so a regressed guard still could not reach the
+    # real store from here.
+    account, fake_home = tmp_path / "account", tmp_path / "fake-home"
+
+    def account_home_is(home: Path) -> None:
+        monkeypatch.setattr(pwd, "getpwuid", lambda uid: SimpleNamespace(pw_dir=str(home)))
+
+    account_home_is(account)
+    bound = _chronicle(account / ".sovereign")
+    elsewhere = _chronicle(fake_home / ".sovereign")
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: fake_home))
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", TEST_ID)
+
+    before = _snapshot(account)
+    with pytest.raises(LiveStoreWriteRefused) as refused:
+        bound.record_insight(domain="probe", content="a leak", session_id="control")
+    assert refused.value.store == "chronicle/insights"
+    assert str(account) in str(refused.value), "the refusal must name the path"
+    assert _snapshot(account) == before, "the refused write still landed"
+
+    # The redirected home is a tmp dir like any other: a writer rooted there writes.
+    home_before = _snapshot(fake_home)
+    elsewhere.record_insight(domain="probe", content="not live", session_id="control")
+    assert _snapshot(fake_home) != home_before, "the write under the redirected HOME did not land"
+
+    # Teeth: the same bound call writes once the account's home is elsewhere.
+    account_home_is(tmp_path / "another-account")
+    bound.record_insight(domain="probe", content="a leak", session_id="control")
+    assert _snapshot(account) != before, "this control's call writes nothing"
