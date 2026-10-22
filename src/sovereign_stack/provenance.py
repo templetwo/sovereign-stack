@@ -621,9 +621,18 @@ def _resolved_within_budget(path: Path) -> Path:
         return Path(os.path.abspath(path))
 
 
-def _plugin_cache_roots() -> tuple[Path, ...]:
-    """The plugin cache as spelled under ``~`` and as resolved (``~/.claude``
-    may itself be a symlink), read at call time."""
+def plugin_cache_roots() -> tuple[Path, ...]:
+    """
+    The plugin cache as spelled under ``~`` and as resolved (``~/.claude`` may
+    itself be a symlink), read at call time.
+
+    Locating it is a bounded resolve() under the account's home, and the
+    answer is the same for every ref. validate_file_ref locates it on each call
+    unless handed this tuple; a caller that checks many refs in one pass
+    (season_review's re-verify, inspect_claim's live re-check) locates it once
+    and passes it in, so a wedged home costs one stat budget per pass, not one
+    per receipt.
+    """
     spelled = Path("~").expanduser() / _PLUGIN_CACHE
     return tuple(dict.fromkeys((spelled, _resolved_within_budget(spelled))))
 
@@ -657,7 +666,7 @@ def _unsurvivable_reason(path: Path, plugin_caches: tuple[Path, ...]) -> str | N
     return None
 
 
-def _checked_file_ref(ref: str) -> tuple[str, Path]:
+def _checked_file_ref(ref: str, plugin_caches: tuple[Path, ...] | None = None) -> tuple[str, Path]:
     """
     validate_file_ref, also returning the bare ref: whitespace-trimmed, with a
     ``studio:`` tag naming this host stripped. verify_receipt_at_write stores
@@ -667,7 +676,8 @@ def _checked_file_ref(ref: str) -> tuple[str, Path]:
         raise ReceiptError("a file receipt ref must be a non-empty string")
     bare = _strip_host_tag(ref.strip())
     path = Path(bare).expanduser()
-    plugin_caches = _plugin_cache_roots()
+    if plugin_caches is None:
+        plugin_caches = plugin_cache_roots()
     # Spelled AND resolved: a lane symlink into /private/tmp breaks the promise
     # by its target (Review Focus 3: refused by its resolved path, not its
     # spelled one), and a ref spelled under /tmp dangles when /tmp is cleared
@@ -679,7 +689,7 @@ def _checked_file_ref(ref: str) -> tuple[str, Path]:
     return bare, path
 
 
-def validate_file_ref(ref: str) -> Path:
+def validate_file_ref(ref: str, *, plugin_caches: tuple[Path, ...] | None = None) -> Path:
     """
     The path a ``file`` receipt's bytes are read from, or a refusal naming the
     rule the ref breaks (design C3).
@@ -697,9 +707,17 @@ def validate_file_ref(ref: str) -> Path:
     is refused under the host-tag rule.
 
     Only the rules: whether the file exists, is a regular file, or hashes in
-    budget is still classify_file_target's and hash_file_bounded's to say.
+    budget is still classify_file_target's and hash_file_bounded's to say. The
+    rules open nothing, though their resolve() lstats the path's components.
     Called by both write-time entry points (preflight_file_receipt and
-    verify_receipt_at_write) before either reads the file.
+    verify_receipt_at_write) before either reads the file, and by both
+    read-time re-hash sites (season_review's re-verify and inspect_claim's
+    live re-check) before either re-hashes a stored receipt.
+
+    Args:
+        ref: the receipt's ref, as given or as stored.
+        plugin_caches: plugin_cache_roots(), located once by a caller that
+            checks many refs in one pass; None (the default) locates it here.
 
     Returns:
         The ref, tag stripped, with ``~`` expanded: the path to hash. Not
@@ -709,7 +727,7 @@ def validate_file_ref(ref: str) -> Path:
     Raises:
         ReceiptError (a ValueError): naming the rule.
     """
-    return _checked_file_ref(ref)[1]
+    return _checked_file_ref(ref, plugin_caches)[1]
 
 
 def preflight_file_receipt(receipt: dict, position: int | None = None) -> None:

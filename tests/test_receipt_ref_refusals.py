@@ -20,12 +20,14 @@ the bytes it names are not on this machine.
 The same rules hold wherever a stored receipt is re-hashed later: season_review's
 re-verify (tests/test_receipt_reverify_report.py) and inspect_claim with
 verify_receipts (here). A receipt stamped before the rules existed is checked
-against them first, and a refused ref reads "unreadable" without being read.
+against them first: a refused ref reads "unreadable", carries the refusal in the
+rule's own words, and its file is never opened or hashed.
 
-Hermetic: every file and symlink lives under tmp_path. HOME points at tmp_path
-wherever ``~`` is expanded, so nothing under the real ~/.claude is read or
-written. The hostname is patched wherever the host matters, so the machine
-running the suite does not decide the result.
+Hermetic: every file and symlink lives under tmp_path, and HOME points at
+tmp_path in every test (an autouse fixture), so ``~`` and the plugin cache the
+rules check each ref against expand there, and nothing under the real ~/.claude
+is read, resolved or written. The hostname is patched wherever the host matters,
+so the machine running the suite does not decide the result.
 """
 
 import hashlib
@@ -48,8 +50,10 @@ def _sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-@pytest.fixture
+@pytest.fixture(autouse=True)
 def home(tmp_path, monkeypatch):
+    """HOME under tmp_path in every test, asked for or not: every
+    validate_file_ref call locates the plugin cache under ``~``."""
     fake_home = tmp_path / "home"
     fake_home.mkdir()
     monkeypatch.setenv("HOME", str(fake_home))
@@ -302,6 +306,14 @@ def test_a_tag_with_no_path_after_it_is_refused(on_host):
         provenance.validate_file_ref("studio:   ")
 
 
+def test_the_autouse_home_puts_the_plugin_cache_under_tmp_path(tmp_path):
+    """The module docstring's claim, checked: the HOME fixture is autouse, so a
+    test that never asks for ``home`` (this one) still sees the plugin cache the
+    rules check refs against under tmp_path, never under the real home."""
+    for root in provenance.plugin_cache_roots():
+        assert root.resolve().is_relative_to(tmp_path.resolve()), root
+
+
 # ── The rules hold where a stored receipt is re-hashed (Task 4 fix round 1) ──
 
 
@@ -325,14 +337,18 @@ def _verified(path, sha256: str) -> dict:
     return {"kind": "file", "ref": str(path), "sha256": sha256, "checked_at_write": "verified"}
 
 
-def _inspect_now(root: Path, claim_id: str) -> list[str]:
+def _receipts(root: Path, claim_id: str, verify_receipts: bool = True) -> list[dict]:
     report = provenance_tools.inspect_claim(
         claim_id,
-        verify_receipts=True,
+        verify_receipts=verify_receipts,
         chronicle_root=root,
         ledger_path=root / "supersessions.jsonl",
     )
-    return [receipt["checked_now"] for receipt in report["receipts"]]
+    return report["receipts"]
+
+
+def _inspect_now(root: Path, claim_id: str) -> list[str]:
+    return [receipt["checked_now"] for receipt in _receipts(root, claim_id)]
 
 
 def test_inspect_claim_re_checks_a_stored_ref_against_the_rules_before_any_read(
@@ -340,7 +356,9 @@ def test_inspect_claim_re_checks_a_stored_ref_against_the_rules_before_any_read(
 ):
     """An env-named file holding the receipt's exact bytes would re-hash as
     verified; a lane link into /private/tmp would read missing. Both are refused
-    by place, and nothing stats or hashes either one."""
+    by place: neither file is opened, stat'd for hazards or hashed (the rules'
+    own resolve() lstats each ref's path components), and each receipt carries
+    its refusal, so "unreadable" never reads as bytes intact on a slow mount."""
     env_file = lane / "service.env"
     env_file.write_bytes(b"a placeholder\n")
     link = lane / "evidence.txt"
@@ -356,12 +374,16 @@ def test_inspect_claim_re_checks_a_stored_ref_against_the_rules_before_any_read(
     monkeypatch.setattr(provenance, "classify_file_target", _no_read)
     monkeypatch.setattr(provenance, "hash_file_bounded", _no_read)
 
-    assert _inspect_now(root, claim_id) == ["unreadable", "unreadable"]
+    env_view, link_view = _receipts(root, claim_id)
+    assert env_view["checked_now"] == link_view["checked_now"] == "unreadable"
+    assert env_view["refused"].startswith("refused by the env-named rule: 'service.env'")
+    assert link_view["refused"].startswith("refused by the scratch-path rule: ")
+    assert "would dangle" in link_view["refused"]
 
 
 def test_inspect_claim_still_verifies_an_ordinary_ref_beside_a_refused_one(tmp_path, lane):
     """The control: the rules refuse by place, so an ordinary file in the same
-    entry still re-hashes, and still verifies."""
+    entry still re-hashes, and still verifies, with no refusal beside it."""
     plain = lane / "plain.txt"
     plain.write_bytes(b"plain bytes\n")
     env_file = lane / "service.env"
@@ -372,4 +394,57 @@ def test_inspect_claim_still_verifies_an_ordinary_ref_beside_a_refused_one(tmp_p
         [_verified(plain, _sha(b"plain bytes\n")), _verified(env_file, _sha(b"a placeholder\n"))],
     )
 
-    assert _inspect_now(root, claim_id) == ["verified", "unreadable"]
+    plain_view, env_view = _receipts(root, claim_id)
+    assert plain_view["checked_now"] == "verified"
+    assert "refused" not in plain_view
+    assert env_view["checked_now"] == "unreadable"
+    assert "env-named rule" in env_view["refused"]
+
+
+def test_inspect_claim_without_a_live_check_carries_no_refusal(tmp_path, lane, monkeypatch):
+    """The refusal rides with checked_now: without verify_receipts there is no
+    live check, so neither appears, and the rules never run."""
+    env_file = lane / "service.env"
+    env_file.write_bytes(b"a placeholder\n")
+    root = tmp_path / "chronicle"
+    claim_id = _seed_legacy(root, [_verified(env_file, _sha(b"a placeholder\n"))])
+
+    def _no_check(*_args, **_kwargs):
+        raise AssertionError("the rules ran without verify_receipts")
+
+    monkeypatch.setattr(provenance, "validate_file_ref", _no_check)
+    monkeypatch.setattr(provenance, "plugin_cache_roots", _no_check)
+
+    assert _receipts(root, claim_id, verify_receipts=False) == [
+        {"kind": "file", "ref": str(env_file), "checked_at_write": "verified"}
+    ]
+
+
+def test_inspect_claim_locates_the_plugin_cache_once_per_call(tmp_path, lane, home, monkeypatch):
+    """Like season_review's pass: three file receipts cost three resolves of
+    their own refs plus one of the plugin cache, not six."""
+    receipts = []
+    for name in ("first.txt", "second.txt", "third.txt"):
+        path = lane / name
+        path.write_bytes(name.encode())
+        receipts.append(_verified(path, _sha(name.encode())))
+    root = tmp_path / "chronicle"
+    claim_id = _seed_legacy(root, receipts)
+
+    resolved: list[Path] = []
+    resolve = provenance._resolved_within_budget
+
+    def _counted(path):
+        resolved.append(path)
+        return resolve(path)
+
+    monkeypatch.setattr(provenance, "_resolved_within_budget", _counted)
+
+    assert _inspect_now(root, claim_id) == ["verified", "verified", "verified"]
+    cache = home / ".claude" / "plugins" / "cache"
+    assert resolved.count(cache) == 1, resolved
+    assert sorted(p.name for p in resolved if p != cache) == [
+        "first.txt",
+        "second.txt",
+        "third.txt",
+    ]

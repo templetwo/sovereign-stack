@@ -17,11 +17,15 @@ with one of six statuses:
                   than the write (replaced bytes that kept an older mtime), the
                   case that asks for a reader's attention
   missing         the file is gone
-  unreadable      a hazard class, or a read that did not finish in budget
+  unreadable      a hazard class, a read that did not finish in budget, or a
+                  ref the write-time rules refuse today, whose file is never
+                  opened or hashed
 
 Every receipt here is written through the real record_insight path, so
 checked_at_write is the server's own stamp, never a hand-written one. Hermetic:
-the chronicle and every evidence file live under tmp_path.
+the chronicle and every evidence file live under tmp_path, and HOME points at
+tmp_path in every test (an autouse fixture), so the plugin cache the rules check
+each ref against is located under tmp_path, never under the real ~/.claude.
 """
 
 import hashlib
@@ -39,6 +43,17 @@ from sovereign_stack.provenance import derive_claim_id, iter_chronicle_entries
 
 def _sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+@pytest.fixture(autouse=True)
+def home(tmp_path, monkeypatch):
+    """HOME under tmp_path in every test: validate_file_ref, at the write and at
+    re-verify, locates the plugin cache under ``~``, and a resolve() of the real
+    ~/.claude/plugins/cache would lstat the real home's metadata."""
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setenv("HOME", str(fake_home))
+    return fake_home
 
 
 @pytest.fixture
@@ -174,7 +189,9 @@ def test_never_verified_is_read_from_the_write_stamp_before_any_file_read(
     """The stamp decides first, with no IO: a never-matched receipt whose file is
     also gone is still never_verified, and nothing stats, resolves or hashes it.
     validate_file_ref resolves the path (an lstat per component), so it is IO
-    too: the stamp precedes the rules as well as the reads."""
+    too: the stamp precedes the rules as well as the reads. So does locating the
+    plugin cache, which the pass does on its first verified receipt: a pass that
+    meets none never resolves anything."""
     never = lane / "never.txt"
     never.write_bytes(b"the caller hashed something else\n")
     _record(chronicle, "never matched, then deleted", never, "f" * 64)
@@ -184,6 +201,8 @@ def test_never_verified_is_read_from_the_write_stamp_before_any_file_read(
         raise AssertionError("a never-verified receipt was read from disk")
 
     monkeypatch.setattr(seasons, "validate_file_ref", _no_read)
+    monkeypatch.setattr(seasons, "plugin_cache_roots", _no_read)
+    monkeypatch.setattr(provenance, "_resolved_within_budget", _no_read)
     monkeypatch.setattr(seasons, "classify_file_target", _no_read)
     monkeypatch.setattr(seasons, "hash_file_bounded", _no_read)
 
@@ -328,30 +347,29 @@ def test_an_mtime_stat_that_never_answers_reads_unreadable(lane, monkeypatch):
 # write now refuses to look. Measured read-only on the live record 2026-10-22:
 # 17 such receipts (11 scratch path, 4 plugin cache, 2 env-named file), all
 # stamped verified. Re-hashing them would read the files the rules keep
-# receipts off, so the rules run first and a refused ref is never read.
+# receipts off, so the rules run first and a refused ref's file is never
+# opened or hashed (the rules' own resolve() lstats its path components).
 
 # Never created: the link's text names it, and resolve() follows the text.
 _NEVER_CREATED = "/private/tmp/sovereign-c1-probe-never-created/evidence.txt"
 
 
-def _env_named(tmp_path, lane, monkeypatch):
+def _env_named(home, lane):
     path = lane / "service.env"
     path.write_bytes(b"a placeholder, not a credential\n")
     return path, _sha(path.read_bytes()), "env-named rule"
 
 
-def _scratch_symlink(tmp_path, lane, monkeypatch):
+def _scratch_symlink(home, lane):
     link = lane / "evidence.txt"
     link.symlink_to(_NEVER_CREATED)
     return link, "0" * 64, "scratch-path rule"
 
 
-def _plugin_cache(tmp_path, lane, monkeypatch):
-    home = tmp_path / "home"
+def _plugin_cache(home, lane):
     cached = home / ".claude" / "plugins" / "cache" / "a-plugin" / "1.0.0" / "SKILL.md"
     cached.parent.mkdir(parents=True)
     cached.write_bytes(b"a skill\n")
-    monkeypatch.setenv("HOME", str(home))
     return cached, _sha(cached.read_bytes()), "plugin-cache rule"
 
 
@@ -361,12 +379,15 @@ def _plugin_cache(tmp_path, lane, monkeypatch):
     ids=["env-named", "scratch-symlink", "plugin-cache"],
 )
 def test_a_verified_receipt_the_rules_refuse_today_is_unreadable_and_never_read(
-    make, tmp_path, lane, monkeypatch
+    make, home, lane, monkeypatch
 ):
     """The env-named and plugin-cache files hold the very bytes their receipts
     name, so a re-hash would say ok: the place decides, not the bytes. The
-    scratch-path link dangles, which a re-hash would call missing."""
-    path, sha256, rule = make(tmp_path, lane, monkeypatch)
+    scratch-path link dangles, which a re-hash would call missing. Nothing
+    opens or hashes any of them, and neither the hazard stat nor the mtime stat
+    runs; the rules' own resolve() lstats each ref's path components, and the
+    row names the rule."""
+    path, sha256, rule = make(home, lane)
 
     def _no_read(*_args, **_kwargs):
         raise AssertionError("a ref the rules refuse was read from disk")
@@ -400,3 +421,54 @@ def test_season_review_names_the_rule_of_a_refused_ref_and_counts_it_unreadable(
         "file receipts re-verified: 1 (0 ok, 0 moved_on, 0 never_verified, 0 mismatch,"
         " 0 missing, 1 unreadable)"
     ) in report
+
+
+# ── The plugin cache is located once per pass (Task 4 fix round 2) ──────────
+#
+# Every ref is checked against the plugin cache's location, and locating it is
+# a bounded resolve() under the account's home. Located once per receipt, it
+# cost one more resolve and daemon thread per verified receipt on top of the
+# ref's own: about 1,200 resolves per live season_review (603 verified file
+# receipts, counted read-only 2026-10-22) where once per pass costs about 604,
+# and a full stat budget per receipt when the home is wedged.
+
+
+def test_a_pass_locates_the_plugin_cache_once_not_once_per_receipt(
+    chronicle, lane, home, monkeypatch
+):
+    """Three verified receipts cost three resolves of their own refs (the
+    symlink rule needs each ref's resolved path) plus one of the plugin cache,
+    not six."""
+    for name in ("first.txt", "second.txt", "third.txt"):
+        path = lane / name
+        path.write_bytes(name.encode())
+        _record(chronicle, f"verified against {name}", path, _sha(name.encode()))
+
+    resolved: list[Path] = []
+    resolve = provenance._resolved_within_budget
+
+    def _counted(path):
+        resolved.append(path)
+        return resolve(path)
+
+    # The provenance module attribute: validate_file_ref and plugin_cache_roots
+    # both look it up there at call time.
+    monkeypatch.setattr(provenance, "_resolved_within_budget", _counted)
+    rows = seasons.reverify_file_receipts(_entries(chronicle))
+
+    assert [row["status"] for row in rows] == ["ok", "ok", "ok"]
+    cache = home / ".claude" / "plugins" / "cache"
+    assert resolved.count(cache) == 1, resolved
+    assert sorted(p.name for p in resolved if p != cache) == [
+        "first.txt",
+        "second.txt",
+        "third.txt",
+    ]
+
+
+def test_the_autouse_home_puts_the_plugin_cache_under_tmp_path(tmp_path):
+    """The module docstring's claim, checked: the HOME fixture is autouse, so a
+    test that never asks for ``home`` (this one) still sees the plugin cache the
+    rules check refs against under tmp_path, never under the real home."""
+    for root in provenance.plugin_cache_roots():
+        assert root.resolve().is_relative_to(tmp_path.resolve()), root

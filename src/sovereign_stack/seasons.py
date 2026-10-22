@@ -64,6 +64,7 @@ from .provenance import (
     hash_file_bounded,
     iter_chronicle_entries,
     load_supersessions,
+    plugin_cache_roots,
     token_overlap,
     under_chronicle_write_lock,
     validate_file_ref,
@@ -85,8 +86,9 @@ from .witness import days_old
 #   missing         the file is gone
 #   unreadable      a hazard class, a read that did not finish in budget, or a
 #                   ref the write-time rules refuse today (validate_file_ref:
-#                   a scratch path, the plugin cache, an env-named file), which
-#                   is never read
+#                   a scratch path, the plugin cache, an env-named file, a
+#                   studio: tag naming another host), whose file is never
+#                   opened or hashed; the row's "refused" names the rule
 REVERIFY_STATUSES = ("ok", "moved_on", "never_verified", "mismatch", "missing", "unreadable")
 
 
@@ -160,9 +162,18 @@ def reverify_file_receipts(entries: list[dict]) -> list[dict]:
     a re-hash cannot make a verification of something the server never
     verified. Only a "verified" receipt is re-hashed, and only after its ref
     passes the write's own rules (validate_file_ref, design C3). A ref the
-    write would refuse today predates the rule; it is "unreadable" and is
-    never stat'd or hashed, because re-hashing it would read the very file the
-    rule keeps receipts off (two live receipts hash an env-named file).
+    write would refuse today predates the rule; it is "unreadable" and its
+    file is never opened or hashed, because re-hashing it would read the very
+    file the rule keeps receipts off (two live receipts hash an env-named
+    file). The rules' own resolve() lstats the ref's path components; beyond
+    the pass's one look at the plugin cache (below), that is all the IO a
+    refused ref costs.
+
+    The rules check every ref against the plugin cache's location, which is a
+    bounded resolve() under the account's home and the same for the whole
+    pass. The pass locates it once, on its first verified receipt, so a pass
+    that meets none never looks, and N verified receipts cost N resolves of
+    their own refs plus one.
 
     Other kinds get no row. archive and claim receipts keep their own verdicts
     in season_review, and cmd / url / human receipts are stamped "attested" by
@@ -170,6 +181,7 @@ def reverify_file_receipts(entries: list[dict]) -> list[dict]:
     become a failure.
     """
     rows: list[dict] = []
+    plugin_caches: tuple[Path, ...] | None = None
     for entry in entries:
         receipts = entry.get("verified_by")
         if not isinstance(receipts, list):
@@ -186,10 +198,12 @@ def reverify_file_receipts(entries: list[dict]) -> list[dict]:
             if stamp != "verified":
                 status = "never_verified"
             else:
+                if plugin_caches is None:
+                    plugin_caches = plugin_cache_roots()
                 # The path the write hashed: trimmed, a studio: tag naming this
                 # host stripped, ~ expanded. The rules run before any read.
                 try:
-                    path = validate_file_ref(ref)
+                    path = validate_file_ref(ref, plugin_caches=plugin_caches)
                 except ReceiptError as exc:
                     status, refused = "unreadable", str(exc)
                 else:
@@ -791,7 +805,8 @@ def season_review(
       4. Hygiene — dangling supersession pointers, receipt re-verify
          failures (file receipts split by status: moved_on, never_verified,
          mismatch, missing, unreadable; a ref the write-time rules refuse
-         reads unreadable and is never read; see reverify_file_receipts),
+         reads unreadable and its file is never opened or hashed; see
+         reverify_file_receipts),
          unreceipted >=0.9 ground_truth sentinels, pin-loss warnings,
          sentinel-count-vs-boot-budget.
       5. Dormant domains / fragmentation stats.
