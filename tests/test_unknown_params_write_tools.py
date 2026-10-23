@@ -412,7 +412,6 @@ def drain(request, tmp_path, tmp_sovereign_root, monkeypatch):
     d.drain_root = tmp_sovereign_root
     d.home = tmp_path / "home"
     (d.home / ".sovereign").mkdir(parents=True)
-    monkeypatch.setenv("HOME", str(d.home))
     shard = tmp_sovereign_root / "chronicle" / "open_threads" / "d7.jsonl"
     shard.write_text(json.dumps({"thread_id": _D7_THREAD}) + "\n")
 
@@ -421,7 +420,16 @@ def drain(request, tmp_path, tmp_sovereign_root, monkeypatch):
     else:
         module = _fork_drain(d, request)
 
-    with _sandbox(f"d7-drain-{request.param}") as (s, stack_root):
+    # HOME AND THE POST STAND-IN ARE UNDONE AT THIS FIXTURE'S TEARDOWN, not at the
+    # test's monkeypatch. conftest.no_live_audit_writes reads Path.home() at its own
+    # teardown, which runs after this fixture's and before monkeypatch's (autouse
+    # fixtures set monkeypatch up first). A HOME still redirected then would make
+    # that guard read the tmp tree and pass without looking at the live chains.
+    with (
+        monkeypatch.context() as scoped,
+        _sandbox(f"d7-drain-{request.param}") as (s, stack_root),
+    ):
+        scoped.setenv("HOME", str(d.home))
         d.stack_root = stack_root
 
         def _post(url, json=None, headers=None, timeout=None):  # httpx.post's keyword names
@@ -429,7 +437,7 @@ def drain(request, tmp_path, tmp_sovereign_root, monkeypatch):
             result = _run(_call_through_framework(s, json["tool"], json["arguments"]))
             return _Resp(_bridge_envelope(result))
 
-        monkeypatch.setattr(module.httpx, "post", _post)
+        scoped.setattr(module.httpx, "post", _post)
         yield d
 
 
