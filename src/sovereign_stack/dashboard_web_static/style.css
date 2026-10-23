@@ -1253,8 +1253,10 @@ input::placeholder { color: var(--text-faint); }
 .stat-value.is-uptime { color: var(--v2-gold); }
 .stat-value.is-muted  { color: var(--text-dim); }
 /* SERVED vs HEAD (design A4) on the VERSION stat: amber when the running bridge
-   predates the stack's HEAD or the tree is dirty; dim italic when the bridge
-   could not tell (null) or does not report it. False alone stays plain. */
+   does not serve the stack's HEAD as committed (served_predates_head true: it
+   started before HEAD's commit, HEAD is not the commit it loaded, or the tree
+   was dirty at start or is dirty now); dim italic when the bridge could not
+   tell (null) or does not report it. False alone stays plain. */
 .stat-value.is-behind-head  { color: var(--degraded); }
 .stat-value.is-head-unknown { color: var(--text-dim); font-style: italic; }
 /* The design hides VERSION + UPTIME below 1240px so the phase name keeps

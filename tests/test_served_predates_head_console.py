@@ -33,7 +33,8 @@ TRUE_REASON = (
 )
 FALSE_REASON = (
     "service started 2026-10-23T13:00:00+00:00 at or after HEAD a12b51f "
-    "committed at 2026-10-23T12:00:00+00:00; working tree clean"
+    "committed at 2026-10-23T12:00:00+00:00; HEAD is the commit the service loaded; "
+    "working tree clean at service start and now"
 )
 NULL_REASON = (
     "git metadata unreadable: git log failed: fatal: not a git repository: '~/sovereign-stack/.git'"

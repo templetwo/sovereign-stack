@@ -403,8 +403,10 @@ function renderHeader(snapshot) {
 }
 
 // SERVED vs HEAD (design A4). The bridge re-reads the stack's HEAD and says
-// whether its running process is older than HEAD's commit, or the tree is
-// dirty: `served_predates_head` true / false / null, with a reason. null is
+// whether its running process is older than HEAD's commit, whether HEAD is no
+// longer the commit the process loaded, or whether the tree was dirty at start
+// or is dirty now: `served_predates_head` true / false / null, with a reason
+// naming each rule that holds. null is
 // "the bridge could not decide" and is NEVER read as false: it gets a style of
 // its own, and so does a bridge too old to send the field (no reason either).
 // Strict comparisons only: a truthiness test would fold null into false.
