@@ -17,9 +17,14 @@ claim id") and recorded the false conclusion into the chronicle as
 A silently-ignored parameter is a fail-open: the caller gets a confident,
 well-formed, WRONG answer instead of a correction. This file:
 
-1. Reproduces the exact historical call and asserts it now raises instead
-   of silently succeeding. THIS TEST MUST FAIL ON PRE-FIX CODE — that
-   failure is the proof the defect is real, not assumed.
+1. Reproduces the exact historical call and asserts it is no longer
+   silent. THIS TEST MUST FAIL ON PRE-FIX CODE — that failure is the proof
+   the defect is real, not assumed. UPDATED 2026-10-23 (design D7, thread
+   0804046c): the read path answers and names the key in the envelope's
+   `warnings`, with the same nearest-match hint, instead of raising; the
+   write path still refuses. The fail-open was the silence, and a named key
+   ends it without failing a read. tests/test_unknown_params_write_tools.py
+   holds the guard for every published tool.
 2. Confirms valid parameters (including the same `return_claim_id` /
    `with_ids` names on their CORRECT tools) are completely unaffected —
    the fix must not become a new fail-open in the other direction.
@@ -57,27 +62,31 @@ def _seed(srv, content="seed entry", domain="test-domain"):
     _run(_call(srv, "record_insight", {"domain": domain, "content": content}))
 
 
-class TestRecallInsightsRejectsUnknownKeys:
-    """The exact historical misfire, reproduced against the live dispatcher."""
+class TestRecallInsightsNamesUnknownKeys:
+    """The exact historical misfire, reproduced against the live dispatcher.
 
-    def test_return_claim_id_on_recall_insights_must_raise(self, isolated):
+    A read tool since design D7 answers and names the unknown key in its
+    envelope; before the guard it answered in silence, which is the defect."""
+
+    def test_return_claim_id_on_recall_insights_is_named_with_the_read_side_name(self, isolated):
         srv, _ = isolated
         _seed(srv)
 
-        with pytest.raises(ValueError) as excinfo:
-            _run(_call(srv, "recall_insights", {"query": "seed", "return_claim_id": True}))
+        result = _run(_call(srv, "recall_insights", {"query": "seed", "return_claim_id": True}))
 
-        message = str(excinfo.value)
-        assert "return_claim_id" in message
+        payload = json.loads(result[0].text)
+        (warning,) = payload["warnings"]
+        assert warning.startswith("unknown argument(s) ignored: return_claim_id;")
         # Nearest-match must point at the real read-side equivalent, not
         # just say "unknown" and leave the caller to guess again.
-        assert "with_ids" in message
+        assert "did you mean 'with_ids'?" in warning
+        assert payload["items"], "the read must still answer"
 
     def test_arbitrary_unknown_key_names_the_offender(self, isolated):
         srv, _ = isolated
-        with pytest.raises(ValueError) as excinfo:
-            _run(_call(srv, "recall_insights", {"totally_made_up_arg": True}))
-        assert "totally_made_up_arg" in str(excinfo.value)
+        result = _run(_call(srv, "recall_insights", {"totally_made_up_arg": True}))
+        (warning,) = json.loads(result[0].text)["warnings"]
+        assert "totally_made_up_arg" in warning
 
 
 class TestRecallInsightsControlValidParamsUnaffected:
@@ -212,10 +221,11 @@ class TestBridgeInjectedKeysTolerated:
         )
         assert "Insight recorded" in result[0].text
 
-    def test_same_keys_still_rejected_on_recall_insights(self, isolated):
+    def test_same_keys_are_named_on_recall_insights(self, isolated):
         """The tolerance is record_insight-specific — recall_insights has no
-        known caller injecting these, so they stay rejected there."""
+        known caller injecting these, so there the key is named, as any
+        unknown key on a read tool is since design D7."""
         srv, _ = isolated
-        with pytest.raises(ValueError) as excinfo:
-            _run(_call(srv, "recall_insights", {"session_token_id": "tok_abc123"}))
-        assert "session_token_id" in str(excinfo.value)
+        result = _run(_call(srv, "recall_insights", {"session_token_id": "tok_abc123"}))
+        (warning,) = json.loads(result[0].text)["warnings"]
+        assert "session_token_id" in warning

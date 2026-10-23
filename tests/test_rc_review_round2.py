@@ -544,9 +544,10 @@ class TestF5TheActorIsResolvedNotComposed:
         never a default — is asserted on the context, which is where identity
         lives now."""
         monkeypatch.setattr(server.spiral_state, "session_id", None)
-        out = _dispatch_ack(signal, actor_seat="   ")
-        assert out["ok"] is False
-        assert "'actor_seat' is not an accepted argument" in out["error"]
+        # Refused at dispatch entry since design D7 (signal_ack is a write
+        # tool), by name and before the signal handler runs.
+        with pytest.raises(ValueError, match=r"^unknown argument\(s\): actor_seat;"):
+            _dispatch_ack(signal, actor_seat="   ")
         blank = _dispatch_ack(signal)
         assert blank["ok"] is False
         assert "no caller identity" in blank["error"]

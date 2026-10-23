@@ -252,7 +252,7 @@ class TestTheSchemaDeclaresIt:
 
         from sovereign_stack import server
 
-        with pytest.raises(ValueError, match="unknown parameter"):
+        with pytest.raises(ValueError, match=r"^unknown argument\(s\): originl_timestamp;"):
             asyncio.run(
                 server._reject_unknown_params(
                     "record_insight", {"domain": "d", "content": "c", "originl_timestamp": "x"}

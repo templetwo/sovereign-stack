@@ -102,17 +102,20 @@ class TestN3TheCloserComesFromTheDispatchContext:
         which is how a comment claiming native input was ignored survived over
         a dispatch that read it."""
         monkeypatch.setattr(server.spiral_state, "session_id", "fixture-established-session")
-        out = _dispatch(
-            "signal_ack",
-            {
-                "signal_id": signal,
-                "state": "acted",
-                "reason": "closed",
-                argument: "fixture-different-seat",
-            },
-        )
-        assert out["ok"] is False
-        assert f"{argument!r} is not an accepted argument" in out["error"]
+        # Refused at dispatch entry since design D7 (signal_ack is a write
+        # tool), by name and before the signal handler runs. The handler's own
+        # identity refusal still answers a direct caller (test_signal_ledger.py).
+        with pytest.raises(ValueError) as exc:
+            _dispatch(
+                "signal_ack",
+                {
+                    "signal_id": signal,
+                    "state": "acted",
+                    "reason": "closed",
+                    argument: "fixture-different-seat",
+                },
+            )
+        assert str(exc.value).startswith(f"unknown argument(s): {argument};")
         row = sl.load_latest(sl.default_sovereign_root())[signal]
         assert row["state"] == "open", "a refusal that still writes the row is the fail-open"
         assert row["closed_by"] is None
@@ -181,7 +184,12 @@ class TestN3TheCloserComesFromTheDispatchContext:
         """THE ONE THAT MATTERS. Every argument name that could plausibly
         address the context — the var's own name, its module path, dotted and
         underscored spellings — is either refused or has no effect on the
-        stamped closer. The server's own identity is what lands."""
+        stamped closer. The server's own identity is what lands.
+
+        Since design D7 they are refused: signal_ack is a write tool, so an
+        undeclared key fails the call at dispatch entry and none of them reaches
+        the handler. The row stays open, and the same close without them lands
+        under the server's own identity."""
         from sovereign_stack import dispatch_context as dc
 
         monkeypatch.setattr(server.spiral_state, "session_id", "fixture-established-session")
@@ -193,11 +201,16 @@ class TestN3TheCloserComesFromTheDispatchContext:
             "context": {"caller_seat": "attacker"},
             "_caller_seat": "attacker",
         }
-        out = _dispatch(
-            "signal_ack",
-            {"signal_id": signal, "state": "acted", "reason": "closed", **reachers},
-        )
-        assert out["ok"] is True, "these are not refused names; they are simply inert"
+        with pytest.raises(ValueError) as exc:
+            _dispatch(
+                "signal_ack",
+                {"signal_id": signal, "state": "acted", "reason": "closed", **reachers},
+            )
+        assert str(exc.value).startswith(f"unknown argument(s): {', '.join(reachers)};")
+        assert sl.load_latest(sl.default_sovereign_root())[signal]["closed_by"] is None
+        assert dc.CALLER_SEAT.get() is None, "a refused call leaves no identity behind"
+        out = _dispatch("signal_ack", {"signal_id": signal, "state": "acted", "reason": "closed"})
+        assert out["ok"] is True
         assert out["row"]["closed_by"] == "seat:fixture-established-session"
         assert dc.CALLER_SEAT.get() is None, "the dispatch reset its own token"
 

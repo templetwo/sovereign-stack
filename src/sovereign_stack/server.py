@@ -151,8 +151,9 @@ def _parse_lineage_limit(arguments: dict, tool_name: str) -> int:
     which renders the same buckets, through the same render_lineage, under the
     same "N older withheld by limit_per_bucket" coverage line, and which is the
     door the boot ritual actually prescribes — declared no such key. An
-    undeclared key is silently dropped, so the full door named the lever,
-    accepted it, ignored it, and reported nothing.
+    undeclared key was silently dropped then (since design D7 it is named in
+    the envelope), so the full door named the lever, accepted it, ignored it,
+    and reported nothing.
 
     Handing back 100 to a caller who asked for 10,000 with no signal is the
     fail-open shape these doors exist to avoid: the seat walks away believing it
@@ -3198,61 +3199,155 @@ _KNOWN_PARAM_ALIASES: dict[str, dict[str, str]] = {
 # is a declared property of record_insight and is forwarded to storage, where
 # **metadata has always been ready to keep it. session_token_id remains
 # tolerated because it is still undeclared and still dropped.
+#
+# ADDED 2026-10-23 (design D7, the guard lifted to every published tool). The
+# caller survey for the lift (the bridge's /api/call and seat socket, its
+# session-token path and /api/batch, both Ring-2 drains, the Claude connector,
+# the Ring-1 proxies, the house scripts that call /api/call) found one more
+# undeclared key on a write tool: `situation`, which the propose_learning
+# schemas of all three Ring-2 bridges REQUIRE (clients/grok_bridge/
+# tool_adapter.py, clients/openai_bridge/tool_adapter.py, clients/
+# antigravity_connector/bridge_setup.py) and which both drains forward verbatim
+# to record_learning (build_commit_arguments in bridge_core/pending_writes.py
+# and in openai_bridge/pending_writes.py). Refusing it would turn every drained
+# learning into commit_failed. The record_learning body never reads it, so its
+# text has been dropped on every drained learning so far: a pre-existing loss,
+# reported forward, not fixed here.
 _ADDITIONAL_ALLOWED_PARAMS: dict[str, frozenset[str]] = {
+    # ~/sovereign-bridge bridge.py /api/call, the scoped session-token path.
     "record_insight": frozenset({"session_token_id"}),
+    # The three bridges' propose_learning, forwarded by both Ring-2 drains.
+    "record_learning": frozenset({"situation"}),
 }
 
 
-async def _reject_unknown_params(tool_name: str, arguments: dict) -> None:
-    """Raise ValueError naming every argument key `tool_name`'s live schema
-    doesn't declare, instead of the pre-existing behavior (every branch below
-    reads via `arguments.get(key, default)`, which silently drops anything
-    not explicitly read — a fail-open: the caller gets a confident,
-    well-formed, WRONG answer instead of a correction).
+# THE INTENTS WHOSE TOOLS REFUSE AN UNKNOWN ARGUMENT (design D7, thread
+# 0804046c). A write, govern or handoff tool changes state, so an argument it
+# drops is a change made without what the caller asked for. Every other
+# published tool runs without the unknown keys and names them in its envelope.
+_REFUSE_UNKNOWN_ARGUMENT_INTENTS = frozenset({"write", "govern", "handoff"})
 
-    The allowlist is derived from `list_tools()` — the same live registry
-    `my_toolkit`/`heartbeat` already treat as the source of truth — not a
-    second hand-maintained copy that could drift from the registered
-    inputSchema. Called only for tools where the caller survey in
-    mesh-2026-08 (recall_insights, record_insight) is complete; see the
-    scope note where this is invoked.
 
-    Deliberately uncached: this dispatches on the same request path as
-    `test_contract_walker.py`'s live-schema assumption, and rebuilding a
-    ~97-entry list of Tool object literals (no I/O, no network) is cheap
-    next to a chronicle write already going through a worker thread.
+def _unknown_argument_hint(
+    tool_name: str, key: str, accepted: list[str], schema_map: dict[str, list[str]]
+) -> str | None:
+    """One hint for an unknown key, or None.
+
+    A known cross-tool confusion (_KNOWN_PARAM_ALIASES) or else a near spelling
+    among the tool's own parameters, and the first other published tool that
+    declares the key.
     """
-    if not arguments:
-        return
+    alias = _KNOWN_PARAM_ALIASES.get(tool_name, {}).get(key)
+    if alias is None:
+        close = difflib.get_close_matches(key, accepted, n=1)
+        alias = close[0] if close else None
+    owner = next((n for n, keys in schema_map.items() if n != tool_name and key in keys), None)
+    owned = f"'{key}' is a parameter of {owner}" if owner else None
+    if alias is None:
+        return owned
+    hint = f"'{key}': did you mean '{alias}'?"
+    return f"{hint} ({owned})" if owned else hint
+
+
+async def _unknown_arguments(tool_name: str, arguments: dict) -> tuple[list[str], str] | None:
+    """The keys of ``arguments`` that ``tool_name`` does not declare, and the text naming them.
+
+    Returns ``(unknown, detail)``, where ``detail`` reads ``"<names>; accepted:
+    <names>"`` (``(none)`` for a tool with no parameters), followed by one hint
+    per key that has one; or None when every key is declared by the tool's live
+    inputSchema or tolerated for a named caller (_ADDITIONAL_ALLOWED_PARAMS). A
+    name the published registry does not carry also returns None: the retirement
+    gate and the unknown-tool raise answer it.
+
+    The allowlist is derived from `list_tools()`, the same live registry
+    `my_toolkit` and `heartbeat` treat as the source of truth, not a second
+    hand-maintained copy that could drift from the registered inputSchema.
+    Deliberately uncached: rebuilding the Tool literals costs well under a
+    millisecond (0.07 ms, measured 2026-10-23), next to any call it guards.
+    """
+    if not isinstance(arguments, dict) or not arguments:
+        return None
     tools = await list_tools()
-    schema_map = {t.name: set((t.inputSchema.get("properties") or {}).keys()) for t in tools}
-    valid_keys = schema_map.get(tool_name)
-    if valid_keys is None:
-        return  # tool not in the live registry — not this guard's problem
+    schema_map = {t.name: list((t.inputSchema.get("properties") or {}).keys()) for t in tools}
+    accepted = schema_map.get(tool_name)
+    if accepted is None:
+        return None
     tolerated = _ADDITIONAL_ALLOWED_PARAMS.get(tool_name, frozenset())
-    unknown = [k for k in arguments if k not in valid_keys and k not in tolerated]
+    unknown = [k for k in arguments if k not in accepted and k not in tolerated]
     if not unknown:
-        return
+        return None
+    detail = f"{', '.join(unknown)}; accepted: {', '.join(accepted) or '(none)'}"
+    hints = [_unknown_argument_hint(tool_name, k, accepted, schema_map) for k in unknown]
+    return unknown, "; ".join([detail, *(h for h in hints if h)])
 
-    def _describe(key: str) -> str:
-        alias = _KNOWN_PARAM_ALIASES.get(tool_name, {}).get(key)
-        if alias is None:
-            close = difflib.get_close_matches(key, valid_keys, n=1)
-            alias = close[0] if close else None
-        owner = next(
-            (n for n, keys in schema_map.items() if n != tool_name and key in keys),
-            None,
-        )
-        msg = f"unknown parameter '{key}' for {tool_name}"
-        if alias:
-            msg += f"; did you mean '{alias}'?"
-        if owner:
-            msg += f" ({key} is a {owner} parameter)"
-        if not alias and not owner:
-            msg += ". No close match found among this tool's valid parameters."
-        return msg
 
-    raise ValueError("; also: ".join(_describe(k) for k in unknown))
+async def _reject_unknown_params(tool_name: str, arguments: dict) -> None:
+    """Raise ValueError("unknown argument(s): <names>; accepted: <names>") for
+    any key in ``arguments`` that ``tool_name`` does not declare.
+
+    The refusal for write, govern and handoff tools (_screen_unknown_arguments).
+    Raised, not returned: the SDK turns a raise into isError=True with exactly
+    this text and the bridge into {"ok": false, "error": <this text>}, while
+    returned text is wrapped as a SUCCESS (the P1 rule, mesh-20260719).
+
+    History: written for record_insight and recall_insights on
+    fix/tool-dispatch-unknown-key-rejection (af8714b, held 2026-08-02 and never
+    merged), grafted 2026-08-28 after HQ rediscovered the defect (SOP #12 with
+    HQ as the instance), and lifted by design D7 from those two branches to
+    dispatch entry, so it guards every published tool.
+    """
+    found = await _unknown_arguments(tool_name, arguments)
+    if found is not None:
+        raise ValueError(f"unknown argument(s): {found[1]}")
+
+
+async def _screen_unknown_arguments(name: str, arguments: dict) -> tuple[dict, str | None]:
+    """Answer the arguments ``name`` does not declare, before anything else runs.
+
+    A write, govern or handoff tool is refused (_reject_unknown_params), so its
+    body never runs and nothing is written. Any other published tool goes on
+    with the unknown keys removed, so "ignored" is literally true, and the
+    returned warning goes into its envelope. Returns ``(arguments to dispatch,
+    warning or None)``.
+    """
+    if _intent_for(name) in _REFUSE_UNKNOWN_ARGUMENT_INTENTS:
+        await _reject_unknown_params(name, arguments)
+        return arguments, None
+    found = await _unknown_arguments(name, arguments)
+    if found is None:
+        return arguments, None
+    unknown, detail = found
+    kept = {k: v for k, v in arguments.items() if k not in unknown}
+    return kept, f"unknown argument(s) ignored: {detail}"
+
+
+def _with_envelope_warning(result, warning: str):
+    """``result`` with ``warning`` inside its first content item.
+
+    The first item because the bridge reads only ``content[0]``
+    (bridge.call_mcp_tool), so a warning in a later item never reaches a remote
+    seat. A JSON object gains ``warnings`` as its first key, after any warnings
+    the tool returned there itself; any other text gains a leading
+    ``warnings: [...]`` line. Every dispatch branch returns list[TextContent]
+    (the dispatcher's contract), so any other shape is returned unchanged.
+    """
+    if not isinstance(result, list):
+        return result
+    line = f"warnings: {json.dumps([warning])}"
+    if not result or not isinstance(result[0], TextContent):
+        return [TextContent(type="text", text=line), *result]
+    text = result[0].text
+    try:
+        payload = json.loads(text)
+    except ValueError:
+        payload = None
+    if isinstance(payload, dict):
+        own = payload.pop("warnings", [])
+        own = own if isinstance(own, list) else [own]
+        text = json.dumps({"warnings": [*own, warning], **payload}, indent=2)
+    else:
+        text = f"{line}\n\n{text}"
+    return [TextContent(type="text", text=text), *result[1:]]
 
 
 # Placeholder session values that are the ABSENCE of an identity, not one.
@@ -3434,6 +3529,14 @@ async def _dispatch_tool(name: str, arguments: dict):
     # MCP call to the body except through this gate.
     if name in RETIRED_TOOLS:
         raise ValueError(retired_tool_error(name))
+    # UNKNOWN ARGUMENTS ARE ANSWERED HERE, BEFORE ANY STATE MOVES (design D7,
+    # thread 0804046c). Every branch below reads its arguments with .get(), so
+    # an undeclared key used to vanish and the call answered as if it had never
+    # been sent. A write, govern or handoff tool is refused before the spiral
+    # moves or its body runs; any other tool runs without the key and names it
+    # in its envelope. Below the retirement gate, so a retired name keeps its
+    # own answer.
+    arguments, ignored = await _screen_unknown_arguments(name, arguments)
     # ── THE DISPATCH CONTEXT IS ESTABLISHED HERE, AT DISPATCH ENTRY ─────────
     #
     # This is the one place the SERVER can speak for itself about who is
@@ -3465,13 +3568,14 @@ async def _dispatch_tool(name: str, arguments: dict):
         if resolved:
             seat_token = set_caller_seat(resolved)
     try:
-        return await _dispatch_registered_tool(name, arguments, transport_seat=transport_seat)
+        result = await _dispatch_registered_tool(name, arguments, transport_seat=transport_seat)
     finally:
         # ALWAYS RESET, INCLUDING ON THE RAISE PATH. A token left unreset
         # leaks this call's identity into whatever runs next in the same
         # context.
         if seat_token is not None:
             reset_caller_seat(seat_token)
+    return result if ignored is None else _with_envelope_warning(result, ignored)
 
 
 async def _dispatch_registered_tool(
@@ -3562,14 +3666,8 @@ async def _dispatch_registered_tool(
         return [TextContent(type="text", text=json.dumps(result, indent=2))]
 
     if name == "record_insight":
-        # Unknown-key rejection: see _reject_unknown_params. Grafted from
-        # fix/tool-dispatch-unknown-key-rejection (af8714b, "HELD FOR REVIEW",
-        # authored 2026-08-02 and never merged). HQ independently rediscovered
-        # this defect on 2026-08-28 and wrote a narrower hand-rolled allowlist
-        # before finding the held branch — SOP #12 with HQ as the instance. The
-        # branch's version is kept because it derives valid keys from the LIVE
-        # registry rather than a second hand-maintained copy that can drift.
-        await _reject_unknown_params("record_insight", arguments)
+        # An undeclared key never reaches this branch: _dispatch_tool refuses it
+        # first (_screen_unknown_arguments, design D7).
         domain = arguments.get("domain")
         content = arguments.get("content")
         # The schema marks both required — don't invent defaults for callers
@@ -3719,12 +3817,11 @@ async def _dispatch_registered_tool(
         ]
 
     if name == "recall_insights":
-        # The held branch wired BOTH tools; the alias map's documented incident
-        # (return_claim_id passed to recall_insights, silently dropped, and a
-        # false ground_truth conclusion written from the silence) is a READ-path
-        # failure, so covering only the write path would leave the exact case
-        # that motivated the guard uncovered.
-        await _reject_unknown_params("recall_insights", arguments)
+        # The alias map's documented incident (return_claim_id passed here,
+        # dropped in silence, and a false ground_truth conclusion written from
+        # the silence) is answered at dispatch entry since design D7: the key is
+        # named in this envelope's warnings, with the with_ids hint, and never
+        # reaches this branch.
         query = arguments.get("query")
         domain = arguments.get("domain")
         if domain and domain.lower() == "all":
@@ -4058,8 +4155,8 @@ async def _dispatch_registered_tool(
         # gentle door got the schema key; this one renders the SAME lineage
         # buckets through the SAME render_lineage, prints the same "N older
         # withheld by limit_per_bucket" line, and declared no such key — so it
-        # named the lever, accepted the argument (an undeclared key is dropped,
-        # not rejected), ignored it, and reported nothing. Verbatim the failure
+        # named the lever, accepted the argument (an undeclared key was dropped
+        # then, not rejected), ignored it, and reported nothing. Verbatim the failure
         # the gentle door's own comment condemns.
         try:
             lineage_limit = _parse_lineage_limit(arguments, "where_did_i_leave_off")
@@ -4267,7 +4364,8 @@ async def _dispatch_registered_tool(
         # older withheld by limit_per_bucket" — while this schema declared only
         # source_instance and full_content, and arrival_state hardcoded 5. A seat
         # that followed the instructions got 5 letters back and NO error, because
-        # an undeclared key is simply dropped. The advertised remedy silently
+        # an undeclared key was simply dropped (before design D7, which names
+        # one in the envelope). The advertised remedy silently
         # doing nothing is worse than no remedy: it retires the question.
         #
         # ONE DOORWAY, MANY DEPTHS (Phase 4): same build_arrival_state
