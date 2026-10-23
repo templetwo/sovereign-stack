@@ -44,8 +44,10 @@ as well as the stack's tmp root. Nothing here touches ~/.sovereign.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import hashlib
 import json
+import re
 import types
 from pathlib import Path
 
@@ -436,6 +438,7 @@ def _bridge_core_drain(d: _Drain, tmp_path: Path, monkeypatch):
         pw.approve_pending_write(ctx, p.proposal_id, approved_by="Anthony")
         return p.proposal_id
 
+    d.ctx = ctx
     d.propose = propose
     d.commit = lambda pid, live=True: pw.commit_pending_write(ctx, pid, live=live)
     d.retry = lambda pid: pw.retry_pending_write(ctx, pid, actor="Anthony")
@@ -915,3 +918,67 @@ class TestTheConsoleSaysCommitFailed:
         assert result.exit_code == 0, result.output
         assert "would refuse: unknown argument(s): foo" in result.output
         assert fork_console.posted == []
+
+
+# ---------------------------------------------------------------------------
+# The antigravity connector's compass keys never travel in a proposal's
+# arguments (plan 1's final review, finding I-5)
+# ---------------------------------------------------------------------------
+
+
+class TestTheAntigravityCompassKeysStayOutOfTheProposal:
+    """clients/antigravity_connector/bridge_setup.governed_call takes the compass
+    result from the call's arguments when no keyword carries it (the fallback for
+    direct callers). It used to read them with get() and leave them there, and
+    intercept stores those arguments as the proposal's, which both drains forward
+    verbatim. Since D7 the Stack refuses both keys on every commit target, and a
+    CRITICAL proposal must carry the compass, so such a proposal was refused on
+    commit, refused again on retry, and unfixable by an edit (the audit hash):
+    committable never. Before D7 it committed with the keys dropped. The
+    antigravity queue drains through bridge_core, so the bridge_core drain
+    carries the commit here, with the connector's substrate on its context."""
+
+    @pytest.mark.parametrize("drain", ["bridge_core"], indirect=True)
+    def test_a_critical_proposal_carrying_the_keys_in_its_arguments_commits(
+        self, drain, monkeypatch
+    ):
+        import antigravity_connector.bridge_setup as bs
+        import bridge_core.pending_writes as pw
+        from bridge_core.risk import RiskLevel
+
+        ctx = dataclasses.replace(drain.ctx, substrate=bs.SUBSTRATE)
+        monkeypatch.setattr(bs, "ANTIGRAVITY_CONTEXT", ctx)
+
+        def _must_not_dispatch(name, args):  # pragma: no cover - proves non-dispatch
+            raise AssertionError(f"Ring 1 dispatch reached for a Ring 2 call: {name}")
+
+        # An identity phrase makes the proposal CRITICAL, so the compass result is
+        # what lets it commit at all: the keys cannot simply be thrown away.
+        result = bs.governed_call(
+            _must_not_dispatch,
+            "propose_insight",
+            {
+                "content": "i remember this D7 probe from a previous session",
+                "domain": "d7",
+                "compass_check_result": "PROCEED",
+                "compass_check_rationale": "the probe ran compass_check first",
+            },
+            "d7-antigravity-seat",
+            substrate=bs.SUBSTRATE,
+        )
+        (pid,) = re.findall(r"PROPOSAL CREATED: (\S+)", result["content"][0]["text"])
+        proposal = pw._load_proposal(ctx, pid)[0]
+        assert proposal.risk_level == RiskLevel.CRITICAL
+        assert proposal.compass_check_result == "PROCEED"
+        assert proposal.compass_check_rationale == "the probe ran compass_check first"
+        pw.approve_pending_write(ctx, pid, approved_by="Anthony")
+
+        before = _state(drain)
+        committed = pw.commit_pending_write(ctx, pid, live=True)
+
+        assert committed.status == "committed", committed.commit_result
+        assert _state(drain) != before, "the commit wrote nothing under the stack's tmp root"
+        compass_keys = {"compass_check_result", "compass_check_rationale"}
+        assert [body["tool"] for body in drain.posted] == ["record_insight"]
+        assert not compass_keys & set(drain.posted[0]["arguments"])
+        assert not compass_keys & set(pw._load_proposal(ctx, pid)[0].arguments)
