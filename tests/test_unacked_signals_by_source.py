@@ -19,11 +19,12 @@ it is, one `open_thread` signal per open thread: in the field and the summary
 says the same words.
 
 The status line is the clause's second surface. hq-pulse renders it from the same
-field and summary, in `~/bin/hq-pulse.py`, HQ's file, edited in HQ's lane at the
-deploy and never on a branch. The edit that carries the label there is the tracked
-patch beside the plan; the tests at the end rebuild its `render_signals` from the
-patch's post-image and run it against this fixture, so the line a person reads after
-the deploy is pinned here while `~/bin` is never read.
+field and summary, in `~/bin/hq-pulse.py`, HQ's file, edited in HQ's lane with a
+`.bak` beside it and never on a branch; the tracked patch beside the plan is the
+record of that edit, applied 2026-10-23. Its renderer is tested beside the pulse,
+in HQ's lane (`hq-pulse-render-checks.py`), not here: this suite executes no patch
+text and reads nothing under `~/bin`. What is pinned here is the pulse's input, the
+field and the summary, shape and labels, in every shape.
 
 Tmp roots only. Nothing here reads, counts or compares the live store.
 """
@@ -353,100 +354,3 @@ def test_the_attention_strip_labels_the_thread_count_as_open_threads():
     js = (STATIC / "app.js").read_text(encoding="utf-8")
     assert f"['thread', '{sl.SOURCE_LABELS['thread']}']" in js
     assert "['thread', 'threads']" not in js
-
-
-# ── The status line (spec A3's second surface) ───────────────────────────────
-# hq-pulse's status line is rendered by `render_signals` in ~/bin/hq-pulse.py,
-# HQ's file, edited in HQ's lane at the deploy with a .bak beside it and never
-# on a branch. The edit that carries the label there is the tracked patch
-# below, one hunk over the whole function. These tests rebuild the function
-# from the patch's post-image and run it against the stack's own field and
-# summary, so the line a person reads after the deploy is pinned here while
-# ~/bin itself is never read.
-PULSE_PATCH = (
-    Path(__file__).resolve().parents[1]
-    / "docs"
-    / "superpowers"
-    / "plans"
-    / "2026-10-21-next-phase-plan-1-hq-pulse-labels.patch"
-)
-
-
-def _pulse_render_from_patch():
-    """`render_signals` as it reads once the tracked patch is applied.
-
-    The patch is one hunk (asserted: the post-image is whole only then), so
-    its context and `+` lines are the patched text. The function is sliced
-    from its `def` to the next top-level `def` and compiled alone: pure Python
-    on builtins, and nothing of the pulse's `main()` is executed."""
-    lines = PULSE_PATCH.read_text(encoding="utf-8").splitlines()
-    hunks = [i for i, line in enumerate(lines) if line.startswith("@@ ")]
-    assert len(hunks) == 1, "one hunk over the whole function; regenerate with diff -U 12"
-    post = [line[1:] for line in lines[hunks[0] + 1 :] if line[:1] in (" ", "+") or line == ""]
-    start = next((i for i, line in enumerate(post) if line.startswith("def render_signals(")), None)
-    assert start is not None, "the hunk does not reach def render_signals("
-    end = next((i for i in range(start + 1, len(post)) if post[i].startswith("def ")), None)
-    assert end is not None, "the hunk ends inside render_signals; it must reach the next def"
-    namespace: dict = {}
-    exec(compile("\n".join(post[start:end]) + "\n", str(PULSE_PATCH), "exec"), namespace)
-    return namespace["render_signals"]
-
-
-def _as_the_pulse_reads_it(payload):
-    """Both blocks reach the pulse as JSON over HTTP."""
-    return json.loads(json.dumps(payload))
-
-
-def test_the_tracked_pulse_patch_labels_the_thread_count_on_the_status_line(tmp_sovereign_root):
-    """Spec A3's second surface. On both routes the pulse renders (the
-    heartbeat's flat `by_source` and `signals_summary`'s nested detail) the
-    thread count prints under its label, one word, in thread's sorted slot,
-    and no bare `thread=` token is left on the line."""
-    render = _pulse_render_from_patch()
-    root = tmp_sovereign_root
-    _three_threads_one_honk(root)
-    label = sl.SOURCE_LABELS["thread"].replace(" ", "_")
-    assert label == "open_threads", "one word, a space made _"
-    field = _as_the_pulse_reads_it(sl.heartbeat_field(root))
-    summary = json.loads(sl.handle_signal_tool("signals_summary", {}, root=root))
-    line = render(field)
-    assert line == f"decision=0,guardian=0,halt=0,honk=1,proposal=0,{label}=3,watchman=0/ok"
-    assert render(summary) == line, "the summary route prints each nested value as its open"
-    tokens = line.split("/")[0].split(",")
-    assert not any(token.startswith("thread=") for token in tokens), "a bare thread= token"
-    assert f"{label}=3" in tokens
-
-
-def test_the_patched_status_line_says_unknown_for_what_it_could_not_read(tmp_sovereign_root):
-    """Fail-closed on both routes, the pulse's own null-not-zero rule: a
-    never-scanned ledger is UNKNOWN, a source that could not be measured is
-    UNKNOWN in its slot (the summary route's nested null included, which the
-    unpatched pulse printed as a dict repr), a partial sweep says so, and no
-    block at all is ABSENT."""
-    render = _pulse_render_from_patch()
-    root = tmp_sovereign_root
-    assert render(_as_the_pulse_reads_it(sl.heartbeat_field(root))) == "UNKNOWN/never"
-    _three_threads_one_honk(root, guardian_readable=False)
-    label = sl.SOURCE_LABELS["thread"].replace(" ", "_")
-    expected = f"decision=0,guardian=UNKNOWN,halt=0,honk=1,proposal=0,{label}=3,watchman=0"
-    field = _as_the_pulse_reads_it(sl.heartbeat_field(root))
-    summary = json.loads(sl.handle_signal_tool("signals_summary", {}, root=root))
-    assert render(field) == expected + "/degraded"
-    assert render(summary) == expected + "/degraded"
-    assert render(dict(field, partial=True)) == expected + "/degraded/PARTIAL"
-    assert render(None) == "ABSENT"
-
-
-def test_the_patched_status_line_leaves_the_old_shape_and_an_unlabelled_block_as_they_were():
-    """The pulse reads whichever stack answers. The pre-A3 `total` shape
-    renders exactly as before the patch; a by-source block with no
-    `source_labels` (the bridge's fallback, an older A3 stack) prints each
-    source under its key; a null `by_source` is UNKNOWN."""
-    render = _pulse_render_from_patch()
-    assert render({"total": 322, "ingestion": "ok"}) == "322/ok"
-    assert render({"total": None, "ingestion": "refreshing", "partial": True}) == (
-        "UNKNOWN/refreshing/PARTIAL"
-    )
-    unlabelled = {"ingestion": "ok", "by_source": {"thread": 3, "honk": 1}}
-    assert render(unlabelled) == "honk=1,thread=3/ok"
-    assert render({"ingestion": "error", "by_source": None}) == "UNKNOWN/error"
