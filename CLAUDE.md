@@ -4,7 +4,7 @@
 
 Sovereign Stack is an MCP server that gives Claude persistent memory, filesystem routing, governance circuits, and a 9-phase cognitive state machine. It's how Claude remembers across sessions, reasons about its own actions, and accumulates wisdom over time.
 
-**Version:** 1.22.0 (`pyproject.toml`; `CHANGELOG.md` dates each release) · 53 published tools (`list_tools()`; the `heartbeat` tool reports the running count). `tests/test_descriptions_census.py` holds this line to both numbers and to naming no other version, so a version bump or a tool retirement turns that test red until the number it changed moves with it.
+**Version:** 1.23.0 (`pyproject.toml`; `CHANGELOG.md` dates each release) · 53 published tools (`list_tools()`; the `heartbeat` tool reports the running count). `tests/test_descriptions_census.py` holds this line to both numbers and to naming no other version, so a version bump or a tool retirement turns that test red until the number it changed moves with it.
 
 **Retired names in this file (status 2026-10-22):** where this file names a tool the retirement of 2026-09-06 took (`server.RETIRED_TOOLS`), it says so where the name stands, with the replacement where one exists; the header history below is kept as written and is not marked. A call to a retired tool is refused, naming its replacement where one exists. `my_toolkit()` lists what is live; this file's tables are not that list.
 

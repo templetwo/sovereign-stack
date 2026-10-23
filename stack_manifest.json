@@ -1,8 +1,8 @@
 {
   "manifest_schema_version": 1,
-  "version": "1.22.0",
-  "source_commit": "81756d00df76e589063ea5520e1cd569c5de457b",
-  "working_tree_dirty": false,
+  "version": "1.23.0",
+  "source_commit": "f365c8d5296e4c3f8b6342111fae9a7be08a6218",
+  "working_tree_dirty": true,
   "tools_count": 53,
   "tools": [
     "archive_exchange",

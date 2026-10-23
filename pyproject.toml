@@ -1,6 +1,6 @@
 [project]
 name = "sovereign-stack"
-version = "1.22.0"
+version = "1.23.0"
 description = "MCP server for AI memory, governance, reflection daemons, consciousness continuity and progressive boot (arrive/arrive_lineage). Runtime-reflexive. 100% local. Token-gated SSE surface. Cross-substrate bridges for ChatGPT and Grok. The live tool count is in stack_manifest.json, generated from the registry."
 readme = "README.md"
 license = {file = "LICENSE"}
