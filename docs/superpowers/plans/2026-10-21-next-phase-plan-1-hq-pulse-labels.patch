@@ -1,0 +1,90 @@
+Task 9 (design A3) deploy pairing for HQ's pulse: the status line labels the thread count.
+
+Target: /Users/tony_studio/bin/hq-pulse.py as HQ left it at 2026-10-23 06:04:36 EDT, the
+by-source edit of progress.md:65 (sha256
+c465b6ef8c5af1588d2d764f2e01ff55bd02d190374db445723f86c9e2f73516). One hunk, covering
+the whole of `render_signals`, so the lines below the `@@` are that function as it reads
+once applied. Nothing newer than the plist's interpreter (/usr/bin/python3, CLT 3.9).
+
+What it changes, and nothing else:
+- each source prints under the block's own `source_labels` name for it, a space made `_`,
+  so the thread count reads `open_threads=N` (spec A3: "the thread backlog is labelled as
+  the open-thread count it is"), or under its key where the block carries no label (the
+  bridge's fallback, an older stack);
+- a nested `signals_summary` value prints as its `open` count, so a null source renders
+  UNKNOWN on both routes (the Task 9 review's must-fix: that route printed dict reprs);
+- the older `total` shape, a null `by_source`, PARTIAL and ABSENT render as before.
+
+Apply, in HQ's lane at the Task 12 deploy, never on a branch (this file authorizes nothing;
+~/bin is HQ's):
+  shasum -a 256 ~/bin/hq-pulse.py          # c465b6ef... or re-derive this patch first
+  cp ~/bin/hq-pulse.py ~/bin/hq-pulse.py.bak-YYYYMMDD-labels
+  patch ~/bin/hq-pulse.py < docs/superpowers/plans/2026-10-21-next-phase-plan-1-hq-pulse-labels.patch
+
+Pinned in the repo: tests/test_unacked_signals_by_source.py rebuilds `render_signals` from
+this patch's post-image and runs it against the stack's own field and summary (a tmp root,
+JSON round-tripped): open_threads=N on both routes, UNKNOWN for a source it could not read,
+the old shape unchanged. No test reads ~/bin.
+
+--- hq-pulse.py (as HQ left it 2026-10-23 06:04:36 EDT, sha256 c465b6ef8c5af1588d2d764f2e01ff55bd02d190374db445723f86c9e2f73516)
++++ hq-pulse.py (labelled: each source under its source_labels name, a nested summary value as its open count)
+@@ -143,43 +143,56 @@
+     age_s = datetime.now(timezone.utc).timestamp() - mtime
+     if age_s > WATCHMAN_STALE_S:
+         return f"STALE (age={int(age_s)}s > {WATCHMAN_STALE_S}s)"
+     return f"OK (age={int(age_s)}s)"
+ 
+ 
+ def render_signals(block) -> str:
+     """One status token for an unacked-signal block (the heartbeat's
+     `unacked_signals` or a `signals_summary` result). Two shapes, both
+     fail-closed on the render:
+ 
+     - the by-source shape (sovereign-stack plan 1 Task 9, design A3: counts
+-      per source, no headline total) renders `thread=205,watchman=110,...`,
+-      and a null `by_source` (the ledger unreadable) renders UNKNOWN;
++      per source, no headline total) renders `open_threads=205,watchman=110,...`:
++      each source under the block's own `source_labels` name for it (A3: the
++      thread count is the open threads; a space becomes `_`, so a token stays
++      one word), or under its key where the block carries no label (the
++      bridge's fallback, an older stack). A source's value is its `open` count
++      when it is the nested detail `signals_summary` returns, so a null source
++      renders UNKNOWN on both routes. A null `by_source` (the ledger unreadable)
++      renders UNKNOWN;
+     - the older shape with a `total` key renders `total/ingestion`, with a
+       null total as UNKNOWN (the stack's own null-not-zero rule).
+ 
+     A partial sweep says so in both. Anything that is not a dict is ABSENT
+     (an older stack, or no block at all). Edited 2026-10-23 by HQ ahead of
+     the plan 1 deploy so the pulse reads either stack without a restart.
+     """
+     if not isinstance(block, dict):
+         return "ABSENT"
+     ing = block.get("ingestion", "?")
+     if "total" in block:
+         total = block.get("total")
+         out = ("UNKNOWN" if total is None else str(total)) + f"/{ing}"
+     else:
+         by_source = block.get("by_source")
+         if isinstance(by_source, dict):
+-            parts = [f"{src}={'UNKNOWN' if n is None else n}" for src, n in sorted(by_source.items())]
++            labels = block.get("source_labels")
++            labels = labels if isinstance(labels, dict) else {}
++            parts = []
++            for src, n in sorted(by_source.items()):
++                if isinstance(n, dict):  # signals_summary: the nested detail
++                    n = n.get("open")
++                name = str(labels.get(src) or src).replace(" ", "_")
++                parts.append(f"{name}={'UNKNOWN' if n is None else n}")
+             out = (",".join(parts) if parts else "none") + f"/{ing}"
+         else:
+             out = f"UNKNOWN/{ing}"
+     if block.get("partial"):
+         out += "/PARTIAL"
+     return out
+ 
+ 
+ def main():
+     signal.signal(signal.SIGALRM, _timeout_handler)
+     signal.alarm(SCRIPT_TIMEOUT_S)
+ 
