@@ -305,6 +305,45 @@ def test_the_supersedes_refusal_points_at_no_retired_tool(tmp_path):
     assert stale_sentences(message, RETIRED) == [], message
 
 
+# ── Three sentences the census cannot see (plan 1's final review, finding I-4) ─
+#
+# Each said what its code no longer does, and carries neither a consumption word
+# nor a retired name, so the scanner above passes all three. Each is pinned here
+# against what its code does now.
+
+
+def _description(tool_name: str) -> str:
+    return next(tool.description for tool in _published_tools() if tool.name == tool_name)
+
+
+def test_season_review_calls_section_3_the_keyword_screen_it_is():
+    """Design C5: section 3 is a regex over sentinel text, titled "POLICY-SHAPED
+    KEYWORD SCREEN (...; NOT a count of policies)". The registered description
+    still called it "policy candidates", the reading C5 exists to stop."""
+    text = _description("season_review")
+    assert "policy candidates" not in text
+    assert "keyword screen" in text
+    assert "a match is not a policy" in text
+
+
+def test_inspect_claim_names_every_checked_now_value_and_the_refused_key():
+    """_check_receipt_now answers an archive or file receipt with verified,
+    mismatch, missing or unreadable, and a ref the write-time rules refuse gains
+    `refused` (design C3). The description listed the first three only."""
+    text = _description("inspect_claim")
+    assert "checked_now: verified|mismatch|missing|unreadable" in text
+    assert "gains refused" in text
+
+
+def test_nape_ack_says_which_count_of_nape_summary_drops_the_ack():
+    """NapeDaemon.summary drops an acked honk from `unacknowledged` only; its
+    per-level counts and `total` still count it (pinned in
+    tests/test_nape_daemon.py). "stops counting it" read as all of them."""
+    text = _description("nape_ack")
+    assert "stops counting" not in text
+    assert "unacknowledged count drops it at once" in text
+
+
 # ── The repo CLAUDE.md header ───────────────────────────────────────────────
 
 _HEADER_VERSION = re.compile(r"\*\*Version:\*\*\s*v?(\d+(?:\.\d+)+)")

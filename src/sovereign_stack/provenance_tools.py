@@ -459,8 +459,10 @@ PROVENANCE_TOOLS = [
             "full lineage walk (predecessors → self → successors, cycle-safe), and whether "
             "the entry's supersedes breadcrumb agrees with the canonical ledger "
             "(ledger_vs_breadcrumb: consistent|divergent). verify_receipts=true re-runs "
-            "archive/file checks live (checked_now: verified|mismatch|missing; claim refs "
-            "cite or dangle, never verify; cmd/url/human stay attested). Not-found and "
+            "archive/file checks live (checked_now: verified|mismatch|missing|unreadable; "
+            "a file ref the write-time rules refuse today reads unreadable, is never opened, "
+            "and gains refused, the rule in its own words; claim refs cite or dangle, never "
+            "verify; cmd/url/human stay attested). Not-found and "
             "ambiguous refs come back as honest JSON, never errors."
         ),
         inputSchema={

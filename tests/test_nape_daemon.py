@@ -836,6 +836,9 @@ class TestSummaryCounts:
 
         after = self.daemon.summary(SESSION)
         assert after["unacknowledged"] == unacked_before - 1
+        # Only `unacknowledged` moves: the per-level counts and `total` count
+        # every honk, acked or not, which is what nape_ack's description says.
+        assert after["total"] == before["total"]
 
     def test_summary_scopes_to_session(self):
         """Honks from a different session are not counted in SESSION summary."""

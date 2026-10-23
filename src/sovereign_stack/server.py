@@ -1860,8 +1860,9 @@ def _registered_tools():
                 name="nape_ack",
                 description=(
                     "Acknowledge a Nape honk by its honk_id. The ack is appended to "
-                    "nape/acks.jsonl and the honk stays in honks.jsonl for audit; nape_summary "
-                    "stops counting it at once. Its row in signals_summary(source='honk') "
+                    "nape/acks.jsonl and the honk stays in honks.jsonl for audit; nape_summary's "
+                    "unacknowledged count drops it at once (its per-level counts and total, "
+                    "which count every honk, do not). Its row in signals_summary(source='honk') "
                     "closes only at the next ledger sweep, which a read (signals_summary or the "
                     "heartbeat tool) starts once the last scan is older than its freshness bound "
                     "(3600 s by default), so until then that row can still read open. "
