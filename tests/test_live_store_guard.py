@@ -14,8 +14,10 @@ THREE KINDS OF TEST BELOW:
      and the live root unmoved when a test redirects $HOME or Path.home();
   2. the census, which is the list of record: every funnel's first statement
      is the guard naming its store, and every file write in the guarded
-     modules sits inside a funnel or is named as a writer of something that is
-     not a T0.1 store;
+     modules sits inside a funnel, inside a multi-tool handler's branch that
+     calls the guard before it writes, or is named as a writer of something
+     that is not a T0.1 store; the scan that finds the writes has controls of
+     its own, a form for every way it counts a write and the reads it must not;
   3. the controls: each funnel, aimed at a root the guard has been told is the
      live one, is refused with the path named and leaves that root
      byte-identical. A guard that is present but handed the wrong path passes
@@ -220,11 +222,18 @@ NOT_T01_STORES: dict[tuple[str, str], str] = {
     ("sovereign_stack.metabolism", "_dedup_self_model_impl"): (
         "the self-model mirror and its archive"
     ),
-    ("sovereign_stack.metabolism", "handle_metabolism_tool"): (
-        "a multi-tool handler: the metabolism log, the self-model mirror and "
-        "session_handoff are not T0.1 stores; its retire_hypothesis branch rewrites "
-        "insight shards and is pinned by "
-        "test_retire_hypothesis_is_refused_against_a_live_chronicle below"
+    # A multi-tool handler is credited branch by branch (`if name == "<tool>":`),
+    # so a new branch that writes is a new census key and fails until it is
+    # named. Its retire_hypothesis branch rewrites insight shards: GUARDED_BRANCHES.
+    ("sovereign_stack.metabolism", "handle_metabolism_tool[metabolize]"): (
+        "the metabolism log; the insight-shard hygiene it triggers runs in "
+        "_archive_test_artifacts_impl, a census funnel"
+    ),
+    ("sovereign_stack.metabolism", "handle_metabolism_tool[self_model]"): (
+        "the self-model mirror (~/.sovereign/self_model.json)"
+    ),
+    ("sovereign_stack.metabolism", "handle_metabolism_tool[session_handoff]"): (
+        "session_handoff.json and its history, not the handoffs/ store"
     ),
     ("sovereign_stack.daemons.base", "BaseDaemon._perform_halt"): (
         "a daemon halt note in its halt_dir"
@@ -232,6 +241,10 @@ NOT_T01_STORES: dict[tuple[str, str], str] = {
     ("sovereign_stack.daemons.base", "BaseDaemon._save_state"): "a daemon's own state file",
     ("sovereign_stack.daemons.entrypoint", "_comms_post_fn_real"): (
         "a comms channel post under <root>/comms"
+    ),
+    ("sovereign_stack.daemons.entrypoint", "_build_metabolize_daemon"): (
+        "touches an empty metabolism_log.jsonl on a fresh install, the metabolize "
+        "daemon's structural evidence"
     ),
     ("sovereign_stack.daemons.metabolize_daemon", "MetabolizeDaemon._write_decision"): (
         "the metabolize daemon's nightly decision note"
@@ -241,9 +254,58 @@ NOT_T01_STORES: dict[tuple[str, str], str] = {
     ),
 }
 
+# Branches of a multi-tool handler that write a T0.1 store, each with the store
+# its guard must name. The branch's own statements must call the guard, naming
+# that store, before its first write (test_every_guarded_branch_calls_the_guard
+# _before_it_writes), and its runtime refusal has a control below.
+GUARDED_BRANCHES: dict[tuple[str, str], str] = {
+    ("sovereign_stack.metabolism", "handle_metabolism_tool[retire_hypothesis]"): (
+        "chronicle/insights"
+    ),
+}
+
+# WHAT THE SCAN COUNTS AS A WRITE. Plan 1's final review (finding I-6) measured
+# the first version blind to every way Python opens a file but two, so the forms
+# are listed here with what makes each one a write, and each has a control in
+# test_the_scan_sees_every_way_to_write_a_file. A form the scan cannot read (a
+# mode or a flag held in a variable) counts as a write: an unknown fails closed.
 _WRITE_MODE_CHARS = frozenset("awx+")
-_MUTATING_METHODS = frozenset({"write_text", "write_bytes", "unlink", "rmdir", "rename"})
-_MUTATING_OS_CALLS = frozenset({"remove", "unlink", "replace", "rename", "move", "rmtree"})
+# Methods that change a file whatever their receiver (Path's, in practice).
+_MUTATING_METHODS = frozenset({"write_text", "write_bytes", "unlink", "rmdir", "rename", "touch"})
+# os.* and shutil.* calls that change a file.
+_MUTATING_OS_CALLS = frozenset(
+    {
+        "remove",
+        "unlink",
+        "replace",
+        "rename",
+        "move",
+        "rmtree",
+        "truncate",
+        "copy",
+        "copy2",
+        "copyfile",
+        "copytree",
+    }
+)
+# Module functions whose mode is their SECOND argument, as the builtin open's is.
+_BUILTIN_STYLE_OPENERS = frozenset(
+    {("io", "open"), ("gzip", "open"), ("bz2", "open"), ("lzma", "open"), ("codecs", "open")}
+    | {("os", "fdopen")}
+)
+# os.open(path, flags) writes when any of these flags is in `flags`.
+_OS_OPEN_WRITE_FLAGS = frozenset({"O_WRONLY", "O_RDWR", "O_APPEND", "O_CREAT", "O_TRUNC"})
+# tempfile's creators make a file or a directory: counted, wherever they put it.
+_TEMPFILE_CREATORS = frozenset(
+    {
+        "mkstemp",
+        "mkdtemp",
+        "NamedTemporaryFile",
+        "TemporaryFile",
+        "SpooledTemporaryFile",
+        "TemporaryDirectory",
+    }
+)
 
 
 def _funnel_id(key: tuple[str, str]) -> str:
@@ -316,51 +378,131 @@ def _guard_store(stmt: ast.stmt) -> str | None:
     return None
 
 
+def _mode_writes(mode: ast.expr | None) -> bool:
+    """A constant mode writes when it holds w, a, x or +; no mode is the default
+    "r"; a mode the scan cannot read (a name, a call, an f-string) counts."""
+    if mode is None:
+        return False
+    if isinstance(mode, ast.Constant):
+        return isinstance(mode.value, str) and bool(_WRITE_MODE_CHARS & set(mode.value))
+    return True
+
+
+def _os_open_writes(call: ast.Call) -> bool:
+    """os.open(path, flags) writes when a write flag is named in `flags`; flags the
+    scan cannot read by name (a variable, a number) count as a write."""
+    flags = call.args[1] if len(call.args) > 1 else None
+    for keyword in call.keywords:
+        if keyword.arg == "flags":
+            flags = keyword.value
+    if flags is None:
+        return True
+    names = set()
+    for node in ast.walk(flags):
+        if isinstance(node, ast.Attribute):
+            names.add(node.attr)
+        elif isinstance(node, ast.Name) and node.id != "os":
+            names.add(node.id)
+        elif isinstance(node, ast.Constant):
+            names.add(repr(node.value))
+    return bool(names & _OS_OPEN_WRITE_FLAGS) or not all(n.startswith("O_") for n in names)
+
+
 def _is_write(call: ast.Call) -> bool:
     func = call.func
-    if isinstance(func, ast.Attribute) and func.attr in _MUTATING_METHODS:
-        return True
-    if (
-        isinstance(func, ast.Attribute)
-        and isinstance(func.value, ast.Name)
-        and func.value.id in ("os", "shutil")
-        and func.attr in _MUTATING_OS_CALLS
-    ):
-        return True
-    if isinstance(func, ast.Name) and func.id == "open":
+    if isinstance(func, ast.Name):
+        if func.id != "open":
+            return False
         mode = call.args[1] if len(call.args) > 1 else None  # builtin open(path, mode)
-    elif isinstance(func, ast.Attribute) and func.attr == "open":
-        mode = call.args[0] if call.args else None  # Path.open(mode)
+    elif isinstance(func, ast.Attribute):
+        module = func.value.id if isinstance(func.value, ast.Name) else None
+        if module in ("os", "shutil") and func.attr in _MUTATING_OS_CALLS:
+            return True
+        if module == "os" and func.attr == "open":
+            return _os_open_writes(call)
+        if module == "tempfile" and func.attr in _TEMPFILE_CREATORS:
+            return True
+        if func.attr in _MUTATING_METHODS:
+            return True
+        if func.attr == "replace":
+            # Path.replace(target): one positional, or target= alone. str.replace
+            # takes two positionals and datetime.replace keywords only.
+            keywords = {keyword.arg for keyword in call.keywords}
+            return (len(call.args) == 1 and not keywords) or (
+                not call.args and keywords == {"target"}
+            )
+        if (module, func.attr) in _BUILTIN_STYLE_OPENERS:
+            mode = call.args[1] if len(call.args) > 1 else None  # io.open(path, mode), ...
+        elif func.attr == "open":
+            mode = call.args[0] if call.args else None  # Path.open(mode)
+        else:
+            return False
     else:
         return False
     for keyword in call.keywords:
         if keyword.arg == "mode":
             mode = keyword.value
-    return (
-        isinstance(mode, ast.Constant)
-        and isinstance(mode.value, str)
-        and bool(_WRITE_MODE_CHARS & set(mode.value))
-    )
+    return _mode_writes(mode)
+
+
+def _branch_tool(test: ast.expr) -> str | None:
+    """The tool a multi-tool handler's branch serves, from `name == "<tool>"`."""
+    if (
+        isinstance(test, ast.Compare)
+        and isinstance(test.left, ast.Name)
+        and test.left.id == "name"
+        and len(test.ops) == 1
+        and isinstance(test.ops[0], ast.Eq)
+        and isinstance(test.comparators[0], ast.Constant)
+        and isinstance(test.comparators[0].value, str)
+    ):
+        return test.comparators[0].value
+    return None
 
 
 def _write_sites(tree: ast.Module) -> list[tuple[int, str]]:
-    """(line, qualified name of the enclosing def) for every file write in the module."""
+    """(line, qualified name of the enclosing def) for every file write in the module.
+
+    A write inside a multi-tool handler's `if name == "<tool>":` branch, an elif
+    of one included, is credited to `<function>[<tool>]`, so the census can name
+    each branch's store and a new branch that writes fails until it is named.
+    """
     sites: list[tuple[int, str]] = []
 
-    def visit(node: ast.AST, scope: list[str], in_function: bool) -> None:
+    def visit(node: ast.AST, scope: list[str], in_function: bool, branched: bool) -> None:
         for child in ast.iter_child_nodes(node):
             if isinstance(child, ast.ClassDef) and not in_function:
-                visit(child, [*scope, child.name], False)
+                visit(child, [*scope, child.name], False, False)
             elif isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 # A def nested inside a function is credited to the outermost
                 # function, the one whose name the census can list.
-                visit(child, scope if in_function else [*scope, child.name], True)
+                if in_function:
+                    visit(child, scope, True, branched)
+                else:
+                    visit(child, [*scope, child.name], True, False)
+            elif in_function and not branched and isinstance(child, ast.If):
+                visit_branches(child, scope)
             else:
                 if isinstance(child, ast.Call) and _is_write(child):
                     sites.append((child.lineno, ".".join(scope) or "<module>"))
-                visit(child, scope, in_function)
+                visit(child, scope, in_function, branched)
 
-    visit(tree, [], False)
+    def visit_branches(node: ast.If, scope: list[str]) -> None:
+        tool = _branch_tool(node.test)
+        if tool is None:
+            # Not a tool branch: its test, body and else are read like any other code.
+            visit(node, scope, True, False)
+            return
+        visit(ast.Module(body=[ast.Expr(node.test)], type_ignores=[]), scope, True, False)
+        labelled = [*scope[:-1], f"{scope[-1]}[{tool}]"]
+        visit(ast.Module(body=node.body, type_ignores=[]), labelled, True, True)
+        orelse = node.orelse
+        if len(orelse) == 1 and isinstance(orelse[0], ast.If):
+            visit_branches(orelse[0], scope)
+        else:
+            visit(ast.Module(body=orelse, type_ignores=[]), scope, True, False)
+
+    visit(tree, [], False, False)
     return sites
 
 
@@ -378,23 +520,181 @@ def test_every_funnel_calls_the_guard(module_name, qualname):
     )
 
 
+_ACCOUNTED = (FUNNELS, GUARDED_BRANCHES, NOT_T01_STORES)
+
+
+def _census_of(module_name: str, tree: ast.Module) -> tuple[set[tuple[str, str]], list[str]]:
+    """(every census key that writes in the module, the writes no entry accounts for)."""
+    written: set[tuple[str, str]] = set()
+    unaccounted: list[str] = []
+    for lineno, qualname in _write_sites(tree):
+        key = (module_name, qualname)
+        written.add(key)
+        if not any(key in table for table in _ACCOUNTED):
+            unaccounted.append(f"{module_name}:{lineno} in {qualname}")
+    return written, unaccounted
+
+
 def test_every_write_in_the_census_modules_is_accounted_for():
     written: set[tuple[str, str]] = set()
     unaccounted: list[str] = []
     modules = _census_modules()
     assert "sovereign_stack.daemons.synthesis_daemon" in modules  # the daemons are in scope
     for module_name in modules:
-        for lineno, qualname in _write_sites(_module_tree(module_name)):
-            key = (module_name, qualname)
-            written.add(key)
-            if key not in FUNNELS and key not in NOT_T01_STORES:
-                unaccounted.append(f"{module_name}:{lineno} in {qualname}")
+        module_written, module_unaccounted = _census_of(module_name, _module_tree(module_name))
+        written |= module_written
+        unaccounted += module_unaccounted
     assert not unaccounted, (
-        "a file write outside every census funnel: guard it and add it to FUNNELS, "
-        f"or name why it is not a T0.1 store in NOT_T01_STORES: {unaccounted}"
+        "a file write outside every census funnel: guard it and add it to FUNNELS "
+        "(GUARDED_BRANCHES for a multi-tool handler's branch), or name why it is not a "
+        f"T0.1 store in NOT_T01_STORES: {unaccounted}"
     )
-    stale = sorted((set(FUNNELS) | set(NOT_T01_STORES)) - written)
+    stale = sorted(set().union(*_ACCOUNTED) - written)
     assert not stale, f"census entries that no longer write anything: {stale}"
+
+
+def _branch_node(fn: ast.AST, tool: str) -> ast.If | None:
+    return next(
+        (
+            node
+            for node in ast.walk(fn)
+            if isinstance(node, ast.If) and _branch_tool(node.test) == tool
+        ),
+        None,
+    )
+
+
+@pytest.mark.parametrize(
+    ("module_name", "key"),
+    sorted(GUARDED_BRANCHES),
+    ids=[_funnel_id(key) for key in sorted(GUARDED_BRANCHES)],
+)
+def test_every_guarded_branch_calls_the_guard_before_it_writes(module_name, key):
+    function, _, tool = key.partition("[")
+    branch = _branch_node(_find_def(_module_tree(module_name), function), tool.rstrip("]"))
+    assert branch is not None, f"the census names {module_name}.{key}, which no longer exists"
+    store = GUARDED_BRANCHES[(module_name, key)]
+    guards = [stmt.lineno for stmt in branch.body if _guard_store(stmt) == store]
+    writes = [
+        node.lineno
+        for stmt in branch.body
+        for node in ast.walk(stmt)
+        if isinstance(node, ast.Call) and _is_write(node)
+    ]
+    assert guards and writes, (guards, writes)
+    assert min(guards) < min(writes), (
+        f"{module_name}.{key} writes at line {min(writes)} before it calls "
+        f"refuse_if_test_targets_live(..., store={store!r})"
+    )
+
+
+# The scan's own controls (law 10): every form it counts as a write, and the reads
+# it must leave alone, so a narrowed scan fails here before a census goes blind.
+_WRITE_FORMS = [
+    'open(p, "a")',
+    'open(p, mode="w")',
+    "open(p, mode)",
+    'p.open("ab+")',
+    "p.open(mode)",
+    'io.open(p, "a")',
+    'gzip.open(p, "at")',
+    'bz2.open(p, "wb")',
+    'lzma.open(p, mode="w")',
+    'codecs.open(p, "a", "utf-8")',
+    'os.fdopen(fd, "w")',
+    "os.open(p, os.O_WRONLY | os.O_CREAT)",
+    "os.open(p, os.O_RDWR)",
+    "os.open(p, os.O_APPEND)",
+    "os.open(p, os.O_TRUNC)",
+    "os.open(p, flags)",
+    "os.open(p, 1)",
+    "p.touch()",
+    "p.replace(target)",
+    "p.replace(target=t)",
+    "os.replace(a, b)",
+    "os.truncate(p, 0)",
+    "shutil.copy(a, b)",
+    "shutil.copy2(a, b)",
+    "shutil.copyfile(a, b)",
+    "shutil.copytree(a, b)",
+    "tempfile.mkstemp(dir=d)",
+    "tempfile.mkdtemp()",
+    'tempfile.NamedTemporaryFile("w", dir=d, delete=False)',
+    'p.write_text("x")',
+    "p.unlink()",
+    "shutil.rmtree(d)",
+    "os.remove(p)",
+]
+_READ_FORMS = [
+    "open(p)",
+    'open(p, "r")',
+    'open(p, "rb")',
+    "p.open()",
+    'p.open("rb")',
+    "io.open(p)",
+    "gzip.open(p)",
+    'gzip.open(p, "rt")',
+    'codecs.open(p, "r", "utf-8")',
+    "os.fdopen(fd)",
+    "os.open(p, os.O_RDONLY)",
+    "os.open(p, os.O_RDONLY | os.O_CLOEXEC)",
+    '"a-b".replace("-", "_")',
+    "dt.replace(tzinfo=tz)",
+    "p.read_text()",
+]
+
+
+@pytest.mark.parametrize("source", _WRITE_FORMS)
+def test_the_scan_sees_every_way_to_write_a_file(source):
+    assert _is_write(ast.parse(source, mode="eval").body), source
+
+
+@pytest.mark.parametrize("source", _READ_FORMS)
+def test_the_scan_leaves_reads_alone(source):
+    assert not _is_write(ast.parse(source, mode="eval").body), source
+
+
+def test_a_multi_tool_handler_is_credited_branch_by_branch():
+    tree = ast.parse(
+        "async def handle(name, arguments):\n"
+        '    if name == "first":\n'
+        '        open(p, "a")\n'
+        '    elif name == "second":\n'
+        '        p.write_text("x")\n'
+        "    else:\n"
+        "        p.unlink()\n"
+        "    if ready:\n"
+        '        if name == "third":\n'
+        "            p.touch()\n"
+        '    open(q, "w")\n'
+    )
+    assert [qualname for _, qualname in _write_sites(tree)] == [
+        "handle[first]",
+        "handle[second]",
+        "handle",
+        "handle[third]",
+        "handle",
+    ]
+
+
+def test_a_new_metabolism_branch_that_writes_a_shard_fails_the_census():
+    """The handler used to be allowlisted whole, so a new branch rewriting an
+    insight shard passed the census unseen. A branch the census does not name is
+    now a write no entry accounts for."""
+    source = _source_path("sovereign_stack.metabolism").read_text(encoding="utf-8")
+    anchor = "async def handle_metabolism_tool(name, arguments):\n"
+    assert source.count(anchor) == 1
+    leaked = source.replace(
+        anchor,
+        anchor + '    if name == "rewrite_shard":\n'
+        '        (CHRONICLE_DIR / "insights" / "x.jsonl").write_text("{}")\n',
+    )
+    _, unaccounted = _census_of("sovereign_stack.metabolism", ast.parse(leaked))
+    assert [entry.rsplit(" in ", 1)[1] for entry in unaccounted] == [
+        "handle_metabolism_tool[rewrite_shard]"
+    ]
+    # Control: the file as it stands accounts for every write.
+    assert _census_of("sovereign_stack.metabolism", ast.parse(source))[1] == []
 
 
 # ── 3. the controls: each funnel refused against a root the guard calls live ─
@@ -576,9 +876,10 @@ def test_control_a_leaking_write_is_refused(funnel, monkeypatch, tmp_sovereign_r
 
 def test_retire_hypothesis_is_refused_against_a_live_chronicle(monkeypatch, tmp_sovereign_root):
     # retire_hypothesis rewrites insight shards inside metabolism's multi-tool
-    # handler, so it is pinned here rather than by the census. Its
-    # CHRONICLE_DIR is bound from Path.home() at import and ignores
-    # SOVEREIGN_ROOT: the exact shape that lets a test aim it at the live store.
+    # handler: the census names that branch (GUARDED_BRANCHES) and this pins its
+    # refusal at runtime. Its CHRONICLE_DIR is bound from Path.home() at import
+    # and ignores SOVEREIGN_ROOT: the exact shape that lets a test aim it at the
+    # live store.
     _seeded_insight(tmp_sovereign_root, "a hypothesis the control would retire")
     monkeypatch.setattr(metabolism, "CHRONICLE_DIR", tmp_sovereign_root / "chronicle")
     before = _snapshot(tmp_sovereign_root)
