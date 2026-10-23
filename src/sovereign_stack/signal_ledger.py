@@ -1547,6 +1547,17 @@ def summarize(root: Path | None = None, *, now: datetime | None = None) -> dict:
 # publishes it.
 BY_SOURCE_NOTE = "a total would be mostly the open-thread backlog by construction; read by source"
 
+# THE THREAD COUNT IS LABELLED AS THE OPEN-THREAD COUNT IT IS (design A3, the
+# spec's own words). `thread` opens one `open_thread` signal per open thread
+# and closes it when the thread resolves or a seat acks it, so its count is the
+# open-thread backlog, not a stream of new signals: it moves only when a thread
+# is opened, resolved or acked. Its key alone does not say that, so the field
+# names it, beside `by_source` and keyed by source; a source with no entry is
+# labelled by its own key. A label is a name, not a measurement: it rides in
+# every shape of the field, blind ones included, and is never nulled. The
+# console strip says the same words (app.js ATT_SOURCES), and a test ties them.
+SOURCE_LABELS = {"thread": "open threads"}
+
 
 def _blind_field(
     error: str,
@@ -1579,6 +1590,7 @@ def _blind_field(
         "by_source": None,
         "stale_24h_by_source": None,
         "note": BY_SOURCE_NOTE,
+        "source_labels": dict(SOURCE_LABELS),
         "by_source_detail": None,
         "corrupt_rows": None,
         "source_status": None,
@@ -1593,7 +1605,8 @@ def heartbeat_field(root: Path | None = None, *, scan: bool = False) -> dict:
     EVERY COUNT IS PER SOURCE (design A3): ``by_source`` (open),
     ``stale_24h_by_source`` and ``by_source_detail``, with ``note`` saying why
     there is no total. No cross-source sum is published in any shape; see
-    ``BY_SOURCE_NOTE``.
+    ``BY_SOURCE_NOTE``. ``source_labels`` names the count a key alone does not:
+    ``thread`` is the open threads (``SOURCE_LABELS``), in every shape.
 
     ``scan=True`` runs ingestion first (review F4: "ingestion must run on
     read"). It is OPT-IN rather than the default because
@@ -1769,6 +1782,9 @@ def heartbeat_field(root: Path | None = None, *, scan: bool = False) -> dict:
             "by_source": by_source_open,
             "stale_24h_by_source": stale_24h_by_source,
             "note": BY_SOURCE_NOTE,
+            # A NAME, NOT A MEASUREMENT: never nulled with the counts above, and
+            # a fresh copy per read, so no caller can relabel the next reader.
+            "source_labels": dict(SOURCE_LABELS),
             # THE NESTED VIEW, CARRIED ON THE SAME FOLD. `signals_summary`
             # needs stale windows and oldest_unacked per source; the reviewer
             # caught it calling summarize() a second time to get them and
@@ -3224,6 +3240,8 @@ SIGNAL_TOOLS = [
             "unacked counts by source (open, stale_24h and stale_7d, with "
             "oldest_unacked) and per-source availability, never a total: "
             "summed across sources it would be mostly the open-thread backlog. "
+            "source_labels names what a key alone does not: the thread count is "
+            "the open threads. "
             "mode='list' returns the SIGNALS THEMSELVES — "
             "signal_id, source, kind, opened_at, owner, state and the concern "
             "text — which is what you pass to signal_ack. Optional source "
@@ -3646,6 +3664,9 @@ def handle_signal_tool(
                 # re-fold one. The stale windows are per source, in here.
                 "by_source": field.get("by_source_detail"),
                 "note": field.get("note"),
+                # A vocabulary, not a count: it rides whole under a source
+                # filter, like the note.
+                "source_labels": field.get("source_labels"),
                 "corrupt_rows": field.get("corrupt_rows"),
                 "source_status": field.get("source_status"),
                 "sources_degraded": field.get("sources_degraded"),

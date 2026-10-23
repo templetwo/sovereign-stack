@@ -704,7 +704,14 @@ class TestF8TheNativeHeartbeatCarriesUnackedSignals:
         payload = json.loads(result[0].text)
         assert "unacked_signals" in payload
         field = payload["unacked_signals"]
-        for key in ("error", "ingestion", "source_status", "by_source", "stale_24h_by_source"):
+        for key in (
+            "error",
+            "ingestion",
+            "source_status",
+            "by_source",
+            "stale_24h_by_source",
+            "source_labels",
+        ):
             assert key in field, f"heartbeat's unacked_signals is missing {key}"
         # Design A3: counts by source, never a total, and the field says why.
         assert "total" not in field and field["note"]

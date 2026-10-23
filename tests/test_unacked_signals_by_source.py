@@ -13,8 +13,10 @@ stale windows still stand, in `by_source_detail` and in `stale_24h_by_source`.
 The shape is pinned whole (FIELD_KEYS, SUMMARY_KEYS), so no sum comes back
 under a new name, `by_source_sum` included. The removal drops a headline and no
 information: each dropped number is rebuilt here from the per-source values the
-field still publishes. And the console names the thread count for what it is,
-the open threads, one `open_thread` signal each.
+field still publishes. And the thread count is labelled as the open-thread count
+it is, one `open_thread` signal per open thread: in the field and the summary
+(`source_labels`, every shape, never nulled) and on the console strip, which
+says the same words.
 
 Tmp roots only. Nothing here reads, counts or compares the live store.
 """
@@ -33,6 +35,11 @@ from sovereign_stack import dashboard_web as web
 from sovereign_stack import signal_ledger as sl
 
 NOTE = "a total would be mostly the open-thread backlog by construction; read by source"
+
+# Spec A3: "the thread backlog is labelled as the open-thread count it is". The
+# spec names this one source; every other source is labelled by its own key.
+# Pinned literally, so the words cannot drift unseen.
+LABELS = {"thread": "open threads"}
 
 # What design A3 took out of the field: the four cross-source sums, and the
 # scope list that only ever described one of them. `by_source_sum` is the
@@ -64,6 +71,7 @@ FIELD_KEYS = frozenset(
         "by_source",
         "stale_24h_by_source",
         "note",
+        "source_labels",
         "by_source_detail",
         "corrupt_rows",
         "source_status",
@@ -72,7 +80,7 @@ FIELD_KEYS = frozenset(
 )
 
 # signals_summary's summary is the field itself, its nested detail published
-# under `by_source`, so it carries the same envelope and no sum either.
+# under `by_source`, so it carries the same envelope and labels, and no sum.
 SUMMARY_KEYS = frozenset(
     {
         "ok",
@@ -86,6 +94,7 @@ SUMMARY_KEYS = frozenset(
         "not_configured",
         "by_source",
         "note",
+        "source_labels",
         "corrupt_rows",
         "source_status",
         "sources_degraded",
@@ -129,6 +138,7 @@ def test_a_measured_ledger_reports_each_source_and_no_total(tmp_sovereign_root):
     # The 24-hour window, by source: the threads are weeks old, the honk is not.
     assert field["stale_24h_by_source"] == dict.fromkeys(sl.SOURCES, 0) | {"thread": 3}
     assert field["note"] == NOTE
+    assert field["source_labels"] == LABELS
     for key in REMOVED_KEYS:
         assert key not in field, f"the field still publishes {key}"
     assert set(field) == FIELD_KEYS
@@ -139,6 +149,7 @@ def test_a_blind_field_carries_the_note_and_no_total(tmp_sovereign_root):
     assert field["measured"] is False and field["error"] == "not_scanned"
     assert field["by_source"] is None and field["stale_24h_by_source"] is None
     assert field["note"] == NOTE
+    assert field["source_labels"] == LABELS, "a label is a name, not a measurement"
     for key in REMOVED_KEYS:
         assert key not in field, f"the blind shape still carries {key}"
     assert set(field) == FIELD_KEYS
@@ -152,6 +163,7 @@ def test_an_unmeasured_source_is_null_in_both_maps_and_the_rest_still_count(tmp_
     assert field["stale_24h_by_source"]["guardian"] is None
     assert field["by_source"]["thread"] == 3 and field["by_source"]["honk"] == 1
     assert field["stale_24h_by_source"]["thread"] == 3
+    assert field["source_labels"] == LABELS
     for key in REMOVED_KEYS:
         assert key not in field, f"the degraded shape still carries {key}"
     assert set(field) == FIELD_KEYS
@@ -168,7 +180,25 @@ def test_a_config_error_nulls_the_stale_map_with_the_open_map(tmp_sovereign_root
     assert field["ingestion"] == "config_error"
     assert set(field["by_source"].values()) == {None}
     assert set(field["stale_24h_by_source"].values()) == {None}
+    # The branch that nulls every count leaves the label: it names the count,
+    # it does not measure it.
+    assert field["source_labels"] == LABELS
     assert set(field) == FIELD_KEYS
+
+
+def test_the_field_labels_the_thread_count_as_the_open_thread_count(tmp_sovereign_root):
+    """Spec A3's labelling clause, on the field itself. Only `thread` is
+    labelled: its count is the open-thread backlog, one `open_thread` signal
+    per open thread, and the spec names that one. Each read hands back its own
+    copy, so a caller that edits one field cannot relabel the next."""
+    assert sl.SOURCE_LABELS == LABELS
+    assert set(sl.SOURCE_LABELS) <= set(sl.SOURCES), "a label for a source that does not exist"
+    _three_threads_one_honk(tmp_sovereign_root)
+    first = sl.heartbeat_field(tmp_sovereign_root)
+    assert first["source_labels"] == LABELS
+    first["source_labels"]["thread"] = "edited by a caller"
+    assert sl.heartbeat_field(tmp_sovereign_root)["source_labels"] == LABELS
+    assert sl.SOURCE_LABELS == LABELS
 
 
 def test_signals_summary_reports_by_source_with_the_note_and_no_total(tmp_sovereign_root):
@@ -179,8 +209,21 @@ def test_signals_summary_reports_by_source_with_the_note_and_no_total(tmp_sovere
     assert out["by_source"]["thread"]["open"] == 3 and out["by_source"]["thread"]["stale_24h"] == 3
     assert out["by_source"]["honk"]["open"] == 1 and out["by_source"]["honk"]["stale_24h"] == 0
     assert out["note"] == NOTE
+    assert out["source_labels"] == LABELS
     for key in REMOVED_KEYS:
         assert key not in out, f"signals_summary still publishes {key}"
+    assert set(out) == SUMMARY_KEYS
+
+
+@pytest.mark.parametrize("source", ["thread", "honk"])
+def test_a_filtered_summary_keeps_the_labels_whole(tmp_sovereign_root, source):
+    """The source filter narrows the counts (`by_source`, `source_status`).
+    The labels are a vocabulary, not a count, and ride whole like the note."""
+    root = tmp_sovereign_root
+    _three_threads_one_honk(root)
+    out = json.loads(sl.handle_signal_tool("signals_summary", {"source": source}, root=root))
+    assert out["ok"] is True and list(out["by_source"]) == [source]
+    assert out["source_labels"] == LABELS
     assert set(out) == SUMMARY_KEYS
 
 
@@ -188,6 +231,7 @@ def test_the_signals_summary_description_says_by_source_and_never_a_total():
     description = next(t.description for t in sl.SIGNAL_TOOLS if t.name == "signals_summary")
     assert "unacked total" not in description, "it still promises the total it no longer returns"
     assert "counts by source" in description and "never a total" in description
+    assert "source_labels" in description and "open threads" in description
 
 
 def _declare(root: Path, sources: dict[str, str]) -> None:
@@ -278,6 +322,7 @@ def test_the_console_builder_takes_the_new_shape_and_shows_the_honk_count(
     signals = snapshot["unacked_signals"]
     assert signals["by_source"]["honk"] == 1 and signals["by_source"]["thread"] == 3
     assert signals["note"] == NOTE
+    assert signals["source_labels"] == LABELS
     for key in REMOVED_KEYS:
         assert key not in signals, f"the snapshot still carries {key}"
     assert set(signals) == FIELD_KEYS
@@ -296,7 +341,8 @@ def test_the_attention_strip_renders_no_cross_source_sum():
 def test_the_attention_strip_labels_the_thread_count_as_open_threads():
     """Spec A3: "the thread backlog is labelled as the open-thread count it
     is". The strip is where a person reads that count, so it says open
-    threads, not threads."""
+    threads, not threads, and in the field's own words: one label, two
+    surfaces, and this test fails if either moves without the other."""
     js = (STATIC / "app.js").read_text(encoding="utf-8")
-    assert "['thread', 'open threads']" in js
+    assert f"['thread', '{sl.SOURCE_LABELS['thread']}']" in js
     assert "['thread', 'threads']" not in js
