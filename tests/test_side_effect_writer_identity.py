@@ -26,7 +26,7 @@ import json
 import pytest
 
 from sovereign_stack import server
-from sovereign_stack.dispatch_context import reset_caller_seat, set_caller_seat
+from sovereign_stack.dispatch_context import caller_seat, reset_caller_seat, set_caller_seat
 from sovereign_stack.handoff import HandoffEngine
 from sovereign_stack.memory import ExperientialMemory
 from sovereign_stack.spiral import SpiralState
@@ -195,3 +195,107 @@ def test_schema_declares_source_instance_as_the_optional_fallback():
     assert "source_instance" not in schema["required"]
     description = prop["description"].lower()
     assert "seat" in description and "fallback" in description
+
+
+# ── THE MCP SESSION A SEAT CALL RIDES (Task 6 fix round 1, review finding 3) ─
+#
+# The tests above call ``_dispatch_tool`` directly, inside the seat. A seat
+# call never reaches it that way. The middleware's GET ``/sse`` branch
+# (``SovereignAsgiMiddleware.__call__`` in sse_server.py) binds the seat with
+# ``caller_seat_for_session`` and hands the session to ``sovereign_server.run``;
+# ``tools/call`` then arrives as a message from the caller's side, which holds
+# no seat, and reaches ``handle_tool`` in a task the MCP run loop spawns. The
+# identity reaches the insight only if that task inherits the context the
+# session was bound in. The tests below run that loop for real over the SDK's
+# in-memory streams, with the SDK's ``ClientSession`` (the client the bridge's
+# ``call_mcp_tool`` opens for every call) on the caller's side and the seat
+# bound only on the server's side.
+
+_WIRE_SEAT = "grok-build-studio"
+_SESSION_TIMEOUT_S = 20.0
+
+
+def _sse_scope(seat: str | None) -> dict:
+    """The scope ``caller_seat_for_session`` reads: a loopback GET of /sse."""
+    headers = [] if seat is None else [(b"x-sovereign-seat", seat.encode())]
+    return {
+        "type": "http",
+        "path": "/sse",
+        "method": "GET",
+        "headers": headers,
+        "query_string": b"",
+        "client": ("127.0.0.1", 12345),
+    }
+
+
+async def _call_over_a_seat_session(seat: str | None, tool: str, arguments: dict) -> str:
+    """One ``tools/call`` over a real MCP session whose server side holds the seat."""
+    import anyio
+    from mcp import ClientSession
+    from mcp.shared.memory import create_client_server_memory_streams
+
+    from sovereign_stack import sse_server
+
+    async def serve(read_stream, write_stream):
+        # What the /sse branch does once it has accepted the connect.
+        with sse_server.caller_seat_for_session(_sse_scope(seat)):
+            await server.server.run(
+                read_stream,
+                write_stream,
+                server.server.create_initialization_options(),
+                raise_exceptions=True,
+            )
+
+    async with (
+        create_client_server_memory_streams() as (client_streams, server_streams),
+        anyio.create_task_group() as session_group,
+    ):
+        session_group.start_soon(serve, *server_streams)
+        async with ClientSession(*client_streams) as session:
+            assert caller_seat() is None, "the caller's side must hold no seat"
+            await session.initialize()
+            result = await session.call_tool(tool, arguments)
+        session_group.cancel_scope.cancel()
+    assert not result.isError, result
+    return result.content[0].text
+
+
+def _resolve_over_a_seat_session(memory, *, seat: str | None, **extra) -> tuple[str, dict]:
+    memory.record_open_thread("which seat resolved this?", domain=DOMAIN)
+    (thread,) = _rows([memory.threads_dir / f"{DOMAIN}.jsonl"])
+    thread_id = thread["thread_id"]
+    arguments = {"thread_id": thread_id, "resolution": RESOLUTION, **extra}
+    call = _call_over_a_seat_session(seat, "resolve_thread_by_id", arguments)
+    text = asyncio.run(asyncio.wait_for(call, timeout=_SESSION_TIMEOUT_S))
+    assert text.startswith(f"Thread {thread_id} resolved → ground_truth insight: "), text
+    (row,) = [r for r in _insights(memory, DOMAIN) if r.get("resolved_thread_id") == thread_id]
+    return text, row
+
+
+def test_a_resolve_over_a_seat_session_lands_with_the_bare_seat(mem):
+    """The hop the direct tests skip: the seat is bound only on the server's
+    side of a real MCP session, the call arrives from the caller's side, and
+    the run loop's handler task has to carry the seat to the row."""
+    text, row = _resolve_over_a_seat_session(mem, seat=_WIRE_SEAT)
+    assert row["source_instance"] == _WIRE_SEAT
+    assert "attribution: seat" in text
+
+
+def test_the_signed_shape_over_a_seat_session_adds_no_override_note(mem):
+    """What the bridge would send if it signed this tool (review finding 1's
+    remedy): ``sign_arguments`` stamps ``source_instance`` with the same bare
+    seat the header carries. The two agree, so the seat wins with nothing to
+    name: "harmless under D2", pinned here rather than argued."""
+    text, row = _resolve_over_a_seat_session(mem, seat=_WIRE_SEAT, source_instance=_WIRE_SEAT)
+    assert row["source_instance"] == _WIRE_SEAT
+    assert "attribution: seat" in text
+    assert "was not used" not in text
+
+
+def test_a_session_bound_to_no_seat_lands_unattributed(mem):
+    """The control. Same session, no header: the server's own fill is live
+    (the ``mem`` fixture checks it) and must not reach the row."""
+    text, row = _resolve_over_a_seat_session(mem, seat=None)
+    assert "source_instance" not in row
+    assert not any("seat:" in str(value) for value in row.values())
+    assert "attribution: none" in text
