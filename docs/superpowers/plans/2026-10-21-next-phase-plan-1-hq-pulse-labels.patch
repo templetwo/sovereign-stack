@@ -16,6 +16,15 @@ by-source block, which it is not (see below), so this hunk's `+` lines now carry
 corrected words and the post-image here differs from the live file in those docstring lines
 only. Carrying the correction into ~/bin is HQ's, with a .bak, at the deploy.
 
+Status 2026-10-23, the final fix wave: the bridge's fallback now takes the stack's blind shape
+(bridge branch phase/plan-1, c2f681f, plan :252's remedy): no `total`, `source_labels` present,
+`by_source` null, so the pulse takes the by-source branch and prints UNKNOWN/error, as the
+paragraph below foresaw. The hunk's `+` words "it carries `total` and takes that branch"
+describe the fallback before that commit; when HQ carries the correction into ~/bin after
+both deploys, the true clause is "the bridge's fallback is not one: it carries labels and a
+null `by_source`, which renders UNKNOWN". The hunk itself is left as applied, so its header
+still holds.
+
 What it changes, and nothing else:
 - each source prints under the block's own `source_labels` name for it, a space made `_`,
   so the thread count reads `open_threads=N` (spec A3: "the thread backlog is labelled as
