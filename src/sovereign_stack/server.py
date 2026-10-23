@@ -967,9 +967,9 @@ def _registered_tools():
                     "whole build, not just the endpoint. Reference the returned archive_id "
                     "from a record_insight summary. A summary is not the artifact. "
                     "READS LIVE HERE TOO as of 2026-09-06: mode='get' with an archive_id "
-                    "retrieves one exchange and re-verifies its bytes (replaces "
-                    "recall_exchange); mode='list' returns provenance only, newest "
-                    "first, with the optional filters (replaces list_exchanges). "
+                    "retrieves one exchange and re-verifies its bytes (replaces the "
+                    "retired recall_exchange); mode='list' returns provenance only, newest "
+                    "first, with the optional filters (replaces the retired list_exchanges). "
                     "Default mode='archive' writes, exactly as before."
                 ),
                 inputSchema={
@@ -1301,7 +1301,7 @@ def _registered_tools():
                     "reading signs it for you alone and hides it from nobody; only an explicit "
                     "retire() clears it for everyone (signature ledger, 2026-08-31). The previous "
                     "wording here — 'surfaced exactly once, then archived' — described the "
-                    "consumed_at behaviour that ledger replaced, and stayed on the tool "
+                    "legacy consumed_at behaviour that ledger replaced, and stayed on the tool "
                     "description after the code changed."
                 ),
                 inputSchema={
@@ -1323,7 +1323,7 @@ def _registered_tools():
                         },
                         "supersedes": {
                             "type": "string",
-                            "description": "Optional id of an EARLIER handoff this one corrects (its filename, with or without .json — see handoff_archaeology). The older record is never modified; it simply starts rendering 'CORRECTED BY <id>' wherever it is surfaced, so a stale claim can no longer read as current. Refused if it names no handoff in the store.",
+                            "description": "Optional id of an EARLIER handoff this one corrects: its filename, with or without .json, as this tool printed it when that handoff was written ('Handoff written → …'). When your seat already handed off on the same thread, this tool's result names the newest such file. No tool lists the whole store; its files are in the handoffs/ directory of the Stack root. The older record is never modified; it simply starts rendering 'CORRECTED BY <id>' wherever it is surfaced, so a stale claim can no longer read as current. Refused if it names no handoff in the store.",
                         },
                     },
                     "required": ["note"],
@@ -1373,13 +1373,19 @@ def _registered_tools():
                 name="where_did_i_leave_off",
                 description=(
                     "Boot-up call. Answers 'where am I?' in one breath. Returns spiral status, "
-                    "unconsumed handoffs from previous instances (surfaced once, attribution-framed), "
-                    "recent open threads, and activity since the newest entry in chronicle domain "
+                    "the handoffs from previous instances that this reader has not yet signed "
+                    "(newest first, up to 20, attribution-framed), recent open threads, and "
+                    "activity since the newest entry in chronicle domain "
                     "'reflection' (close_session writes one at each close; the marker is shared "
                     "across seats and machines, so it may be another seat's close; the window is "
-                    "inclusive). Read this first when "
-                    "resuming work. Handoffs flip to consumed=true after this call — they stay "
-                    "queryable via recall_insights but don't re-surface and pile up. "
+                    "inclusive). Read this first when resuming work. Each handoff it shows is "
+                    "SIGNED for source_instance: reading signs it for you alone and hides it from "
+                    "nobody, so it stops resurfacing to you while every other seat still sees it, "
+                    "and only an explicit retire() clears a handoff for everyone (signature "
+                    "ledger, 2026-08-31). consume=false reads without signing; the parameter "
+                    "keeps its legacy name. With no source_instance, or a placeholder such as "
+                    "'unknown', nothing is signed and the handoff list is the legacy pre-ledger "
+                    "filter, not your queue. "
                     "Pass domain_tags (and optionally project) to also surface context-matched "
                     "threads, mistakes-to-avoid, and related insights ranked by relevance."
                 ),
@@ -1393,11 +1399,26 @@ def _registered_tools():
                         "consume": {
                             "type": "boolean",
                             "default": True,
-                            "description": "Mark surfaced handoffs as consumed. Set false for read-only preview.",
+                            "description": (
+                                "Sign each handoff this call shows, for source_instance "
+                                "(default true): reading signs it for you alone and hides it "
+                                "from nobody; only an explicit retire() clears a handoff for "
+                                "everyone. Set false to read without signing. With no named "
+                                "source_instance nothing is signed either way. The name is "
+                                "legacy: before the signature ledger (2026-08-31) this flag hid "
+                                "each handoff it showed from every later reader."
+                            ),
                         },
                         "source_instance": {
                             "type": "string",
-                            "description": "Which instance is reading (recorded as consumed_by for audit).",
+                            "description": (
+                                "Which seat is reading. The handoff list is this reader's own "
+                                "queue (the handoffs it has not signed and nobody has retired), "
+                                "each signature records this name, and it also routes your model "
+                                "line's lineage letters to you. Missing, or a placeholder such as "
+                                "'unknown': nothing is signed and the handoff list falls back to "
+                                "the legacy pre-ledger filter, which is nobody's queue."
+                            ),
                         },
                         "domain_tags": {
                             "type": "array",
@@ -1462,8 +1483,8 @@ def _registered_tools():
                     "'reflection' (close_session writes it), and your self-model. Carries the "
                     "breath without the full ritual. The complete inheritance (lineage "
                     "letters, every thread) stays one call away via where_did_i_leave_off "
-                    "(the deep boot). Does NOT "
-                    "consume handoffs — read+consume happens in where_did_i_leave_off. "
+                    "(the deep boot). Signs no handoffs: where_did_i_leave_off is the door "
+                    "that signs them, for its reader alone. "
                     "Depth on demand, not by force."
                 ),
                 inputSchema={
@@ -1509,8 +1530,8 @@ def _registered_tools():
                     "+ THE VOICES IN THE BOOT), spiral status, lineage letters (COMMS — "
                     "LINEAGE), and the self-model snapshot — and omits all work-thread "
                     "sections (open threads, handoffs, persistent markers, recent activity) "
-                    "and the scribe block by construction, not by filter. Does "
-                    "NOT consume handoffs. The gentle arrival path for remote and "
+                    "and the scribe block by construction, not by filter. Signs no "
+                    "handoffs. The gentle arrival path for remote and "
                     "lightly-provisioned seats: the smallest, calmest boot payload, for "
                     "seats where the full boot does not land cleanly."
                 ),
@@ -1837,10 +1858,14 @@ def _registered_tools():
             Tool(
                 name="nape_ack",
                 description=(
-                    "Acknowledge a Nape honk by its honk_id. "
-                    "Acknowledged honks are removed from the open honk queue "
-                    "(signals_summary(source='honk')) but remain "
-                    "in the audit log (acks.jsonl). Include a note explaining how the "
+                    "Acknowledge a Nape honk by its honk_id. The ack is appended to "
+                    "nape/acks.jsonl and the honk stays in honks.jsonl for audit; nape_summary "
+                    "stops counting it at once. Its row in signals_summary(source='honk') "
+                    "closes only at the next ledger sweep, which a read (signals_summary or the "
+                    "heartbeat tool) starts once the last scan is older than its freshness bound "
+                    "(3600 s by default), so until then that row can still read open. "
+                    "signal_ack on that row's signal_id closes it now and, when the row names its "
+                    "honk, writes this ack in the same call. Include a note explaining how the "
                     "concern was addressed or why it was a false positive."
                 ),
                 inputSchema={
@@ -1848,7 +1873,13 @@ def _registered_tools():
                     "properties": {
                         "honk_id": {
                             "type": "string",
-                            "description": "honk_id from nape_honks output.",
+                            "description": (
+                                "The honk's id as nape wrote it in nape/honks.jsonl. Through "
+                                "the tools it is origin.native_id on the honk's row in "
+                                "signals_summary(mode='list', source='honk'), where the row "
+                                "carries one; that row's signal_id is what signal_ack takes "
+                                "instead."
+                            ),
                         },
                         "note": {"type": "string", "description": "How the concern was addressed."},
                     },

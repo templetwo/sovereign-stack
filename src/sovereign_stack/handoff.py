@@ -6,8 +6,10 @@ Those are different layers. Insights are past-tense; handoffs are future-tense.
 
 Design principles:
 - Per-instance, per-thread: a session can leave multiple handoffs for different threads
-- Read-once surface, preserved in archive: handoffs appear in where_did_i_leave_off
-  exactly once, then flip to consumed. They stay queryable but don't re-surface and pile up.
+- Signed per reader, retired only on purpose (the signature ledger, 2026-08-31): reading a
+  handoff in where_did_i_leave_off signs it for that reader alone and hides it from nobody;
+  only retire(), with a reason, clears it for everyone. The legacy consumed_at field stays
+  on old files and is nobody's queue (see the SIGNATURE LEDGER block below).
 - Attribution-framed: surfaced as "previous instance (id, time) left this note" — not as
   the new instance's own intent. Epistemic hygiene against injection by compromised/drifted
   sessions.
@@ -379,7 +381,9 @@ class HandoffEngine:
                 f"(looked for {name!r} in {self.root}). Refusing the write: a "
                 "correction link that points at nothing renders as no link at "
                 "all, which is exactly the silent-drop this field exists to "
-                "end. List candidates with handoff_archaeology()."
+                "end. The id is the filename the handoff tool printed when that "
+                "handoff was written; no tool lists the store, whose files are in "
+                "the directory named above."
             )
         return name
 
