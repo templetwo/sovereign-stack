@@ -13,6 +13,42 @@ _Nothing yet._
 
 ---
 
+## [1.23.0] - 2026-10-23
+
+57 commits since 1.22.0 (2026-10-22): the next-phase design's plan 1 (`docs/superpowers/specs/2026-10-21-next-phase-design.md`, `docs/superpowers/plans/2026-10-21-next-phase-plan-1.md`), eleven tasks behind existing seams, no new store, no daemon, nothing that spends. Built subagent-driven on branch `phase/plan-1` (fresh implementer and reviewer per task, a final whole-branch review, one fix wave, a verification seat); 4784 tests collected, 4778 passed, 6 skipped at the final tree.
+
+### The record reaches (B1, B4, B6, C5)
+
+- `recall_insights` orders by relevance whenever a query is given and by newest only for a bare browse; the envelope says `order_used` and `order_defaulted`, and the schema no longer promises `newest`.
+- An empty search names its stores: `scope.stores_searched`, `scope.not_searched`, `scope.note`, with the stable store label from `store_identity`.
+- Tool descriptions say what the code does (the doors, `nape_ack`, `inspect_claim`, `season_review`, the aperture, this repo's CLAUDE.md), and a census test keeps them honest; the CLAUDE.md header names one version, pyproject's.
+- `season_review`'s policy section is a keyword screen and says so, the matched word beside each candidate.
+
+### Receipts that keep (C1, C3, C4, E2)
+
+- Re-verify reads the write stamp: a receipt that no longer matches says `moved_on` against the write instant, never "never verified"; `byte_len` and the blob id ride on file receipts; refs under scratch, plugin-cache and env-named paths are refused, and the refusal says no hash ran.
+- `intensity` is bounded: numeric strings and bools are refused.
+- pyproject's description, the README's generated block and `manifest --check` agree with the live tool count; the description carries no count.
+
+### Seats are seen (A3, A4, D2, D7)
+
+- The heartbeat's `unacked_signals` and `signals_summary` report counts by source with `source_labels` (the thread count is the open threads) and `stale_24h_by_source`, and never a cross-source total (`total`, `total_configured`, `stale_24h`, `stale_7d` are gone). Readers: the console, hq-pulse (edited by HQ on 2026-10-23 to render either shape), the bridge (its PR of the same date).
+- `served_predates_head` on the bridge heartbeat and the console: the served commit against HEAD, the tree's dirtiness read at start, `null` with a reason when git metadata is unreadable.
+- Side-effect writers name their caller: `resolve_thread_by_id` stamps the socket caller's seat on the insight it writes (`attribution: seat | argument | none`).
+- Unknown arguments are refused on write, govern and handoff tools, and by name on `thread_touch`, `self_model`, `spiral_reflect` and `nape_ack`; warned on reads. The Ring-2 drains record a refused proposal as `commit_failed` naming the key; the antigravity connector pops its compass keys before forwarding.
+
+### Tests cannot write the live record (T0.1)
+
+- Every write funnel (`memory`, `handoff`, `nape_daemon`, thread touches, supersessions, the archive, `metabolism`'s shard rewrites) refuses a write to the live `~/.sovereign` while a test runs, naming the path; a census test (ast-based, daemons included) keeps every writer under the guard; `conftest`'s audit guard reads the home once at import so a HOME redirect cannot blind it.
+
+### Deploy notes
+
+- Restart `com.templetwo.sovereign-sse` and `com.templetwo.sovereign-bridge` after the fast-forward and `pip install -e . --no-deps` (the version is read from the installed metadata); `com.templetwo.sovereign-dashboard-web` last, since its restart ends the HQ panel session.
+- Pairings: the sovereign-bridge PR of the same date (per-source signal keys and the blind-shape fallback with `source_labels`, `served_predates_head`, `resolve_thread_by_id` in `SEAT_SIGNABLE_TOOLS`); hq-pulse already renders both shapes; `~/.sovereign/hq/modules.json`'s signals note and the global CLAUDE.md's recall-default box are HQ's edits in the same pass.
+- Rollback: `git -C ~/sovereign-stack checkout 31d3141 && venv/bin/pip install -e . --no-deps` and the same two restarts; no migration, no new state file.
+
+---
+
 ## [1.22.0] - 2026-10-22
 
 148 commits since 1.21.0 (2026-08-28). The sections below name what shipped since, newest first; the ten sections after them were written as the work landed.

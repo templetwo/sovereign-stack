@@ -1129,6 +1129,11 @@ def _fetch_bridge_heartbeat_uncached() -> dict | None:
         "bridge_commit": payload.get("bridge_commit"),
         "service_start_time": service_start,
         "service_uptime_seconds": _age_seconds(service_start),
+        # Design A4: true / false / null as the bridge said it, with its reason.
+        # Copied verbatim: null is "the bridge could not decide", never false,
+        # and both keys are None when the bridge predates the field.
+        "served_predates_head": payload.get("served_predates_head"),
+        "served_predates_head_reason": payload.get("served_predates_head_reason"),
         "aperture_surfaces": aperture.get("surfaces"),
         "gate_total_pending_all_substrates": gate.get("total_pending_all_substrates"),
         "gate_total_pending_claim_bearing": gate.get("total_pending_claim_bearing"),

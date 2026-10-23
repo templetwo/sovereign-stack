@@ -151,8 +151,9 @@ def _parse_lineage_limit(arguments: dict, tool_name: str) -> int:
     which renders the same buckets, through the same render_lineage, under the
     same "N older withheld by limit_per_bucket" coverage line, and which is the
     door the boot ritual actually prescribes — declared no such key. An
-    undeclared key is silently dropped, so the full door named the lever,
-    accepted it, ignored it, and reported nothing.
+    undeclared key was silently dropped then (since design D7 it is named in
+    the envelope), so the full door named the lever, accepted it, ignored it,
+    and reported nothing.
 
     Handing back 100 to a caller who asked for 10,000 with no signal is the
     fail-open shape these doors exist to avoid: the seat walks away believing it
@@ -967,9 +968,9 @@ def _registered_tools():
                     "whole build, not just the endpoint. Reference the returned archive_id "
                     "from a record_insight summary. A summary is not the artifact. "
                     "READS LIVE HERE TOO as of 2026-09-06: mode='get' with an archive_id "
-                    "retrieves one exchange and re-verifies its bytes (replaces "
-                    "recall_exchange); mode='list' returns provenance only, newest "
-                    "first, with the optional filters (replaces list_exchanges). "
+                    "retrieves one exchange and re-verifies its bytes (replaces the "
+                    "retired recall_exchange); mode='list' returns provenance only, newest "
+                    "first, with the optional filters (replaces the retired list_exchanges). "
                     "Default mode='archive' writes, exactly as before."
                 ),
                 inputSchema={
@@ -1214,6 +1215,20 @@ def _registered_tools():
                             "description": "The stable thread id (from get_open_threads output)",
                         },
                         "resolution": {"type": "string", "description": "What was discovered"},
+                        "source_instance": {
+                            "type": "string",
+                            "description": (
+                                "WHO resolved it: the author stamped on the resolution "
+                                "insight. Optional, and second in precedence: the seat "
+                                "the call arrives with (the seat socket's "
+                                "X-Sovereign-Seat stamp) wins, and this argument is the "
+                                "fallback when no seat arrived. With neither, the "
+                                "insight lands without a source_instance and the result "
+                                "says 'attribution: none'. session_id is NOT a "
+                                "substitute: it is the server's spiral session, "
+                                "identical for every writer."
+                            ),
+                        },
                     },
                     "required": ["thread_id", "resolution"],
                 },
@@ -1287,7 +1302,7 @@ def _registered_tools():
                     "reading signs it for you alone and hides it from nobody; only an explicit "
                     "retire() clears it for everyone (signature ledger, 2026-08-31). The previous "
                     "wording here — 'surfaced exactly once, then archived' — described the "
-                    "consumed_at behaviour that ledger replaced, and stayed on the tool "
+                    "legacy consumed_at behaviour that ledger replaced, and stayed on the tool "
                     "description after the code changed."
                 ),
                 inputSchema={
@@ -1309,7 +1324,7 @@ def _registered_tools():
                         },
                         "supersedes": {
                             "type": "string",
-                            "description": "Optional id of an EARLIER handoff this one corrects (its filename, with or without .json — see handoff_archaeology). The older record is never modified; it simply starts rendering 'CORRECTED BY <id>' wherever it is surfaced, so a stale claim can no longer read as current. Refused if it names no handoff in the store.",
+                            "description": "Optional id of an EARLIER handoff this one corrects: its filename, with or without .json, as this tool printed it when that handoff was written ('Handoff written → …'). When your seat already handed off on the same thread, this tool's result names the newest such file. No tool lists the whole store; its files are in the handoffs/ directory of the Stack root. The older record is never modified; it simply starts rendering 'CORRECTED BY <id>' wherever it is surfaced, so a stale claim can no longer read as current. Refused if it names no handoff in the store.",
                         },
                     },
                     "required": ["note"],
@@ -1359,13 +1374,19 @@ def _registered_tools():
                 name="where_did_i_leave_off",
                 description=(
                     "Boot-up call. Answers 'where am I?' in one breath. Returns spiral status, "
-                    "unconsumed handoffs from previous instances (surfaced once, attribution-framed), "
-                    "recent open threads, and activity since the newest entry in chronicle domain "
+                    "the handoffs from previous instances that this reader has not yet signed "
+                    "(newest first, up to 20, attribution-framed), recent open threads, and "
+                    "activity since the newest entry in chronicle domain "
                     "'reflection' (close_session writes one at each close; the marker is shared "
                     "across seats and machines, so it may be another seat's close; the window is "
-                    "inclusive). Read this first when "
-                    "resuming work. Handoffs flip to consumed=true after this call — they stay "
-                    "queryable via recall_insights but don't re-surface and pile up. "
+                    "inclusive). Read this first when resuming work. Each handoff it shows is "
+                    "SIGNED for source_instance: reading signs it for you alone and hides it from "
+                    "nobody, so it stops resurfacing to you while every other seat still sees it, "
+                    "and only an explicit retire() clears a handoff for everyone (signature "
+                    "ledger, 2026-08-31). consume=false reads without signing; the parameter "
+                    "keeps its legacy name. With no source_instance, or a placeholder such as "
+                    "'unknown', nothing is signed and the handoff list is the legacy pre-ledger "
+                    "filter, not your queue. "
                     "Pass domain_tags (and optionally project) to also surface context-matched "
                     "threads, mistakes-to-avoid, and related insights ranked by relevance."
                 ),
@@ -1379,11 +1400,26 @@ def _registered_tools():
                         "consume": {
                             "type": "boolean",
                             "default": True,
-                            "description": "Mark surfaced handoffs as consumed. Set false for read-only preview.",
+                            "description": (
+                                "Sign each handoff this call shows, for source_instance "
+                                "(default true): reading signs it for you alone and hides it "
+                                "from nobody; only an explicit retire() clears a handoff for "
+                                "everyone. Set false to read without signing. With no named "
+                                "source_instance nothing is signed either way. The name is "
+                                "legacy: before the signature ledger (2026-08-31) this flag hid "
+                                "each handoff it showed from every later reader."
+                            ),
                         },
                         "source_instance": {
                             "type": "string",
-                            "description": "Which instance is reading (recorded as consumed_by for audit).",
+                            "description": (
+                                "Which seat is reading. The handoff list is this reader's own "
+                                "queue (the handoffs it has not signed and nobody has retired), "
+                                "each signature records this name, and it also routes your model "
+                                "line's lineage letters to you. Missing, or a placeholder such as "
+                                "'unknown': nothing is signed and the handoff list falls back to "
+                                "the legacy pre-ledger filter, which is nobody's queue."
+                            ),
                         },
                         "domain_tags": {
                             "type": "array",
@@ -1448,8 +1484,8 @@ def _registered_tools():
                     "'reflection' (close_session writes it), and your self-model. Carries the "
                     "breath without the full ritual. The complete inheritance (lineage "
                     "letters, every thread) stays one call away via where_did_i_leave_off "
-                    "(the deep boot). Does NOT "
-                    "consume handoffs — read+consume happens in where_did_i_leave_off. "
+                    "(the deep boot). Signs no handoffs: where_did_i_leave_off is the door "
+                    "that signs them, for its reader alone. "
                     "Depth on demand, not by force."
                 ),
                 inputSchema={
@@ -1495,8 +1531,8 @@ def _registered_tools():
                     "+ THE VOICES IN THE BOOT), spiral status, lineage letters (COMMS — "
                     "LINEAGE), and the self-model snapshot — and omits all work-thread "
                     "sections (open threads, handoffs, persistent markers, recent activity) "
-                    "and the scribe block by construction, not by filter. Does "
-                    "NOT consume handoffs. The gentle arrival path for remote and "
+                    "and the scribe block by construction, not by filter. Signs no "
+                    "handoffs. The gentle arrival path for remote and "
                     "lightly-provisioned seats: the smallest, calmest boot payload, for "
                     "seats where the full boot does not land cleanly."
                 ),
@@ -1823,10 +1859,15 @@ def _registered_tools():
             Tool(
                 name="nape_ack",
                 description=(
-                    "Acknowledge a Nape honk by its honk_id. "
-                    "Acknowledged honks are removed from the open honk queue "
-                    "(signals_summary(source='honk')) but remain "
-                    "in the audit log (acks.jsonl). Include a note explaining how the "
+                    "Acknowledge a Nape honk by its honk_id. The ack is appended to "
+                    "nape/acks.jsonl and the honk stays in honks.jsonl for audit; nape_summary's "
+                    "unacknowledged count drops it at once (its per-level counts and total, "
+                    "which count every honk, do not). Its row in signals_summary(source='honk') "
+                    "closes only at the next ledger sweep, which a read (signals_summary or the "
+                    "heartbeat tool) starts once the last scan is older than its freshness bound "
+                    "(3600 s by default), so until then that row can still read open. "
+                    "signal_ack on that row's signal_id closes it now and, when the row names its "
+                    "honk, writes this ack in the same call. Include a note explaining how the "
                     "concern was addressed or why it was a false positive."
                 ),
                 inputSchema={
@@ -1834,7 +1875,13 @@ def _registered_tools():
                     "properties": {
                         "honk_id": {
                             "type": "string",
-                            "description": "honk_id from nape_honks output.",
+                            "description": (
+                                "The honk's id as nape wrote it in nape/honks.jsonl. Through "
+                                "the tools it is origin.native_id on the honk's row in "
+                                "signals_summary(mode='list', source='honk'), where the row "
+                                "carries one; that row's signal_id is what signal_ack takes "
+                                "instead."
+                            ),
                         },
                         "note": {"type": "string", "description": "How the concern was addressed."},
                     },
@@ -3153,61 +3200,187 @@ _KNOWN_PARAM_ALIASES: dict[str, dict[str, str]] = {
 # is a declared property of record_insight and is forwarded to storage, where
 # **metadata has always been ready to keep it. session_token_id remains
 # tolerated because it is still undeclared and still dropped.
+#
+# ADDED 2026-10-23 (design D7, the guard lifted to every published tool). The
+# caller survey for the lift (the bridge's /api/call and seat socket, its
+# session-token path and /api/batch, both Ring-2 drains, the Claude connector,
+# the Ring-1 proxies, the house scripts that call /api/call) found one more
+# undeclared key on a write tool: `situation`, which the propose_learning
+# schemas of all three Ring-2 bridges REQUIRE (clients/grok_bridge/
+# tool_adapter.py, clients/openai_bridge/tool_adapter.py, clients/
+# antigravity_connector/bridge_setup.py) and which both drains forward verbatim
+# to record_learning (build_commit_arguments in bridge_core/pending_writes.py
+# and in openai_bridge/pending_writes.py). Refusing it would turn every drained
+# learning into commit_failed. The record_learning body never reads it, so its
+# text has been dropped on every drained learning so far: a pre-existing loss,
+# reported forward, not fixed here.
 _ADDITIONAL_ALLOWED_PARAMS: dict[str, frozenset[str]] = {
+    # ~/sovereign-bridge bridge.py /api/call, the scoped session-token path.
     "record_insight": frozenset({"session_token_id"}),
+    # The three bridges' propose_learning, forwarded by both Ring-2 drains.
+    "record_learning": frozenset({"situation"}),
 }
 
 
-async def _reject_unknown_params(tool_name: str, arguments: dict) -> None:
-    """Raise ValueError naming every argument key `tool_name`'s live schema
-    doesn't declare, instead of the pre-existing behavior (every branch below
-    reads via `arguments.get(key, default)`, which silently drops anything
-    not explicitly read — a fail-open: the caller gets a confident,
-    well-formed, WRONG answer instead of a correction).
+# THE INTENTS WHOSE TOOLS REFUSE AN UNKNOWN ARGUMENT (design D7, thread
+# 0804046c). A write, govern or handoff tool changes state, so an argument it
+# drops is a change made without what the caller asked for. Every other
+# published tool runs without the unknown keys and names them in its envelope,
+# except the tools named in _REFUSE_UNKNOWN_ARGUMENT_TOOLS below.
+_REFUSE_UNKNOWN_ARGUMENT_INTENTS = frozenset({"write", "govern", "handoff"})
 
-    The allowlist is derived from `list_tools()` — the same live registry
-    `my_toolkit`/`heartbeat` already treat as the source of truth — not a
-    second hand-maintained copy that could drift from the registered
-    inputSchema. Called only for tools where the caller survey in
-    mesh-2026-08 (recall_insights, record_insight) is complete; see the
-    scope note where this is invoked.
+# AND FOUR TOOLS BY NAME, WHICH CHANGE STATE UNDER AN INTENT THAT DOES NOT SAY SO
+# (plan 1's final review, finding I-2; option (b), taken by the final fix wave
+# under its dispatch, not a ruling). thread_touch (communicate) appends
+# chronicle/thread_touches.jsonl, a T0.1 funnel; self_model (orient) writes
+# ~/.sovereign/self_model.json on its update; nape_ack (communicate) appends
+# nape/acks.jsonl, a T0.1 store; spiral_reflect (introspect) advances and saves
+# the spiral state. Keyed on intent alone, a direct call to any of them ran the
+# write with the key dropped, where spec G4 reads "unknown arguments to a write
+# tool are refused, not dropped". Named here rather than reclassified, so
+# TOOL_INTENTS still says what each tool is for and this set says which refuse.
+# A self_model READ with a stray key is refused too: the set is by tool, not by
+# action. Seats sent thread_touch an undeclared source_instance 20 times between
+# 2026-09-03 and 09-12 (Task 8's traffic census, none since); those calls are
+# now refused with "did you mean 'instance_id'?" until plan 2's D1 declares the
+# key there.
+_REFUSE_UNKNOWN_ARGUMENT_TOOLS = frozenset(
+    {"nape_ack", "self_model", "spiral_reflect", "thread_touch"}
+)
 
-    Deliberately uncached: this dispatches on the same request path as
-    `test_contract_walker.py`'s live-schema assumption, and rebuilding a
-    ~97-entry list of Tool object literals (no I/O, no network) is cheap
-    next to a chronicle write already going through a worker thread.
+
+def _refuses_unknown_arguments(name: str) -> bool:
+    """True when ``name`` refuses an argument it does not declare, rather than
+    running without it: its intent is write, govern or handoff, or it is one of
+    the state-changing tools named in _REFUSE_UNKNOWN_ARGUMENT_TOOLS."""
+    return (
+        _intent_for(name) in _REFUSE_UNKNOWN_ARGUMENT_INTENTS
+        or name in _REFUSE_UNKNOWN_ARGUMENT_TOOLS
+    )
+
+
+def _unknown_argument_hint(
+    tool_name: str, key: str, accepted: list[str], schema_map: dict[str, list[str]]
+) -> str | None:
+    """One hint for an unknown key, or None.
+
+    A known cross-tool confusion (_KNOWN_PARAM_ALIASES) or else a near spelling
+    among the tool's own parameters, and the first other published tool that
+    declares the key.
     """
-    if not arguments:
-        return
+    alias = _KNOWN_PARAM_ALIASES.get(tool_name, {}).get(key)
+    if alias is None:
+        close = difflib.get_close_matches(key, accepted, n=1)
+        alias = close[0] if close else None
+    owner = next((n for n, keys in schema_map.items() if n != tool_name and key in keys), None)
+    owned = f"'{key}' is a parameter of {owner}" if owner else None
+    if alias is None:
+        return owned
+    hint = f"'{key}': did you mean '{alias}'?"
+    return f"{hint} ({owned})" if owned else hint
+
+
+async def _unknown_arguments(tool_name: str, arguments: dict) -> tuple[list[str], str] | None:
+    """The keys of ``arguments`` that ``tool_name`` does not declare, and the text naming them.
+
+    Returns ``(unknown, detail)``, where ``detail`` reads ``"<names>; accepted:
+    <names>"`` (``(none)`` for a tool with no parameters), followed by one hint
+    per key that has one; or None when every key is declared by the tool's live
+    inputSchema or tolerated for a named caller (_ADDITIONAL_ALLOWED_PARAMS). A
+    name the published registry does not carry also returns None: the retirement
+    gate and the unknown-tool raise answer it.
+
+    The allowlist is derived from `list_tools()`, the same live registry
+    `my_toolkit` and `heartbeat` treat as the source of truth, not a second
+    hand-maintained copy that could drift from the registered inputSchema.
+    Deliberately uncached: rebuilding the Tool literals costs well under a
+    millisecond (0.07 ms, measured 2026-10-23), next to any call it guards.
+    """
+    if not isinstance(arguments, dict) or not arguments:
+        return None
     tools = await list_tools()
-    schema_map = {t.name: set((t.inputSchema.get("properties") or {}).keys()) for t in tools}
-    valid_keys = schema_map.get(tool_name)
-    if valid_keys is None:
-        return  # tool not in the live registry — not this guard's problem
+    schema_map = {t.name: list((t.inputSchema.get("properties") or {}).keys()) for t in tools}
+    accepted = schema_map.get(tool_name)
+    if accepted is None:
+        return None
     tolerated = _ADDITIONAL_ALLOWED_PARAMS.get(tool_name, frozenset())
-    unknown = [k for k in arguments if k not in valid_keys and k not in tolerated]
+    unknown = [k for k in arguments if k not in accepted and k not in tolerated]
     if not unknown:
-        return
+        return None
+    detail = f"{', '.join(unknown)}; accepted: {', '.join(accepted) or '(none)'}"
+    hints = [_unknown_argument_hint(tool_name, k, accepted, schema_map) for k in unknown]
+    return unknown, "; ".join([detail, *(h for h in hints if h)])
 
-    def _describe(key: str) -> str:
-        alias = _KNOWN_PARAM_ALIASES.get(tool_name, {}).get(key)
-        if alias is None:
-            close = difflib.get_close_matches(key, valid_keys, n=1)
-            alias = close[0] if close else None
-        owner = next(
-            (n for n, keys in schema_map.items() if n != tool_name and key in keys),
-            None,
-        )
-        msg = f"unknown parameter '{key}' for {tool_name}"
-        if alias:
-            msg += f"; did you mean '{alias}'?"
-        if owner:
-            msg += f" ({key} is a {owner} parameter)"
-        if not alias and not owner:
-            msg += ". No close match found among this tool's valid parameters."
-        return msg
 
-    raise ValueError("; also: ".join(_describe(k) for k in unknown))
+async def _reject_unknown_params(tool_name: str, arguments: dict) -> None:
+    """Raise ValueError("unknown argument(s): <names>; accepted: <names>") for
+    any key in ``arguments`` that ``tool_name`` does not declare.
+
+    The refusal for write, govern and handoff tools and the state-changing
+    tools named in _REFUSE_UNKNOWN_ARGUMENT_TOOLS (_screen_unknown_arguments).
+    Raised, not returned: the SDK turns a raise into isError=True with exactly
+    this text and the bridge into {"ok": false, "error": <this text>}, while
+    returned text is wrapped as a SUCCESS (the P1 rule, mesh-20260719).
+
+    History: written for record_insight and recall_insights on
+    fix/tool-dispatch-unknown-key-rejection (af8714b, held 2026-08-02 and never
+    merged), grafted 2026-08-28 after HQ rediscovered the defect (SOP #12 with
+    HQ as the instance), and lifted by design D7 from those two branches to
+    dispatch entry, so it guards every published tool.
+    """
+    found = await _unknown_arguments(tool_name, arguments)
+    if found is not None:
+        raise ValueError(f"unknown argument(s): {found[1]}")
+
+
+async def _screen_unknown_arguments(name: str, arguments: dict) -> tuple[dict, str | None]:
+    """Answer the arguments ``name`` does not declare, before anything else runs.
+
+    A write, govern or handoff tool, or one named in
+    _REFUSE_UNKNOWN_ARGUMENT_TOOLS, is refused (_reject_unknown_params), so its
+    body never runs and nothing is written. Any other published tool goes on
+    with the unknown keys removed, so "ignored" is literally true, and the
+    returned warning goes into its envelope. Returns ``(arguments to dispatch,
+    warning or None)``.
+    """
+    if _refuses_unknown_arguments(name):
+        await _reject_unknown_params(name, arguments)
+        return arguments, None
+    found = await _unknown_arguments(name, arguments)
+    if found is None:
+        return arguments, None
+    unknown, detail = found
+    kept = {k: v for k, v in arguments.items() if k not in unknown}
+    return kept, f"unknown argument(s) ignored: {detail}"
+
+
+def _with_envelope_warning(result, warning: str):
+    """``result`` with ``warning`` inside its first content item.
+
+    The first item because the bridge reads only ``content[0]``
+    (bridge.call_mcp_tool), so a warning in a later item never reaches a remote
+    seat. A JSON object gains ``warnings`` as its first key, after any warnings
+    the tool returned there itself; any other text gains a leading
+    ``warnings: [...]`` line. Every dispatch branch returns list[TextContent]
+    (the dispatcher's contract), so any other shape is returned unchanged.
+    """
+    if not isinstance(result, list):
+        return result
+    line = f"warnings: {json.dumps([warning])}"
+    if not result or not isinstance(result[0], TextContent):
+        return [TextContent(type="text", text=line), *result]
+    text = result[0].text
+    try:
+        payload = json.loads(text)
+    except ValueError:
+        payload = None
+    if isinstance(payload, dict):
+        own = payload.pop("warnings", [])
+        own = own if isinstance(own, list) else [own]
+        text = json.dumps({"warnings": [*own, warning], **payload}, indent=2)
+    else:
+        text = f"{line}\n\n{text}"
+    return [TextContent(type="text", text=text), *result[1:]]
 
 
 # Placeholder session values that are the ABSENCE of an identity, not one.
@@ -3246,6 +3419,79 @@ def _signal_actor() -> str | None:
     if isinstance(session, str) and session.strip().casefold() not in _NON_IDENTITIES:
         return f"seat:{session.strip()}"
     return None
+
+
+# THE STACK'S OWN NAMESPACE ON A SEAT IT TOOK CUSTODY OF: sse_server applies it
+# to the X-Sovereign-Seat value (`SEAT_NAMESPACE`) and `_signal_actor` to the
+# server's own identity. Spelled here, not imported, because sse_server imports
+# this module; the header test in tests/test_side_effect_writer_identity.py
+# goes red if the two ever diverge.
+_SEAT_NAMESPACE = "seat:"
+
+
+def _transport_seat_id(transport_seat: str | None) -> str | None:
+    """The bare seat id a transport established for this dispatch, or None.
+
+    One leading ``seat:`` is dropped so the row carries the seat id the seat
+    socket already signs on that seat's direct writes (the bridge's
+    ``seat_identity.sign_arguments`` stamps ``source_instance=<seat id>``): one
+    seat, one spelling, whichever tool wrote the row.
+    """
+    if not transport_seat:
+        return None
+    seat = transport_seat.removeprefix(_SEAT_NAMESPACE).strip()
+    return seat or None
+
+
+def _side_effect_author(transport_seat: str | None, arguments: dict) -> tuple[str | None, str]:
+    """``(source_instance, attribution)`` for an insight a tool writes as a side effect.
+
+    Design D2, thread a85ec5e6. The precedence, with the ``attribution`` value
+    each step reports:
+
+      1. ``"seat"``: the seat a TRANSPORT established before dispatch entry
+         (the seat socket's stamp), as its bare seat id.
+      2. ``"argument"``: the caller's ``source_instance`` argument, verbatim.
+      3. ``"none"``: neither. The insight still lands with the key absent;
+         refusing it is D1 (plan 2).
+
+    ``transport_seat`` is captured by ``_dispatch_tool`` BEFORE it fills
+    ``CALLER_SEAT`` with ``seat:<spiral session>``, and that is the point. The
+    fill names the SERVER: reading ``caller_seat()`` here would stamp the
+    server on every native resolution and override every argument, which is
+    the defect the thread records, relabelled as an author.
+    """
+    seat = _transport_seat_id(transport_seat)
+    if seat:
+        return seat, "seat"
+    argument = arguments.get("source_instance")
+    if isinstance(argument, str) and argument.strip():
+        return argument, "argument"
+    return None, "none"
+
+
+def _attribution_line(source_instance: str | None, attribution: str, arguments: dict) -> str:
+    """The result line saying where a side-effect insight's author came from.
+
+    An argument the seat overrode is named rather than dropped in silence:
+    from the caller's side an ignored argument looks exactly like an honoured
+    one, which is the reasoning ``dispatch_context`` gives for refusing the
+    identity arguments on signal_ack.
+    """
+    if attribution == "none":
+        return (
+            "attribution: none (no seat arrived and no source_instance argument "
+            "named an author; the insight carries no source_instance)"
+        )
+    if attribution == "argument":
+        return f"attribution: argument (source_instance {source_instance!r}, as passed)"
+    line = (
+        f"attribution: seat (source_instance {source_instance!r}, the seat this call arrived with)"
+    )
+    argument = arguments.get("source_instance")
+    if argument is not None and argument != source_instance:
+        line += f"; the source_instance argument {argument!r} was not used, the seat wins"
+    return line
 
 
 def _earlier_handoff_nudge(record: dict) -> str:
@@ -3316,6 +3562,15 @@ async def _dispatch_tool(name: str, arguments: dict):
     # MCP call to the body except through this gate.
     if name in RETIRED_TOOLS:
         raise ValueError(retired_tool_error(name))
+    # UNKNOWN ARGUMENTS ARE ANSWERED HERE, BEFORE ANY STATE MOVES (design D7,
+    # thread 0804046c). Every branch below reads its arguments with .get(), so
+    # an undeclared key used to vanish and the call answered as if it had never
+    # been sent. A write, govern or handoff tool, or a state-changing tool
+    # named in _REFUSE_UNKNOWN_ARGUMENT_TOOLS, is refused before the spiral
+    # moves or its body runs; any other tool runs without the key and names it
+    # in its envelope. Below the retirement gate, so a retired name keeps its
+    # own answer.
+    arguments, ignored = await _screen_unknown_arguments(name, arguments)
     # ── THE DISPATCH CONTEXT IS ESTABLISHED HERE, AT DISPATCH ENTRY ─────────
     #
     # This is the one place the SERVER can speak for itself about who is
@@ -3335,27 +3590,42 @@ async def _dispatch_tool(name: str, arguments: dict):
     # route into the dispatch — the MCP `@server.call_tool()` entry, the
     # bridge's native shim, and the tests that call the dispatcher directly —
     # gets the same establishment, and none of them has to remember to do it.
+    #
+    # THE SEAT A TRANSPORT ESTABLISHED IS READ FIRST, BEFORE THE FILL (design
+    # D2). Once the fill runs, CALLER_SEAT holds the server's own identity and
+    # the two can no longer be told apart; the side-effect writers need exactly
+    # that distinction, because the fill names the server and not a caller.
+    transport_seat = caller_seat()
     seat_token = None
-    if caller_seat() is None:
+    if transport_seat is None:
         resolved = _signal_actor()
         if resolved:
             seat_token = set_caller_seat(resolved)
     try:
-        return await _dispatch_registered_tool(name, arguments)
+        result = await _dispatch_registered_tool(name, arguments, transport_seat=transport_seat)
     finally:
         # ALWAYS RESET, INCLUDING ON THE RAISE PATH. A token left unreset
         # leaks this call's identity into whatever runs next in the same
         # context.
         if seat_token is not None:
             reset_caller_seat(seat_token)
+    return result if ignored is None else _with_envelope_warning(result, ignored)
 
 
-async def _dispatch_registered_tool(name: str, arguments: dict):
+async def _dispatch_registered_tool(
+    name: str, arguments: dict, *, transport_seat: str | None = None
+):
     """The dispatch body. Reached in production only via _dispatch_tool.
 
     Called directly by tests that cover a RETAINED-BUT-UNPUBLISHED
     implementation; a production caller cannot reach it without passing the
     retirement gate above.
+
+    ``transport_seat`` is the caller identity a transport established before
+    dispatch entry (the seat socket's ``X-Sovereign-Seat`` stamp), or None. It
+    is never the server's own fill. Only the side-effect writers read it
+    (design D2); a direct call that omits it is a call that arrived with no
+    seat.
     """
     global spiral_state
     spiral_state.record_tool_call(name)
@@ -3430,14 +3700,8 @@ async def _dispatch_registered_tool(name: str, arguments: dict):
         return [TextContent(type="text", text=json.dumps(result, indent=2))]
 
     if name == "record_insight":
-        # Unknown-key rejection: see _reject_unknown_params. Grafted from
-        # fix/tool-dispatch-unknown-key-rejection (af8714b, "HELD FOR REVIEW",
-        # authored 2026-08-02 and never merged). HQ independently rediscovered
-        # this defect on 2026-08-28 and wrote a narrower hand-rolled allowlist
-        # before finding the held branch — SOP #12 with HQ as the instance. The
-        # branch's version is kept because it derives valid keys from the LIVE
-        # registry rather than a second hand-maintained copy that can drift.
-        await _reject_unknown_params("record_insight", arguments)
+        # An undeclared key never reaches this branch: _dispatch_tool refuses it
+        # first (_screen_unknown_arguments, design D7).
         domain = arguments.get("domain")
         content = arguments.get("content")
         # The schema marks both required — don't invent defaults for callers
@@ -3587,12 +3851,11 @@ async def _dispatch_registered_tool(name: str, arguments: dict):
         ]
 
     if name == "recall_insights":
-        # The held branch wired BOTH tools; the alias map's documented incident
-        # (return_claim_id passed to recall_insights, silently dropped, and a
-        # false ground_truth conclusion written from the silence) is a READ-path
-        # failure, so covering only the write path would leave the exact case
-        # that motivated the guard uncovered.
-        await _reject_unknown_params("recall_insights", arguments)
+        # The alias map's documented incident (return_claim_id passed here,
+        # dropped in silence, and a false ground_truth conclusion written from
+        # the silence) is answered at dispatch entry since design D7: the key is
+        # named in this envelope's warnings, with the with_ids hint, and never
+        # reaches this branch.
         query = arguments.get("query")
         domain = arguments.get("domain")
         if domain and domain.lower() == "all":
@@ -3601,6 +3864,28 @@ async def _dispatch_registered_tool(name: str, arguments: dict):
         start_date = arguments.get("start_date")
         end_date = arguments.get("end_date")
         since_last_reflection = arguments.get("since_last_reflection", False)
+        # RELEVANCE WHEN THE QUERY CARRIES A TERM, NEWEST FOR A BARE BROWSE
+        # (design B1). The default was "newest" for every call, so a search
+        # with no `order` returned the most recent matches anywhere in the
+        # chronicle instead of the best ones (the 2026-08-06 A/B: 0 of 8 on
+        # topic under newest, 8 of 8 under relevance, same matches). Only the
+        # TOOL's default moves: memory.py's library default stays "newest", so
+        # in-process callers keep their exact payload. A query of only
+        # whitespace is a bare browse: the library splits the query on
+        # whitespace, and str.strip() and str.split() share one definition of
+        # it, so this test is true exactly when the library has a term to
+        # rank by.
+        query_has_term = bool((query or "").strip())
+        order = arguments.get("order") or ("relevance" if query_has_term else "newest")
+        # The order the library actually applies, which is what the envelope
+        # names. It mirrors the library's sort: "oldest"; "relevance" only
+        # when there is a term to rank by; newest for everything else. So an
+        # explicit "relevance" with no term reports "newest", the order the
+        # items are really in.
+        if order == "oldest" or (order == "relevance" and query_has_term):
+            order_used = order
+        else:
+            order_used = "newest"
         result = experiential.recall_insights(
             query=query,
             domain=domain,
@@ -3621,7 +3906,7 @@ async def _dispatch_registered_tool(name: str, arguments: dict):
             with_ids=arguments.get("with_ids", True),
             exclude_superseded=arguments.get("exclude_superseded", False),
             domain_contains=arguments.get("domain_contains"),
-            order=arguments.get("order", "newest"),
+            order=order,
             offset=arguments.get("offset", 0),
             content_class=arguments.get("content_class"),
             exclude_content_class=arguments.get("exclude_content_class"),
@@ -3631,6 +3916,11 @@ async def _dispatch_registered_tool(name: str, arguments: dict):
             # bare array that implies completeness.
             envelope=True,
         )
+        # Added here, not in the library's envelope, so the library's Schema v1
+        # shape stays exactly as its own callers and tests know it, and every
+        # response this tool returns carries both fields.
+        result["order_used"] = order_used
+        result["order_defaulted"] = not arguments.get("order")
         return [TextContent(type="text", text=json.dumps(result, indent=2))]
 
     if name == "check_mistakes":
@@ -3697,12 +3987,23 @@ async def _dispatch_registered_tool(name: str, arguments: dict):
     if name == "resolve_thread_by_id":
         thread_id = arguments.get("thread_id", "")
         resolution = arguments.get("resolution", "")
-        path = experiential.resolve_thread_by_id(thread_id, resolution, spiral_state.session_id)
+        # THE STACK WRITES THIS INSIGHT, NOT THE CALLER (design D2, thread
+        # a85ec5e6), so the caller's seat reaches it only through here: eight
+        # Grok resolutions on 2026-09-06 landed with nothing but the server's
+        # session_id and could not say which seat closed them.
+        source_instance, attribution = _side_effect_author(transport_seat, arguments)
+        path = experiential.resolve_thread_by_id(
+            thread_id, resolution, spiral_state.session_id, source_instance=source_instance
+        )
         if not path:
             return [TextContent(type="text", text=f"No open thread found with id: {thread_id}")]
         return [
             TextContent(
-                type="text", text=f"Thread {thread_id} resolved → ground_truth insight: {path}"
+                type="text",
+                text=(
+                    f"Thread {thread_id} resolved → ground_truth insight: {path}\n"
+                    + _attribution_line(source_instance, attribution, arguments)
+                ),
             )
         ]
 
@@ -3786,7 +4087,14 @@ async def _dispatch_registered_tool(name: str, arguments: dict):
         what_surprised_me = (arguments.get("what_surprised_me") or "").strip()
         what_to_pick_up = (arguments.get("what_to_pick_up") or "").strip()
         thread = arguments.get("thread", "general")
-        source_instance = arguments.get("source_instance", "unknown")
+        # A SEAT THE TRANSPORT ESTABLISHED AUTHORS ALL THREE RECORDS (design
+        # D2): the stack writes them, so the caller's seat reaches them only
+        # through here. The bridge refuses close_session on the seat socket, so
+        # today only a direct loopback /sse client sending X-Sovereign-Seat
+        # arrives with one. With no seat the two defaults below are untouched;
+        # de-defaulting them is D1 (plan 2).
+        seat = _transport_seat_id(transport_seat)
+        source_instance = seat or arguments.get("source_instance", "unknown")
         # SCOPED DELIBERATELY TO THE HANDOFF LEG. close_session writes three
         # things; only step 3 goes through HandoffEngine. Passing "" to the
         # record_insight legs as well would change what lands in Anthony's
@@ -3794,7 +4102,7 @@ async def _dispatch_registered_tool(name: str, arguments: dict):
         # different decision, and not this branch's to make. So the insight
         # legs keep the historical "unknown" and the handoff leg gets the
         # de-defaulted value the author guard expects.
-        handoff_author = arguments.get("source_instance", "")
+        handoff_author = seat or arguments.get("source_instance", "")
 
         if not what_i_learned:
             return [TextContent(type="text", text="close_session requires what_i_learned")]
@@ -3881,8 +4189,8 @@ async def _dispatch_registered_tool(name: str, arguments: dict):
         # gentle door got the schema key; this one renders the SAME lineage
         # buckets through the SAME render_lineage, prints the same "N older
         # withheld by limit_per_bucket" line, and declared no such key — so it
-        # named the lever, accepted the argument (an undeclared key is dropped,
-        # not rejected), ignored it, and reported nothing. Verbatim the failure
+        # named the lever, accepted the argument (an undeclared key was dropped
+        # then, not rejected), ignored it, and reported nothing. Verbatim the failure
         # the gentle door's own comment condemns.
         try:
             lineage_limit = _parse_lineage_limit(arguments, "where_did_i_leave_off")
@@ -4090,7 +4398,8 @@ async def _dispatch_registered_tool(name: str, arguments: dict):
         # older withheld by limit_per_bucket" — while this schema declared only
         # source_instance and full_content, and arrival_state hardcoded 5. A seat
         # that followed the instructions got 5 letters back and NO error, because
-        # an undeclared key is simply dropped. The advertised remedy silently
+        # an undeclared key was simply dropped (before design D7, which names
+        # one in the envelope). The advertised remedy silently
         # doing nothing is worse than no remedy: it retires the question.
         #
         # ONE DOORWAY, MANY DEPTHS (Phase 4): same build_arrival_state

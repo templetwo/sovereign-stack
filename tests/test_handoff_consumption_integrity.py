@@ -40,7 +40,9 @@ import pytest
 
 from sovereign_stack.handoff import HandoffEngine
 
-# NOTE: NON_IDENTIFYING_CONSUMERS and _refuse_live_store_during_tests are
+# NOTE: NON_IDENTIFYING_CONSUMERS and the live-store guard (moved 2026-10-22
+# from handoff._refuse_live_store_during_tests to
+# live_store_guard.refuse_if_test_targets_live, design T0.1) are
 # imported locally inside the specific tests that need them (below), not
 # here at module level. Both names are NEW in this fix — importing them at
 # module level would make this entire file fail to collect when run against
@@ -137,20 +139,20 @@ class TestLiveStoreGuard:
 
     def test_guard_is_a_noop_outside_pytest(self, monkeypatch):
         """The guard must not fire in production — only under pytest."""
-        from sovereign_stack.handoff import _refuse_live_store_during_tests
+        from sovereign_stack.live_store_guard import refuse_if_test_targets_live
 
         monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
         # Should not raise: no PYTEST_CURRENT_TEST means this isn't a test
         # process from the guard's point of view (even though it obviously
         # is one right now — this monkeypatch is the point).
-        _refuse_live_store_during_tests(Path.home() / ".sovereign" / "handoffs")
+        refuse_if_test_targets_live(Path.home() / ".sovereign" / "handoffs", store="handoffs")
 
     def test_guard_allows_tmp_roots(self, tmp_path):
         """Sanity: the guard must not false-positive on ordinary tmp isolation
         (every other test in this suite depends on this being true)."""
-        from sovereign_stack.handoff import _refuse_live_store_during_tests
+        from sovereign_stack.live_store_guard import refuse_if_test_targets_live
 
-        _refuse_live_store_during_tests(tmp_path / "handoffs")  # must not raise
+        refuse_if_test_targets_live(tmp_path / "handoffs", store="handoffs")  # must not raise
 
     def test_isolated_server_handoff_tool_does_not_touch_real_store(self):
         """End-to-end proof for the SPECIFIC confirmed leak: dispatching the

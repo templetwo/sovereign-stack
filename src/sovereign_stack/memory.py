@@ -23,8 +23,9 @@ from pathlib import Path
 from typing import Any
 
 from . import protected as protected_module
-from . import provenance
+from . import provenance, store_identity
 from .coherence import Coherence
+from .live_store_guard import refuse_if_test_targets_live
 
 # Pattern: "(1) ... (2) ..." with sequential numbered items is a bundle.
 # Requires at least items (1) and (2) so a single parenthetical "(e.g. foo)" is never mistaken.
@@ -617,17 +618,28 @@ RECALL_INSIGHTS_SCHEMA_EXTENSIONS = {
             "are given. Omit (default) to match all domains (backward-compatible)."
         ),
     },
+    # NO "default" KEY, ON PURPOSE (design B1). The tool's default depends on
+    # `query` (relevance when the query carries a term, newest for a bare
+    # browse), and the envelope's `order_defaulted` reports whether `order`
+    # was left out. So no declared default can hold: omitting `order` and
+    # passing any value explicitly always differ in `order_defaulted`, and
+    # tests/test_contract_walker.py requires the two to be equal. This
+    # describes the TOOL; the library's own `order="newest"` default on
+    # ExperientialMemory.recall_insights is unchanged.
     "order": {
         "type": "string",
         "enum": ["newest", "oldest", "relevance"],
-        "default": "newest",
         "description": (
-            "Sort order for returned insights. "
-            "'newest' (default) — newest-first by timestamp (pre-existing behavior). "
+            "Sort order for returned insights. When omitted: 'relevance' if `query` "
+            "carries a term (any non-whitespace text), 'newest' for a bare browse (no "
+            "query, or a query of only whitespace). The envelope names the order "
+            "actually applied in `order_used` and says in `order_defaulted` whether "
+            "`order` was left out. "
+            "'newest' — newest-first by timestamp. "
             "'oldest' — oldest-first; surfaces entries buried under recent migrations. "
-            "'relevance' — when query is given, ranks by number of query terms matched "
-            "(descending) with no recency boost, so an old exact match outranks a fresh "
-            "partial match. Falls back to 'newest' when no query is given."
+            "'relevance' — ranks by number of query terms matched (descending) with no "
+            "recency boost, so an old exact match outranks a fresh partial match; with "
+            "no query term it sorts newest, and `order_used` says 'newest'."
         ),
     },
     "offset": {
@@ -1084,7 +1096,9 @@ class ExperientialMemory:
         Args:
             domain: Knowledge domain (e.g., "architecture", "consciousness")
             content: The insight content
-            intensity: Significance level 0.0-1.0
+            intensity: Significance level, a number in [0.0, 1.0]; anything else
+                   (out of range, a string, a bool, NaN) raises ValueError and
+                   nothing is written.
             session_id: Current session identifier
             layer: Chronicle layer - "ground_truth", "hypothesis", or "open_thread"
                    Defaults to "hypothesis" (interpretations should be earned, not inherited)
@@ -1173,6 +1187,7 @@ class ExperientialMemory:
             any receipt verification or ledger write, so a retry can never
             double-write supersession records.
         """
+        refuse_if_test_targets_live(self.insights_dir, store="chronicle/insights")
         # v1.7.0 provenance params — validate SHAPES first (fail fast, before
         # the dedup check); ref resolution and ledger writes happen only
         # after dedup so a retry duplicate never touches the ledger.
@@ -1203,6 +1218,25 @@ class ExperientialMemory:
                 # 2026-07-10. Size is not a hazard class — the wall clock bounds
                 # the read, and a big file that hashes fast still verifies.
                 provenance.preflight_file_receipt(receipt, position)
+
+        # Operational intensity (design C4): bounded to [0.0, 1.0], beside the
+        # emotional check below and in the same shape (a ValueError before any
+        # write), with two differences on purpose. The value must already BE a
+        # number: intensity drives surfacing (the boot's >=0.9 markers,
+        # recall's min_intensity) and every reader compares it as one, and no
+        # caller in the record has ever sent a string (live census 2026-10-22:
+        # 4,767 floats, 8 ints, 0 strings), so a numeric string is refused, not
+        # coerced. A bool is refused: True would otherwise pass as 1.0, the
+        # strongest marker the record has, from a type slip. NaN fails the
+        # comparison and is refused with the rest. An in-range value is stored
+        # as given, so an int keeps the bytes it has today. The five April rows
+        # above 1 stay as history; nothing here rewrites a stored row.
+        if (
+            isinstance(intensity, bool)
+            or not isinstance(intensity, (int, float))
+            or not 0.0 <= intensity <= 1.0
+        ):
+            raise ValueError("intensity must be between 0.0 and 1.0")
 
         # Emotional layer (v1.7.2) — light validation, fail fast. Descriptive
         # storage only; nothing here feeds surfacing or ranking.
@@ -1434,6 +1468,7 @@ class ExperientialMemory:
         Returns:
             Path to the recorded learning
         """
+        refuse_if_test_targets_live(self.learnings_dir, store="chronicle/learnings")
         # FAIL CLOSED ON THE LABEL, and this is the specimen that earned it: a
         # propose_learning proposal filed 2026-08-28 carried a domain with a
         # "/" in it, was approved, and died at commit — this path addresses its
@@ -1484,6 +1519,7 @@ class ExperientialMemory:
         Returns:
             Path to the recorded transformation
         """
+        refuse_if_test_targets_live(self.transformations_dir, store="chronicle/transformations")
         timestamp = datetime.now(timezone.utc)
         session_id = session_id or f"session_{timestamp.strftime('%Y%m%d_%H%M%S')}"
 
@@ -1538,6 +1574,7 @@ class ExperientialMemory:
         Returns:
             Path to the recorded thread
         """
+        refuse_if_test_targets_live(self.threads_dir, store="chronicle/open_threads")
         # Same gate, same reason as record_learning above: this domain becomes
         # a filename, and a "/" in it asked for a directory nothing created.
         domain = _normalize_domain(domain)
@@ -1619,6 +1656,7 @@ class ExperientialMemory:
             Path to the new ground_truth insight, or "" when no unresolved
             thread in `domain` matched `question_fragment`.
         """
+        refuse_if_test_targets_live(self.threads_dir, store="chronicle/open_threads")
         resolved_thread_id: str | None = None
         resolved_timestamp: str | None = None
         now = datetime.now(timezone.utc).isoformat()
@@ -1677,16 +1715,30 @@ class ExperientialMemory:
             resolved_thread_timestamp=resolved_timestamp,
         )
 
-    def resolve_thread_by_id(self, thread_id: str, resolution: str, session_id: str = None) -> str:
+    def resolve_thread_by_id(
+        self,
+        thread_id: str,
+        resolution: str,
+        session_id: str = None,
+        source_instance: str = None,
+    ) -> str:
         """
         Resolve an open thread by its stable thread_id.
 
         Preferred over resolve_thread(domain, fragment) when the thread_id is
         known — avoids ambiguity when multiple threads share keywords.
 
+        Args:
+            source_instance: The author stamped on the resolution insight (the
+                server passes the caller's seat, else its argument; design D2).
+                None leaves the key ABSENT from the row, never stored as null,
+                so "unattributed" stays distinguishable from "attributed to
+                nothing".
+
         Returns:
             Path to the new ground_truth insight (or empty string if not found).
         """
+        refuse_if_test_targets_live(self.threads_dir, store="chronicle/open_threads")
         resolved_domain: str | None = None
         resolved_question: str | None = None
         resolved_timestamp: str | None = None
@@ -1737,6 +1789,7 @@ class ExperientialMemory:
             resolved_from=(resolved_question or "")[:80],
             resolved_thread_id=thread_id,
             resolved_thread_timestamp=resolved_timestamp,
+            **({"source_instance": source_instance} if source_instance else {}),
         )
 
     def get_open_threads(
@@ -1971,6 +2024,9 @@ class ExperientialMemory:
         Raises:
             ValueError: If thread_id or note is empty.
         """
+        refuse_if_test_targets_live(
+            self.thread_touches_file, store="chronicle/thread_touches.jsonl"
+        )
         if not thread_id or not thread_id.strip():
             raise ValueError("thread_id is required")
         if not note or not note.strip():
@@ -2246,6 +2302,8 @@ class ExperientialMemory:
                     partial_reasons, continuation} instead of a bare list —
                     the read-side sibling of the P1 write fix: the response
                     states its own coverage instead of implying completeness.
+                    Its scope also names the store searched and the stores
+                    it cannot reach (design B6).
             content_class: INCLUDE filter (Phase 1). One class or a list; keep
                     only entries whose content_class is in the set. Untagged
                     entries are DROPPED when this is given (include-mode is how
@@ -2467,6 +2525,25 @@ class ExperientialMemory:
                 "domain_query": domain_query,
                 "domains_searched": len(search_dirs),
                 "domains_total": domains_total,
+                # THE STORES THIS READ SEARCHED, AND THE ONES IT CANNOT REACH
+                # (design B6, thread 8a1d522b). A seat that found nothing here
+                # told Anthony a receipt did not exist, while its own memory
+                # file cited t2helix chronicle numbers: a store this read never
+                # touches. So every envelope names the store it read and the
+                # two it did not, and an empty result says it measured only
+                # these. The store is named by its stable label, read from
+                # store_identity on each call (the one label the studio:
+                # receipt tag shares), never by the live hostname, which macOS
+                # can re-derive while the store stays the same. The note keys
+                # on total_matched, not on the page (a page past the end still
+                # matched), and is null otherwise, so the key set never varies.
+                "stores_searched": [f"stack-chronicle:{store_identity.STUDIO_HOST_LABEL}"],
+                "not_searched": ["t2helix (machine-local)", "other machines' chronicles"],
+                "note": (
+                    "an empty result is a measurement of these stores only"
+                    if total_matched == 0
+                    else None
+                ),
             },
             "truncated": truncated,
             "partial_reasons": partial_reasons,
@@ -2634,6 +2711,7 @@ class ExperientialMemory:
             The stored provenance record (archive_id, descriptor, sha256,
             byte_len, path, source/vector/conversation, tags, timestamp).
         """
+        refuse_if_test_targets_live(self.archives_dir, store="chronicle/archives")
         timestamp = datetime.now(timezone.utc)
         session_id = session_id or f"session_{timestamp.strftime('%Y%m%d_%H%M%S')}"
 

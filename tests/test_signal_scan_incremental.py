@@ -471,7 +471,7 @@ class TestTheSweepRunsOffTheCallersThread:
             field = sl.heartbeat_field(root)
             assert field["ingestion"] == "refreshing"
             assert field["measured"] is True
-            assert field["total"] == 1, "a refresh blanked a perfectly good count"
+            assert field["by_source"]["halt"] == 1, "a refresh blanked a perfectly good count"
             assert field["scanned_at"] == "2020-01-01T00:00:00.000Z"
             assert field["refresh_started_at"] == inflight["started_at"]
             assert "scan_stale" in (field["error"] or "")
@@ -508,7 +508,7 @@ class TestTheSweepRunsOffTheCallersThread:
                     break
                 time.sleep(0.02)
 
-    def test_a_refresh_that_raises_is_an_error_with_a_null_total(self, tmp_sovereign_root):
+    def test_a_refresh_that_raises_is_an_error_with_no_count(self, tmp_sovereign_root):
         root = tmp_sovereign_root
         _guardian_ok(root)
         real = sl.scan_all
@@ -521,7 +521,7 @@ class TestTheSweepRunsOffTheCallersThread:
             field = sl.heartbeat_field(root, scan=True)
         finally:
             sl.scan_all = real
-        assert field["total"] is None
+        assert field["by_source"] is None
         assert "fixture sweep explosion" in field["error"]
         assert field["ingestion"] == "error"
 
@@ -575,15 +575,14 @@ class TestAnOverrunSweepSaysSoInsteadOfShortening:
         for name in marker["unreached"]:
             assert marker["source_status"][name].startswith("partial:")
 
-    def test_a_partial_certificate_reads_as_partial_with_a_null_total(self, tmp_sovereign_root):
+    def test_a_partial_certificate_reads_as_partial_with_every_count_null(self, tmp_sovereign_root):
         root = tmp_sovereign_root
         _guardian_ok(root)
         _honks(root, 2)
         _sweep(root, budget_seconds=0.000001)
         field = sl.heartbeat_field(root)
         assert field["ingestion"] == "partial"
-        assert field["total"] is None
-        assert field["stale_24h"] is None
+        assert set(field["stale_24h_by_source"].values()) == {None}
         assert field["partial"] is True
         assert field["unreached"]
         assert "partial_scan:" in field["error"]
@@ -597,7 +596,7 @@ class TestAnOverrunSweepSaysSoInsteadOfShortening:
         out = json.loads(sl.handle_signal_tool("signals_summary", {}, root=root))
         assert out["ok"] is True
         assert out["ingestion"] == "partial"
-        assert out["total"] is None
+        assert {facts["open"] for facts in out["by_source"].values()} == {None}
         assert out["unreached"]
 
     def test_a_partial_sweep_keeps_the_progress_it_made(self, tmp_sovereign_root):
@@ -625,7 +624,7 @@ class TestAnOverrunSweepSaysSoInsteadOfShortening:
         field = sl.heartbeat_field(root)
         assert field["partial"] is False
         assert field["ingestion"] == "ok"
-        assert field["total"] == 2
+        assert field["by_source"]["honk"] == 2
 
     def test_a_partial_certificate_that_names_nothing_is_invalid(self, tmp_sovereign_root):
         root = tmp_sovereign_root

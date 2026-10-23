@@ -279,7 +279,7 @@ class TestThreadFamilyCandidates:
 class TestPolicyCandidates:
     def test_policy_shaped_sentinel_proposed(self, season_root):
         report = review(season_root)
-        assert "3. POLICY CANDIDATES" in report
+        assert "3. POLICY-SHAPED KEYWORD SCREEN" in report
         assert "set_policy(statement=" in report
         assert "Never expand the iMessage allowlist" in report
         assert 'set_by="<approving human>"' in report
@@ -308,8 +308,13 @@ class TestHygiene:
         assert f"dangling predecessor {('ab' * 32)[:16]}" in report
 
     def test_receipt_reverify_failure_surfaced(self, season_root):
+        # The fixture's receipt was stamped "verified" on an entry dated four
+        # days ago, and its file was written when the fixture ran, so the file
+        # is newer than the write: design C1 calls that "moved_on", not
+        # "mismatch" (the mismatch case is pinned in
+        # tests/test_receipt_reverify_report.py).
         report = review(season_root)
-        assert "re-verifies as mismatch" in report
+        assert "re-verifies as moved_on" in report
 
     def test_unreceipted_sentinels_counted(self, season_root):
         report = review(season_root)
@@ -363,7 +368,7 @@ class TestScoping:
         for header in (
             "1. SUPERSESSION CANDIDATES",
             "2. THREAD-FAMILY CANDIDATES",
-            "3. POLICY CANDIDATES",
+            "3. POLICY-SHAPED KEYWORD SCREEN",
             "4. HYGIENE",
             "5. DORMANT DOMAINS / FRAGMENTATION",
         ):

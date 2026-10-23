@@ -33,6 +33,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .live_store_guard import refuse_if_test_targets_live
 from .provenance import LIVED_VANTAGES
 
 # =============================================================================
@@ -1696,6 +1697,7 @@ def _append_jsonl(path: Path, record: dict) -> None:
         Must be JSON-serializable. A TypeError is raised at json.dumps time
         if it is not — callers should use _safe_truncate() on nested objects.
     """
+    refuse_if_test_targets_live(path, store="nape")
     data = (json.dumps(record, ensure_ascii=False) + "\n").encode("utf-8")
     with path.open("ab+") as fh:
         end = fh.seek(0, os.SEEK_END)

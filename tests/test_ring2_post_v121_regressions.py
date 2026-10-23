@@ -14,6 +14,7 @@ so target_risk's referential checks resolve against the sandbox too.
 
 from __future__ import annotations
 
+import inspect
 import json
 from pathlib import Path
 
@@ -1166,10 +1167,16 @@ def _conftest_module():
 
 def _run_guard(monkeypatch, fake_home, mutate):
     """Drive the real conftest fixture body around `mutate`, rooted at a fake
-    home. Returns the AssertionError it raised, or None if it stayed silent."""
+    home. Returns the AssertionError it raised, or None if it stayed silent.
+
+    The guard reads its home from `_LIVE_AUDIT_HOME`, bound once at conftest
+    import (plan 1's final review, finding I-7), so that binding is what moves
+    here; HOME and Path.home() do not move it, which
+    test_the_tripwire_measures_the_import_time_home_while_a_test_redirects_home
+    pins."""
     conftest = _conftest_module()
 
-    monkeypatch.setattr(conftest.Path, "home", classmethod(lambda cls: fake_home))
+    monkeypatch.setattr(conftest, "_LIVE_AUDIT_HOME", fake_home)
     try:
         gen = conftest.no_live_audit_writes.__wrapped__()
         next(gen)  # setup: snapshot sizes
@@ -1185,7 +1192,8 @@ def _run_guard(monkeypatch, fake_home, mutate):
         # UNDO IMMEDIATELY, do not wait for fixture teardown.
         #
         # The REAL no_live_audit_writes is autouse, so it is already wrapping
-        # this very test — and it reads Path.home() at ITS teardown. If the
+        # this very test — and it reads _LIVE_AUDIT_HOME at ITS teardown (it read
+        # Path.home() when this was written). If the
         # patch is still in place then, the real guard globs the FAKE home,
         # sees a file that did not exist at its own setup, and fails the test
         # for the write this test made on purpose. Whether that happens depends
@@ -1226,6 +1234,52 @@ def test_the_tripwire_stays_quiet_when_nothing_writes(monkeypatch, fake_home):
 def test_the_tripwire_skips_cleanly_without_a_sovereign_dir(monkeypatch, tmp_path):
     """CI and fresh clones have no ~/.sovereign — that is not a failure."""
     assert _run_guard(monkeypatch, tmp_path, lambda: None) is None
+
+
+def test_the_tripwire_measures_the_import_time_home_while_a_test_redirects_home(
+    monkeypatch, tmp_path
+):
+    """Plan 1's final review, finding I-7. A test that redirects HOME or patches
+    Path.home() through its own monkeypatch still has them redirected when the
+    autouse guard tears down, so a guard that read Path.home() then measured the
+    test's fake home and passed without looking at the live chains. The guard now
+    reads the home bound at conftest import. Here a stand-in for that home holds a
+    chain that grows during the test while HOME and Path.home() point elsewhere,
+    at a home whose own chain grows too: the guard must name the first and
+    ignore the second."""
+    conftest = _conftest_module()
+    account, redirected = tmp_path / "account", tmp_path / "redirected"
+    chains = {}
+    for home in (account, redirected):
+        chain = home / ".sovereign" / "openai_bridge" / "audit" / "audit.jsonl"
+        chain.parent.mkdir(parents=True)
+        chain.write_text('{"event_type": "approved"}\n')
+        chains[home] = chain
+
+    monkeypatch.setenv("HOME", str(redirected))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: redirected))
+    assert Path.home() == redirected and Path("~").expanduser() == redirected
+    # The redirect has teeth: read through Path.home(), the redirected chain is
+    # what a guard would measure, which is the blindness this pins against.
+    assert str(chains[redirected]) in {str(p) for p in redirected.glob(conftest._LIVE_AUDIT_GLOB)}
+
+    def both_chains_grow():
+        for chain in chains.values():
+            with chain.open("a") as fh:
+                fh.write('{"event_type": "retry_armed"}\n')
+
+    exc = _run_guard(monkeypatch, account, both_chains_grow)
+    assert exc is not None, "the guard measured the redirected home, not its own"
+    assert str(chains[account]) in str(exc)
+    assert str(chains[redirected]) not in str(exc)
+
+
+def test_the_tripwire_home_is_bound_at_import_not_read_at_call():
+    """The binding itself: a value captured at import, never a call made at
+    setup or teardown, which a test's monkeypatch could still be redirecting."""
+    conftest = _conftest_module()
+    assert isinstance(conftest._LIVE_AUDIT_HOME, Path)
+    assert "Path.home()" not in inspect.getsource(conftest._live_audit_sizes)
 
 
 def test_the_openai_fixture_rebinds_every_write_path(openai_tmp):
@@ -1368,23 +1422,32 @@ def test_both_substrates_agree_on_the_original_timestamp_targets():
     assert core_targets == frozenset({"record_insight", "record_learning", "record_open_thread"})
 
 
-def test_the_three_duplicated_target_sets_are_each_pinned():
-    """Meta-pin: a fourth duplicated set must not ship unpinned.
+def test_the_duplicated_target_declarations_are_each_pinned():
+    """Meta-pin: a further duplicated declaration must not ship unpinned.
 
     Each name that exists as a separate literal in BOTH pending_writes modules
-    is asserted equal somewhere. This test names the three that exist today.
+    is asserted equal somewhere. This test names the four that exist today:
+    three target sets and, since design D7's Task 8 fix round 3 (2026-10-23),
+    ARGUMENT_SCREEN_TARGETS, the drain's own screen of the commit targets the
+    Stack only warns on, a dict of target to accepted argument names (its values
+    are pinned to list_tools() in tests/test_unknown_params_write_tools.py; empty
+    since plan 1's final fix wave, when the Stack began refusing on all seven
+    commit targets, and still a duplicated declaration this pin holds equal).
 
     SAY WHAT IT CANNOT SEE, so nobody reads it as a guarantee. The scan is
-    `dir(core)` filtered to names ENDING IN `_TARGETS` that are `frozenset` in
-    BOTH modules, which is the shape all three duplicated sets happen to have
-    today — and only that shape. A fourth duplicated declaration slips past
-    silently if it is a plain `set`, a `tuple`, a `list`, or named anything
-    else (`*_COMMIT_TARGETS` matches; `TARGETS_*` and `*_ALLOWED` do not). It
-    is a TRIPWIRE over the current convention, not an exhaustive audit of
-    duplicated declarations: it catches the next set that follows the pattern
-    and cannot catch the one that does not. Keeping the convention is what
-    makes it work; widening the scan to every module-level container would
-    catch the imports and the behaviour sets too, which is a different test.
+    `dir(core)` filtered to names ENDING IN `_TARGETS` that are a `frozenset`
+    or a `dict` in BOTH modules, which is the shape all four duplicated
+    declarations happen to have today — and only that shape. A further
+    duplicated declaration slips past silently if it is a plain `set`, a
+    `tuple`, a `list`, or named anything else (`*_COMMIT_TARGETS` matches;
+    `TARGETS_*` and `*_ALLOWED` do not). It is a TRIPWIRE over the current
+    convention, not an exhaustive audit of duplicated declarations: it catches
+    the next declaration that follows the pattern and cannot catch the one
+    that does not. Keeping the convention is what makes it work; widening the
+    scan to every module-level container would catch the imports and the
+    behaviour sets too, which is a different test. (The fork's own
+    COMMIT_TARGETS dict is not in bridge_core.pending_writes, so the scan,
+    which needs the name in both, does not see it.)
     """
     from bridge_core import pending_writes as core
     from openai_bridge import pending_writes as oai
@@ -1393,13 +1456,14 @@ def test_the_three_duplicated_target_sets_are_each_pinned():
         name
         for name in dir(core)
         if name.endswith("_TARGETS")
-        and isinstance(getattr(core, name, None), frozenset)
-        and isinstance(getattr(oai, name, None), frozenset)
+        and isinstance(getattr(core, name, None), (frozenset, dict))
+        and isinstance(getattr(oai, name, None), (frozenset, dict))
     }
     assert duplicated == {
         "VERIFIED_BY_TARGETS",
         "PROVENANCE_PASSTHROUGH_TARGETS",
         "ORIGINAL_TIMESTAMP_TARGETS",
-    }, f"a duplicated target set has no parity test: {duplicated}"
+        "ARGUMENT_SCREEN_TARGETS",
+    }, f"a duplicated target declaration has no parity test: {duplicated}"
     for name in duplicated:
         assert getattr(core, name) == getattr(oai, name), name

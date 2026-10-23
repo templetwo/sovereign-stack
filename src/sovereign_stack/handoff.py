@@ -6,8 +6,10 @@ Those are different layers. Insights are past-tense; handoffs are future-tense.
 
 Design principles:
 - Per-instance, per-thread: a session can leave multiple handoffs for different threads
-- Read-once surface, preserved in archive: handoffs appear in where_did_i_leave_off
-  exactly once, then flip to consumed. They stay queryable but don't re-surface and pile up.
+- Signed per reader, retired only on purpose (the signature ledger, 2026-08-31): reading a
+  handoff in where_did_i_leave_off signs it for that reader alone and hides it from nobody;
+  only retire(), with a reason, clears it for everyone. The legacy consumed_at field stays
+  on old files and is nobody's queue (see the SIGNATURE LEDGER block below).
 - Attribution-framed: surfaced as "previous instance (id, time) left this note" — not as
   the new instance's own intent. Epistemic hygiene against injection by compromised/drifted
   sessions.
@@ -19,12 +21,12 @@ Layout:
 """
 
 import json
-import os
 import re
 from datetime import datetime
 from pathlib import Path
 
 from ._log import get_logger
+from .live_store_guard import refuse_if_test_targets_live
 
 logger = get_logger(__name__)
 
@@ -35,7 +37,7 @@ HANDOFF_MAX_BYTES = 2048  # ~2KB per note
 # LOOKS filled in. Verified against the live store 2026-08-01: 159/251 (63%)
 # of handoffs carried "unknown", 78/251 (31%) carried "test" (all traced to a
 # test suite that was writing through to the live ~/.sovereign store — see
-# _refuse_live_store_during_tests below), leaving only 14/251 naming an actual
+# live_store_guard.refuse_if_test_targets_live), leaving only 14/251 naming an actual
 # reader. A gate that accepts these silently is the fail-open this module
 # exists to close (house rule: a surface must be incapable of reporting
 # success on a meaningless operation).
@@ -162,41 +164,6 @@ def _validate_author_identity(source_instance: str, note: str | None = None) -> 
             "pass the real seat name instead." + preview
         )
     return cleaned
-
-
-def _refuse_live_store_during_tests(root: Path) -> None:
-    """Defense in depth: a pytest run must never be able to mutate the real
-    ~/.sovereign store, no matter which module-level singleton it inherited.
-
-    ``PYTEST_CURRENT_TEST`` is set by pytest for the duration of every test's
-    setup/call/teardown phase (pytest docs, not our convention). Checking it
-    here — at the moment of the actual write — catches the case a test's
-    fixture set SOVEREIGN_ROOT or patched DEFAULT_ROOT *after* a module-level
-    HandoffEngine singleton had already been constructed from the real root
-    at import time (server.py:129 does exactly this). Verified on the live
-    store 2026-08-01: this was not hypothetical — two separate test fixtures
-    (tests/test_resume_in_context.py, tests/test_nape_autohook.py
-    ``_isolated_server``) were doing exactly this and had respectively
-    consumed 249/251 real handoffs and written 51 "healthy probe" records
-    into ~/.sovereign/handoffs/ before this guard existed.
-    """
-    if not os.environ.get("PYTEST_CURRENT_TEST"):
-        return
-    try:
-        resolved = root.resolve()
-    except OSError:
-        resolved = root
-    real_root = (Path.home() / ".sovereign" / "handoffs").resolve()
-    if resolved == real_root or real_root in resolved.parents or resolved in real_root.parents:
-        raise RuntimeError(
-            f"Refusing to write to the live Sovereign Stack handoff store "
-            f"({real_root}) from inside a pytest run (root resolved to "
-            f"{resolved}). This HandoffEngine was almost certainly a stale "
-            "module-level singleton bound before a test fixture's "
-            "SOVEREIGN_ROOT/DEFAULT_ROOT override took effect — patch "
-            "`server.handoff_engine` (or equivalent) directly with a "
-            "HandoffEngine rooted at a tmp_path, not just the env var."
-        )
 
 
 def _slug(s: str, max_len: int = 40) -> str:
@@ -414,7 +381,9 @@ class HandoffEngine:
                 f"(looked for {name!r} in {self.root}). Refusing the write: a "
                 "correction link that points at nothing renders as no link at "
                 "all, which is exactly the silent-drop this field exists to "
-                "end. List candidates with handoff_archaeology()."
+                "end. The id is the filename the handoff tool printed when that "
+                "handoff was written; no tool lists the store, whose files are in "
+                "the directory named above."
             )
         return name
 
@@ -442,7 +411,7 @@ class HandoffEngine:
         size limit, is empty, if source_instance names no author, or if
         supersedes names no existing handoff.
         """
-        _refuse_live_store_during_tests(self.root)
+        refuse_if_test_targets_live(self.root, store="handoffs")
         note = (note or "").strip()
         if not note:
             raise ValueError("handoff note is empty")
@@ -589,7 +558,13 @@ class HandoffEngine:
         the handoff from every future boot while recording nothing useful
         about who erased it.
         """
-        _refuse_live_store_during_tests(self.root)
+        refuse_if_test_targets_live(self.root, store="handoffs")
+        # The files rewritten below are the ones the caller HANDS in, which
+        # need not sit under self.root: each is checked before any is touched.
+        # Listed first so an iterator is not spent by the check.
+        paths = list(paths)
+        for p in paths:
+            refuse_if_test_targets_live(p, store="handoffs")
         consumed_by = _validate_reader_identity(consumed_by)
         count = 0
         ts = datetime.now().isoformat()
@@ -670,7 +645,7 @@ class HandoffEngine:
                 log is an audit trail same as mark_consumed's consumed_by,
                 and is held to the same standard).
         """
-        _refuse_live_store_during_tests(self.root)
+        refuse_if_test_targets_live(self.root, store="handoffs")
         if not handoff_path or not str(handoff_path).strip():
             raise ValueError("handoff_path is required")
         consumed_by = _validate_reader_identity(consumed_by)
@@ -771,7 +746,7 @@ class HandoffEngine:
         while carrying no information, which is how 159 handoffs came to be
         stamped "unknown".
         """
-        _refuse_live_store_during_tests(self.root)
+        refuse_if_test_targets_live(self.root, store="handoffs")
         if not handoff_path or not str(handoff_path).strip():
             raise ValueError("handoff_path is required")
         signer = _validate_reader_identity(signer, field="signer")
@@ -838,7 +813,7 @@ class HandoffEngine:
         handoff file is untouched, so retirement is reversible by editing the
         log.
         """
-        _refuse_live_store_during_tests(self.root)
+        refuse_if_test_targets_live(self.root, store="handoffs")
         if not handoff_path or not str(handoff_path).strip():
             raise ValueError("handoff_path is required")
         retired_by = _validate_reader_identity(retired_by, field="retired_by")

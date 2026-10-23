@@ -264,17 +264,29 @@ def governed_call(dispatch_ring1, name: str, args: dict, source_instance: str,
     # 2026-08-28 hardening) was structurally inert for antigravity. Not a
     # regression; a third entry point the fix's stated scope never covered.
     # Fallback to args mirrors the other substrates for direct callers.
+    #
+    # POPPED, NOT READ (plan 1's final review, finding I-5), from a copy so the
+    # caller's dict is untouched, and whether or not a keyword carried them, as
+    # bridge_core.dispatch.pop_bridge_metadata and the openai adapter do. They
+    # are bridge metadata, not Stack arguments: intercept stores `args` as the
+    # proposal's arguments and both drains forward those verbatim, and since D7
+    # the Stack refuses both keys on every commit target, so a proposal that
+    # kept them, a CRITICAL one included (which must carry the compass), could
+    # never commit.
+    args = dict(args)
+    args_compass_result = args.pop("compass_check_result", None)
+    args_compass_rationale = args.pop("compass_check_rationale", None)
     res = intercept(
         ctx, name, args, source_instance, session_id=session_id,
         compass_check_result=(
             compass_check_result
             if compass_check_result is not None
-            else args.get("compass_check_result")
+            else args_compass_result
         ),
         compass_check_rationale=(
             compass_check_rationale
             if compass_check_rationale is not None
-            else args.get("compass_check_rationale")
+            else args_compass_rationale
         ),
     )
     if not res.allowed:

@@ -17,7 +17,7 @@ nothing to keep in sync, and the superseded file is never reopened for writing.
 
 Containment: every test here is rooted at tmp_path. The engine additionally
 refuses any write under the live ~/.sovereign during a pytest run
-(_refuse_live_store_during_tests), and the byte-identity test below is the
+(live_store_guard.refuse_if_test_targets_live), and the byte-identity test below is the
 direct proof that a superseding write does not touch its predecessor.
 """
 

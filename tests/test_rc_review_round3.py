@@ -102,17 +102,20 @@ class TestN3TheCloserComesFromTheDispatchContext:
         which is how a comment claiming native input was ignored survived over
         a dispatch that read it."""
         monkeypatch.setattr(server.spiral_state, "session_id", "fixture-established-session")
-        out = _dispatch(
-            "signal_ack",
-            {
-                "signal_id": signal,
-                "state": "acted",
-                "reason": "closed",
-                argument: "fixture-different-seat",
-            },
-        )
-        assert out["ok"] is False
-        assert f"{argument!r} is not an accepted argument" in out["error"]
+        # Refused at dispatch entry since design D7 (signal_ack is a write
+        # tool), by name and before the signal handler runs. The handler's own
+        # identity refusal still answers a direct caller (test_signal_ledger.py).
+        with pytest.raises(ValueError) as exc:
+            _dispatch(
+                "signal_ack",
+                {
+                    "signal_id": signal,
+                    "state": "acted",
+                    "reason": "closed",
+                    argument: "fixture-different-seat",
+                },
+            )
+        assert str(exc.value).startswith(f"unknown argument(s): {argument};")
         row = sl.load_latest(sl.default_sovereign_root())[signal]
         assert row["state"] == "open", "a refusal that still writes the row is the fail-open"
         assert row["closed_by"] is None
@@ -181,7 +184,12 @@ class TestN3TheCloserComesFromTheDispatchContext:
         """THE ONE THAT MATTERS. Every argument name that could plausibly
         address the context — the var's own name, its module path, dotted and
         underscored spellings — is either refused or has no effect on the
-        stamped closer. The server's own identity is what lands."""
+        stamped closer. The server's own identity is what lands.
+
+        Since design D7 they are refused: signal_ack is a write tool, so an
+        undeclared key fails the call at dispatch entry and none of them reaches
+        the handler. The row stays open, and the same close without them lands
+        under the server's own identity."""
         from sovereign_stack import dispatch_context as dc
 
         monkeypatch.setattr(server.spiral_state, "session_id", "fixture-established-session")
@@ -193,11 +201,16 @@ class TestN3TheCloserComesFromTheDispatchContext:
             "context": {"caller_seat": "attacker"},
             "_caller_seat": "attacker",
         }
-        out = _dispatch(
-            "signal_ack",
-            {"signal_id": signal, "state": "acted", "reason": "closed", **reachers},
-        )
-        assert out["ok"] is True, "these are not refused names; they are simply inert"
+        with pytest.raises(ValueError) as exc:
+            _dispatch(
+                "signal_ack",
+                {"signal_id": signal, "state": "acted", "reason": "closed", **reachers},
+            )
+        assert str(exc.value).startswith(f"unknown argument(s): {', '.join(reachers)};")
+        assert sl.load_latest(sl.default_sovereign_root())[signal]["closed_by"] is None
+        assert dc.CALLER_SEAT.get() is None, "a refused call leaves no identity behind"
+        out = _dispatch("signal_ack", {"signal_id": signal, "state": "acted", "reason": "closed"})
+        assert out["ok"] is True
         assert out["row"]["closed_by"] == "seat:fixture-established-session"
         assert dc.CALLER_SEAT.get() is None, "the dispatch reset its own token"
 
@@ -541,6 +554,28 @@ def _read_all_three(root: Path, monkeypatch) -> dict[str, dict]:
     return {"passive": passive, "native": native, "summary": summary}
 
 
+def _counts_published(payload: dict) -> list[str]:
+    """Every count a reader could act on that this payload still publishes.
+
+    Before design A3 these tests asked `payload.get("total") is None`, which
+    passes for any payload once the key is gone. Published-nothing now means no
+    cross-source sum is present (the four A3 removed, and the labelled
+    `by_source_sum` the plan's Files line named and the spec does not) and every
+    per-source value in every view, flat or nested, is null. The summary's
+    refusal (`{"ok": false, ...}`) carries no view at all, so it publishes
+    nothing.
+    """
+    sums = ("total", "total_configured", "stale_24h", "stale_7d", "by_source_sum")
+    found = [k for k in sums if k in payload]
+    for view in ("by_source", "stale_24h_by_source", "by_source_detail"):
+        for source, value in (payload.get(view) or {}).items():
+            if isinstance(value, dict):
+                found += [f"{view}.{source}.{k}" for k, v in value.items() if v is not None]
+            elif value is not None:
+                found.append(f"{view}.{source}")
+    return found
+
+
 def _damage(root: Path, kind: str) -> None:
     mpath = sl.scan_marker_path(root)
     marker = json.loads(mpath.read_text())
@@ -571,7 +606,7 @@ class TestN2ARefreshNeverErasesTheDamage:
         out = _read_all_three(root, monkeypatch)
         for reader, payload in out.items():
             assert payload.get("error"), f"{reader} reported no error"
-            assert payload.get("total") is None, f"{reader} published a total"
+            assert _counts_published(payload) == [], f"{reader} published a count"
         assert sl.scan_marker_path(root).read_text() == before, "the read replaced the marker"
 
     def test_the_summary_refuses_rather_than_listing_from_a_damaged_ledger(
@@ -611,7 +646,7 @@ class TestN2ARefreshNeverErasesTheDamage:
         for _ in range(3):
             out = _read_all_three(root, monkeypatch)
             assert out["native"]["error"]
-            assert out["native"]["total"] is None
+            assert _counts_published(out["native"]) == []
 
     def test_a_never_scanned_root_initializes(self, tmp_sovereign_root):
         """The case that must NOT be refused: nothing is being overwritten
@@ -699,7 +734,7 @@ class TestN2ARefreshNeverErasesTheDamage:
 
 
 class TestN5TheShrankBranchReturnsNull:
-    def test_a_marker_claiming_more_than_the_ledger_holds_nulls_the_total(
+    def test_a_marker_claiming_more_than_the_ledger_holds_publishes_no_count(
         self, tmp_sovereign_root, monkeypatch
     ):
         """`:990` set ledger_shrank and `:1009` copied the numeric total
@@ -711,7 +746,7 @@ class TestN5TheShrankBranchReturnsNull:
         out = _read_all_three(root, monkeypatch)
         for reader, payload in out.items():
             assert "ledger_shrank" in (payload.get("error") or ""), reader
-            assert payload.get("total") is None, f"{reader} published a total"
+            assert _counts_published(payload) == [], f"{reader} published a count"
 
     def test_the_per_source_counts_are_nulled_too(self, tmp_sovereign_root, monkeypatch):
         """The missing rows have no source to subtract them from either, so
@@ -720,7 +755,7 @@ class TestN5TheShrankBranchReturnsNull:
         _scanned_root(root)
         _damage(root, "counts")
         field = _read_all_three(root, monkeypatch)["passive"]
-        assert field["stale_24h"] is None and field["stale_7d"] is None
+        assert set(field["stale_24h_by_source"].values()) == {None}
         assert set(field["by_source"].values()) == {None}
         assert all(
             v is None for facts in field["by_source_detail"].values() for v in facts.values()
@@ -741,7 +776,7 @@ class TestN6TheRecordedRowCountIsReconciled:
             # the certified byte prefix, not a shrinkage test, so the error
             # says mismatch rather than shrank.
             assert "ledger_rows_mismatch" in (payload.get("error") or ""), reader
-            assert payload.get("total") is None, reader
+            assert _counts_published(payload) == [], reader
 
     def test_a_legitimate_append_is_still_valid(self, tmp_sovereign_root):
         """POSITIVE CONTROL (experimental law #3). The ledger is append-only
@@ -753,7 +788,7 @@ class TestN6TheRecordedRowCountIsReconciled:
         sl.ack_signal(sid, "seat:watch-2-3", "acted", "handled", root)
         field = sl.heartbeat_field(root)
         assert field["error"] is None
-        assert field["total"] == 0
+        assert set(field["by_source"].values()) == {0}
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -771,12 +806,13 @@ class TestNotConfiguredIsDeclaredNeverInferred:
         field = sl.heartbeat_field(root)
         assert field["source_status"]["guardian"] == "unavailable"
         assert field["not_configured"] == []
-        assert field["total"] is None
+        assert field["by_source"]["guardian"] is None
 
-    def test_a_declared_source_is_out_of_scope_but_total_still_says_null(self, tmp_sovereign_root):
-        """`total` promises all seven sources. A source out of scope is still
-        UNMEASURED against that promise, so `total` stays null and the
-        narrower number gets its own name."""
+    def test_a_declared_source_is_out_of_scope_and_its_count_stays_null(self, tmp_sovereign_root):
+        """A source declared out of scope is still UNMEASURED: its count is
+        null, never 0, and the configured sources keep theirs. Before design
+        A3 this pinned `total` null beside `total_configured` 1; neither sum is
+        published now, so the declaration itself names the scope."""
         root = tmp_sovereign_root
         _guardian_ok(root)
         sl.source_config_path(root).parent.mkdir(parents=True, exist_ok=True)
@@ -790,25 +826,25 @@ class TestNotConfiguredIsDeclaredNeverInferred:
         field = sl.heartbeat_field(root)
         assert field["source_status"]["guardian"] == "not_configured"
         assert field["not_configured"] == ["guardian"]
-        assert field["total"] is None
-        assert field["total_configured"] == 1
-        assert "guardian" not in field["total_configured_scope"]
-        assert len(field["total_configured_scope"]) == len(sl.SOURCES) - 1
+        assert {s for s, n in field["by_source"].items() if n is None} == {"guardian"}
+        assert field["by_source"]["halt"] == 1
 
-    def test_a_configured_source_that_failed_still_nulls_the_configured_total(
+    def test_a_configured_source_that_failed_stays_a_failure_beside_a_declared_one(
         self, tmp_sovereign_root
     ):
         """Astra: 'A configured failed source still makes its required
-        aggregate null.' Not-configured and could-not-read are different
-        facts, and only the first one shrinks the scope."""
+        aggregate null.' There is no aggregate since design A3; what stays to
+        hold is that not-configured and could-not-read are different facts,
+        and a failed configured source is never read as an undeclared zero."""
         root = tmp_sovereign_root
         sl.source_config_path(root).parent.mkdir(parents=True, exist_ok=True)
         sl.source_config_path(root).write_text(json.dumps({"sources": {"halt": "not_configured"}}))
         sl.scan_all(root, guardian_provider=lambda: None)
         field = sl.heartbeat_field(root)
         assert field["not_configured"] == ["halt"]
-        assert field["total_configured"] is None
-        assert field["total"] is None
+        assert field["source_status"]["guardian"] == "unavailable"
+        assert field["by_source"]["guardian"] is None and field["by_source"]["halt"] is None
+        assert "guardian" in field["error"]
 
     def test_an_unreadable_declaration_excuses_nothing(self, tmp_sovereign_root):
         root = tmp_sovereign_root
@@ -818,15 +854,18 @@ class TestNotConfiguredIsDeclaredNeverInferred:
         sl.scan_all(root, guardian_provider=lambda: {"issues": []})
         field = sl.heartbeat_field(root)
         assert field["not_configured"] == []
-        assert field["total_configured"] is None
+        assert set(field["by_source"].values()) == {None}
         assert "source_config_unreadable" in field["error"]
 
-    def test_the_scope_travels_with_the_number_on_the_tool_surface(self, tmp_sovereign_root):
+    def test_the_declaration_travels_on_the_tool_surface(self, tmp_sovereign_root):
+        """The scope used to travel as `total_configured_scope`, beside the
+        number it described. With no sum published (design A3), the tool
+        carries the declaration itself and every source's status."""
         root = tmp_sovereign_root
         _guardian_ok(root)
         sl.scan_all(root, guardian_provider=lambda: {"issues": []})
         out = json.loads(sl.handle_signal_tool("signals_summary", {}, root=root))
-        assert out["total_configured_scope"] == list(sl.SOURCES)
+        assert list(out["source_status"]) == list(sl.SOURCES)
         assert out["not_configured"] == []
 
 
@@ -1126,7 +1165,7 @@ class TestN9ScannerFailuresKeepTheirTraceback:
 
         monkeypatch.setattr(sl, "scan_all", boom)
         field = sl.heartbeat_field(root, scan=True)
-        assert field["total"] is None
+        assert field["by_source"] is None
         assert "fixture scanner diagnosis token" in field["error"]
         # THE PUBLIC ERROR STAYS A STRING. `heartbeat_field` must not raise —
         # dashboard_web.build_snapshot calls it with no section guard.
@@ -1859,7 +1898,7 @@ class TestR4TheLockIsNotTheCertificate:
         marker = sl.scan_marker_path(root)
         marker.write_text("")
         out = sl.heartbeat_field(root, scan=True)
-        assert out["error"] and out["total"] is None
+        assert out["error"] and out["by_source"] is None
         assert marker.read_text() == "", "the read reissued the certificate"
         assert sid in sl.load_latest(root)
 
@@ -1872,7 +1911,7 @@ class TestR4TheLockIsNotTheCertificate:
         sl.ledger_path(root).write_text("")
         out = sl.heartbeat_field(root, scan=True)
         assert out["error"]
-        assert out["total"] is None
+        assert out["by_source"] is None
         assert out["ingestion"] != "ok"
 
     def test_a_fresh_root_still_initializes(self, tmp_sovereign_root):
@@ -1920,7 +1959,7 @@ class TestR5TheCertifiedPrefixRowCountIsExact:
         self._restate(root, 0)
         for reader, payload in _read_all_three(root, monkeypatch).items():
             assert "ledger_rows_mismatch" in (payload.get("error") or ""), reader
-            assert payload.get("total") is None, reader
+            assert _counts_published(payload) == [], reader
 
     def test_a_legitimate_append_cannot_mask_an_overstatement(
         self, tmp_sovereign_root, monkeypatch
@@ -1934,7 +1973,7 @@ class TestR5TheCertifiedPrefixRowCountIsExact:
         sl.ack_signal(sid, "seat:fixture-reviewer", "acted", "fixture", root)
         for reader, payload in _read_all_three(root, monkeypatch).items():
             assert "ledger_rows_mismatch" in (payload.get("error") or ""), reader
-            assert payload.get("total") is None, reader
+            assert _counts_published(payload) == [], reader
 
     def test_rows_appended_beyond_the_prefix_stay_legitimate(self, tmp_sovereign_root):
         """POSITIVE CONTROL (law #3). The certificate speaks only about its own
@@ -1944,7 +1983,7 @@ class TestR5TheCertifiedPrefixRowCountIsExact:
         sl.ack_signal(sid, "seat:fixture-reviewer", "acted", "fixture", root)
         out = sl.heartbeat_field(root)
         assert out["error"] is None
-        assert out["total"] == 0
+        assert set(out["by_source"].values()) == {0}
 
 
 class TestR6TheListingChecksContainmentBeforeReading:
@@ -2120,13 +2159,12 @@ class TestR9AConfigurationErrorIsNotAHealthyIngestion:
             {"nope": {}},
         ],
     )
-    def test_an_invalid_declaration_is_config_error_with_a_null_total(
+    def test_an_invalid_declaration_is_config_error_with_every_count_null(
         self, tmp_sovereign_root, payload
     ):
         out = self._config(tmp_sovereign_root, payload)
         assert out["ingestion"] == "config_error"
-        assert out["total"] is None
-        assert out["total_configured"] is None
+        assert {facts["open"] for facts in out["by_source"].values()} == {None}
         assert out["error"]
 
     def test_the_unreadable_file_takes_the_same_path(self, tmp_sovereign_root):
@@ -2137,8 +2175,8 @@ class TestR9AConfigurationErrorIsNotAHealthyIngestion:
         sl.scan_all(root, guardian_provider=lambda: {"issues": []})
         field = sl.heartbeat_field(root)
         assert field["ingestion"] == "config_error"
-        assert field["total"] is None
-        assert field["stale_24h"] is None and field["stale_7d"] is None
+        assert set(field["by_source"].values()) == {None}
+        assert set(field["stale_24h_by_source"].values()) == {None}
 
     def test_a_valid_declaration_is_still_healthy(self, tmp_sovereign_root):
         """POSITIVE CONTROL. A readable declaration must not take the error
@@ -2146,7 +2184,8 @@ class TestR9AConfigurationErrorIsNotAHealthyIngestion:
         out = self._config(tmp_sovereign_root, {"sources": {"guardian": "not_configured"}})
         assert out["ingestion"] != "config_error"
         assert out["not_configured"] == ["guardian"]
-        assert out["total_configured"] == 0
+        opens = {source: facts["open"] for source, facts in out["by_source"].items()}
+        assert opens == dict.fromkeys(sl.SOURCES, 0) | {"guardian": None}
 
     def test_an_absent_declaration_is_still_healthy(self, tmp_sovereign_root):
         root = tmp_sovereign_root
@@ -2154,5 +2193,5 @@ class TestR9AConfigurationErrorIsNotAHealthyIngestion:
         sl.scan_all(root, guardian_provider=lambda: {"issues": []})
         out = json.loads(sl.handle_signal_tool("signals_summary", {}, root=root))
         assert out["ingestion"] == "ok"
-        assert out["total"] == 0
-        assert len(out["total_configured_scope"]) == len(sl.SOURCES)
+        assert {facts["open"] for facts in out["by_source"].values()} == {0}
+        assert out["not_configured"] == [] and list(out["source_status"]) == list(sl.SOURCES)

@@ -7,8 +7,10 @@ chronicle. Mirrors the test_provenance_tools.py style (happy path asserts
 both the returned text AND the on-disk JSONL; rejection paths assert the
 exact rejection text; a no-mutation witness confirms reads never touch the
 ledger's bytes) plus the boot-door integration pattern from
-test_boot_ritual.py's TestProtectedDrawerBootLine (patch server.DEFAULT_ROOT,
-exercise the REAL assembled boot output).
+test_boot_ritual.py's TestProtectedDrawerBootLine (exercise the REAL
+assembled boot output), with the doors run under tests/_phase4_fixture.py's
+singleton redirect: a bare server.DEFAULT_ROOT patch missed the singletons
+server.py builds from the live root at import (see _doors_at).
 
 Every test here is written to fail if the feature it names is deleted —
 assertions pin real behavior (specific one-liner text, specific rejection
@@ -20,7 +22,6 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
@@ -722,10 +723,45 @@ def _call_arrive_lineage(source_instance: str = "test-instance") -> str:
     return asyncio.run(_run())
 
 
+def _doors_at(root: Path):
+    """Run the doors with every singleton they read on the tmp root.
+
+    A bare server.DEFAULT_ROOT patch is not enough: server.py builds
+    handoff_engine, experiential and reflexive_surface from the live root when it
+    is imported. tests/_phase4_fixture.py's redirect moves those, the spiral
+    state, the reflections dir and the policy path to the tmp root as well.
+    """
+    from tests import _phase4_fixture as fx
+
+    return fx._patched_singletons(root)
+
+
 class TestTheGroundBootWiring:
-    def test_present_in_where_did_i_leave_off_when_catches_exist(self, tmp_path):
+    def test_the_doors_read_every_singleton_from_the_tmp_root(self, tmp_path):
+        """Pin the context the tests below run the doors in, whatever the live store holds.
+
+        server.py builds handoff_engine, experiential and reflexive_surface from the
+        live root at import, so a DEFAULT_ROOT patch applied afterwards left the boot
+        reading live handoffs and insights. That is how a live handoff carrying the
+        words "THE GROUND" failed the absent test below from 2026-10-22 on. Isolating
+        it is test isolation (HQ ruling, 2026-10-22 10:52 EDT). Path arithmetic only:
+        no live file is opened or stat'd and no count is compared.
+        """
         from sovereign_stack import server
 
+        root = tmp_path / ".sovereign"
+        (root / "chronicle").mkdir(parents=True)
+        with _doors_at(root):
+            seen = {
+                "DEFAULT_ROOT": Path(server.DEFAULT_ROOT),
+                "handoff_engine": server.handoff_engine.root,
+                "experiential": server.experiential.root,
+                "reflexive_surface": server.reflexive_surface.sovereign_root,
+            }
+        off_the_tmp_root = sorted(n for n, p in seen.items() if not p.is_relative_to(tmp_path))
+        assert off_the_tmp_root == []
+
+    def test_present_in_where_did_i_leave_off_when_catches_exist(self, tmp_path):
         root = tmp_path / ".sovereign"
         chronicle = root / "chronicle"
         chronicle.mkdir(parents=True)
@@ -740,23 +776,19 @@ class TestTheGroundBootWiring:
             vantage="human_attestation",
             chronicle_root=chronicle,
         )
-        with patch.object(server, "DEFAULT_ROOT", str(root)):
+        with _doors_at(root):
             text = _call_boot()
         assert "━━━ THE GROUND ━━━" in text
         assert "compass → HQ: five refusals heard as a mirror" in text
 
     def test_absent_in_where_did_i_leave_off_when_no_catches(self, tmp_path):
-        from sovereign_stack import server
-
         root = tmp_path / ".sovereign"
         (root / "chronicle").mkdir(parents=True)
-        with patch.object(server, "DEFAULT_ROOT", str(root)):
+        with _doors_at(root):
             text = _call_boot()
         assert "THE GROUND" not in text
 
     def test_present_in_arrive_lineage_with_calm_variant(self, tmp_path):
-        from sovereign_stack import server
-
         root = tmp_path / ".sovereign"
         chronicle = root / "chronicle"
         chronicle.mkdir(parents=True)
@@ -771,7 +803,7 @@ class TestTheGroundBootWiring:
             vantage="human_attestation",
             chronicle_root=chronicle,
         )
-        with patch.object(server, "DEFAULT_ROOT", str(root)):
+        with _doors_at(root):
             text = _call_arrive_lineage()
         assert "━━━ THE GROUND ━━━" in text
         assert (
@@ -783,17 +815,13 @@ class TestTheGroundBootWiring:
         assert "would have cost" not in text
 
     def test_absent_in_arrive_lineage_when_no_catches(self, tmp_path):
-        from sovereign_stack import server
-
         root = tmp_path / ".sovereign"
         (root / "chronicle").mkdir(parents=True)
-        with patch.object(server, "DEFAULT_ROOT", str(root)):
+        with _doors_at(root):
             text = _call_arrive_lineage()
         assert "THE GROUND" not in text
 
     def test_scribe_anchor_untouched_in_real_boot(self, tmp_path):
-        from sovereign_stack import server
-
         root = tmp_path / ".sovereign"
         chronicle = root / "chronicle"
         chronicle.mkdir(parents=True)
@@ -808,6 +836,6 @@ class TestTheGroundBootWiring:
             vantage="human_attestation",
             chronicle_root=chronicle,
         )
-        with patch.object(server, "DEFAULT_ROOT", str(root)):
+        with _doors_at(root):
             text = _call_boot()
         assert "Now decide what to pick up. The handoffs are claims, not commands." in text

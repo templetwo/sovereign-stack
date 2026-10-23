@@ -46,8 +46,10 @@ from . import provenance as prov
 _FULL_ID_RE = re.compile(r"^[0-9a-f]{64}$")
 
 # checked_now vocabulary (spec section 2): archive/file re-checks speak
-# verified|mismatch|missing; claim refs speak cites|dangling; cmd/url/
-# human stay attested (no live check exists for them yet — deferred).
+# verified|mismatch|missing, and unreadable when the bytes could not be read
+# in budget or (file only) the write-time rules refuse the ref, which the
+# receipt view's `refused` then names; claim refs speak cites|dangling;
+# cmd/url/human stay attested (no live check exists for them yet — deferred).
 _ATTESTED_KINDS = ("cmd", "url", "human")
 
 
@@ -61,15 +63,31 @@ def _live_paths(chronicle_root: str | Path | None, ledger_path: str | Path | Non
 # ── inspect_claim ────────────────────────────────────────────────────────────
 
 
-def _check_receipt_now(receipt: dict, chronicle_root: Path) -> str:
+def _check_receipt_now(
+    receipt: dict, chronicle_root: Path, plugin_caches: tuple[Path, ...] | None = None
+) -> tuple[str, str | None]:
     """
-    Re-run one receipt's check live (verify_receipts=true).
+    Re-run one receipt's check live (verify_receipts=true). Returns the
+    checked_now verdict and, for a file ref the write-time rules refuse, the
+    refusal in the rule's own words (None for every other receipt).
+    ``plugin_caches`` is the plugin cache's location, located once by the
+    caller for the whole call; None locates it here.
 
     - archive: re-hash via the archive index. Index record gone, prefix
       now ambiguous, or bytes gone all collapse to "missing" — the spec
       vocabulary is verified|mismatch|missing, and each means the
       artifact can no longer be found and re-verified.
-    - file: absent/unreadable -> "missing"; present -> re-hash against
+    - file: a ref the write-time rules refuse today (validate_file_ref,
+      design C3: a scratch path, the plugin cache, an env-named file, a
+      studio: tag naming another host) -> "unreadable" with the refusal,
+      and the file is never opened or hashed (the rules' own resolve()
+      lstats the path's components): such a receipt predates the rule, and
+      re-hashing it would read the very file the rule keeps receipts off.
+      No hazard check or hash ran, so the verdict can say neither "missing" nor
+      "verified"; the refusal travels beside it, so a reader is not left to
+      read a bare "unreadable" as bytes intact on a slow mount.
+      Otherwise absent -> "missing"; a hazard class or a read that does
+      not finish in budget -> "unreadable"; present -> re-hash against
       the receipt's sha256 -> "verified"|"mismatch" (a receipt missing
       its sha256 — historically malformed — reads "mismatch": nothing
       to match is a failed match, never a verification).
@@ -89,50 +107,61 @@ def _check_receipt_now(receipt: dict, chronicle_root: Path) -> str:
         # question. unknown/ambiguous stay "missing" (the artifact cannot be
         # found and re-verified, which is what "missing" has always meant here).
         if verdict in ("verified", "mismatch", "missing", "unreadable"):
-            return verdict
-        return "missing"
+            return verdict, None
+        return "missing", None
     if kind == "file":
-        path = Path(ref).expanduser()
+        try:
+            path = prov.validate_file_ref(ref, plugin_caches=plugin_caches)
+        except prov.ReceiptError as exc:
+            return "unreadable", str(exc)
         try:
             hazard = prov.classify_file_target(path)
         except prov.BoundedIOError:
-            return "unreadable"
+            return "unreadable", None
         if hazard is not None:
-            return "missing" if "does not exist" in hazard else "unreadable"
+            return ("missing" if "does not exist" in hazard else "unreadable"), None
         sha256 = receipt.get("sha256")
         if not isinstance(sha256, str) or not sha256:
-            return "mismatch"
+            return "mismatch", None
         try:
             recomputed = prov.hash_file_bounded(path)
         except prov.BoundedIOError:
-            return "unreadable"
+            return "unreadable", None
         except OSError:
-            return "missing"
-        return "verified" if recomputed == sha256 else "mismatch"
+            return "missing", None
+        return ("verified" if recomputed == sha256 else "mismatch"), None
     if kind == "claim":
         try:
             prov.resolve_claim(ref, chronicle_root)
         except prov.ProvenanceError:
-            return "dangling"
-        return "cites"
+            return "dangling", None
+        return "cites", None
     if kind in _ATTESTED_KINDS:
-        return "attested"
-    return "dangling"
+        return "attested", None
+    return "dangling", None
 
 
 def _receipt_views(entry: dict, chronicle_root: Path, verify_receipts: bool) -> list[dict]:
     """
     Project the entry's verified_by list to the spec's receipt shape
-    {kind, ref, checked_at_write, unverified_reason?, checked_now?}. The full
-    stored receipts (sha256, note) remain visible inside `entry`.
+    {kind, ref, checked_at_write, unverified_reason?, checked_now?, refused?}.
+    The full stored receipts (sha256, note) remain visible inside `entry`.
 
     unverified_reason rides along whenever the write-time check degraded (a
     file that could not be hashed inside the wall clock stamps "attested" WITH
     a reason). Without it, inspect_claim cannot tell "we tried to hash this and
     gave up" from "a url receipt nobody ever re-checks" — both would read as a
     bare "attested", and distinguishing them is this tool's entire job.
+
+    refused rides along with checked_now when the write-time rules refuse a
+    file ref today (design C3): checked_now reads "unreadable" because no hazard
+    check or hash ran, and refused says why, in the rule's own words, the same text
+    season_review's re-verify row carries. The plugin cache the rules check
+    against is located once per call, on the first file receipt, and only when
+    verify_receipts asks for a live check.
     """
     views: list[dict] = []
+    plugin_caches: tuple[Path, ...] | None = None
     for receipt in entry.get("verified_by") or []:
         if not isinstance(receipt, dict):
             continue
@@ -144,7 +173,13 @@ def _receipt_views(entry: dict, chronicle_root: Path, verify_receipts: bool) -> 
         if receipt.get("unverified_reason"):
             view["unverified_reason"] = receipt["unverified_reason"]
         if verify_receipts:
-            view["checked_now"] = _check_receipt_now(receipt, chronicle_root)
+            if receipt.get("kind") == "file" and plugin_caches is None:
+                plugin_caches = prov.plugin_cache_roots()
+            view["checked_now"], refused = _check_receipt_now(
+                receipt, chronicle_root, plugin_caches
+            )
+            if refused is not None:
+                view["refused"] = refused
         views.append(view)
     return views
 
@@ -191,9 +226,11 @@ def inspect_claim(
     Args:
         claim_id: Full 64-hex claim id (canonical) or git-style prefix.
         verify_receipts: Re-run archive/file checks live; each receipt
-            gains `checked_now` (verified|mismatch|missing for
+            gains `checked_now` (verified|mismatch|missing|unreadable for
             archive/file, cites|dangling for claim, attested for
-            cmd/url/human).
+            cmd/url/human). A file ref the write-time rules refuse today
+            reads "unreadable" without being opened, and its receipt also
+            gains `refused`, the refusal in the rule's own words.
         chronicle_root: Chronicle root (None = live ~/.sovereign/chronicle).
         ledger_path: Supersession ledger (None = live supersessions.jsonl).
 
@@ -422,8 +459,10 @@ PROVENANCE_TOOLS = [
             "full lineage walk (predecessors → self → successors, cycle-safe), and whether "
             "the entry's supersedes breadcrumb agrees with the canonical ledger "
             "(ledger_vs_breadcrumb: consistent|divergent). verify_receipts=true re-runs "
-            "archive/file checks live (checked_now: verified|mismatch|missing; claim refs "
-            "cite or dangle, never verify; cmd/url/human stay attested). Not-found and "
+            "archive/file checks live (checked_now: verified|mismatch|missing|unreadable; "
+            "a file ref the write-time rules refuse today reads unreadable, is never opened, "
+            "and gains refused, the rule in its own words; claim refs cite or dangle, never "
+            "verify; cmd/url/human stay attested). Not-found and "
             "ambiguous refs come back as honest JSON, never errors."
         ),
         inputSchema={

@@ -14,7 +14,7 @@ The digestion layer. Two surfaces:
 
 2. **season_review** — a READ-ONLY digest: supersession candidates
    (cross-domain token overlap + legacy markers), thread-family
-   candidates, policy candidates (the seeding path), hygiene findings,
+   candidates, a policy-shaped keyword screen (the seeding path), hygiene findings,
    and dormancy/fragmentation stats. Every candidate line carries a
    ready-to-paste tool call. The pass changes nothing — it never even
    instantiates ExperientialMemory (whose constructor mkdirs); all
@@ -48,35 +48,85 @@ from pathlib import Path
 
 from mcp.types import Tool
 
-from .memory import ExperientialMemory, iter_thread_shards
+from .memory import ExperientialMemory, _parse_iso, _write_instant_of, iter_thread_shards
 from .policies import PolicyRegistry
 from .protected import load_protected_fold
 from .provenance import (
     LIVED_VANTAGES,
     BoundedIOError,
+    ReceiptError,
     classify_file_target,
     derive_claim_id,
     display_id,
+    file_mtime_bounded,
     fold_supersessions,
     has_legacy_marker,
     hash_file_bounded,
     iter_chronicle_entries,
     load_supersessions,
+    plugin_cache_roots,
     token_overlap,
     under_chronicle_write_lock,
+    validate_file_ref,
     verify_archive_ref,
 )
 from .witness import days_old
 
+# ── Receipt re-verify rows (design C1) ──
 
-def _reverify_file_receipt(path: Path, expected_sha256: str | None) -> str:
+# The status of one stored `file` receipt, re-verified now:
+#   ok              the bytes still hash to the receipt's sha256
+#   moved_on        stamped "verified" at write; the bytes differ now and the
+#                   file's mtime is after the write (an edit after the check)
+#   never_verified  checked_at_write is not "verified": it never matched, or was
+#                   never hashed, so no re-hash today can make it a verification
+#   mismatch        stamped "verified"; the bytes differ and the file is no newer
+#                   than the write (bytes replaced under an older mtime, by a copy
+#                   that kept its source's mtime or a restore): worth a look
+#   missing         the file is gone
+#   unreadable      a hazard class, a read that did not finish in budget, or a
+#                   ref the write-time rules refuse today (validate_file_ref:
+#                   a scratch path, the plugin cache, an env-named file, a
+#                   studio: tag naming another host), whose file is never
+#                   opened or hashed; the row's "refused" names the rule
+REVERIFY_STATUSES = ("ok", "moved_on", "never_verified", "mismatch", "missing", "unreadable")
+
+
+def _written_at(entry: dict) -> float | None:
     """
-    Re-hash one stored file receipt under provenance's wall clock.
+    The epoch second ``entry`` was appended, or None when its stamp will not
+    parse.
+
+    The receipt was checked at the write, so the write instant is what a later
+    edit has to come after. memory._write_instant_of names it: the stored
+    ``timestamp``, or ``occurred_at`` on a backdated row, whose ``timestamp``
+    is an authorship time earlier than the write. A naive stamp reads as UTC,
+    as the original_timestamp validator reads one.
+    """
+    raw = _write_instant_of(entry)
+    parsed = _parse_iso(raw) if isinstance(raw, str) else None
+    if parsed is None:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.timestamp()
+
+
+def _reverify_file_receipt(
+    path: Path, expected_sha256: str | None, written_at: float | None
+) -> str:
+    """
+    Re-hash one stored file receipt that was stamped "verified" at write,
+    under provenance's wall clock, and name what became of it.
 
     season_review walks every receipted entry, so an unbounded read here is
     the 2026-07-10 freeze multiplied by the size of the chronicle. A path
     that cannot be read in budget re-verifies as "unreadable", which the
     caller reports as a hygiene failure — honest, and never a verification.
+
+    Different bytes are "moved_on" only on positive evidence, an mtime after
+    the write. An mtime at or before it, or a write instant that will not
+    parse, leaves them "mismatch", the status that asks for a reader's look.
     """
     try:
         hazard = classify_file_target(path)
@@ -85,11 +135,101 @@ def _reverify_file_receipt(path: Path, expected_sha256: str | None) -> str:
     if hazard is not None:
         return "missing" if "does not exist" in hazard else "unreadable"
     try:
-        return "verified" if hash_file_bounded(path) == expected_sha256 else "mismatch"
+        if hash_file_bounded(path) == expected_sha256:
+            return "ok"
+        modified_at = file_mtime_bounded(path)
     except BoundedIOError:
         return "unreadable"
     except OSError:
         return "missing"
+    if written_at is not None and modified_at > written_at:
+        return "moved_on"
+    return "mismatch"
+
+
+def reverify_file_receipts(entries: list[dict]) -> list[dict]:
+    """
+    One row per stored ``file`` receipt, in entry and receipt order, each with
+    a status from REVERIFY_STATUSES (design C1).
+
+    A row is ``{"claim_id", "ref", "checked_at_write", "status"}``: the
+    entry's derived 64-hex id, the ref as stored, the write-time stamp (None
+    when the row carries none) and the status. A row whose ref the rules
+    refused also carries ``"refused"``, the refusal in the rule's own words.
+
+    The write-time stamp is read first, with no IO: a receipt not stamped
+    "verified" is "never_verified" whatever its file looks like today, because
+    a re-hash cannot make a verification of something the server never
+    verified. Only a "verified" receipt is re-hashed, and only after its ref
+    passes the write's own rules (validate_file_ref, design C3). A ref the
+    write would refuse today predates the rule; it is "unreadable" and its
+    file is never opened or hashed, because re-hashing it would read the very
+    file the rule keeps receipts off (two live receipts hash an env-named
+    file). The rules' own resolve() lstats the ref's path components; beyond
+    the pass's one look at the plugin cache (below), that is all the IO a
+    refused ref costs.
+
+    The rules check every ref against the plugin cache's location, which is a
+    bounded resolve() under the account's home and the same for the whole
+    pass. The pass locates it once, on its first verified receipt, so a pass
+    that meets none never looks, and N verified receipts cost N resolves of
+    their own refs plus one.
+
+    Other kinds get no row. archive and claim receipts keep their own verdicts
+    in season_review, and cmd / url / human receipts are stamped "attested" by
+    design: read through the never_verified rule, every one of them would
+    become a failure.
+    """
+    rows: list[dict] = []
+    plugin_caches: tuple[Path, ...] | None = None
+    for entry in entries:
+        receipts = entry.get("verified_by")
+        if not isinstance(receipts, list):
+            continue
+        claim_id: str | None = None
+        for receipt in receipts:
+            if not isinstance(receipt, dict) or receipt.get("kind") != "file":
+                continue
+            if claim_id is None:
+                claim_id = derive_claim_id(entry)
+            ref = str(receipt.get("ref") or "")
+            stamp = receipt.get("checked_at_write")
+            refused: str | None = None
+            if stamp != "verified":
+                status = "never_verified"
+            else:
+                if plugin_caches is None:
+                    plugin_caches = plugin_cache_roots()
+                # The path the write hashed: trimmed, a studio: tag naming this
+                # host stripped, ~ expanded. The rules run before any read.
+                try:
+                    path = validate_file_ref(ref, plugin_caches=plugin_caches)
+                except ReceiptError as exc:
+                    status, refused = "unreadable", str(exc)
+                else:
+                    status = _reverify_file_receipt(path, receipt.get("sha256"), _written_at(entry))
+            row = {"claim_id": claim_id, "ref": ref, "checked_at_write": stamp, "status": status}
+            if refused is not None:
+                row["refused"] = refused
+            rows.append(row)
+    return rows
+
+
+def _reverify_row_line(row: dict) -> str:
+    """The hygiene line for one file receipt that did not re-verify ok."""
+    status = row["status"]
+    line = f"  • {display_id(row['claim_id'])} file:{row['ref']} re-verifies as {status}"
+    if row.get("refused"):
+        # The rule's name is the refusal's first clause ("refused by the
+        # scratch-path rule"); the rest restates the ref the line already shows.
+        return line + f" ({row['refused'].split(':', 1)[0]}; the file was not read)"
+    if status == "moved_on":
+        return line + " (the file changed after the write; the receipt held when checked)"
+    if status == "never_verified":
+        return line + f" (stamped {row['checked_at_write'] or 'nothing'} at write)"
+    if status == "mismatch":
+        return line + " (the bytes differ and the file is no newer than the write)"
+    return line
 
 
 # ── Constants ──
@@ -115,7 +255,9 @@ SEASON_FOOTER = (
 
 _FAMILY_ID_RE = re.compile(r"^fam_\d{8}_\d{6}_[0-9a-f]{8}$")
 
-# Policy-shaped: normative/imperative language a standing rule would use.
+# Policy-shaped KEYWORD SCREEN (design C5): normative/imperative words a
+# standing rule would use. A hit means one of these words is in the text; it
+# is not a policy, and a count of hits is not a count of policies.
 _POLICY_SHAPE_RE = re.compile(
     r"\b(always|never|must(?: not)?|do not|don't|required?|prefer|policy|non-negotiable)\b",
     re.IGNORECASE,
@@ -600,6 +742,13 @@ def _preview(text: str) -> str:
     return text[:_PREVIEW_CHARS] + ("…" if len(text) > _PREVIEW_CHARS else "")
 
 
+def _policy_shape_matches(text: str) -> list[str]:
+    """The keyword screen's words found in ``text``: lower-cased, each once,
+    in the order they first appear in the text. Empty when the screen does
+    not match (exactly when ``_POLICY_SHAPE_RE.search(text)`` is None)."""
+    return list(dict.fromkeys(m.group(1).lower() for m in _POLICY_SHAPE_RE.finditer(text)))
+
+
 def _load_threads_readonly(chronicle_root: Path) -> list[dict]:
     """
     Unresolved threads, newest first — WITHOUT ExperientialMemory
@@ -659,12 +808,18 @@ def season_review(
          the newer entry; pairs already in the ledger are excluded.
       2. Thread-family candidates — unresolved-question clusters at
          Jaccard >= 0.45 not already co-familied.
-      3. Policy candidates — policy-shaped sentinels (intensity >= 0.9,
-         normative language) absent from the registry. This IS the
-         seeding path; nothing is auto-registered.
+      3. Policy-shaped keyword screen — sentinels (intensity >= 0.9)
+         whose text matches a regex of normative words, absent from the
+         registry. Each line names the words it matched; a hit is not a
+         policy and the section never counts policies (design C5). This
+         IS the seeding path; nothing is auto-registered.
       4. Hygiene — dangling supersession pointers, receipt re-verify
-         failures, unreceipted >=0.9 ground_truth sentinels, pin-loss
-         warnings, sentinel-count-vs-boot-budget.
+         failures (file receipts split by status: moved_on, never_verified,
+         mismatch, missing, unreadable; a ref the write-time rules refuse
+         reads unreadable and its file is never opened or hashed; see
+         reverify_file_receipts),
+         unreceipted >=0.9 ground_truth sentinels, pin-loss warnings,
+         sentinel-count-vs-boot-budget.
       5. Dormant domains / fragmentation stats.
 
     Every candidate line includes a ready-to-paste tool call. The pass
@@ -804,13 +959,16 @@ def season_review(
         "none — open threads look atomic (or are already familied).",
     )
 
-    # ── 3. Policy candidates (the seeding path) ──
+    # ── 3. Policy-shaped keyword screen (the seeding path) ──
+    # A regex over sentinel text, NOT a count of policies (design C5): each
+    # line names the screen's words it matched, and the overflow counts matches.
     pol_lines: list[str] = []
     for entry in entries:
         if _intensity(entry) < SENTINEL_INTENSITY:
             continue
         content = entry.get("content", "")
-        if not _POLICY_SHAPE_RE.search(content):
+        matched = _policy_shape_matches(content)
+        if not matched:
             continue
         if not in_window(entry) or not in_domain(entry.get("domain", "")):
             continue
@@ -824,16 +982,16 @@ def season_review(
         statement = json.dumps(content[:200] + ("…" if len(content) > 200 else ""))
         pol_lines.append(
             f"  • {display_id(derive_claim_id(entry))} [{entry.get('domain', '?')}]"
-            f" {_preview(content)}\n"
+            f" {_preview(content)} · matched: {', '.join(matched)}\n"
             f"    → set_policy(statement={statement},"
             f' domain="{entry.get("domain", "general")}", set_by="<approving human>")'
         )
     overflow = len(pol_lines) - max_candidates
     pol_lines = pol_lines[:max_candidates]
     if overflow > 0:
-        pol_lines.append(f"  …and {overflow} more (raise max_candidates to see them).")
+        pol_lines.append(f"  …and {overflow} more matches (keyword screen)")
     lines += _section(
-        "3. POLICY CANDIDATES (policy-shaped sentinels absent from the registry)",
+        "3. POLICY-SHAPED KEYWORD SCREEN (a regex over sentinel text; NOT a count of policies)",
         pol_lines,
         "none — no unregistered policy-shaped sentinels in the window.",
     )
@@ -854,7 +1012,8 @@ def season_review(
             dangling.append(f"  • dangling successor {display_id(successor)}")
     hyg.extend(dangling or ["  ✓ supersession pointers: all resolve."])
 
-    reverify_failures: list[str] = []
+    file_rows = reverify_file_receipts(entries)
+    reverify_failures = [_reverify_row_line(row) for row in file_rows if row["status"] != "ok"]
     receipted = 0
     for entry in entries:
         receipts = entry.get("verified_by")
@@ -866,10 +1025,10 @@ def season_review(
             if not isinstance(receipt, dict):
                 continue
             kind, ref = receipt.get("kind"), str(receipt.get("ref") or "")
+            if kind == "file":
+                continue  # one row each, from reverify_file_receipts above
             if kind == "archive":
                 verdict = verify_archive_ref(ref, root)
-            elif kind == "file":
-                verdict = _reverify_file_receipt(Path(ref).expanduser(), receipt.get("sha256"))
             elif kind == "claim":
                 hits = {cid for cid in ids_present if cid.startswith(ref)}
                 verdict = "cites" if len(hits) == 1 else ("ambiguous" if hits else "dangling")
@@ -877,6 +1036,14 @@ def season_review(
                 verdict = "attested"
             if verdict not in ("verified", "cites", "attested"):
                 reverify_failures.append(f"  • {eid} {kind}:{ref} re-verifies as {verdict}")
+    if reverify_failures and file_rows:
+        by_status = Counter(row["status"] for row in file_rows)
+        reverify_failures.insert(
+            0,
+            f"  • file receipts re-verified: {len(file_rows)} ("
+            + ", ".join(f"{by_status[status]} {status}" for status in REVERIFY_STATUSES)
+            + ")",
+        )
     hyg.extend(
         reverify_failures
         or [f"  ✓ receipt re-verify: {receipted} receipted entr(ies), no failures."]
@@ -1029,8 +1196,10 @@ SEASON_TOOLS = [
             "READ-ONLY season digest — the chronicle's digestion pass. Five sections: "
             "(1) supersession candidates (legacy CORRECTED/DEFINITIVE/supersedes markers + "
             "cross-domain token overlap >= 0.5), (2) thread-family candidates (question "
-            "clusters >= 0.45), (3) policy candidates (policy-shaped >=0.9 sentinels absent "
-            "from the registry — the seeding path), (4) hygiene (dangling pointers, receipt "
+            "clusters >= 0.45), (3) a policy-shaped keyword screen (a regex of normative "
+            "words over >=0.9 sentinels absent from the registry, each line naming the words "
+            "it matched; a match is not a policy and the section is never a count of "
+            "policies — the seeding path), (4) hygiene (dangling pointers, receipt "
             "re-verify, unreceipted sentinels, pin-loss, sentinel-vs-boot-budget), "
             "(5) dormant domains / fragmentation. Every candidate line carries a "
             "ready-to-paste tool call. This pass changes nothing — act via "

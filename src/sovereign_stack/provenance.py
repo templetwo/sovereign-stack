@@ -34,12 +34,16 @@ import hashlib
 import json
 import os
 import re
+import socket
 import stat
 import threading
 import time
 from collections.abc import Callable, Iterator
 from datetime import datetime, timezone
 from pathlib import Path
+
+from . import store_identity
+from .live_store_guard import refuse_if_test_targets_live
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
@@ -479,6 +483,21 @@ def hash_file_bounded(path: Path) -> str:
     return _run_bounded(_hash, READ_TIMEOUT_SECONDS + 0.5)  # type: ignore[return-value]
 
 
+def file_mtime_bounded(path: Path) -> float:
+    """
+    A file's modification time (epoch seconds) under the stat wall clock.
+
+    Re-verify reads it to tell a file that moved on after its receipt was
+    checked from one whose bytes were replaced under an older mtime. Same
+    bound as classify_file_target: a stat on a wedged mount never answers.
+
+    Raises:
+        BoundedIOError: the stat did not answer inside its budget.
+        OSError: the file could not be stat'd.
+    """
+    return _run_bounded(lambda: os.stat(path).st_mtime, STAT_TIMEOUT_SECONDS)  # type: ignore[return-value]
+
+
 def read_blob_bounded(path: Path) -> tuple[str | None, str | None]:
     """
     Read an archive-indexed blob as utf-8 under the same bounds.
@@ -510,6 +529,207 @@ def read_blob_bounded(path: Path) -> tuple[str | None, str | None]:
         return None, "missing"
 
 
+# ── File receipt refs that cannot survive (design C3) ────────────────────────
+#
+# A file receipt promises that a later reader can re-hash the bytes it names. A
+# ref into one of these places breaks that promise by WHERE it points, so it is
+# refused at write with the rule named, instead of landing and dangling later.
+# Measured 2026-10-21: eleven scratchpad refs, all missing; four receipts
+# dangling in the plugin cache; two hashing an env-named file.
+
+# Cleared by the OS, and by the harness, whose scratchpads live there. On macOS
+# /tmp is a symlink to /private/tmp; on Linux /tmp is the directory itself.
+SCRATCH_ROOTS = (Path("/private/tmp"), Path("/tmp"))
+
+# Under the account's home. The harness replaces a plugin version by deleting
+# the old one, with no trash.
+_PLUGIN_CACHE = Path(".claude") / "plugins" / "cache"
+
+# socket.gethostname() on the Mac Studio starts with this (measured 2026-10-22:
+# exactly "mac-studio").
+_STUDIO_HOSTNAME_PREFIX = "mac-studio"
+
+# The configured host label. A Studio whose hostname stops starting with the
+# prefix above (macOS can replace a derived hostname with a network-supplied
+# one) still answers to its label when the service environment sets this to
+# store_identity.STUDIO_HOST_LABEL. Unset by default: the hostname decides.
+HOST_LABEL_ENV = "SOVEREIGN_HOST_LABEL"
+
+
+def _this_host_is_the_studio() -> bool:
+    """
+    Whether the machine running this code is the one a ``studio:`` tag names.
+
+    Read on every call: the hostname starts with the Studio's prefix, or the
+    configured host label equals the Studio's label. The label alone never
+    decides it. store_identity.STUDIO_HOST_LABEL is a constant, identical on
+    every machine, so comparing a ref's tag with it is true for every
+    ``studio:`` ref everywhere (store_identity's own warning).
+    """
+    if socket.gethostname().startswith(_STUDIO_HOSTNAME_PREFIX):
+        return True
+    return os.environ.get(HOST_LABEL_ENV, "").strip() == store_identity.STUDIO_HOST_LABEL
+
+
+def _strip_host_tag(ref: str) -> str:
+    """
+    ``ref`` without a leading ``studio:`` tag, refused when the tag names
+    another machine.
+
+    The tag is the house's spelling for a path on the Mac Studio in a record
+    other machines read (``studio:~/...``). A receipt is checked against bytes
+    on the machine that records it, so a tagged ref is usable only there; on
+    any other host, hashing ``~/...`` would read a different machine's file.
+
+    Raises:
+        ReceiptError: the tag names another host, or no path follows it.
+    """
+    tag = f"{store_identity.STUDIO_HOST_LABEL}:"
+    if not ref.startswith(tag):
+        return ref
+    if not _this_host_is_the_studio():
+        raise ReceiptError(
+            f"refused by the host-tag rule: the ref is tagged {tag!r} (the Mac Studio) "
+            f"but this host is {socket.gethostname()!r}, and a file receipt is checked "
+            "against bytes on the machine that records it. Record it on the Studio; "
+            f"where the Studio's hostname has changed, set {HOST_LABEL_ENV}="
+            f"{store_identity.STUDIO_HOST_LABEL} in its service environment."
+        )
+    bare = ref[len(tag) :].strip()
+    if not bare:
+        raise ReceiptError(f"refused by the host-tag rule: no path follows the {tag!r} tag")
+    return bare
+
+
+def _resolved_within_budget(path: Path) -> Path:
+    """
+    ``path.resolve()`` under the stat wall clock; the lexical absolute path
+    when it cannot finish.
+
+    resolve() lstats and readlinks every component of a caller-supplied path,
+    the class of call that froze the stack on 2026-07-10 when one never
+    answered. A resolve that does not finish is not the caller's error (the
+    same reading preflight_file_receipt gives a stat that never answers): the
+    rules then read the spelled path, and the write's own stat degrades the
+    receipt to "attested" downstream. A symlink loop (RuntimeError on Python
+    3.10 to 3.12) falls back the same way, and classify_file_target refuses it
+    as a loop, exactly as before this check existed.
+    """
+    try:
+        return _run_bounded(path.resolve, STAT_TIMEOUT_SECONDS)  # type: ignore[return-value]
+    except (BoundedIOError, OSError, RuntimeError):
+        return Path(os.path.abspath(path))
+
+
+def plugin_cache_roots() -> tuple[Path, ...]:
+    """
+    The plugin cache as spelled under ``~`` and as resolved (``~/.claude`` may
+    itself be a symlink), read at call time.
+
+    Locating it is a bounded resolve() under the account's home, and the
+    answer is the same for every ref. validate_file_ref locates it on each call
+    unless handed this tuple; a caller that checks many refs in one pass
+    (season_review's re-verify, inspect_claim's live re-check) locates it once
+    and passes it in, so a wedged home costs one stat budget per pass, not one
+    per receipt.
+    """
+    spelled = Path("~").expanduser() / _PLUGIN_CACHE
+    return tuple(dict.fromkeys((spelled, _resolved_within_budget(spelled))))
+
+
+def _unsurvivable_reason(path: Path, plugin_caches: tuple[Path, ...]) -> str | None:
+    """The rule ``path`` breaks, worded for the refusal, or None.
+
+    Containment is by path components (Path.is_relative_to), never a string
+    prefix, so /tmpfoo is not under /tmp."""
+    for root in SCRATCH_ROOTS:
+        if path.is_relative_to(root):
+            return (
+                f"refused by the scratch-path rule: {path} is under {root}, which the OS "
+                "and the harness clear, so this receipt would dangle. Keep the evidence "
+                "somewhere durable (a lane dir, the repo) and cite that copy."
+            )
+    for root in plugin_caches:
+        if path.is_relative_to(root):
+            return (
+                f"refused by the plugin-cache rule: {path} is under {root}, whose old "
+                "versions the harness deletes without trash, so this receipt would "
+                "dangle. Copy the file somewhere durable and cite that copy."
+            )
+    name = path.name.lower()
+    if name.endswith(".env") or ".env." in name:
+        return (
+            f"refused by the env-named rule: {path.name!r} is an env-named file (its "
+            "name ends in .env or contains .env.); env files hold credentials, and a "
+            "receipt must not point at one."
+        )
+    return None
+
+
+def _checked_file_ref(ref: str, plugin_caches: tuple[Path, ...] | None = None) -> tuple[str, Path]:
+    """
+    validate_file_ref, also returning the bare ref: whitespace-trimmed, with a
+    ``studio:`` tag naming this host stripped. verify_receipt_at_write stores
+    it only when a tag was stripped; any other ref is stored exactly as given.
+    """
+    if not isinstance(ref, str) or not ref.strip():
+        raise ReceiptError("a file receipt ref must be a non-empty string")
+    bare = _strip_host_tag(ref.strip())
+    path = Path(bare).expanduser()
+    if plugin_caches is None:
+        plugin_caches = plugin_cache_roots()
+    # Spelled AND resolved: a lane symlink into /private/tmp breaks the promise
+    # by its target (Review Focus 3: refused by its resolved path, not its
+    # spelled one), and a ref spelled under /tmp dangles when /tmp is cleared
+    # even if the link there points somewhere durable.
+    for candidate in dict.fromkeys((Path(os.path.abspath(path)), _resolved_within_budget(path))):
+        reason = _unsurvivable_reason(candidate, plugin_caches)
+        if reason is not None:
+            raise ReceiptError(reason)
+    return bare, path
+
+
+def validate_file_ref(ref: str, *, plugin_caches: tuple[Path, ...] | None = None) -> Path:
+    """
+    The path a ``file`` receipt's bytes are read from, or a refusal naming the
+    rule the ref breaks (design C3).
+
+    Refused, with the rule named, when the path as spelled or as resolved is:
+      - under /private/tmp or /tmp (SCRATCH_ROOTS): the scratch-path rule;
+      - under ~/.claude/plugins/cache: the plugin-cache rule;
+      - a file whose basename ends in ``.env`` or contains ``.env.``
+        (case-insensitive): the env-named rule.
+
+    A ref beginning ``studio:`` (store_identity.STUDIO_HOST_LABEL plus a
+    colon) is accepted, with the tag stripped, when this host is the Studio:
+    ``socket.gethostname()`` starts with ``mac-studio``, or the configured
+    host label (``SOVEREIGN_HOST_LABEL``) is the Studio's. On any other host it
+    is refused under the host-tag rule.
+
+    Only the rules: whether the file exists, is a regular file, or hashes in
+    budget is still classify_file_target's and hash_file_bounded's to say. The
+    rules open nothing, though their resolve() lstats the path's components.
+    Called by both write-time entry points (preflight_file_receipt and
+    verify_receipt_at_write) before either reads the file, and by both
+    read-time re-hash sites (season_review's re-verify and inspect_claim's
+    live re-check) before either re-hashes a stored receipt.
+
+    Args:
+        ref: the receipt's ref, as given or as stored.
+        plugin_caches: plugin_cache_roots(), located once by a caller that
+            checks many refs in one pass; None (the default) locates it here.
+
+    Returns:
+        The ref, tag stripped, with ``~`` expanded: the path to hash. Not
+        resolved, so the hazard classification reads the path as spelled, as
+        it did before this check existed.
+
+    Raises:
+        ReceiptError (a ValueError): naming the rule.
+    """
+    return _checked_file_ref(ref, plugin_caches)[1]
+
+
 def preflight_file_receipt(receipt: dict, position: int | None = None) -> None:
     """
     Reject hazard-class file receipts BEFORE the write does any work.
@@ -532,7 +752,11 @@ def preflight_file_receipt(receipt: dict, position: int | None = None) -> None:
     if not isinstance(ref, str) or not ref.strip():
         return
     try:
-        hazard = classify_file_target(Path(ref.strip()).expanduser())
+        path = validate_file_ref(ref)
+    except ReceiptError as exc:
+        raise ReceiptError(f"{_receipt_name(receipt, position)}: {exc}") from exc
+    try:
+        hazard = classify_file_target(path)
     except BoundedIOError:
         return
     if hazard is not None:
@@ -637,10 +861,13 @@ def verify_receipt_at_write(
       - archive: re-hash via the archive index. unknown/ambiguous/missing
         bytes -> REJECTED (a receipt pointing at nothing is unrecordable);
         resolvable -> stamped "verified" | "mismatch".
-      - file: requires sha256; missing file / hazard class (fifo, device,
-        directory, dataless placeholder) -> REJECTED; present -> re-hashed
-        under a wall clock (chunked) -> "verified" | "mismatch". Size is not
-        a hazard: a 300 MB run file that hashes inside the budget verifies.
+      - file: requires sha256; a ref that cannot survive (validate_file_ref:
+        scratch path, plugin cache, env-named file, or a studio: tag naming
+        another host) -> REJECTED with the rule named, before anything is
+        read; missing file / hazard class (fifo, device, directory, dataless
+        placeholder) -> REJECTED; present -> re-hashed under a wall clock
+        (chunked) -> "verified" | "mismatch". Size is not a hazard: a 300 MB
+        run file that hashes inside the budget verifies.
       - claim: resolved against insights/ + quarantine; dangling or
         ambiguous -> REJECTED; resolvable -> stamped "cites", NEVER
         "verified" (a citation is not a verification).
@@ -657,7 +884,9 @@ def verify_receipt_at_write(
     exactly what is true.
 
     Returns a COPY of the receipt with "checked_at_write" added (and
-    "unverified_reason" when degraded); the input dict is never mutated.
+    "unverified_reason" when degraded); the input dict is never mutated. A
+    file ref whose studio: tag named this host is stored bare (the tag
+    stripped); every other ref is stored exactly as given.
 
     Raises:
         ReceiptError: naming the offending receipt.
@@ -668,6 +897,7 @@ def verify_receipt_at_write(
     ref = receipt["ref"].strip()
 
     unverified_reason: str | None = None
+    stored_ref: str | None = None
 
     if kind == "archive":
         verdict = verify_archive_ref(ref, chronicle_root)
@@ -685,7 +915,12 @@ def verify_receipt_at_write(
         else:
             stamp = verdict  # "verified" | "mismatch"
     elif kind == "file":
-        path = Path(ref).expanduser()
+        try:
+            bare_ref, path = _checked_file_ref(ref)
+        except ReceiptError as exc:
+            raise ReceiptError(f"{name}: {exc}") from exc
+        if bare_ref != ref:
+            stored_ref = bare_ref  # the studio: tag named this host; store the bare path
         try:
             hazard = classify_file_target(path)
         except BoundedIOError as exc:
@@ -717,6 +952,8 @@ def verify_receipt_at_write(
         stamp = "attested"
 
     stamped = dict(receipt)
+    if stored_ref is not None:
+        stamped["ref"] = stored_ref
     stamped["checked_at_write"] = stamp
     if unverified_reason is not None:
         stamped["unverified_reason"] = unverified_reason
@@ -988,6 +1225,7 @@ def append_supersession(ledger_path: Path, record: dict) -> dict:
     first write, never import). Validates the action/id core so a
     hand-built record can't poison the fold. Returns the record.
     """
+    refuse_if_test_targets_live(ledger_path, store="chronicle/supersessions.jsonl")
     if record.get("action") not in SUPERSESSION_ACTIONS:
         raise SupersessionError(f"invalid supersession action {record.get('action')!r}")
     sid = record.get("superseded_id")

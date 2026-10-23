@@ -218,14 +218,21 @@ def measure_aperture(
         "default_shown": _shown_or_default(
             door_shown.get("insights"), _RECALL_INSIGHTS_DEFAULT_LIMIT
         ),
-        "default_order": "newest",
+        # The tool's default moved with design B1: a query that carries a term
+        # ranks by relevance, and only a bare browse is newest-first. Both
+        # fields travel in /api/heartbeat and the note is printed on the full
+        # door, so they say what the dispatch now does. `default_order` keeps
+        # one machine-readable value per case, each a member of
+        # `orders_available`, as the single token it replaced was.
+        "default_order": {"query_with_a_term": "relevance", "bare_browse": "newest"},
         "orders_available": ["newest", "oldest", "relevance"],
         "envelope": "recall_insights returns total_matched / truncated / continuation",
         "widen_with": "recall_insights(limit=N, order='relevance', offset=N)",
         "note": (
-            "the default order is 'newest', which returns recency rather than relevance "
-            "— a query about an old subject is answered with the newest writing in the "
-            "house unless order='relevance' is passed"
+            "a query ranks by relevance by default; a bare browse (domain only, or no "
+            "query) is newest-first, so it returns the newest writing in its scope (the "
+            "given domain, or the whole chronicle), not the most relevant; every "
+            "response names the order applied in order_used"
         ),
     }
 
@@ -256,7 +263,18 @@ def measure_aperture(
             "the pre-ledger global consumed_at field. It hides nothing from anyone now "
             "— it counts as its own reader's signature only. NOT your queue."
         ),
-        "widen_with": "handoff_archaeology(limit=N) — the whole store, signed and unsigned",
+        # NO CALL WIDENS THIS SURFACE, AND THE FIELD SAYS SO. It named
+        # handoff_archaeology(limit=N), which was retired on 2026-09-06 with no
+        # replacement (server.RETIRED_TOOLS), so a seat that followed it was
+        # refused. The old name stays in the text, labelled retired, for a seat
+        # that still carries it; the census in tests/test_descriptions_census.py
+        # holds every widen_with here to a published tool.
+        "widen_with": (
+            "none: no tool lists the whole handoff store. handoff_archaeology was retired "
+            "on 2026-09-06 with no replacement; the store, signed and unsigned, is the "
+            ".json files in the handoffs/ directory of the Stack root "
+            "(~/.sovereign/handoffs/ by default)"
+        ),
     }
     if unsigned is None:
         handoffs["default_shown"] = "per-reader queue — not measurable here (no reader identity)"

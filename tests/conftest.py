@@ -51,6 +51,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import tempfile
 from collections.abc import Generator
 from datetime import datetime, timezone
 from pathlib import Path
@@ -63,6 +64,37 @@ import pytest
 # against the real ~/.sovereign after the test's SOVEREIGN_ROOT is gone. The push
 # tests drive PushLink.tick() directly; the poller stays off for the suite.
 os.environ.setdefault("HQ_PUSH_DISABLED", "1")
+
+
+# ── pytest's temp root must not sit under a scratch root (design C3) ────────
+#
+# provenance.validate_file_ref refuses a file receipt whose path is under /tmp
+# or /private/tmp (provenance.SCRATCH_ROOTS), because those are cleared and the
+# receipt would dangle. On Linux CI (ubuntu-latest) tempfile.gettempdir() IS
+# /tmp, so tmp_path, and every receipt a test builds in it, would be refused by
+# the rule under test. On macOS the per-user temp dir (/private/var/folders/...)
+# is outside both roots and nothing here moves, which is why a local run cannot
+# show the failure. Measured 2026-10-22 by running the receipt suites with
+# TMPDIR under /private/tmp: 38 failures, 9 of them in tests older than the rule.
+#
+# When the platform temp dir resolves under a scratch root, the process's
+# tempfile dir moves to <rootdir>/.pytest-tmp (gitignored). pytest derives
+# tmp_path from tempfile.gettempdir(), so both move together, and TMPDIR follows
+# for child processes. The rule itself is never relaxed for tests: the tests
+# move off it. An explicit --basetemp or PYTEST_DEBUG_TEMPROOT wins untouched.
+def pytest_configure(config: pytest.Config) -> None:
+    from sovereign_stack.provenance import SCRATCH_ROOTS
+
+    if config.option.basetemp or os.environ.get("PYTEST_DEBUG_TEMPROOT"):
+        return
+    platform_tmp = Path(tempfile.gettempdir()).resolve()
+    if not any(platform_tmp.is_relative_to(root) for root in SCRATCH_ROOTS):
+        return
+    relocated = Path(config.rootpath) / ".pytest-tmp"
+    relocated.mkdir(exist_ok=True)
+    tempfile.tempdir = str(relocated)
+    os.environ["TMPDIR"] = str(relocated)
+
 
 # ── AUTOUSE GUARD 1 of 6: the live-audit tripwire ───────────────────────────
 #
@@ -105,9 +137,20 @@ os.environ.setdefault("HQ_PUSH_DISABLED", "1")
 # chain while the suite was running.
 _LIVE_AUDIT_GLOB = ".sovereign/*/audit/audit.jsonl"
 
+# The home whose audit chains are live, read ONCE, when this conftest is
+# imported, before any test can move it: the same import-time binding
+# _LIVE_SOVEREIGN below has. It used to be Path.home() at setup and teardown,
+# and a test that redirects HOME or patches Path.home() through its own
+# monkeypatch has not been undone yet when this autouse guard's teardown runs
+# (autouse fixtures set up first and tear down last), so the guard measured the
+# fake home and passed without looking at the live chains (plan 1's final
+# review, finding I-7; 3b1b415 had moved one fixture's redirect out of the way,
+# and the guard stayed blind for every other test that redirects the home).
+_LIVE_AUDIT_HOME = Path(os.path.expanduser("~"))
+
 
 def _live_audit_sizes() -> dict[str, int]:
-    home = Path.home()
+    home = _LIVE_AUDIT_HOME
     if not (home / ".sovereign").is_dir():
         return {}
     sizes: dict[str, int] = {}

@@ -467,6 +467,16 @@ ORIGINAL_TIMESTAMP_TARGETS: frozenset[str] = frozenset(
     {"record_insight", "record_learning", "record_open_thread"}
 )
 
+# Commit targets on which the Stack only WARNS about an argument it does not
+# declare, each with its LIVE inputSchema property names in declaration order:
+# this drain refuses such a commit itself, before the POST (design D7, Review
+# Focus 5). Mirrors bridge_core.pending_writes.ARGUMENT_SCREEN_TARGETS, whose
+# comment gives the reason and why it is empty today (the Stack refuses on every
+# commit target since plan 1's final fix wave); the screen itself is imported
+# from there, and the two literals are held equal, and to the Stack's
+# list_tools(), by test.
+ARGUMENT_SCREEN_TARGETS: dict[str, tuple[str, ...]] = {}
+
 
 def build_commit_arguments(proposal: Proposal) -> dict[str, Any]:
     """
@@ -636,6 +646,64 @@ def _precondition_check(proposal: Proposal) -> list[str]:
     return errors
 
 
+def _record_commit_failure(
+    proposal_id: str,
+    proposal: Proposal,
+    path: Path,
+    error: str,
+    stack_response: dict | None,
+) -> Proposal:
+    """Record a live commit that did not land, and return the proposal.
+
+    Twin of bridge_core.pending_writes._record_commit_failure. ``stack_response``
+    is the Stack's answer when it refused the POST, or None when this drain
+    refused before posting (ARGUMENT_SCREEN_TARGETS); the record then says
+    ``posted: False`` rather than carry a response nobody sent. The audit events
+    carry ``proposal_id`` as the caller passed it, as this module always has.
+    """
+    posted = stack_response is not None
+    proposal.status = "commit_failed"
+    proposal.commit_result = {
+        "live": True,
+        "committed": False,
+        "commit_target": proposal.commit_target,
+        "error": error,
+        **({"stack_response": stack_response} if posted else {"posted": False}),
+        "failed_at": datetime.now(timezone.utc).isoformat(),
+    }
+    _save_proposal(proposal, path)
+    append_audit_event(
+        AuditEvent.COMMIT_FAILED,
+        proposal_id=proposal_id,
+        actor="bridge",
+        details={
+            "tool": proposal.tool,
+            "commit_target": proposal.commit_target,
+            "live": True,
+            "error": error,
+            **({} if posted else {"posted": False}),
+        },
+    )
+    # Verify the chain on THIS branch too — see the bridge_core twin.
+    ok, msg = verify_chain()
+    if not ok:
+        logger.error("CHAIN BROKEN after failed commit: %s", msg)
+        append_audit_event(
+            AuditEvent.CHAIN_BROKEN,
+            proposal_id=proposal_id,
+            actor="bridge",
+            details={"message": msg, "after": "commit_failed"},
+        )
+
+    logger.error(
+        "Proposal %s: %s → %s — NOT committed",
+        "REJECTED by Stack" if posted else "REFUSED by the drain before the POST",
+        proposal_id,
+        error,
+    )
+    return proposal
+
+
 def commit_pending_write(proposal_id: str, live: bool = False) -> Proposal:
     """
     Execute an approved proposal against the Stack.
@@ -660,6 +728,17 @@ def commit_pending_write(proposal_id: str, live: bool = False) -> Proposal:
     # cannot diverge — see build_commit_arguments.
     commit_args = build_commit_arguments(proposal)
 
+    # THIS DRAIN'S OWN SCREEN (ARGUMENT_SCREEN_TARGETS), the behaviour imported
+    # from bridge_core so the two substrates cannot drift. Decided from the
+    # stored proposal alone: before the dry run returns, so the review surface
+    # says what the live call will do, and before the token, which a refusal
+    # never needs.
+    from bridge_core.pending_writes import undeclared_argument_refusal
+
+    refusal = undeclared_argument_refusal(
+        proposal.commit_target, commit_args, ARGUMENT_SCREEN_TARGETS
+    )
+
     if not live:
         # Dry-run: show the body a live commit would actually send
         # (layer translated, provenance injected).
@@ -669,7 +748,12 @@ def commit_pending_write(proposal_id: str, live: bool = False) -> Proposal:
             "would_call": proposal.commit_target,
             "with_arguments": commit_args,
         }
+        if refusal:
+            proposal.commit_result["would_refuse"] = refusal
         return proposal
+
+    if refusal:
+        return _record_commit_failure(proposal_id, proposal, path, refusal, None)
 
     # ── Live commit ───────────────────────────────────────────────────────────
     token = os.environ.get("BRIDGE_TOKEN", "")
@@ -697,44 +781,7 @@ def commit_pending_write(proposal_id: str, live: bool = False) -> Proposal:
     # absence is not failure. Twin of the guard in bridge_core.pending_writes.
     if isinstance(stack_result, dict) and "ok" in stack_result and not stack_result["ok"]:
         stack_error = stack_result.get("error") or "Stack rejected the write (ok=false)"
-        proposal.status = "commit_failed"
-        proposal.commit_result = {
-            "live": True,
-            "committed": False,
-            "commit_target": proposal.commit_target,
-            "error": stack_error,
-            "stack_response": stack_result,
-            "failed_at": datetime.now(timezone.utc).isoformat(),
-        }
-        _save_proposal(proposal, path)
-        append_audit_event(
-            AuditEvent.COMMIT_FAILED,
-            proposal_id=proposal_id,
-            actor="bridge",
-            details={
-                "tool": proposal.tool,
-                "commit_target": proposal.commit_target,
-                "live": True,
-                "error": stack_error,
-            },
-        )
-        # Verify the chain on THIS branch too — see the bridge_core twin.
-        ok, msg = verify_chain()
-        if not ok:
-            logger.error("CHAIN BROKEN after failed commit: %s", msg)
-            append_audit_event(
-                AuditEvent.CHAIN_BROKEN,
-                proposal_id=proposal_id,
-                actor="bridge",
-                details={"message": msg, "after": "commit_failed"},
-            )
-
-        logger.error(
-            "Proposal REJECTED by Stack: %s → %s — NOT committed",
-            proposal_id,
-            stack_error,
-        )
-        return proposal
+        return _record_commit_failure(proposal_id, proposal, path, stack_error, stack_result)
 
     proposal.status = "committed"
     proposal.commit_result = {
