@@ -58,7 +58,9 @@
 //                           tokens_available:false, tokens_note}
 //       bridge_heartbeat : {version, tools, source_commit, bridge_commit,
 //                           service_uptime_seconds, aperture_surfaces,
-//                           gate_total_pending_all_substrates}
+//                           gate_total_pending_all_substrates,
+//                           served_predates_head (true|false|null),
+//                           served_predates_head_reason}
 //       lineage          : {letters[{bucket, title, date, from,
 //                           age_seconds}], counts{}, total}
 //   open_threads_index (NEW) — the LAST key, and the ONE that is not simply
@@ -400,6 +402,31 @@ function renderHeader(snapshot) {
   renderHeaderStats(snapshot);
 }
 
+// SERVED vs HEAD (design A4). The bridge re-reads the stack's HEAD and says
+// whether its running process is older than HEAD's commit, or the tree is
+// dirty: `served_predates_head` true / false / null, with a reason. null is
+// "the bridge could not decide" and is NEVER read as false: it gets a style of
+// its own, and so does a bridge too old to send the field (no reason either).
+// Strict comparisons only: a truthiness test would fold null into false.
+function servedHeadState(hb) {
+  const value = hb ? hb.served_predates_head : undefined;
+  const reason = hb && typeof hb.served_predates_head_reason === 'string'
+    ? hb.served_predates_head_reason
+    : null;
+  if (value === true) {
+    return { cls: 'is-behind-head', note: `served predates HEAD: ${reason || 'no reason given'}` };
+  }
+  if (value === false) {
+    return { cls: null, note: `served does not predate HEAD: ${reason || 'no reason given'}` };
+  }
+  return {
+    cls: 'is-head-unknown',
+    note: reason
+      ? `served vs HEAD unknown: ${reason}`
+      : 'served vs HEAD unknown: this bridge does not report it',
+  };
+}
+
 // PHASE / TOOLS / VERSION / BRIDGE UP.
 //
 // All four now come from the SNAPSHOT — the server fetches the bridge
@@ -453,10 +480,17 @@ function renderHeaderStats(snapshot) {
     if (version) {
       vEl.textContent = version.startsWith('v') ? version : `v${version}`;
       vEl.classList.remove('is-muted');
-      // source_commit cannot go stale the way the version string can — the
-      // bridge resolves `version` once at import.
-      if (hb.source_commit) vEl.title = `source ${hb.source_commit}` + (hb.bridge_commit ? ` · bridge ${hb.bridge_commit}` : '');
     }
+    // source_commit cannot go stale the way the version string can — the
+    // bridge resolves `version` once at import. The served-vs-HEAD state
+    // (design A4) colours the same stat and gives its reason in the title.
+    const head = servedHeadState(hb);
+    vEl.classList.toggle('is-behind-head', head.cls === 'is-behind-head');
+    vEl.classList.toggle('is-head-unknown', head.cls === 'is-head-unknown');
+    const commits = hb.source_commit
+      ? `source ${hb.source_commit}` + (hb.bridge_commit ? ` · bridge ${hb.bridge_commit}` : '')
+      : '';
+    vEl.title = [commits, head.note].filter(Boolean).join('\n');
     if (hb.tools != null) {
       const n = Number(hb.tools);
       if (!state.toolsAnimated) {
@@ -479,6 +513,9 @@ function renderHeaderStats(snapshot) {
       node.textContent = text;
       node.classList.add('is-muted');
     }
+    // ...and no served-vs-HEAD colour or reason outlives the data either.
+    vEl.classList.remove('is-behind-head', 'is-head-unknown');
+    vEl.title = '';
   }
 }
 
