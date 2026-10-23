@@ -61,6 +61,31 @@ def _short(proposal_id: str) -> str:
     return proposal_id[:8] if proposal_id else "?"
 
 
+def _echo_commit_failed(p, result: dict) -> None:
+    """A live commit that did not land, said as one, on stderr.
+
+    commit_pending_write records a refused commit as commit_failed and RETURNS
+    it. Until 2026-10-23 this console then announced it in green as COMMITTED
+    (LIVE), with the Stack's ok:false visible only inside the printed response,
+    and a refusal by the drain's own screen (design D7, posted: false) printed
+    an empty response under the same banner.
+    """
+    click.echo(
+        click.style(
+            f"COMMIT FAILED (LIVE): {_short(p.proposal_id)}  [{p.tool}] → {p.commit_target}",
+            fg="red",
+            bold=True,
+        ),
+        err=True,
+    )
+    click.echo(f"  error: {result.get('error', '?')}", err=True)
+    if "stack_response" in result:
+        click.echo("  Stack response:", err=True)
+        click.echo(f"    {json.dumps(result['stack_response'], indent=4)}", err=True)
+    else:
+        click.echo("  nothing was posted to the Stack", err=True)
+
+
 def _status_of(ops, proposal_id: str) -> str | None:
     """The proposal's status BEFORE the operation, read for display only.
 
@@ -393,8 +418,14 @@ def commit(ctx, proposal_id: str, live: bool):
             click.echo(f"  proposal:   {_short(p.proposal_id)}")
             click.echo(f"  would call: {result.get('would_call', p.commit_target)}")
             click.echo(f"  with args:  {json.dumps(result.get('with_arguments', p.arguments), indent=4)}")
+            if result.get("would_refuse"):
+                click.echo(click.style(f"  would refuse: {result['would_refuse']}", fg="red"))
             click.echo()
             return
+
+        if p.status == "commit_failed":
+            _echo_commit_failed(p, result)
+            sys.exit(1)
 
         stack_response = result.get("stack_response", {})
         click.echo(

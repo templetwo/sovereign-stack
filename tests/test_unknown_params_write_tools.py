@@ -43,9 +43,11 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import types
 from pathlib import Path
 
 import pytest
+from click.testing import CliRunner
 from mcp.types import TextContent
 
 from sovereign_stack import server as srv
@@ -732,3 +734,94 @@ class TestTheDrainScreensTheWarnPathTargets:
         assert committed.status == "committed", committed.commit_result
         assert drain.posted == [{"tool": target, "arguments": args}]
         assert "a D7 drain probe" in json.dumps(_stored(drain, target))
+
+
+# ---------------------------------------------------------------------------
+# The operator's consoles say commit_failed: Review Focus 5's "never a silent drop"
+# on the surface that tells Anthony what a drain did
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def fork_console(request, monkeypatch):
+    """The OpenAI fork's queue on tmp dirs (``oai``), its POST answered by
+    ``console.reply`` and recorded in ``console.posted``.
+
+    Both consoles commit through that module: ``bridge`` is bridge_core.cli, whose
+    default --source is openai, and ``openai`` is openai_bridge.cli, imported under
+    that name and never as ``clients.openai_bridge.cli``, a separate module object
+    the ``oai`` rebinds would miss. HOME is not redirected: nothing here reads it.
+    """
+    from bridge_core.cli import cli as bridge_cli
+    from openai_bridge.cli import cli as openai_cli
+
+    pw = request.getfixturevalue("oai")
+    console = types.SimpleNamespace(posted=[], reply={"ok": True, "result": "stubbed"})
+    clis = {"bridge": bridge_cli, "openai": openai_cli}
+
+    def _post(url, json=None, headers=None, timeout=None):  # httpx.post's keyword names
+        console.posted.append(json)
+        return _Resp(console.reply)
+
+    monkeypatch.setattr(pw.httpx, "post", _post)
+
+    def propose(ring2_tool: str, args: dict) -> str:
+        p = pw.create_pending_write(ring2_tool, dict(args), source_instance="d7-console-seat")
+        pw.approve_pending_write(p.proposal_id, approved_by="Anthony")
+        return p.proposal_id
+
+    console.propose = propose
+    console.run = lambda name, *argv: CliRunner().invoke(clis[name], list(argv))
+    return console
+
+
+_SELF_MODEL_FOO = {"action": "update", "observation": "o", "category": "tendency", "foo": 1}
+_HANDOFF = {"note": "a D7 console probe", "thread": "d7"}
+
+
+class TestTheConsoleSaysCommitFailed:
+    """Both consoles used to print a green COMMITTED (LIVE) for any live commit
+    that returned, commit_failed included."""
+
+    @pytest.mark.parametrize("name", ["bridge", "openai"])
+    def test_a_drain_refusal_is_not_announced_as_committed(self, fork_console, name):
+        pid = fork_console.propose("self_model", _SELF_MODEL_FOO)
+        result = fork_console.run(name, "commit", pid, "--live")
+
+        assert result.exit_code == 1, result.output
+        assert "COMMIT FAILED (LIVE)" in result.output
+        assert "COMMITTED (LIVE)" not in result.output
+        assert "unknown argument(s): foo" in result.output
+        assert "nothing was posted to the Stack" in result.output
+        assert fork_console.posted == []
+
+    @pytest.mark.parametrize("name", ["bridge", "openai"])
+    def test_a_stack_refusal_is_not_announced_as_committed(self, fork_console, name):
+        fork_console.reply = {"ok": False, "error": "unknown argument(s): foo; accepted: note"}
+        pid = fork_console.propose("handoff", {**_HANDOFF, "foo": 1})
+        result = fork_console.run(name, "commit", pid, "--live")
+
+        assert result.exit_code == 1, result.output
+        assert "COMMIT FAILED (LIVE)" in result.output
+        assert "COMMITTED (LIVE)" not in result.output
+        assert '"ok": false' in result.output
+        assert [body["tool"] for body in fork_console.posted] == ["handoff"]
+
+    @pytest.mark.parametrize("name", ["bridge", "openai"])
+    def test_a_commit_is_still_announced(self, fork_console, name):
+        """Positive control: the banner the two refusals must not print."""
+        pid = fork_console.propose("handoff", _HANDOFF)
+        result = fork_console.run(name, "commit", pid, "--live")
+
+        assert result.exit_code == 0, result.output
+        assert "COMMITTED (LIVE)" in result.output
+        assert "COMMIT FAILED" not in result.output
+
+    @pytest.mark.parametrize("name", ["bridge", "openai"])
+    def test_the_dry_run_prints_the_refusal(self, fork_console, name):
+        pid = fork_console.propose("self_model", _SELF_MODEL_FOO)
+        result = fork_console.run(name, "commit", pid)
+
+        assert result.exit_code == 0, result.output
+        assert "would refuse: unknown argument(s): foo" in result.output
+        assert fork_console.posted == []
