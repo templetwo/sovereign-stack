@@ -1428,9 +1428,11 @@ def test_the_duplicated_target_declarations_are_each_pinned():
     Each name that exists as a separate literal in BOTH pending_writes modules
     is asserted equal somewhere. This test names the four that exist today:
     three target sets and, since design D7's Task 8 fix round 3 (2026-10-23),
-    ARGUMENT_SCREEN_TARGETS, the drain's own screen of the two commit targets
-    the Stack only warns on, a dict of target to accepted argument names (its
-    values are pinned to list_tools() in tests/test_unknown_params_write_tools.py).
+    ARGUMENT_SCREEN_TARGETS, the drain's own screen of the commit targets the
+    Stack only warns on, a dict of target to accepted argument names (its values
+    are pinned to list_tools() in tests/test_unknown_params_write_tools.py; empty
+    since plan 1's final fix wave, when the Stack began refusing on all seven
+    commit targets, and still a duplicated declaration this pin holds equal).
 
     SAY WHAT IT CANNOT SEE, so nobody reads it as a guarantee. The scan is
     `dir(core)` filtered to names ENDING IN `_TARGETS` that are a `frozenset`
