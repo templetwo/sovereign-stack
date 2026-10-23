@@ -1214,6 +1214,20 @@ def _registered_tools():
                             "description": "The stable thread id (from get_open_threads output)",
                         },
                         "resolution": {"type": "string", "description": "What was discovered"},
+                        "source_instance": {
+                            "type": "string",
+                            "description": (
+                                "WHO resolved it: the author stamped on the resolution "
+                                "insight. Optional, and second in precedence: the seat "
+                                "the call arrives with (the seat socket's "
+                                "X-Sovereign-Seat stamp) wins, and this argument is the "
+                                "fallback when no seat arrived. With neither, the "
+                                "insight lands without a source_instance and the result "
+                                "says 'attribution: none'. session_id is NOT a "
+                                "substitute: it is the server's spiral session, "
+                                "identical for every writer."
+                            ),
+                        },
                     },
                     "required": ["thread_id", "resolution"],
                 },
@@ -3248,6 +3262,79 @@ def _signal_actor() -> str | None:
     return None
 
 
+# THE STACK'S OWN NAMESPACE ON A SEAT IT TOOK CUSTODY OF: sse_server applies it
+# to the X-Sovereign-Seat value (`SEAT_NAMESPACE`) and `_signal_actor` to the
+# server's own identity. Spelled here, not imported, because sse_server imports
+# this module; the header test in tests/test_side_effect_writer_identity.py
+# goes red if the two ever diverge.
+_SEAT_NAMESPACE = "seat:"
+
+
+def _transport_seat_id(transport_seat: str | None) -> str | None:
+    """The bare seat id a transport established for this dispatch, or None.
+
+    One leading ``seat:`` is dropped so the row carries the seat id the seat
+    socket already signs on that seat's direct writes (the bridge's
+    ``seat_identity.sign_arguments`` stamps ``source_instance=<seat id>``): one
+    seat, one spelling, whichever tool wrote the row.
+    """
+    if not transport_seat:
+        return None
+    seat = transport_seat.removeprefix(_SEAT_NAMESPACE).strip()
+    return seat or None
+
+
+def _side_effect_author(transport_seat: str | None, arguments: dict) -> tuple[str | None, str]:
+    """``(source_instance, attribution)`` for an insight a tool writes as a side effect.
+
+    Design D2, thread a85ec5e6. The precedence, with the ``attribution`` value
+    each step reports:
+
+      1. ``"seat"``: the seat a TRANSPORT established before dispatch entry
+         (the seat socket's stamp), as its bare seat id.
+      2. ``"argument"``: the caller's ``source_instance`` argument, verbatim.
+      3. ``"none"``: neither. The insight still lands with the key absent;
+         refusing it is D1 (plan 2).
+
+    ``transport_seat`` is captured by ``_dispatch_tool`` BEFORE it fills
+    ``CALLER_SEAT`` with ``seat:<spiral session>``, and that is the point. The
+    fill names the SERVER: reading ``caller_seat()`` here would stamp the
+    server on every native resolution and override every argument, which is
+    the defect the thread records, relabelled as an author.
+    """
+    seat = _transport_seat_id(transport_seat)
+    if seat:
+        return seat, "seat"
+    argument = arguments.get("source_instance")
+    if isinstance(argument, str) and argument.strip():
+        return argument, "argument"
+    return None, "none"
+
+
+def _attribution_line(source_instance: str | None, attribution: str, arguments: dict) -> str:
+    """The result line saying where a side-effect insight's author came from.
+
+    An argument the seat overrode is named rather than dropped in silence:
+    from the caller's side an ignored argument looks exactly like an honoured
+    one, which is the reasoning ``dispatch_context`` gives for refusing the
+    identity arguments on signal_ack.
+    """
+    if attribution == "none":
+        return (
+            "attribution: none (no seat arrived and no source_instance argument "
+            "named an author; the insight carries no source_instance)"
+        )
+    if attribution == "argument":
+        return f"attribution: argument (source_instance {source_instance!r}, as passed)"
+    line = (
+        f"attribution: seat (source_instance {source_instance!r}, the seat this call arrived with)"
+    )
+    argument = arguments.get("source_instance")
+    if argument is not None and argument != source_instance:
+        line += f"; the source_instance argument {argument!r} was not used, the seat wins"
+    return line
+
+
 def _earlier_handoff_nudge(record: dict) -> str:
     """One added result line when this seat already handed off on this thread.
 
@@ -3335,13 +3422,19 @@ async def _dispatch_tool(name: str, arguments: dict):
     # route into the dispatch — the MCP `@server.call_tool()` entry, the
     # bridge's native shim, and the tests that call the dispatcher directly —
     # gets the same establishment, and none of them has to remember to do it.
+    #
+    # THE SEAT A TRANSPORT ESTABLISHED IS READ FIRST, BEFORE THE FILL (design
+    # D2). Once the fill runs, CALLER_SEAT holds the server's own identity and
+    # the two can no longer be told apart; the side-effect writers need exactly
+    # that distinction, because the fill names the server and not a caller.
+    transport_seat = caller_seat()
     seat_token = None
-    if caller_seat() is None:
+    if transport_seat is None:
         resolved = _signal_actor()
         if resolved:
             seat_token = set_caller_seat(resolved)
     try:
-        return await _dispatch_registered_tool(name, arguments)
+        return await _dispatch_registered_tool(name, arguments, transport_seat=transport_seat)
     finally:
         # ALWAYS RESET, INCLUDING ON THE RAISE PATH. A token left unreset
         # leaks this call's identity into whatever runs next in the same
@@ -3350,12 +3443,20 @@ async def _dispatch_tool(name: str, arguments: dict):
             reset_caller_seat(seat_token)
 
 
-async def _dispatch_registered_tool(name: str, arguments: dict):
+async def _dispatch_registered_tool(
+    name: str, arguments: dict, *, transport_seat: str | None = None
+):
     """The dispatch body. Reached in production only via _dispatch_tool.
 
     Called directly by tests that cover a RETAINED-BUT-UNPUBLISHED
     implementation; a production caller cannot reach it without passing the
     retirement gate above.
+
+    ``transport_seat`` is the caller identity a transport established before
+    dispatch entry (the seat socket's ``X-Sovereign-Seat`` stamp), or None. It
+    is never the server's own fill. Only the side-effect writers read it
+    (design D2); a direct call that omits it is a call that arrived with no
+    seat.
     """
     global spiral_state
     spiral_state.record_tool_call(name)
@@ -3724,12 +3825,23 @@ async def _dispatch_registered_tool(name: str, arguments: dict):
     if name == "resolve_thread_by_id":
         thread_id = arguments.get("thread_id", "")
         resolution = arguments.get("resolution", "")
-        path = experiential.resolve_thread_by_id(thread_id, resolution, spiral_state.session_id)
+        # THE STACK WRITES THIS INSIGHT, NOT THE CALLER (design D2, thread
+        # a85ec5e6), so the caller's seat reaches it only through here: eight
+        # Grok resolutions on 2026-09-06 landed with nothing but the server's
+        # session_id and could not say which seat closed them.
+        source_instance, attribution = _side_effect_author(transport_seat, arguments)
+        path = experiential.resolve_thread_by_id(
+            thread_id, resolution, spiral_state.session_id, source_instance=source_instance
+        )
         if not path:
             return [TextContent(type="text", text=f"No open thread found with id: {thread_id}")]
         return [
             TextContent(
-                type="text", text=f"Thread {thread_id} resolved → ground_truth insight: {path}"
+                type="text",
+                text=(
+                    f"Thread {thread_id} resolved → ground_truth insight: {path}\n"
+                    + _attribution_line(source_instance, attribution, arguments)
+                ),
             )
         ]
 
@@ -3813,7 +3925,14 @@ async def _dispatch_registered_tool(name: str, arguments: dict):
         what_surprised_me = (arguments.get("what_surprised_me") or "").strip()
         what_to_pick_up = (arguments.get("what_to_pick_up") or "").strip()
         thread = arguments.get("thread", "general")
-        source_instance = arguments.get("source_instance", "unknown")
+        # A SEAT THE TRANSPORT ESTABLISHED AUTHORS ALL THREE RECORDS (design
+        # D2): the stack writes them, so the caller's seat reaches them only
+        # through here. The bridge refuses close_session on the seat socket, so
+        # today only a direct loopback /sse client sending X-Sovereign-Seat
+        # arrives with one. With no seat the two defaults below are untouched;
+        # de-defaulting them is D1 (plan 2).
+        seat = _transport_seat_id(transport_seat)
+        source_instance = seat or arguments.get("source_instance", "unknown")
         # SCOPED DELIBERATELY TO THE HANDOFF LEG. close_session writes three
         # things; only step 3 goes through HandoffEngine. Passing "" to the
         # record_insight legs as well would change what lands in Anthony's
@@ -3821,7 +3940,7 @@ async def _dispatch_registered_tool(name: str, arguments: dict):
         # different decision, and not this branch's to make. So the insight
         # legs keep the historical "unknown" and the handoff leg gets the
         # de-defaulted value the author guard expects.
-        handoff_author = arguments.get("source_instance", "")
+        handoff_author = seat or arguments.get("source_instance", "")
 
         if not what_i_learned:
             return [TextContent(type="text", text="close_session requires what_i_learned")]

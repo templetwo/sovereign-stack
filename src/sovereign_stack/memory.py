@@ -1715,12 +1715,25 @@ class ExperientialMemory:
             resolved_thread_timestamp=resolved_timestamp,
         )
 
-    def resolve_thread_by_id(self, thread_id: str, resolution: str, session_id: str = None) -> str:
+    def resolve_thread_by_id(
+        self,
+        thread_id: str,
+        resolution: str,
+        session_id: str = None,
+        source_instance: str = None,
+    ) -> str:
         """
         Resolve an open thread by its stable thread_id.
 
         Preferred over resolve_thread(domain, fragment) when the thread_id is
         known — avoids ambiguity when multiple threads share keywords.
+
+        Args:
+            source_instance: The author stamped on the resolution insight (the
+                server passes the caller's seat, else its argument; design D2).
+                None leaves the key ABSENT from the row, never stored as null,
+                so "unattributed" stays distinguishable from "attributed to
+                nothing".
 
         Returns:
             Path to the new ground_truth insight (or empty string if not found).
@@ -1776,6 +1789,7 @@ class ExperientialMemory:
             resolved_from=(resolved_question or "")[:80],
             resolved_thread_id=thread_id,
             resolved_thread_timestamp=resolved_timestamp,
+            **({"source_instance": source_instance} if source_instance else {}),
         )
 
     def get_open_threads(
