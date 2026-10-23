@@ -18,15 +18,17 @@ tool's intent in ``TOOL_INTENTS``:
 
 Review Focus 5 is pinned here too, on both Ring-2 drains (bridge_core's and the
 OpenAI fork's), which forward a proposal's arguments verbatim: for every commit
-target whose intent refuses, an unknown key in a proposal ends in ``commit_failed``
-with the refusal recorded, never in ``committed``. It does NOT hold today for the two
-commit targets the intent keying leaves on the warn path, ``thread_touch``
-(communicate) and ``self_model`` (orient): such a proposal commits with the key
-dropped and the warning kept only in the stored stack response. That is pinned as it
-is, and the property itself is a strict xfail, until HQ rules (the status note under
-Review Focus 5 in docs/superpowers/plans/2026-10-21-next-phase-plan-1.md). Those
-tests drive the real stack handler; only the HTTP hop to ~/sovereign-bridge is
-replaced, by a stand-in that maps the result exactly as ``bridge.call_mcp_tool`` does.
+target, an unknown key in a proposal ends in ``commit_failed`` with the refusal
+recorded, never in ``committed``. For the five targets whose intent refuses, the
+refusal is the Stack's own, returned through the POST. The intent keying leaves two
+targets on the warn path, ``thread_touch`` (communicate) and ``self_model`` (orient),
+where the Stack would run the body without the key; for those each drain screens the
+commit's arguments itself BEFORE the POST (``ARGUMENT_SCREEN_TARGETS``), so nothing
+is posted, nothing is written and a retry has nothing to write twice. A direct call
+to either tool still runs on the warn path (the status note under Review Focus 5 in
+docs/superpowers/plans/2026-10-21-next-phase-plan-1.md). Those tests drive the real
+stack handler; only the HTTP hop to ~/sovereign-bridge is replaced, by a stand-in
+that maps the result exactly as ``bridge.call_mcp_tool`` does.
 
 ISOLATION: the dispatch-level tests replace ``_dispatch_registered_tool`` with a
 sentinel, so no tool body runs; the real-call tests run inside ``_isolated_server``
@@ -340,10 +342,13 @@ class _Resp:
 class _Drain:
     """One Ring-2 drain under test.
 
-    ``drain_one(ring2_tool, args)`` files, approves and live-commits a proposal and
-    returns it; ``posted`` holds every body the commit POSTed; ``stack_root`` is the
-    stack's tmp root, ``drain_root`` the drain's $SOVEREIGN_ROOT, ``home`` the tmp
-    HOME.
+    ``propose(ring2_tool, args)`` files and approves a proposal and returns its id;
+    ``commit(pid, live=True)`` commits it and returns the proposal; ``drain_one``
+    does both. ``retry(pid)`` re-arms a commit_failed proposal; ``stored(pid)`` is
+    the proposal file as the drain reads it back; ``events(pid)`` is its audit event
+    types in order; ``chain_ok()`` says whether the drain's audit chain verifies.
+    ``posted`` holds every body the commit POSTed; ``stack_root`` is the stack's tmp
+    root, ``drain_root`` the drain's $SOVEREIGN_ROOT, ``home`` the tmp HOME.
     """
 
 
@@ -351,6 +356,7 @@ def _bridge_core_drain(d: _Drain, tmp_path: Path, monkeypatch):
     """bridge_core's drain (the grok and antigravity queues) on tmp dirs."""
     import bridge_core.pending_writes as pw
     from bridge_core import BridgeContext
+    from bridge_core.audit import read_audit_trail
     from bridge_core.rings import CANONICAL_COMMIT_TARGETS, CANONICAL_RING_1, CANONICAL_RING_2
 
     ctx = BridgeContext(
@@ -366,12 +372,17 @@ def _bridge_core_drain(d: _Drain, tmp_path: Path, monkeypatch):
     )
     monkeypatch.setenv("D7_DRAIN_TOKEN", "t")
 
-    def drain_one(ring2_tool: str, args: dict):
+    def propose(ring2_tool: str, args: dict) -> str:
         p = pw.create_pending_write(ctx, ring2_tool, dict(args), source_instance="d7-drain-seat")
         pw.approve_pending_write(ctx, p.proposal_id, approved_by="Anthony")
-        return pw.commit_pending_write(ctx, p.proposal_id, live=True)
+        return p.proposal_id
 
-    d.drain_one = drain_one
+    d.propose = propose
+    d.commit = lambda pid, live=True: pw.commit_pending_write(ctx, pid, live=live)
+    d.retry = lambda pid: pw.retry_pending_write(ctx, pid, actor="Anthony")
+    d.stored = lambda pid: pw._load_proposal(ctx, pid)[0].to_dict()
+    d.events = lambda pid: [e["event_type"] for e in read_audit_trail(ctx, proposal_id=pid)]
+    d.chain_ok = lambda: pw.verify_chain(ctx)[0]
     return pw
 
 
@@ -383,14 +394,21 @@ def _fork_drain(d: _Drain, request):
     the drain fixture seeds the thread a thread_touch proposal names. Its queue and
     audit chain go to tmp dirs through test_bridge_drain_provenance's ``oai``
     fixture, which rebinds every store binding that module writes through."""
+    from openai_bridge.audit import read_audit_trail
+
     pw = request.getfixturevalue("oai")
 
-    def drain_one(ring2_tool: str, args: dict):
+    def propose(ring2_tool: str, args: dict) -> str:
         p = pw.create_pending_write(ring2_tool, dict(args), source_instance="d7-fork-seat")
         pw.approve_pending_write(p.proposal_id, approved_by="Anthony")
-        return pw.commit_pending_write(p.proposal_id, live=True)
+        return p.proposal_id
 
-    d.drain_one = drain_one
+    d.propose = propose
+    d.commit = lambda pid, live=True: pw.commit_pending_write(pid, live=live)
+    d.retry = lambda pid: pw.retry_pending_write(pid, actor="Anthony")
+    d.stored = lambda pid: pw._load_proposal(pid)[0].to_dict()
+    d.events = lambda pid: [e["event_type"] for e in read_audit_trail(proposal_id=pid)]
+    d.chain_ok = lambda: pw.verify_chain()[0]
     return pw
 
 
@@ -422,6 +440,7 @@ def drain(request, tmp_path, tmp_sovereign_root, monkeypatch):
         module = _bridge_core_drain(d, tmp_path, monkeypatch)
     else:
         module = _fork_drain(d, request)
+    d.drain_one = lambda ring2_tool, args: d.commit(d.propose(ring2_tool, args))
 
     # HOME AND THE POST STAND-IN ARE UNDONE AT THIS FIXTURE'S TEARDOWN, not at the
     # test's monkeypatch. conftest.no_live_audit_writes reads Path.home() at its own
@@ -467,9 +486,10 @@ _RF5_CASES = [
 ]
 
 # The two commit targets the intent keying leaves on the warn path: thread_touch is
-# `communicate` and self_model is `orient` in TOOL_INTENTS. Review Focus 5 is OPEN
-# for them until HQ rules (the status note under Review Focus 5 in
-# docs/superpowers/plans/2026-10-21-next-phase-plan-1.md).
+# `communicate` and self_model is `orient` in TOOL_INTENTS. The Stack only warns on
+# an unknown argument there, so each drain refuses one itself, before the POST
+# (ARGUMENT_SCREEN_TARGETS in clients/bridge_core/pending_writes.py and its twin in
+# clients/openai_bridge/pending_writes.py).
 _RF5_WARN_PATH_CASES = [
     ("thread_touch", "thread_touch", {"thread_id": _D7_THREAD, "note": "a D7 drain probe"}),
     (
@@ -478,6 +498,13 @@ _RF5_WARN_PATH_CASES = [
         {"action": "update", "observation": "a D7 drain probe", "category": "tendency"},
     ),
 ]
+
+
+def _landed(d: _Drain, target: str) -> bool:
+    """Whether a warn-path target's write reached its tmp store at all."""
+    if target == "thread_touch":
+        return any(d.stack_root.rglob("thread_touches.jsonl"))
+    return (d.home / ".sovereign" / "self_model.json").exists()
 
 
 def _stored(d: _Drain, target: str):
@@ -520,6 +547,70 @@ class TestEveryCommitTargetHasARow:
         assert live == CANONICAL_COMMIT_TARGETS
         assert len(live) < len(COMMIT_TARGETS), "the retired rows the docstring names are gone"
 
+    def test_the_drains_screen_exactly_the_targets_the_stack_only_warns_on(self):
+        """A commit target the Stack does not refuse is screened by both drains, and
+        one it refuses is not: there the Stack's own refusal answers, with hints the
+        drain cannot give. A new warn-intent target fails here until both drains
+        declare it, and a target HQ moves to a refusing intent fails here until its
+        screen comes out."""
+        from bridge_core.pending_writes import ARGUMENT_SCREEN_TARGETS as core
+        from bridge_core.rings import CANONICAL_COMMIT_TARGETS
+        from openai_bridge.pending_writes import ARGUMENT_SCREEN_TARGETS as fork
+
+        warned = {
+            t
+            for t in CANONICAL_COMMIT_TARGETS.values()
+            if srv._intent_for(t) not in REFUSING_INTENTS
+        }
+        assert set(core) == warned == {t for _, t, _ in _RF5_WARN_PATH_CASES}
+        assert fork == core
+
+    @pytest.mark.parametrize("target", [t for _, t, _ in _RF5_WARN_PATH_CASES])
+    def test_each_screen_is_the_live_schema_in_its_order(self, target):
+        """The screen's names are the target's published properties in the order
+        its refusal prints them, and the Stack tolerates no other key there that
+        the screen would refuse (_ADDITIONAL_ALLOWED_PARAMS)."""
+        from bridge_core.pending_writes import ARGUMENT_SCREEN_TARGETS
+
+        assert ARGUMENT_SCREEN_TARGETS[target] == tuple(_accepted(target))
+        assert not srv._ADDITIONAL_ALLOWED_PARAMS.get(target)
+
+
+class TestTheScreenItself:
+    """bridge_core.pending_writes.undeclared_argument_refusal, which both drains call."""
+
+    def test_a_target_outside_the_screen_is_left_to_the_stack(self):
+        from bridge_core.pending_writes import (
+            ARGUMENT_SCREEN_TARGETS,
+            undeclared_argument_refusal,
+        )
+
+        args = {"note": "n", "foo": 1}
+        assert undeclared_argument_refusal("handoff", args, ARGUMENT_SCREEN_TARGETS) is None
+
+    def test_declared_keys_and_no_keys_pass(self):
+        from bridge_core.pending_writes import (
+            ARGUMENT_SCREEN_TARGETS,
+            undeclared_argument_refusal,
+        )
+
+        every = dict.fromkeys(_accepted("thread_touch"), "x")
+        assert undeclared_argument_refusal("thread_touch", every, ARGUMENT_SCREEN_TARGETS) is None
+        assert undeclared_argument_refusal("self_model", {}, ARGUMENT_SCREEN_TARGETS) is None
+
+    def test_unknown_keys_are_named_in_the_callers_order(self):
+        from bridge_core.pending_writes import (
+            ARGUMENT_SCREEN_TARGETS,
+            undeclared_argument_refusal,
+        )
+
+        args = {"zeta": 1, "thread_id": "t", "alpha": 2}
+        text = undeclared_argument_refusal("thread_touch", args, ARGUMENT_SCREEN_TARGETS)
+        assert text.startswith(
+            f"unknown argument(s): zeta, alpha; accepted: {_accepted_text('thread_touch')}; "
+        )
+        assert "refused by the drain before the POST" in text
+
 
 class TestTheDrainRecordsTheRefusal:
     @pytest.mark.parametrize(("ring2_tool", "target", "args"), _RF5_CASES)
@@ -533,6 +624,10 @@ class TestTheDrainRecordsTheRefusal:
         assert committed.commit_result["error"].startswith(
             f"unknown argument(s): foo; accepted: {_accepted_text(target)}"
         )
+        # The Stack's refusal, so the record carries the Stack's answer, not the
+        # drain screen's posted: False.
+        assert committed.commit_result["stack_response"]["ok"] is False
+        assert "posted" not in committed.commit_result
         assert _tree(drain.stack_root) == before, "a refused commit wrote to the stack"
 
     @pytest.mark.parametrize(("ring2_tool", "target", "args"), _RF5_CASES)
@@ -566,38 +661,10 @@ class TestTheDrainRecordsTheRefusal:
         assert _tree(drain.stack_root) != before
 
 
-class TestTheWarnPathCommitTargets:
-    """thread_touch and self_model: what a drained proposal with an unknown key does
-    today, and the Review Focus 5 property they do not yet meet."""
+class TestTheDrainScreensTheWarnPathTargets:
+    """thread_touch and self_model: the Stack only warns on an unknown argument
+    there, so each drain refuses one itself, before the POST, and records it."""
 
-    @pytest.mark.parametrize(("ring2_tool", "target", "args"), _RF5_WARN_PATH_CASES)
-    def test_the_proposal_commits_without_the_key_and_the_warning_is_kept(
-        self, drain, ring2_tool, target, args
-    ):
-        """It COMMITS: the key never reaches storage, and the only trace is the
-        warning inside the stack response the drain stores. Visible, so not a
-        silent drop, but not the refusal Review Focus 5 asks for."""
-        committed = drain.drain_one(ring2_tool, {**args, "foo": 1})
-
-        assert drain.posted[-1]["tool"] == target
-        assert "foo" in drain.posted[-1]["arguments"], "the drain no longer forwards verbatim"
-        assert committed.status == "committed", committed.commit_result
-        warning = f"unknown argument(s) ignored: foo; accepted: {_accepted_text(target)}"
-        assert warning in json.dumps(committed.commit_result["stack_response"])
-        stored = json.dumps(_stored(drain, target))
-        assert "a D7 drain probe" in stored, f"{target}: the write did not land in its tmp store"
-        assert "foo" not in stored
-
-    @pytest.mark.xfail(
-        strict=True,
-        raises=AssertionError,
-        reason=(
-            "Review Focus 5 is open for thread_touch and self_model: the refusal is "
-            "keyed on TOOL_INTENTS (communicate, orient) and the remedy is HQ's ruling. "
-            "Strict, so this turns red the day either target refuses and the marker "
-            "comes off with the ruling."
-        ),
-    )
     @pytest.mark.parametrize(("ring2_tool", "target", "args"), _RF5_WARN_PATH_CASES)
     def test_review_focus_5_holds_for_them_too(self, drain, ring2_tool, target, args):
         before = _tree(drain.stack_root)
@@ -608,3 +675,60 @@ class TestTheWarnPathCommitTargets:
             f"unknown argument(s): foo; accepted: {_accepted_text(target)}"
         )
         assert _tree(drain.stack_root) == before, "a refused commit wrote to the stack"
+
+    @pytest.mark.parametrize(("ring2_tool", "target", "args"), _RF5_WARN_PATH_CASES)
+    def test_it_is_refused_before_the_post_and_the_record_says_so(
+        self, drain, ring2_tool, target, args
+    ):
+        """Nothing reaches the Stack, so the warn path never runs the body, and the
+        refusal is on the proposal file and the drain's audit chain."""
+        pid = drain.propose(ring2_tool, {**args, "foo": 1})
+        committed = drain.commit(pid)
+
+        assert drain.posted == [], "the drain posted a commit it refuses"
+        assert committed.commit_result["posted"] is False
+        assert "stack_response" not in committed.commit_result
+        assert "refused by the drain before the POST" in committed.commit_result["error"]
+        stored = drain.stored(pid)
+        assert stored["status"] == "commit_failed"
+        assert stored["commit_result"]["error"] == committed.commit_result["error"]
+        assert drain.events(pid)[-1] == "commit_failed"
+        assert drain.chain_ok()
+        assert not _landed(drain, target), f"{target}: the refused write landed anyway"
+
+    @pytest.mark.parametrize(("ring2_tool", "target", "args"), _RF5_WARN_PATH_CASES)
+    def test_a_retry_refuses_again_and_still_posts_nothing(self, drain, ring2_tool, target, args):
+        pid = drain.propose(ring2_tool, {**args, "foo": 1})
+        first = drain.commit(pid)
+        drain.retry(pid)
+        second = drain.commit(pid)
+
+        assert second.status == "commit_failed"
+        assert second.commit_result["error"] == first.commit_result["error"]
+        assert drain.posted == []
+        assert drain.events(pid)[-3:] == ["commit_failed", "retry_armed", "commit_failed"]
+        assert not _landed(drain, target)
+
+    @pytest.mark.parametrize(("ring2_tool", "target", "args"), _RF5_WARN_PATH_CASES)
+    def test_the_dry_run_names_the_refusal(self, drain, ring2_tool, target, args):
+        """The review surface says what the live call will do."""
+        pid = drain.propose(ring2_tool, {**args, "foo": 1})
+        preview = drain.commit(pid, live=False)
+        refused = drain.commit(pid)
+
+        assert preview.commit_result["would_refuse"] == refused.commit_result["error"]
+        assert drain.posted == []
+
+    @pytest.mark.parametrize(("ring2_tool", "target", "args"), _RF5_WARN_PATH_CASES)
+    def test_the_same_proposal_without_it_commits_and_lands(self, drain, ring2_tool, target, args):
+        """Positive control: the screen refuses the key, not the target. The same
+        proposal without foo is posted once, as filed, commits, and its write lands,
+        so the refusals above are the screen and not a route that fails every call."""
+        pid = drain.propose(ring2_tool, args)
+        preview = drain.commit(pid, live=False)
+        committed = drain.commit(pid)
+
+        assert "would_refuse" not in preview.commit_result
+        assert committed.status == "committed", committed.commit_result
+        assert drain.posted == [{"tool": target, "arguments": args}]
+        assert "a D7 drain probe" in json.dumps(_stored(drain, target))

@@ -484,6 +484,62 @@ ORIGINAL_TIMESTAMP_TARGETS: frozenset[str] = frozenset(
     {"record_insight", "record_learning", "record_open_thread"}
 )
 
+# Commit targets on which the Stack only WARNS about an argument it does not
+# declare, each with that target's LIVE inputSchema property names, in
+# declaration order (design D7, thread 0804046c; Review Focus 5 of the
+# next-phase plan 1).
+#
+# D7 refuses an unknown argument on a write, govern or handoff tool and lets
+# every other tool run without it, naming it in the envelope. thread_touch
+# (intent communicate) and self_model (orient) are on that second path, so a
+# drained proposal carrying a key the target does not declare would COMMIT with
+# the key dropped: the write lands without part of what the proposal asked for,
+# and the only trace is a warning inside the stored stack response. The drain
+# screens these targets itself, BEFORE the POST, and records commit_failed, so
+# nothing is written and a retry has nothing to write twice. A target the Stack
+# refuses itself is deliberately absent: its refusal is the record there, with
+# hints this screen cannot give. A direct call to either tool does not pass
+# through a drain and still runs on the warn path.
+#
+# A declaration of what the remote schema accepts, so duplicated per substrate
+# (openai_bridge/pending_writes.py) and held equal to the Stack's list_tools()
+# and to that copy by tests/test_unknown_params_write_tools.py, and to its twin
+# by the duplicated-declaration meta-pin in
+# tests/test_ring2_post_v121_regressions.py. When the Stack declares a new
+# argument on either target (design D1 adds source_instance to thread_touch),
+# those tests fail until both copies say so.
+ARGUMENT_SCREEN_TARGETS: dict[str, tuple[str, ...]] = {
+    "thread_touch": ("thread_id", "note", "instance_id"),
+    "self_model": ("action", "observation", "category"),
+}
+
+
+def undeclared_argument_refusal(
+    commit_target: str,
+    commit_args: dict[str, Any],
+    screened: dict[str, tuple[str, ...]],
+) -> str | None:
+    """The drain's refusal of ``commit_args`` for ``commit_target``, or None.
+
+    ``screened`` is the calling substrate's ARGUMENT_SCREEN_TARGETS. A target it
+    does not name returns None, because the Stack answers those itself. The text
+    begins as the Stack's own refusal does, "unknown argument(s): <names>;
+    accepted: <names>" (unknown names in the caller's order, accepted ones in
+    declaration order), and then says that the drain refused it, and why.
+    """
+    accepted = screened.get(commit_target)
+    if accepted is None:
+        return None
+    unknown = [key for key in commit_args if key not in accepted]
+    if not unknown:
+        return None
+    return (
+        f"unknown argument(s): {', '.join(unknown)}; "
+        f"accepted: {', '.join(accepted) or '(none)'}; "
+        "refused by the drain before the POST, because the Stack only warns on an "
+        f"unknown {commit_target} argument and would write the rest (design D7)"
+    )
+
 
 def build_commit_arguments(ctx: BridgeContext, proposal: Proposal) -> dict[str, Any]:
     """
@@ -584,6 +640,70 @@ def build_commit_arguments(ctx: BridgeContext, proposal: Proposal) -> dict[str, 
     return commit_args
 
 
+def _record_commit_failure(
+    ctx: BridgeContext,
+    proposal: Proposal,
+    path: Path,
+    error: str,
+    stack_response: dict | None,
+) -> Proposal:
+    """Record a live commit that did not land, and return the proposal.
+
+    Status commit_failed, the error on the proposal, a COMMIT_FAILED audit
+    event, and the chain verified after it. ``stack_response`` is the Stack's
+    answer when it refused the POST, or None when the drain refused before
+    posting (ARGUMENT_SCREEN_TARGETS); the record then says ``posted: False``
+    rather than carry a response nobody sent.
+    """
+    posted = stack_response is not None
+    proposal.status = "commit_failed"
+    proposal.commit_result = {
+        "live": True,
+        "committed": False,
+        "commit_target": proposal.commit_target,
+        "error": error,
+        **({"stack_response": stack_response} if posted else {"posted": False}),
+        "failed_at": datetime.now(timezone.utc).isoformat(),
+    }
+    _save_proposal(proposal, path)
+    append_audit_event(
+        ctx,
+        AuditEvent.COMMIT_FAILED,
+        proposal_id=proposal.proposal_id,
+        actor="bridge",
+        details={
+            "tool": proposal.tool,
+            "commit_target": proposal.commit_target,
+            "live": True,
+            "error": error,
+            **({} if posted else {"posted": False}),
+        },
+    )
+    # The chain must be verified on THIS branch too. A failed commit still
+    # appended an audit event, so it can still break the chain — and an
+    # early return that skips verification is how a break goes unnoticed
+    # precisely in the run where something already went wrong.
+    ok, msg = verify_chain(ctx)
+    if not ok:
+        logger.error("CHAIN BROKEN after failed commit: %s", msg)
+        append_audit_event(
+            ctx,
+            AuditEvent.CHAIN_BROKEN,
+            proposal_id=proposal.proposal_id,
+            actor="bridge",
+            details={"message": msg, "after": "commit_failed"},
+        )
+
+    logger.error(
+        "Proposal[%s] %s: %s → %s — NOT committed",
+        ctx.substrate,
+        "REJECTED by Stack" if posted else "REFUSED by the drain before the POST",
+        proposal.proposal_id,
+        error,
+    )
+    return proposal
+
+
 def commit_pending_write(
     ctx: BridgeContext,
     proposal_id: str,
@@ -605,6 +725,14 @@ def commit_pending_write(
 
     commit_args = build_commit_arguments(ctx, proposal)
 
+    # THE DRAIN'S OWN SCREEN (ARGUMENT_SCREEN_TARGETS), decided from the stored
+    # proposal alone: before the dry run returns, so the review surface says
+    # what the live call will do, and before the token, which a refusal never
+    # needs.
+    refusal = undeclared_argument_refusal(
+        proposal.commit_target, commit_args, ARGUMENT_SCREEN_TARGETS
+    )
+
     if not live:
         proposal.commit_result = {
             "mocked": False,
@@ -615,7 +743,12 @@ def commit_pending_write(
             # differs from the wire is how 'unknown' authorship shipped.
             "with_arguments": commit_args,
         }
+        if refusal:
+            proposal.commit_result["would_refuse"] = refusal
         return proposal
+
+    if refusal:
+        return _record_commit_failure(ctx, proposal, path, refusal, None)
 
     # Live commit
     token = os.environ.get(ctx.bridge_rest_token_env, "")
@@ -651,50 +784,7 @@ def commit_pending_write(
     # uncommittable, which would be a fail-CLOSED bug of our own making.
     if isinstance(stack_result, dict) and "ok" in stack_result and not stack_result["ok"]:
         stack_error = stack_result.get("error") or "Stack rejected the write (ok=false)"
-        proposal.status = "commit_failed"
-        proposal.commit_result = {
-            "live": True,
-            "committed": False,
-            "commit_target": proposal.commit_target,
-            "error": stack_error,
-            "stack_response": stack_result,
-            "failed_at": datetime.now(timezone.utc).isoformat(),
-        }
-        _save_proposal(proposal, path)
-        append_audit_event(
-            ctx,
-            AuditEvent.COMMIT_FAILED,
-            proposal_id=proposal.proposal_id,
-            actor="bridge",
-            details={
-                "tool": proposal.tool,
-                "commit_target": proposal.commit_target,
-                "live": True,
-                "error": stack_error,
-            },
-        )
-        # The chain must be verified on THIS branch too. A failed commit still
-        # appended an audit event, so it can still break the chain — and an
-        # early return that skips verification is how a break goes unnoticed
-        # precisely in the run where something already went wrong.
-        ok, msg = verify_chain(ctx)
-        if not ok:
-            logger.error("CHAIN BROKEN after failed commit: %s", msg)
-            append_audit_event(
-                ctx,
-                AuditEvent.CHAIN_BROKEN,
-                proposal_id=proposal.proposal_id,
-                actor="bridge",
-                details={"message": msg, "after": "commit_failed"},
-            )
-
-        logger.error(
-            "Proposal[%s] REJECTED by Stack: %s → %s — NOT committed",
-            ctx.substrate,
-            proposal.proposal_id,
-            stack_error,
-        )
-        return proposal
+        return _record_commit_failure(ctx, proposal, path, stack_error, stack_result)
 
     proposal.status = "committed"
     proposal.commit_result = {

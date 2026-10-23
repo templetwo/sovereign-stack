@@ -1368,23 +1368,30 @@ def test_both_substrates_agree_on_the_original_timestamp_targets():
     assert core_targets == frozenset({"record_insight", "record_learning", "record_open_thread"})
 
 
-def test_the_three_duplicated_target_sets_are_each_pinned():
-    """Meta-pin: a fourth duplicated set must not ship unpinned.
+def test_the_duplicated_target_declarations_are_each_pinned():
+    """Meta-pin: a further duplicated declaration must not ship unpinned.
 
     Each name that exists as a separate literal in BOTH pending_writes modules
-    is asserted equal somewhere. This test names the three that exist today.
+    is asserted equal somewhere. This test names the four that exist today:
+    three target sets and, since design D7's Task 8 fix round 3 (2026-10-23),
+    ARGUMENT_SCREEN_TARGETS, the drain's own screen of the two commit targets
+    the Stack only warns on, a dict of target to accepted argument names (its
+    values are pinned to list_tools() in tests/test_unknown_params_write_tools.py).
 
     SAY WHAT IT CANNOT SEE, so nobody reads it as a guarantee. The scan is
-    `dir(core)` filtered to names ENDING IN `_TARGETS` that are `frozenset` in
-    BOTH modules, which is the shape all three duplicated sets happen to have
-    today — and only that shape. A fourth duplicated declaration slips past
-    silently if it is a plain `set`, a `tuple`, a `list`, or named anything
-    else (`*_COMMIT_TARGETS` matches; `TARGETS_*` and `*_ALLOWED` do not). It
-    is a TRIPWIRE over the current convention, not an exhaustive audit of
-    duplicated declarations: it catches the next set that follows the pattern
-    and cannot catch the one that does not. Keeping the convention is what
-    makes it work; widening the scan to every module-level container would
-    catch the imports and the behaviour sets too, which is a different test.
+    `dir(core)` filtered to names ENDING IN `_TARGETS` that are a `frozenset`
+    or a `dict` in BOTH modules, which is the shape all four duplicated
+    declarations happen to have today — and only that shape. A further
+    duplicated declaration slips past silently if it is a plain `set`, a
+    `tuple`, a `list`, or named anything else (`*_COMMIT_TARGETS` matches;
+    `TARGETS_*` and `*_ALLOWED` do not). It is a TRIPWIRE over the current
+    convention, not an exhaustive audit of duplicated declarations: it catches
+    the next declaration that follows the pattern and cannot catch the one
+    that does not. Keeping the convention is what makes it work; widening the
+    scan to every module-level container would catch the imports and the
+    behaviour sets too, which is a different test. (The fork's own
+    COMMIT_TARGETS dict is not in bridge_core.pending_writes, so the scan,
+    which needs the name in both, does not see it.)
     """
     from bridge_core import pending_writes as core
     from openai_bridge import pending_writes as oai
@@ -1393,13 +1400,14 @@ def test_the_three_duplicated_target_sets_are_each_pinned():
         name
         for name in dir(core)
         if name.endswith("_TARGETS")
-        and isinstance(getattr(core, name, None), frozenset)
-        and isinstance(getattr(oai, name, None), frozenset)
+        and isinstance(getattr(core, name, None), (frozenset, dict))
+        and isinstance(getattr(oai, name, None), (frozenset, dict))
     }
     assert duplicated == {
         "VERIFIED_BY_TARGETS",
         "PROVENANCE_PASSTHROUGH_TARGETS",
         "ORIGINAL_TIMESTAMP_TARGETS",
-    }, f"a duplicated target set has no parity test: {duplicated}"
+        "ARGUMENT_SCREEN_TARGETS",
+    }, f"a duplicated target declaration has no parity test: {duplicated}"
     for name in duplicated:
         assert getattr(core, name) == getattr(oai, name), name
