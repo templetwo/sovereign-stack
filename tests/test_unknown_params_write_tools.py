@@ -506,10 +506,13 @@ def drain(request, tmp_path, tmp_sovereign_root, monkeypatch):
     d.drain_one = lambda ring2_tool, args: d.commit(d.propose(ring2_tool, args))
 
     # HOME AND THE POST STAND-IN ARE UNDONE AT THIS FIXTURE'S TEARDOWN, not at the
-    # test's monkeypatch. conftest.no_live_audit_writes reads Path.home() at its own
-    # teardown, which runs after this fixture's and before monkeypatch's (autouse
-    # fixtures set monkeypatch up first). A HOME still redirected then would make
-    # that guard read the tmp tree and pass without looking at the live chains.
+    # test's monkeypatch. conftest.no_live_audit_writes read Path.home() at its own
+    # teardown when this was written (3b1b415), which runs after this fixture's and
+    # before monkeypatch's (autouse fixtures set monkeypatch up first), so a HOME
+    # still redirected then made that guard read the tmp tree. That guard now reads
+    # the home bound at conftest import (plan 1's final review, I-7); the scoping
+    # stays, because a redirect that outlives its fixture is still a trap for the
+    # next reader of Path.home().
     with (
         monkeypatch.context() as scoped,
         _sandbox(f"d7-drain-{request.param}") as (s, stack_root),

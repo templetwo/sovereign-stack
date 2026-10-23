@@ -137,9 +137,20 @@ def pytest_configure(config: pytest.Config) -> None:
 # chain while the suite was running.
 _LIVE_AUDIT_GLOB = ".sovereign/*/audit/audit.jsonl"
 
+# The home whose audit chains are live, read ONCE, when this conftest is
+# imported, before any test can move it: the same import-time binding
+# _LIVE_SOVEREIGN below has. It used to be Path.home() at setup and teardown,
+# and a test that redirects HOME or patches Path.home() through its own
+# monkeypatch has not been undone yet when this autouse guard's teardown runs
+# (autouse fixtures set up first and tear down last), so the guard measured the
+# fake home and passed without looking at the live chains (plan 1's final
+# review, finding I-7; 3b1b415 had moved one fixture's redirect out of the way,
+# and the guard stayed blind for every other test that redirects the home).
+_LIVE_AUDIT_HOME = Path(os.path.expanduser("~"))
+
 
 def _live_audit_sizes() -> dict[str, int]:
-    home = Path.home()
+    home = _LIVE_AUDIT_HOME
     if not (home / ".sovereign").is_dir():
         return {}
     sizes: dict[str, int] = {}
