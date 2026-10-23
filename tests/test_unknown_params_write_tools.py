@@ -574,7 +574,12 @@ class TestEveryCommitTargetHasARow:
         the screen would refuse (_ADDITIONAL_ALLOWED_PARAMS)."""
         from bridge_core.pending_writes import ARGUMENT_SCREEN_TARGETS
 
-        assert ARGUMENT_SCREEN_TARGETS[target] == tuple(_accepted(target))
+        assert ARGUMENT_SCREEN_TARGETS[target] == tuple(_accepted(target)), (
+            f"{target}'s published properties changed (plan 2's D1 adds source_instance "
+            "to thread_touch): update ARGUMENT_SCREEN_TARGETS in clients/bridge_core/"
+            "pending_writes.py and clients/openai_bridge/pending_writes.py, or every "
+            "drained commit carrying the new key is refused before the POST"
+        )
         assert not srv._ADDITIONAL_ALLOWED_PARAMS.get(target)
 
 
