@@ -559,11 +559,14 @@ def _counts_published(payload: dict) -> list[str]:
 
     Before design A3 these tests asked `payload.get("total") is None`, which
     passes for any payload once the key is gone. Published-nothing now means no
-    cross-source sum is present and every per-source value in every view, flat
-    or nested, is null. The summary's refusal (`{"ok": false, ...}`) carries no
-    view at all, so it publishes nothing.
+    cross-source sum is present (the four A3 removed, and the labelled
+    `by_source_sum` the plan's Files line named and the spec does not) and every
+    per-source value in every view, flat or nested, is null. The summary's
+    refusal (`{"ok": false, ...}`) carries no view at all, so it publishes
+    nothing.
     """
-    found = [k for k in ("total", "total_configured", "stale_24h", "stale_7d") if k in payload]
+    sums = ("total", "total_configured", "stale_24h", "stale_7d", "by_source_sum")
+    found = [k for k in sums if k in payload]
     for view in ("by_source", "stale_24h_by_source", "by_source_detail"):
         for source, value in (payload.get(view) or {}).items():
             if isinstance(value, dict):

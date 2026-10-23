@@ -2347,9 +2347,11 @@ function renderHqPanel(snapshot) {
 // ── NEEDS A LOOK strip (cockpit layout, 2026-10-10) ──────────────────────
 // Read-only. Every number is a snapshot field the console already carries;
 // nothing here acknowledges. A source that could not be measured says so —
-// never a zero that reads as "nothing waiting".
+// never a zero that reads as "nothing waiting". The thread count is the
+// open-thread backlog (one open_thread signal per open thread), so it is
+// labelled open threads (design A3).
 const ATT_SOURCES = [
-  ['thread', 'threads'], ['watchman', 'watchman'], ['honk', 'honk signals (ledger)'],
+  ['thread', 'open threads'], ['watchman', 'watchman'], ['honk', 'honk signals (ledger)'],
   ['proposal', 'proposals'], ['guardian', 'guardian'], ['halt', 'halts'], ['decision', 'decisions'],
 ];
 
