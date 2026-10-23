@@ -24,7 +24,10 @@ description string inside its input schema:
 Readings of the brief, stated so a reviewer can dispute each one by name:
 
   * "Every registered tool" is the PUBLISHED surface, ``list_tools()``. A
-    retired tool's own description is served to no one.
+    retired tool's own description is served to no one: the registry minus
+    the published set is exactly ``RETIRED_TOOLS`` (pinned by
+    test_tool_retirement.py's test_the_surface_is_52), and un-retiring a tool
+    puts its text back under this census (pinned here).
   * The legacy/retired exception covers both halves of the rule. Under the
     other reading the migration pointers that say "(retired 2026-09-06)"
     would have to lose the name a seat still carries in memory.
@@ -42,8 +45,9 @@ docstring, and the refusal ``handoff(supersedes=...)`` raises, which pointed a
 caller at the same retired tool the aperture did.
 
 AND THE REPO CLAUDE.md: its first ``**Version:**`` line names pyproject's
-version and the live published-tool count. It said 1.12.0 and 94 tools while
-pyproject said 1.21.0 and the server published 53, so both numbers are held.
+version, once and with no other version beside it, and the live published-tool
+count. It said 1.12.0 and 94 tools while pyproject said 1.21.0 and the server
+published 53, so both numbers are held.
 
 Every rule here ships with a demonstrated-fail control (law 10), and the
 coverage tests fail if the walk reads nothing.
@@ -187,6 +191,26 @@ def test_the_retired_names_are_real_and_off_the_menu():
     assert RETIRED.isdisjoint(published)
 
 
+def test_un_retiring_a_tool_puts_its_text_under_the_census(monkeypatch):
+    """Reading 1 as a test: the census reads list_tools(), the published surface.
+
+    _registered_tools() also holds the 48 retired schemas, and no surface serves
+    their text. Un-retiring is deleting one RETIRED_TOOLS entry, and the census
+    then reads the tool's text. Shown on handoff_archaeology, whose description
+    still says boot "consumed" the handoffs. A patched copy of the map, not
+    delitem, so the real dict keeps its order for every later test.
+    """
+    name = "handoff_archaeology"
+    assert name not in {tool.name for tool in _published_tools()}
+    unretired = {key: entry for key, entry in server.RETIRED_TOOLS.items() if key != name}
+    monkeypatch.setattr(server, "RETIRED_TOOLS", unretired)
+
+    read = [text for tool, _, text in _census() if tool == name]
+    assert read, f"un-retired, {name} is published, so the census must read its text"
+    flagged = [hit for text in read for hit in stale_sentences(text, frozenset(unretired))]
+    assert flagged, f"{name}'s text narrates consumption, so the census must flag it"
+
+
 # ── The scanner can fail (law 10) ───────────────────────────────────────────
 
 
@@ -301,6 +325,15 @@ def header_version(claude_md: str) -> str | None:
     return match.group(1) if match else None
 
 
+_VERSION_TOKEN = re.compile(r"(?<![\d.])\d+(?:\.\d+)+")
+
+
+def header_versions(claude_md: str) -> list[str]:
+    """Every version-shaped token (dotted numbers) on the header line, in order."""
+    line = _header_line(claude_md)
+    return _VERSION_TOKEN.findall(line) if line else []
+
+
 def header_published_count(claude_md: str) -> int | None:
     line = _header_line(claude_md)
     match = _HEADER_COUNT.search(line) if line else None
@@ -323,6 +356,17 @@ def test_the_repo_claude_md_header_names_the_pyproject_version():
         f"CLAUDE.md's first **Version:** line says {stated!r}; "
         f"pyproject.toml says {_pyproject_version()!r}"
     )
+
+
+def test_the_repo_claude_md_header_names_no_other_version():
+    """The header carries pyproject's version once and no other version.
+
+    The line once also said "1.21.0 was released 2026-08-28, and this tree
+    carries unreleased work since". A release bump that moved only the first
+    number would have left that prose naming the old version, unchecked. With
+    one token on the line the bump is one edit, and this refuses a leftover.
+    """
+    assert header_versions(_repo_claude_md()) == [_pyproject_version()]
 
 
 def test_the_repo_claude_md_header_states_the_live_published_tool_count():
@@ -353,3 +397,21 @@ def test_the_header_reader_can_fail(text, version, count):
     """A missing or reworded header reads as None, never as agreement."""
     assert header_version(text) == version
     assert header_published_count(text) == count
+
+
+@pytest.mark.parametrize(
+    ("text", "versions"),
+    [
+        ("**Version:** 1.22.0 · 53 published tools\n", ["1.22.0"]),
+        (
+            "**Version:** 1.22.0 (1.21.0 was released 2026-08-28) · 53 published tools\n",
+            ["1.22.0", "1.21.0"],
+        ),
+        ("**Version:** v1.2.3 (since 1.2.3.) · 7 published tools\n", ["1.2.3", "1.2.3"]),
+        ("**Version:** 1.2.3 (Python 3.10) · 7 published tools\n", ["1.2.3", "3.10"]),
+        ("# Title\n\nno header here\n", []),
+    ],
+)
+def test_header_versions_sees_a_leftover_version(text, versions):
+    """A second version on the line is seen, a repeat included; a date is not one."""
+    assert header_versions(text) == versions
