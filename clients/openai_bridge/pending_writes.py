@@ -471,12 +471,11 @@ ORIGINAL_TIMESTAMP_TARGETS: frozenset[str] = frozenset(
 # declare, each with its LIVE inputSchema property names in declaration order:
 # this drain refuses such a commit itself, before the POST (design D7, Review
 # Focus 5). Mirrors bridge_core.pending_writes.ARGUMENT_SCREEN_TARGETS, whose
-# comment gives the reason; the screen itself is imported from there, and the
-# two literals are held equal, and to the Stack's list_tools(), by test.
-ARGUMENT_SCREEN_TARGETS: dict[str, tuple[str, ...]] = {
-    "thread_touch": ("thread_id", "note", "instance_id"),
-    "self_model": ("action", "observation", "category"),
-}
+# comment gives the reason and why it is empty today (the Stack refuses on every
+# commit target since plan 1's final fix wave); the screen itself is imported
+# from there, and the two literals are held equal, and to the Stack's
+# list_tools(), by test.
+ARGUMENT_SCREEN_TARGETS: dict[str, tuple[str, ...]] = {}
 
 
 def build_commit_arguments(proposal: Proposal) -> dict[str, Any]:

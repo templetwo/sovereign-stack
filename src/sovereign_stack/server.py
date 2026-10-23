@@ -3224,8 +3224,38 @@ _ADDITIONAL_ALLOWED_PARAMS: dict[str, frozenset[str]] = {
 # THE INTENTS WHOSE TOOLS REFUSE AN UNKNOWN ARGUMENT (design D7, thread
 # 0804046c). A write, govern or handoff tool changes state, so an argument it
 # drops is a change made without what the caller asked for. Every other
-# published tool runs without the unknown keys and names them in its envelope.
+# published tool runs without the unknown keys and names them in its envelope,
+# except the tools named in _REFUSE_UNKNOWN_ARGUMENT_TOOLS below.
 _REFUSE_UNKNOWN_ARGUMENT_INTENTS = frozenset({"write", "govern", "handoff"})
+
+# AND FOUR TOOLS BY NAME, WHICH CHANGE STATE UNDER AN INTENT THAT DOES NOT SAY SO
+# (plan 1's final review, finding I-2; option (b), taken by the final fix wave
+# under its dispatch, not a ruling). thread_touch (communicate) appends
+# chronicle/thread_touches.jsonl, a T0.1 funnel; self_model (orient) writes
+# ~/.sovereign/self_model.json on its update; nape_ack (communicate) appends
+# nape/acks.jsonl, a T0.1 store; spiral_reflect (introspect) advances and saves
+# the spiral state. Keyed on intent alone, a direct call to any of them ran the
+# write with the key dropped, where spec G4 reads "unknown arguments to a write
+# tool are refused, not dropped". Named here rather than reclassified, so
+# TOOL_INTENTS still says what each tool is for and this set says which refuse.
+# A self_model READ with a stray key is refused too: the set is by tool, not by
+# action. Seats sent thread_touch an undeclared source_instance 20 times between
+# 2026-09-03 and 09-12 (Task 8's traffic census, none since); those calls are
+# now refused with "did you mean 'instance_id'?" until plan 2's D1 declares the
+# key there.
+_REFUSE_UNKNOWN_ARGUMENT_TOOLS = frozenset(
+    {"nape_ack", "self_model", "spiral_reflect", "thread_touch"}
+)
+
+
+def _refuses_unknown_arguments(name: str) -> bool:
+    """True when ``name`` refuses an argument it does not declare, rather than
+    running without it: its intent is write, govern or handoff, or it is one of
+    the state-changing tools named in _REFUSE_UNKNOWN_ARGUMENT_TOOLS."""
+    return (
+        _intent_for(name) in _REFUSE_UNKNOWN_ARGUMENT_INTENTS
+        or name in _REFUSE_UNKNOWN_ARGUMENT_TOOLS
+    )
 
 
 def _unknown_argument_hint(
@@ -3285,7 +3315,8 @@ async def _reject_unknown_params(tool_name: str, arguments: dict) -> None:
     """Raise ValueError("unknown argument(s): <names>; accepted: <names>") for
     any key in ``arguments`` that ``tool_name`` does not declare.
 
-    The refusal for write, govern and handoff tools (_screen_unknown_arguments).
+    The refusal for write, govern and handoff tools and the state-changing
+    tools named in _REFUSE_UNKNOWN_ARGUMENT_TOOLS (_screen_unknown_arguments).
     Raised, not returned: the SDK turns a raise into isError=True with exactly
     this text and the bridge into {"ok": false, "error": <this text>}, while
     returned text is wrapped as a SUCCESS (the P1 rule, mesh-20260719).
@@ -3304,13 +3335,14 @@ async def _reject_unknown_params(tool_name: str, arguments: dict) -> None:
 async def _screen_unknown_arguments(name: str, arguments: dict) -> tuple[dict, str | None]:
     """Answer the arguments ``name`` does not declare, before anything else runs.
 
-    A write, govern or handoff tool is refused (_reject_unknown_params), so its
+    A write, govern or handoff tool, or one named in
+    _REFUSE_UNKNOWN_ARGUMENT_TOOLS, is refused (_reject_unknown_params), so its
     body never runs and nothing is written. Any other published tool goes on
     with the unknown keys removed, so "ignored" is literally true, and the
     returned warning goes into its envelope. Returns ``(arguments to dispatch,
     warning or None)``.
     """
-    if _intent_for(name) in _REFUSE_UNKNOWN_ARGUMENT_INTENTS:
+    if _refuses_unknown_arguments(name):
         await _reject_unknown_params(name, arguments)
         return arguments, None
     found = await _unknown_arguments(name, arguments)
@@ -3532,7 +3564,8 @@ async def _dispatch_tool(name: str, arguments: dict):
     # UNKNOWN ARGUMENTS ARE ANSWERED HERE, BEFORE ANY STATE MOVES (design D7,
     # thread 0804046c). Every branch below reads its arguments with .get(), so
     # an undeclared key used to vanish and the call answered as if it had never
-    # been sent. A write, govern or handoff tool is refused before the spiral
+    # been sent. A write, govern or handoff tool, or a state-changing tool
+    # named in _REFUSE_UNKNOWN_ARGUMENT_TOOLS, is refused before the spiral
     # moves or its body runs; any other tool runs without the key and names it
     # in its envelope. Below the retirement gate, so a retired name keeps its
     # own answer.

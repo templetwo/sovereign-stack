@@ -487,31 +487,31 @@ ORIGINAL_TIMESTAMP_TARGETS: frozenset[str] = frozenset(
 # Commit targets on which the Stack only WARNS about an argument it does not
 # declare, each with that target's LIVE inputSchema property names, in
 # declaration order (design D7, thread 0804046c; Review Focus 5 of the
-# next-phase plan 1).
+# next-phase plan 1). EMPTY TODAY, AND THAT IS THE SCREEN DOING ITS JOB.
 #
 # D7 refuses an unknown argument on a write, govern or handoff tool and lets
-# every other tool run without it, naming it in the envelope. thread_touch
-# (intent communicate) and self_model (orient) are on that second path, so a
-# drained proposal carrying a key the target does not declare would COMMIT with
-# the key dropped: the write lands without part of what the proposal asked for,
-# and the only trace is a warning inside the stored stack response. The drain
-# screens these targets itself, BEFORE the POST, and records commit_failed, so
-# nothing is written and a retry has nothing to write twice. A target the Stack
-# refuses itself is deliberately absent: its refusal is the record there, with
-# hints this screen cannot give. A direct call to either tool does not pass
-# through a drain and still runs on the warn path.
+# every other tool run without it, naming it in the envelope. A commit target
+# on that second path would COMMIT a drained proposal with the key dropped: the
+# write lands without part of what the proposal asked for, and the only trace
+# is a warning inside the stored stack response. The drain screens such a
+# target itself, BEFORE the POST, and records commit_failed, so nothing is
+# written and a retry has nothing to write twice. A target the Stack refuses
+# itself is deliberately absent: its refusal is the record there, with hints
+# this screen cannot give.
+#
+# thread_touch (intent communicate) and self_model (orient) were the two such
+# targets until plan 1's final fix wave, which made the Stack refuse an unknown
+# argument on both by name (server._REFUSE_UNKNOWN_ARGUMENT_TOOLS; final review
+# I-2, option (b)), so both left this screen, as the test that holds it to the
+# Stack's warn-path targets requires. The mechanism stays for the next one.
 #
 # A declaration of what the remote schema accepts, so duplicated per substrate
 # (openai_bridge/pending_writes.py) and held equal to the Stack's list_tools()
 # and to that copy by tests/test_unknown_params_write_tools.py, and to its twin
 # by the duplicated-declaration meta-pin in
-# tests/test_ring2_post_v121_regressions.py. When the Stack declares a new
-# argument on either target (design D1 adds source_instance to thread_touch),
-# those tests fail until both copies say so.
-ARGUMENT_SCREEN_TARGETS: dict[str, tuple[str, ...]] = {
-    "thread_touch": ("thread_id", "note", "instance_id"),
-    "self_model": ("action", "observation", "category"),
-}
+# tests/test_ring2_post_v121_regressions.py. A commit target the Stack starts
+# only warning on fails those tests until both copies name it.
+ARGUMENT_SCREEN_TARGETS: dict[str, tuple[str, ...]] = {}
 
 
 def undeclared_argument_refusal(
