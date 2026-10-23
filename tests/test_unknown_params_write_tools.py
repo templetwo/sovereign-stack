@@ -377,9 +377,12 @@ def _bridge_core_drain(d: _Drain, tmp_path: Path, monkeypatch):
 
 def _fork_drain(d: _Drain, request):
     """The OpenAI fork's drain (clients/openai_bridge/pending_writes.py), which keeps
-    its own commit path and imports nothing from bridge_core's. Its queue and audit
-    chain go to tmp dirs through test_bridge_drain_provenance's ``oai`` fixture,
-    which rebinds every store binding that module writes through."""
+    its own commit and POST path (build_commit_arguments, commit_pending_write, its
+    httpx.post). Its precondition check imports the referential, escalation and
+    compass guards from bridge_core.target_risk, and that referential check is why
+    the drain fixture seeds the thread a thread_touch proposal names. Its queue and
+    audit chain go to tmp dirs through test_bridge_drain_provenance's ``oai``
+    fixture, which rebinds every store binding that module writes through."""
     pw = request.getfixturevalue("oai")
 
     def drain_one(ring2_tool: str, args: dict):
