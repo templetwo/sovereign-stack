@@ -22,6 +22,10 @@ Design invariants held here:
     widest-fetch-then-slice determinism was verified empirically against the
     live chronicle before this landed (recall(50)[:10]==recall(10),
     get_open_threads(50)[:5]==(5) and [:3]==(3), list_reflections(50)[:3]==(3)).
+    ONE DELIBERATE EXCEPTION (design B2): the persistent markers are ranked at
+    the gather, superseded and retired ones dropped and counted, so the full
+    door and the foyer render from one ranked list; the slice to the rows a
+    door shows is still the renderer's.
 
   * NON-BREAKING. The rendered text of each door preserves every existing
     section byte-for-byte; the only additions are the delimited ``━━━ AS OF ━━━``
@@ -320,7 +324,13 @@ class ArrivalState:
     resonance_error: str | None = None
     open_threads: list[dict] | None = None
     uncertainties: list[dict] | None = None
+    # The persistent markers (design B2): sentinel_pool holds the RANKED LIVE
+    # markers (witness.rank_markers over the gathered pool, superseded and
+    # retired ones dropped); the two fields after it say how many the ranking
+    # held back and whether the pool filled its cap, so a door can state both.
     sentinel_pool: list[dict] | None = None
+    sentinel_held_back: int = 0
+    sentinel_pool_truncated: bool = False
     recent_activity: list[dict] | None = None
     self_model: dict | None = None
     ground_entries: list[dict] | None = None
@@ -358,6 +368,16 @@ def _pending_for_reader(handoff_engine, reader: str, thread: str | None, limit: 
             handoff_engine.unconsumed(thread=thread, limit=limit),
             handoff_engine.unconsumed_count(thread=thread),
         )
+
+
+# The persistent-marker pool's read cap (design B2). The pool is every
+# ground-truth entry at or above 0.9 (582 on 2026-10-23), ranked after the read,
+# so the cap is headroom, not a selection. When a read fills it, what got in is
+# the read's own newest-first slice (recall_insights sorts by the raw stamp
+# string), and the full door says the pool was truncated
+# (witness._MARKER_POOL_TRUNCATED_LINE names this number). Read at call time, so
+# a test can narrow it.
+_MARKER_POOL = 1000
 
 
 def build_arrival_state(
@@ -403,6 +423,8 @@ def build_arrival_state(
     open_threads: list[dict] | None = None
     uncertainties: list[dict] | None = None
     sentinel_pool: list[dict] | None = None
+    sentinel_held_back = 0
+    sentinel_pool_truncated = False
     recent_activity: list[dict] | None = None
     self_model: dict | None = None
     ground_entries: list[dict] | None = None
@@ -434,6 +456,24 @@ def build_arrival_state(
             lineage_degraded = True
             lineage_error = str(exc)
             _degrade("lineage layer", exc)
+
+    def _gather_markers() -> None:
+        # THE MARKER POOL (design B2): every ground-truth entry at or above 0.9,
+        # read with headroom and WITHOUT exclude_superseded, so the superseded
+        # and retired ones arrive annotated and are counted as held back rather
+        # than vanishing from the count. Ranked once, here; the full door and
+        # the foyer both render from the ranked list.
+        nonlocal sentinel_pool, sentinel_held_back, sentinel_pool_truncated
+        try:
+            pool = experiential.recall_insights(
+                min_intensity=0.9, layer_filter="ground_truth", limit=_MARKER_POOL
+            )
+            sentinel_pool = witness.rank_markers(pool)
+            sentinel_held_back = sum(1 for e in pool if "_superseded_by" in e)
+            sentinel_pool_truncated = len(pool) == _MARKER_POOL
+            receipts.append(SectionReceipt("sentinels", len(pool), _newest(pool), False, None))
+        except Exception as exc:
+            _degrade("sentinels", exc)
 
     def _gather_self_model() -> None:
         nonlocal self_model
@@ -548,13 +588,7 @@ def build_arrival_state(
             uncertainties = witness.collect_uncertainties(sovereign_root)
         except Exception as exc:
             _degrade("uncertainties", exc)
-        try:
-            sentinel_pool = experiential.recall_insights(min_intensity=0.9, limit=10)
-            receipts.append(
-                SectionReceipt("sentinels", len(sentinel_pool), _newest(sentinel_pool), False, None)
-            )
-        except Exception as exc:
-            _degrade("sentinels", exc)
+        _gather_markers()
         try:
             recent_activity = experiential.recall_insights(since_last_reflection=True, limit=50)
             receipts.append(
@@ -594,13 +628,7 @@ def build_arrival_state(
             )
         except Exception as exc:
             _degrade("handoffs", exc)
-        try:
-            sentinel_pool = experiential.recall_insights(min_intensity=0.9, limit=10)
-            receipts.append(
-                SectionReceipt("sentinels", len(sentinel_pool), _newest(sentinel_pool), False, None)
-            )
-        except Exception as exc:
-            _degrade("sentinels", exc)
+        _gather_markers()
         try:
             recent_activity = experiential.recall_insights(since_last_reflection=True, limit=50)
             receipts.append(
@@ -704,6 +732,8 @@ def build_arrival_state(
         open_threads=open_threads,
         uncertainties=uncertainties,
         sentinel_pool=sentinel_pool,
+        sentinel_held_back=sentinel_held_back,
+        sentinel_pool_truncated=sentinel_pool_truncated,
         recent_activity=recent_activity,
         self_model=self_model,
         ground_entries=ground_entries,
@@ -892,7 +922,7 @@ def _door_shown(state: ArrivalState, thread_limit: int) -> dict:
             seen.add((str(e.get("timestamp") or ""), str(e.get("domain") or "")))
 
     add((state.recent_activity or [])[:_ACTIVITY_ROWS])
-    add([e for e in (state.sentinel_pool or []) if "_superseded_by" not in e][:_MARKER_ROWS])
+    add((state.sentinel_pool or [])[:_MARKER_ROWS])  # already ranked and live
     if state.domain_tags and state.resonance_error is None:
         add((state.resonance or {}).get("related_insights", []))
     if state.ground_entries:
@@ -1081,11 +1111,16 @@ def render_full(
         render_uncertainties(state.uncertainties or [], max_text_len=None if full_content else 160)
     )
 
-    # 5. Sentinel insights.
-    if state.sentinel_pool:
+    # 5. Persistent markers (design B2). Rendered when anything is live OR held
+    #    back: an all-superseded pool still states 0 of 0 live and its count.
+    if state.sentinel_pool or state.sentinel_held_back:
         lines.extend(
             format_sentinels(
-                state.sentinel_pool, limit=_MARKER_ROWS, full_content=(_ins_cap is None)
+                state.sentinel_pool or [],
+                limit=_MARKER_ROWS,
+                full_content=(_ins_cap is None),
+                held_back=state.sentinel_held_back,
+                truncated=state.sentinel_pool_truncated,
             )
         )
 
@@ -1200,9 +1235,8 @@ def render_foyer(state: ArrivalState) -> str:
     threads_all = state.open_threads or []
     threads = [t for t in threads_all if len((t.get("question") or "").strip()) >= 12]
     pending = state.handoffs or []
-    _sentinel_pool = state.sentinel_pool or []
-    sentinels = [s for s in _sentinel_pool if "_superseded_by" not in s][:1]
-    _pin_was_superseded = bool(_sentinel_pool) and bool(_sentinel_pool[0].get("_superseded_by"))
+    # The ranked live markers (design B2): the pin is the top-ranked one.
+    sentinels = (state.sentinel_pool or [])[:1]
 
     lineage_count = state.lineage_letter_count
 
@@ -1222,11 +1256,15 @@ def render_foyer(state: ArrivalState) -> str:
     if sentinels:
         marker_full = " ".join((sentinels[0].get("content", "") or "").split())
         lines.append(f"  Persistent marker (pinned standing instruction): {marker_full}")
-        if _pin_was_superseded:
-            lines.append(
-                "  (the newest marker was superseded — its successor is pinned; "
-                "recall_insights(exclude_superseded=false) shows the chain)"
-            )
+    # Outside the pin's branch on purpose: when every marker was superseded
+    # nothing is pinned, and the count is the one thing left to say.
+    if state.sentinel_held_back:
+        held = state.sentinel_held_back
+        plural = "s" if held != 1 else ""
+        lines.append(
+            f"  ({held} superseded marker{plural} held back; "
+            "recall_insights(exclude_superseded=false) shows the chain)"
+        )
     if state.policy_boot_line:
         lines.append(f"  {state.policy_boot_line}")
     if lineage_count is None:

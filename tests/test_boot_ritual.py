@@ -314,14 +314,23 @@ class TestProtectedDrawerBootLineArriveLineage:
 
 
 def _old_inline_sentinel_lines(sentinels: list[dict], full_content: bool = False) -> list[str]:
-    """Verbatim replication of the pre-v1.7.0 server.py inline rendering of
-    the PERSISTENT MARKERS section (server.py:2755-2764 at v1.6.2). The
-    golden that witness.format_sentinels must reproduce byte-for-byte on
-    v1.6.2-shaped data (no annotations, no receipts)."""
+    """Replication of the pre-v1.7.0 server.py inline rendering of the
+    PERSISTENT MARKERS section (server.py:2755-2764 at v1.6.2). The golden
+    that witness.format_sentinels must reproduce byte-for-byte on
+    v1.6.2-shaped data (no annotations, no receipts, at most five entries).
+
+    ONE DELIBERATE CHANGE: the header line. Since design B2 (next-phase plan 2,
+    section 8 decision 1) it states the marker rule and the live count instead
+    of "(intensity ≥ 0.9 — these do not fade)". Every marker line is still the
+    v1.6.2 bytes."""
     _ins_cap = None if full_content else 120
     lines: list[str] = []
     if sentinels:
-        lines.append("━━━ PERSISTENT MARKERS (intensity ≥ 0.9 — these do not fade) ━━━")
+        lines.append(
+            "━━━ PERSISTENT MARKERS (ground truth, not superseded, intensity ≥ 0.9; "
+            "ranked verified-or-lived first, then stored date, then intensity; "
+            f"showing {min(5, len(sentinels))} of {len(sentinels)} live) ━━━"
+        )
         for s in sentinels:
             ts = s.get("timestamp", "")[:10]
             dom = s.get("domain", "?")

@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .ground import _truncate, load_ground_entries
-from .provenance import receipt_stamp_counts
+from .provenance import LIVED_VANTAGES, iso_parseable, receipt_stamp_counts
 
 # ── Time ──
 
@@ -1023,6 +1023,96 @@ def render_lineage(data: dict | None, *, full_content: bool = False) -> list[str
 
 
 # ── Sentinel surfacing (persistent markers) ──
+#
+# THE RULE THE BOOT STATES (design B2, section 8 decision 1 of the 2026-10-21
+# next-phase design; enacted by next-phase plan 2): the markers are
+# ground-truth entries not superseded, at or above 0.9, ranked verified-or-lived
+# first, then by their stored date, then by intensity, and the header says so.
+# Until this, the five shown were the five newest writes at >= 0.9 in ANY
+# layer. The pool is gathered in arrival_state (one read, both doors that show
+# markers); the rank and the render live here.
+
+
+def is_verified_or_lived(entry: dict) -> bool:
+    """
+    True when the entry carries a receipt the server stamped ``verified`` at
+    write, or a receipt-exempt lived vantage (provenance.LIVED_VANTAGES:
+    human_observation, human_attestation, witnessed_account), since Anthony's
+    lived rulings carry no file. An attested receipt (human, claim, cmd, url),
+    a mismatch, a cite or a seat-tag vantage is not verification.
+
+    The receipts are counted with receipt_stamp_counts, the same count the
+    ``[N verified, M attested]`` tag renders, so the rank and the tag cannot
+    disagree about what "verified" means. A malformed field (a vantage that is
+    not a string, receipts that are not a list) counts as neither; it never
+    raises.
+    """
+    vantage = entry.get("vantage")
+    if isinstance(vantage, str) and vantage in LIVED_VANTAGES:
+        return True
+    receipts = entry.get("verified_by")
+    if not isinstance(receipts, list):
+        return False
+    return receipt_stamp_counts(receipts)["verified"] > 0
+
+
+def _stored_instant(entry: dict) -> float | None:
+    """
+    The entry's stored ``timestamp`` as POSIX seconds, or None when it is
+    missing or does not parse. The chronicle stores stamps in several shapes
+    (the marker pool on 2026-10-23: 396 ``+00:00``, 125 other offsets, 61
+    naive), so the raw string is never compared: a trailing ``Z`` is swapped
+    for the parser (provenance.iso_parseable, the 3.10-safe spelling) and a
+    naive stamp is read as UTC.
+    """
+    raw = entry.get("timestamp")
+    if not isinstance(raw, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(iso_parseable(raw.strip()))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.timestamp()
+
+
+def marker_rank_key(entry: dict) -> tuple:
+    """
+    The persistent-marker sort key: ``(not is_verified_or_lived(entry),
+    -stamp, -intensity)``, so one ascending sort gives verified-or-lived
+    first, then the newest stored date, then the highest intensity.
+
+    "Stored date" is the entry's own ``timestamp``, which record_insight's
+    ``original_timestamp`` backdates in place (Anthony's 2026-06-19 ruling),
+    so a ruling drained with its true September date ranks in September. A
+    missing or unparseable stamp sorts after every dated entry of its class;
+    a missing intensity counts as 0 (a withheld protected record carries
+    none).
+    """
+    instant = _stored_instant(entry)
+    newest_first = -instant if instant is not None else float("inf")
+    return (not is_verified_or_lived(entry), newest_first, -float(entry.get("intensity", 0)))
+
+
+def rank_markers(entries: list[dict]) -> list[dict]:
+    """
+    The live markers of a pool, ranked by marker_rank_key. Entries annotated
+    ``_superseded_by`` are dropped by the key's PRESENCE: a retirement
+    annotates it as None, and a truthiness test would let a retired marker
+    back in. The caller counts what was dropped (format_sentinels'
+    ``held_back``).
+    """
+    return sorted((e for e in entries if "_superseded_by" not in e), key=marker_rank_key)
+
+
+# The line format_sentinels adds when the pool filled its cap. The number is
+# arrival_state._MARKER_POOL, the production cap (tests/test_boot_markers_rule.py
+# holds the two equal).
+_MARKER_POOL_TRUNCATED_LINE = (
+    "  (pool truncated at 1000; "
+    'recall_insights(layer_filter="ground_truth", min_intensity=0.9) shows all)'
+)
 
 
 def _receipt_count_tag(entry: dict) -> str:
@@ -1039,28 +1129,44 @@ def _receipt_count_tag(entry: dict) -> str:
     return f" [{counts['verified']} verified, {counts['attested']} attested]"
 
 
-def format_sentinels(entries: list[dict], limit: int = 5, full_content: bool = False) -> list[str]:
+def format_sentinels(
+    entries: list[dict],
+    limit: int = 5,
+    full_content: bool = False,
+    *,
+    held_back: int = 0,
+    truncated: bool = False,
+) -> list[str]:
     """
-    Render the boot PERSISTENT MARKERS section from sentinel entries
-    (recall_insights output, which carries the data-gated supersession
-    annotation).
+    Render the boot PERSISTENT MARKERS section.
 
-    Live sentinels only: entries annotated `_superseded_by` are held back
-    — never silently buried — and counted in an explicit holdback line
-    that names the call revealing the chain. Receipted sentinels render
-    `[N verified, M attested]` stamp counts.
+    The boot passes the ranked live markers (rank_markers over the pool
+    arrival_state gathers), ``held_back`` (how many of that pool were
+    superseded or retired) and ``truncated`` (whether the pool filled its
+    cap). The header states the rule and the coverage, "showing N of M live";
+    at most ``limit`` live markers are shown.
 
-    Byte-identical to the pre-v1.7.0 inline rendering when no entry is
-    annotated and none carries receipts. Pass entries fetched with
-    headroom (e.g. limit=10) so held-back markers don't starve the
-    surface; at most ``limit`` live sentinels are shown.
+    Live sentinels only: an entry annotated `_superseded_by` that reaches
+    this function anyway is held back here too, never silently buried, and
+    added to ``held_back``, so the one holdback line names every marker held
+    back and the call that reveals the chain. Receipted sentinels render
+    `[N verified, M attested]` stamp counts. The section renders whenever
+    anything is live OR held back: an all-superseded pool renders at 0 of 0
+    live, so the absence is stated rather than filled from anything else.
+
+    A marker line with no receipts keeps the pre-v1.7.0 inline bytes; the
+    header changed with the rule (design B2).
     """
-    if not entries:
-        return []
     live = [e for e in entries if "_superseded_by" not in e]
-    held_back = len(entries) - len(live)
+    held_back += len(entries) - len(live)
+    if not live and not held_back:
+        return []
     cap = None if full_content else 120
-    lines = ["━━━ PERSISTENT MARKERS (intensity ≥ 0.9 — these do not fade) ━━━"]
+    lines = [
+        "━━━ PERSISTENT MARKERS (ground truth, not superseded, intensity ≥ 0.9; "
+        "ranked verified-or-lived first, then stored date, then intensity; "
+        f"showing {min(limit, len(live))} of {len(live)} live) ━━━"
+    ]
     for s in live[:limit]:
         ts = s.get("timestamp", "")[:10]
         dom = s.get("domain", "?")
@@ -1073,6 +1179,8 @@ def format_sentinels(entries: list[dict], limit: int = 5, full_content: bool = F
             f"  ({held_back} superseded marker{plural} held back — successors shown; "
             "recall_insights(exclude_superseded=false) shows the chain)"
         )
+    if truncated:
+        lines.append(_MARKER_POOL_TRUNCATED_LINE)
     lines.append("")
     return lines
 
