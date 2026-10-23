@@ -85,7 +85,7 @@ class TestF1TheMarkerCarriesCumulativeEvidence:
         assert field["error"], "a truncated ledger read as clean"
         assert field["error"].startswith("ledger_truncated")
         assert field["ingestion"] == "error"
-        assert field["total"] is None
+        assert field["by_source"] is None
 
     def test_rewriting_history_under_a_fresh_marker_is_caught(self, tmp_sovereign_root):
         """Same byte count, different bytes. The prefix hash is what sees it;
@@ -101,7 +101,7 @@ class TestF1TheMarkerCarriesCumulativeEvidence:
         path.write_bytes(rewritten)
         field = sl.heartbeat_field(root)
         assert field["error"].startswith("ledger_rewritten")
-        assert field["total"] is None
+        assert field["by_source"] is None
 
     def test_appending_an_ack_after_a_scan_is_not_loss(self, tmp_sovereign_root):
         """POSITIVE CONTROL (law #3). The ledger is append-only and a watch
@@ -116,7 +116,7 @@ class TestF1TheMarkerCarriesCumulativeEvidence:
         sl.ack_signal(sid, actor="seat:watch", state="acted", reason="handled", root=root)
         field = sl.heartbeat_field(root)
         assert field["error"] is None
-        assert field["total"] == 0
+        assert set(field["by_source"].values()) == {0}
 
     def test_a_stale_marker_is_not_healthy(self, tmp_sovereign_root):
         """A legitimate, fully valid marker dated 2020 returned ingestion:"ok"
@@ -132,7 +132,7 @@ class TestF1TheMarkerCarriesCumulativeEvidence:
         field = sl.heartbeat_field(root)
         assert field["ingestion"] == "stale"
         assert field["error"].startswith("scan_stale")
-        assert field["total"] is None
+        assert field["by_source"] is None
 
     def test_empty_marker_maps_are_not_a_completed_scan(self, tmp_sovereign_root):
         """`_validate_marker` accepted `counts:{}` / `source_status:{}` on
@@ -160,7 +160,7 @@ class TestF1TheMarkerCarriesCumulativeEvidence:
         )
         field = sl.heartbeat_field(root)
         assert field["ingestion"] == "marker_error"
-        assert field["total"] is None
+        assert field["by_source"] is None
 
     def test_a_marker_missing_one_source_is_refused(self, tmp_sovereign_root):
         root = tmp_sovereign_root
@@ -197,13 +197,13 @@ class TestF2NoZeroOnFailedMeasurement:
             assert marker["source_status"]["thread"] != "ok", "the read failure was dropped"
             assert marker["source_status"]["thread"].startswith("unreadable")
             field = sl.heartbeat_field(root)
-            assert field["total"] is None
+            assert field["stale_24h_by_source"]["thread"] is None
             assert field["error"]
             assert field["by_source"]["thread"] is None
         finally:
             shard.chmod(stat.S_IRUSR | stat.S_IWUSR)
 
-    def test_corrupt_rows_never_report_a_zero_total(self, tmp_sovereign_root):
+    def test_corrupt_rows_never_report_a_zero_count(self, tmp_sovereign_root):
         """ "A ledger containing one list-shaped source returns
         error:'corrupt_rows:1 ...', total:0, directly violating never report
         zero on error." — the review, quoting its own probe."""
@@ -226,7 +226,7 @@ class TestF2NoZeroOnFailedMeasurement:
         field = sl.heartbeat_field(root)
         assert field["corrupt_rows"] == 1
         assert field["error"]
-        assert field["total"] is None
+        assert set(field["by_source"].values()) == {None}
         assert field["ingestion"] == "error"
 
     def test_the_tool_result_keeps_the_heartbeat_nulls(self, tmp_sovereign_root):
@@ -240,7 +240,8 @@ class TestF2NoZeroOnFailedMeasurement:
         assert marker["source_status"]["guardian"] == "unavailable", "premise"
         out = json.loads(sl.handle_signal_tool("signals_summary", {}, root=root))
         assert out["by_source"]["guardian"]["open"] is None, "an unmeasured source rendered as 0"
-        assert out["total"] is None
+        assert out["by_source"]["guardian"]["stale_24h"] is None
+        assert out["by_source"]["guardian"]["stale_7d"] is None
         assert out["error"]
 
     def test_a_malformed_honk_source_is_reported_not_counted(self, tmp_sovereign_root):
@@ -252,7 +253,7 @@ class TestF2NoZeroOnFailedMeasurement:
         field = sl.heartbeat_field(root)
         assert field["source_status"]["honk"].startswith("degraded")
         assert field["by_source"]["honk"] is None
-        assert field["total"] is None
+        assert field["stale_24h_by_source"]["honk"] is None
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -399,7 +400,7 @@ class TestF4TheWatchIsConnected:
         assert not sl.ledger_path(root).exists(), "premise: nothing has scanned yet"
         out = json.loads(sl.handle_signal_tool("signals_summary", {}, root=root))
         assert out["ok"] is True
-        assert out["total"] == 1, "the read did not ingest"
+        assert out["by_source"]["halt"]["open"] == 1, "the read did not ingest"
         assert sl.signal_id_for("halt", "fresh.md") in sl.load_latest(root)
 
     def test_a_second_read_does_not_rescan(self, tmp_sovereign_root):
@@ -432,7 +433,7 @@ class TestF4TheWatchIsConnected:
         field = sl.heartbeat_field(root, scan=True)
         assert field["ingestion"] == "error"
         assert field["error"].startswith("scan_failed:RuntimeError")
-        assert field["total"] is None
+        assert field["by_source"] is None
 
     def test_signal_ack_is_a_write_not_governance(self):
         """HQ's ruling, 2026-09-06. Anthony's governance list is laws,
@@ -703,8 +704,10 @@ class TestF8TheNativeHeartbeatCarriesUnackedSignals:
         payload = json.loads(result[0].text)
         assert "unacked_signals" in payload
         field = payload["unacked_signals"]
-        for key in ("error", "ingestion", "total", "by_source", "source_status"):
+        for key in ("error", "ingestion", "source_status", "by_source", "stale_24h_by_source"):
             assert key in field, f"heartbeat's unacked_signals is missing {key}"
+        # Design A3: counts by source, never a total, and the field says why.
+        assert "total" not in field and field["note"]
 
     def test_it_is_the_same_function_the_dashboard_uses(self):
         from sovereign_stack import dashboard_web

@@ -1531,6 +1531,23 @@ def summarize(root: Path | None = None, *, now: datetime | None = None) -> dict:
     }
 
 
+# ── BY SOURCE, NEVER A TOTAL (design A3, 2026-10-21) ────────────────────────
+#
+# The field used to lead with `total`. The design's status line: on the night
+# of 2026-10-20/21 it was 322 open signals, 196 of them open threads by
+# construction, and hq-pulse printed the same number on 87 of 88 runs in the
+# dark window. A sum dominated by a backlog that moves only when a thread is
+# resolved cannot warn about anything else. So the published field carries no
+# cross-source sum at all. Not `total`, and not the sums that rebuild it under
+# another name: `total_configured` equals `total` whenever every source is
+# configured, and the top-level stale windows are mostly the same backlog.
+# Every count is per source, and this note rides in every shape of the field,
+# so a reader who goes looking for the total finds the reason it is not there.
+# `summarize()` still folds a total; it is the internal fold, and nothing
+# publishes it.
+BY_SOURCE_NOTE = "a total would be mostly the open-thread backlog by construction; read by source"
+
+
 def _blind_field(
     error: str,
     ingestion: str,
@@ -1543,7 +1560,7 @@ def _blind_field(
     They are different facts and the tool surface has to answer them
     differently: a ledger that cannot be read at all is a refusal, while a
     ledger that was read with one source unavailable still has rows a watch
-    seat must be able to list and ack — it just has no honest TOTAL. Collapsing
+    seat must be able to list and ack — it just cannot count that source. Collapsing
     the two into one boolean is how "the guardian probe is down" would come to
     mean "you may not see your honks".
     """
@@ -1558,14 +1575,11 @@ def _blind_field(
         "partial": False,
         "unreached": None,
         "measured": False,
-        "total": None,
-        "total_configured": None,
-        "total_configured_scope": None,
         "not_configured": None,
-        "by_source_detail": None,
-        "stale_24h": None,
-        "stale_7d": None,
         "by_source": None,
+        "stale_24h_by_source": None,
+        "note": BY_SOURCE_NOTE,
+        "by_source_detail": None,
         "corrupt_rows": None,
         "source_status": None,
         "sources_degraded": None,
@@ -1575,6 +1589,11 @@ def _blind_field(
 def heartbeat_field(root: Path | None = None, *, scan: bool = False) -> dict:
     """Heartbeat/dashboard payload. Unreadable, unscanned, stale, or partially
     corrupt is NEVER a healthy zero.
+
+    EVERY COUNT IS PER SOURCE (design A3): ``by_source`` (open),
+    ``stale_24h_by_source`` and ``by_source_detail``, with ``note`` saying why
+    there is no total. No cross-source sum is published in any shape; see
+    ``BY_SOURCE_NOTE``.
 
     ``scan=True`` runs ingestion first (review F4: "ingestion must run on
     read"). It is OPT-IN rather than the default because
@@ -1731,6 +1750,9 @@ def heartbeat_field(root: Path | None = None, *, scan: bool = False) -> dict:
         if blind_aggregates:
             by_source_open = dict.fromkeys(by_source_open)
             by_source_detail = {k: dict.fromkeys(v) for k, v in summary["by_source"].items()}
+        # READ OFF THE DETAIL AFTER THE NULLING, never off a second fold, so the
+        # 24-hour map cannot keep a number the open map has just given up.
+        stale_24h_by_source = {k: v["stale_24h"] for k, v in by_source_detail.items()}
         return {
             "error": error,
             "ingestion": ingestion,
@@ -1739,16 +1761,14 @@ def heartbeat_field(root: Path | None = None, *, scan: bool = False) -> dict:
             "partial": partial,
             "unreached": list(unreached),
             "measured": True,
+            "not_configured": summary["not_configured"],
             # THE NULLS COME STRAIGHT FROM summarize(). Nothing here recomputes
             # a count from rows it happens to hold — that recomputation is what
-            # the reviewer caught the tool surface doing.
-            "total": None if blind_aggregates else summary["total"],
-            "total_configured": None if blind_aggregates else summary["total_configured"],
-            "total_configured_scope": summary["total_configured_scope"],
-            "not_configured": summary["not_configured"],
-            "stale_24h": None if blind_aggregates else summary["stale_24h"],
-            "stale_7d": None if blind_aggregates else summary["stale_7d"],
+            # the reviewer caught the tool surface doing. And nothing here sums
+            # across sources (design A3; see BY_SOURCE_NOTE).
             "by_source": by_source_open,
+            "stale_24h_by_source": stale_24h_by_source,
+            "note": BY_SOURCE_NOTE,
             # THE NESTED VIEW, CARRIED ON THE SAME FOLD. `signals_summary`
             # needs stale windows and oldest_unacked per source; the reviewer
             # caught it calling summarize() a second time to get them and
@@ -2772,9 +2792,9 @@ def scan_all(
     IT HAS A HARD TIME BUDGET, and exceeding it produces a PARTIAL certificate
     rather than a short answer wearing a total's name. A source not reached is
     stamped `partial:` in `source_status`, which every downstream reader
-    already treats as unmeasured — so `total` is null by the existing rule, not
-    by a new one. Its previous watermarks are carried forward untouched so the
-    next sweep resumes where this one stopped instead of starting over.
+    already treats as unmeasured — so its counts are null by the existing rule,
+    not by a new one. Its previous watermarks are carried forward untouched so
+    the next sweep resumes where this one stopped instead of starting over.
     """
     r = _root(root)
     budget = scan_budget_seconds() if budget_seconds is None else float(budget_seconds)
@@ -3200,9 +3220,11 @@ SIGNAL_TOOLS = [
     Tool(
         name="signals_summary",
         description=(
-            "The watch seat's queue. mode='summary' (default) returns unacked "
-            "total, stale_24h, stale_7d, per-source open counts and per-source "
-            "availability; mode='list' returns the SIGNALS THEMSELVES — "
+            "The watch seat's queue. mode='summary' (default) returns the "
+            "unacked counts by source (open, stale_24h and stale_7d, with "
+            "oldest_unacked) and per-source availability, never a total: "
+            "summed across sources it would be mostly the open-thread backlog. "
+            "mode='list' returns the SIGNALS THEMSELVES — "
             "signal_id, source, kind, opened_at, owner, state and the concern "
             "text — which is what you pass to signal_ack. Optional source "
             "filter. Ingestion runs before the read, so the counts are current. "
@@ -3618,16 +3640,12 @@ def handle_signal_tool(
                 "refresh_started_at": field.get("refresh_started_at"),
                 "partial": field.get("partial"),
                 "unreached": field.get("unreached"),
-                "total": field.get("total"),
-                # SCOPE TRAVELS WITH THE NARROWER NUMBER, always. Publishing
-                # `total_configured` without saying what it covers is how a
-                # partial count comes to be read as a whole one.
-                "total_configured": field.get("total_configured"),
-                "total_configured_scope": field.get("total_configured_scope"),
                 "not_configured": field.get("not_configured"),
-                "stale_24h": field.get("stale_24h"),
-                "stale_7d": field.get("stale_7d"),
+                # BY SOURCE, NEVER A TOTAL (design A3): the heartbeat field
+                # publishes no cross-source sum, and this branch must not
+                # re-fold one. The stale windows are per source, in here.
                 "by_source": field.get("by_source_detail"),
+                "note": field.get("note"),
                 "corrupt_rows": field.get("corrupt_rows"),
                 "source_status": field.get("source_status"),
                 "sources_degraded": field.get("sources_degraded"),

@@ -527,7 +527,6 @@ class TestPageAssets:
             "main.textContent = 'off';",  # was "HQ off"; the one-word state since 2026-10-10
             "HQ unreachable",
             "console unreachable",
-            "signals, all sources",
             "honk signals (ledger)",
             "guardian unavailable",
             "watchman unavailable",
@@ -541,6 +540,7 @@ class TestPageAssets:
             assert needle in js, needle
         assert "not listening" not in js
         assert " open signals'" not in js  # the strip's old unlabelled total
+        assert "signals, all sources" not in js  # and its labelled one (design A3)
         # The file's own comment names innerHTML to forbid it; assert no ASSIGNMENT.
         assert re.search(r"\.innerHTML\s*=", js) is None
         assert "new Terminal(" in js and "FitAddon" in js

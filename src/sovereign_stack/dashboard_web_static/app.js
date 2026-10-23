@@ -2391,12 +2391,9 @@ function renderAttentionStrip(snapshot) {
       if (u.ingestion && u.ingestion !== 'ok') {
         out.push(attSeg('is-old', 'ledger ', attIngestionWord(u), ''));
       }
-      out.push(u.total == null
-        ? attSeg('is-old', 'signals, all sources ', 'not counted', '')
-        : attSeg(u.stale_7d ? 'is-old' : '', '', String(u.total), ' signals, all sources'));
-      if (u.stale_7d != null) {
-        out.push(attSeg(u.stale_7d ? 'is-old' : '', '', String(u.stale_7d), ' waiting over a week'));
-      }
+      // By source only (design A3): summed across sources the count is mostly
+      // the open-thread backlog, so the field carries no total and neither
+      // does the strip. Each source says its own week-old count.
       for (const [key, label] of ATT_SOURCES) {
         const d = u.by_source_detail && u.by_source_detail[key];
         if (!d) continue;

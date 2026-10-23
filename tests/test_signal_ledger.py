@@ -153,10 +153,10 @@ def test_heartbeat_error_not_zero(tmp_sovereign_root, monkeypatch):
     sl.open_signal(source="halt", native_id="x.md", produced_at="2026-09-01T00:00:00Z", root=root)
     unscanned = sl.heartbeat_field(root)
     assert unscanned["error"] == "not_scanned", "a ledger with no scan behind it is not measured"
-    assert unscanned["total"] is None
+    assert unscanned["by_source"] is None
     good = _scan_measured(root)
     assert good["error"] is None
-    assert good["total"] == 1
+    assert good["by_source"]["halt"] == 1
 
     def boom(*_a, **_k):
         raise OSError("nope")
@@ -164,7 +164,7 @@ def test_heartbeat_error_not_zero(tmp_sovereign_root, monkeypatch):
     monkeypatch.setattr(Path, "read_text", boom)
     bad = sl.heartbeat_field(root)
     assert bad["error"]
-    assert bad["total"] is None
+    assert bad["by_source"] is None
 
 
 def test_escalation_default_off(monkeypatch):
@@ -245,13 +245,13 @@ def test_malformed_ledger_is_error_not_zero(tmp_sovereign_root):
     path.write_text("{broken json}\n", encoding="utf-8")
     bad = sl.heartbeat_field(root)
     assert bad["error"]
-    assert bad["total"] is None
+    assert bad["by_source"] is None
     assert bad["ingestion"] == "error"
 
     path.write_bytes(b"\xff\xfe\x00not-utf8")
     enc = sl.heartbeat_field(root)
     assert enc["error"]
-    assert enc["total"] is None
+    assert enc["by_source"] is None
 
     path.unlink()
     sl.open_signal(source="halt", native_id="ok.md", produced_at="2026-09-01T00:00:00Z", root=root)
@@ -259,30 +259,31 @@ def test_malformed_ledger_is_error_not_zero(tmp_sovereign_root):
         fh.write('{"signal_id":"truncated"\n')
     tail = sl.heartbeat_field(root)
     assert tail["error"]
-    assert tail["total"] is None
+    assert tail["by_source"] is None
 
 
 def test_never_scanned_is_not_healthy_zero(tmp_sovereign_root):
     root = tmp_sovereign_root
     field = sl.heartbeat_field(root)
     assert field["error"] == "not_scanned"
-    assert field["total"] is None
+    assert field["by_source"] is None
     assert field["ingestion"] == "never"
     sl.scan_all(root)
     after = sl.heartbeat_field(root)
     # guardian has no fixture and this is not the live root, so it reports
-    # unavailable, not zero — which degrades ingestion AND nulls the total.
-    # That is the point: an unmeasured source cannot contribute a measured 0.
+    # unavailable, not zero — which degrades ingestion AND nulls guardian's
+    # count in both per-source maps. That is the point: an unmeasured source
+    # cannot contribute a measured 0.
     assert after["ingestion"] == "degraded"
     assert after["sources_degraded"] == ["guardian"]
     assert after["error"] == "unmeasured_sources:guardian"
-    assert after["total"] is None
+    assert after["stale_24h_by_source"]["guardian"] is None
     assert after["by_source"]["guardian"] is None
     _guardian_ok(root)
     sl.scan_all(root)
     measured = sl.heartbeat_field(root)
     assert measured["error"] is None
-    assert measured["total"] == 0
+    assert set(measured["by_source"].values()) == {0}
     assert measured["ingestion"] == "ok"
     assert after["by_source"]["guardian"] is None
     assert after["scanned_at"]
@@ -314,7 +315,7 @@ def test_handle_tools(tmp_sovereign_root):
     sl.open_signal(source="halt", native_id="z.md", produced_at="2026-09-01T00:00:00Z", root=root)
     summary = json.loads(sl.handle_signal_tool("signals_summary", {}, root=root))
     assert summary["ok"] is True
-    assert summary["total"] == 1
+    assert summary["by_source"]["halt"]["open"] == 1
     sid = sl.signal_id_for("halt", "z.md")
     from sovereign_stack.dispatch_context import reset_caller_seat, set_caller_seat
 
@@ -378,15 +379,16 @@ class TestP1RowSchemaValidatedAtLoad:
         sl.scan_all(root)
         field = sl.heartbeat_field(root)
         assert sl.summarize(root)["open_measured"] == 1, "the open signal survived the corrupt row"
-        # ...but it is a FLOOR, not a total. A corrupt row is an unknown number
-        # of lost signals, so the total is null — "never report zero on error"
-        # generalises to "never report a number you cannot stand behind".
-        assert field["total"] is None
+        # ...but it is a FLOOR, not a count. A corrupt row is an unknown number
+        # of lost signals from an unknown source, so every per-source count is
+        # null — "never report zero on error" generalises to "never report a
+        # number you cannot stand behind".
+        assert set(field["by_source"].values()) == {None}
         assert field["error"], "a corrupt row must never read as clean"
         assert field["corrupt_rows"] == 1
         summary = json.loads(sl.handle_signal_tool("signals_summary", {}, root=root))
         assert summary["error"]
-        assert summary["total"] is None
+        assert {facts["open"] for facts in summary["by_source"].values()} == {None}
 
     def test_bad_state_bad_source_and_missing_reason_are_corrupt(self):
         base = {
@@ -428,7 +430,8 @@ class TestP1RowSchemaValidatedAtLoad:
         assert field["error"]
         # The reviewer's exact complaint: this returned total 0 beside a
         # non-null error, "directly violating never report zero on error".
-        assert field["total"] is None
+        # Nothing has scanned this root, so no count is published at all.
+        assert field["by_source"] is None
         assert field["corrupt_rows"] == 1
 
     def test_unparseable_produced_at_is_corrupt_not_invisible(self, tmp_sovereign_root):
@@ -458,11 +461,11 @@ class TestP1ScanMarkerCannotMaskLedgerLoss:
         (root / "daemons" / "halts" / "old.md").write_text("halt\n", encoding="utf-8")
         _guardian_ok(root)
         sl.scan_all(root)
-        assert sl.heartbeat_field(root)["total"] == 1
+        assert sl.heartbeat_field(root)["by_source"]["halt"] == 1
         sl.ledger_path(root).unlink()
         field = sl.heartbeat_field(root)
         assert field["error"] == "ledger_missing"
-        assert field["total"] is None
+        assert field["by_source"] is None
         assert field["ingestion"] == "error"
 
     def test_a_marker_that_carries_no_counts_certifies_nothing(self, tmp_sovereign_root):
@@ -472,7 +475,7 @@ class TestP1ScanMarkerCannotMaskLedgerLoss:
         path.write_text(json.dumps({"bogus": True}), encoding="utf-8")
         field = sl.heartbeat_field(root)
         assert field["error"].startswith("marker_invalid")
-        assert field["total"] is None
+        assert field["by_source"] is None
 
     def test_marker_claiming_more_than_the_ledger_holds_is_loss(self, tmp_sovereign_root):
         root = tmp_sovereign_root
@@ -482,7 +485,7 @@ class TestP1ScanMarkerCannotMaskLedgerLoss:
         sl.scan_marker_path(root).write_text(json.dumps(marker), encoding="utf-8")
         field = sl.heartbeat_field(root)
         assert field["error"].startswith("ledger_shrank")
-        assert field["total"] is None or field["ingestion"] == "error"
+        assert set(field["by_source"].values()) == {None} or field["ingestion"] == "error"
 
     def test_a_scan_materialises_the_ledger_so_empty_is_not_absent(self, tmp_sovereign_root):
         root = tmp_sovereign_root
@@ -717,7 +720,7 @@ class TestP2AnonymousThreadIdsHashTheRelativePath:
         assert sl.scan_threads(root).opened == 2, "basename hashing collapsed these into one"
         _guardian_ok(root)
         sl.scan_all(root)
-        assert sl.heartbeat_field(root)["total"] == 2
+        assert sl.heartbeat_field(root)["by_source"]["thread"] == 2
 
 
 class TestP2OpenIsIdempotentUnderTheAppendLock:
