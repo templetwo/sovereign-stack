@@ -40,12 +40,25 @@ than by rule. If a later seat finds a second one, that is evidence the
 judgement does not scale and the rule should be revisited - not evidence
 that this note was wrong.
 
-FAILS CLOSED, in three specific ways, because a manifest generator that
+THE PACKAGE DESCRIPTION CARRIES NO COUNT AT ALL (design E2, 2026-10-23).
+pyproject's `description` is the line `pip show` and PyPI print. It said
+"97 tools" while list_tools() published 53, and this check passed,
+because it read pyproject's version and nothing else. A count there
+fails now whether or not it is right today: the description is one
+current sentence with no history for a dated count to belong to, and
+the current count already lives in the generated block and in
+stack_manifest.json. Its count reader is wider than the README's - it
+also sees "53 MCP tools", in either case - because a rule that admits
+no count can afford to look harder for one.
+
+FAILS CLOSED, in four specific ways, because a manifest generator that
 degrades quietly is worse than none - it launders staleness as coverage:
   * An empty tool registry raises. It never emits an empty manifest.
   * A README that asserts no current count at all raises, because then
     the check would be vacuous and would pass by having nothing to say.
   * An unparseable version raises rather than defaulting.
+  * A description it cannot read raises, rather than passing a count it
+    never saw.
 """
 
 from __future__ import annotations
@@ -69,6 +82,15 @@ _COUNT_RE = re.compile(r"(?<![\w.])(\d[\d,]*)(\+?)\s+(tools|tests)\b")
 _BADGE_RE = re.compile(r"img\.shields\.io/badge/(?:version|tools|tests)-([\d.,]+)", re.IGNORECASE)
 _AS_OF_RE = re.compile(r"\bas of\s+\S", re.IGNORECASE)
 _VERSION_RE = re.compile(r'^version\s*=\s*"([^"]+)"', re.MULTILINE)
+# The first `description =` line, as _VERSION_RE reads the first version
+# line. Its value must be one double-quoted TOML string on that line.
+_DESCRIPTION_KEY_RE = re.compile(r"^description\s*=", re.MULTILINE)
+_DESCRIPTION_LINE_RE = re.compile(r'description\s*=\s*"((?:[^"\\]|\\.)*)"\s*(?:#.*)?')
+# Wider than _COUNT_RE: up to two words may stand between the number and
+# the noun ("53 MCP tools"), in either case.
+_DESCRIPTION_COUNT_RE = re.compile(
+    r"(?<![\w.])\d[\d,]*\+?\s+(?:[a-z][\w-]*\s+){0,2}(?:tools?|tests?)\b", re.IGNORECASE
+)
 
 
 class ManifestError(RuntimeError):
@@ -184,6 +206,31 @@ def _strip_generated_block(readme: str) -> str:
     return readme
 
 
+def _read_description(pyproject: str) -> str | None:
+    """
+    pyproject's description, or None when it has none.
+
+    No description is no claim. A description this cannot read raises:
+    returning nothing for it would pass whatever count it carries unread.
+    """
+    key = _DESCRIPTION_KEY_RE.search(pyproject)
+    if key is None:
+        return None
+    line = pyproject[key.start() :].split("\n", 1)[0].rstrip()
+    value = _DESCRIPTION_LINE_RE.fullmatch(line)
+    if value is None:
+        raise ManifestError(
+            "could not read the description in pyproject.toml as one double-quoted "
+            f"line ({line!r}) - a description this check cannot read would pass unread"
+        )
+    return value.group(1)
+
+
+def _description_count_claims(description: str) -> list[str]:
+    """Every count the description states, as written: ['97 tools']."""
+    return [m.group(0) for m in _DESCRIPTION_COUNT_RE.finditer(description)]
+
+
 def check_docs_against_manifest(manifest: dict, readme: str, pyproject: str) -> list[str]:
     """
     Return every disagreement between the prose and the projection.
@@ -200,6 +247,16 @@ def check_docs_against_manifest(manifest: dict, readme: str, pyproject: str) -> 
     if m.group(1) != manifest["version"]:
         problems.append(
             f"pyproject version {m.group(1)!r} != manifest version {manifest['version']!r}"
+        )
+
+    description = _read_description(pyproject)
+    claims = _description_count_claims(description) if description else []
+    if claims:
+        problems.append(
+            f"pyproject description states {', '.join(claims)} (list_tools() publishes "
+            f"{manifest['tools_count']}) - the description carries no count, right or "
+            "wrong; the current counts live in the README's generated block and "
+            "stack_manifest.json"
         )
 
     if BEGIN_MARK not in readme or END_MARK not in readme:
@@ -246,7 +303,7 @@ def check_docs_against_manifest(manifest: dict, readme: str, pyproject: str) -> 
     return problems
 
 
-def _main(argv: list[str] | None = None) -> int:
+def _main(argv: list[str] | None = None, *, root: Path | None = None) -> int:
     import argparse
 
     parser = argparse.ArgumentParser(description=__doc__)
@@ -259,7 +316,9 @@ def _main(argv: list[str] | None = None) -> int:
     parser.add_argument("--tests-collected", type=int, default=None)
     args = parser.parse_args(argv)
 
-    root = Path(__file__).resolve().parents[2]
+    # `root` is a seam for tests, which run --check against a scratch tree;
+    # the command line always checks the tree this module ships in.
+    root = root if root is not None else Path(__file__).resolve().parents[2]
     manifest = build_manifest(repo_root=root, tests_collected=args.tests_collected)
     readme_path = root / "README.md"
     readme = readme_path.read_text(encoding="utf-8")
