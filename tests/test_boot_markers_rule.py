@@ -40,10 +40,21 @@ from sovereign_stack.reflexive import ReflexiveSurface
 from sovereign_stack.witness import is_verified_or_lived, marker_rank_key, rank_markers
 
 _PINNED = "  Persistent marker (pinned standing instruction): "
+# Names the cap and what it cost, and no call: the published recall_insights
+# declares neither layer_filter nor min_intensity (Task 2 review, finding I-3).
 _TRUNCATED_LINE = (
-    "  (pool truncated at 1000; "
-    'recall_insights(layer_filter="ground_truth", min_intensity=0.9) shows all)'
+    "  (pool truncated at 1000; entries past the cap were not read, "
+    "so the ranking and the counts above cover only the pool)"
 )
+
+
+def _held_back(count: int) -> str:
+    """The one holdback line both doors print (Task 2 review, finding I-2)."""
+    plural = "s" if count != 1 else ""
+    return (
+        f"  ({count} superseded marker{plural} held back; "
+        "recall_insights(exclude_superseded=false) shows the chain)"
+    )
 
 
 def _header(shown: int, live: int) -> str:
@@ -288,7 +299,12 @@ def test_superseded_marker_held_back_and_counted(chronicle):
     assert section[0] == _header(1, 1)
     assert section[1].endswith("the corrected word")
     assert "the first word" not in "\n".join(section)
-    assert "  (1 superseded marker held back" in section[2]
+    assert section[2:] == [_held_back(1)]
+
+    # The foyer, with a live pin AND a held-back count, words the count the same.
+    foyer = render_foyer(_state(chronicle, "foyer")).splitlines()
+    assert [line for line in foyer if line.startswith(_PINNED)] == [_PINNED + "the corrected word"]
+    assert [line for line in foyer if "superseded marker" in line] == [_held_back(1)]
 
 
 def test_all_superseded_renders_zero_live_no_fallback(chronicle):
@@ -317,19 +333,21 @@ def test_all_superseded_renders_zero_live_no_fallback(chronicle):
     full_state = _state(chronicle, "full")
     assert full_state.sentinel_pool == []
     assert full_state.sentinel_held_back == 2
-    section = _marker_section(render_full(full_state))
+    full_text = render_full(full_state)
+    section = _marker_section(full_text)
     assert section[0] == _header(0, 0)
-    assert section[1].startswith("  (2 superseded markers held back")
-    assert len(section) == 2
+    # The whole line, so a clause claiming successors are shown cannot come back:
+    # one successor is a hypothesis and the other marker was retired, so none is.
+    assert section[1:] == [_held_back(2)]
     for absent in ("replaced marker", "retired marker", "the hypothesis successor"):
         assert absent not in "\n".join(section)
 
-    foyer = render_foyer(_state(chronicle, "foyer")).splitlines()
+    foyer_text = render_foyer(_state(chronicle, "foyer"))
+    foyer = foyer_text.splitlines()
     assert not [line for line in foyer if line.startswith(_PINNED)]
-    assert [line for line in foyer if "superseded marker" in line] == [
-        "  (2 superseded markers held back; "
-        "recall_insights(exclude_superseded=false) shows the chain)"
-    ]
+    assert [line for line in foyer if "superseded marker" in line] == [_held_back(2)]
+    for text in (full_text, foyer_text):
+        assert "successors shown" not in text
 
 
 def test_pool_truncation_line_renders_when_pool_is_full(chronicle, monkeypatch):
@@ -346,6 +364,10 @@ def test_pool_truncation_line_renders_when_pool_is_full(chronicle, monkeypatch):
     # The line names the production cap (arrival_state._MARKER_POOL), not the
     # patched one: the two constants live in two modules and this holds them equal.
     assert f"pool truncated at {production_cap};" in section[-1]
+    # And it sends no seat to a call: none the published tool declares lists the
+    # ground-truth entries at >= 0.9, and an undeclared argument on a read tool
+    # is ignored, which returns the newest rows of every layer instead.
+    assert "recall_insights(" not in section[-1]
 
     monkeypatch.setattr(arrival_state, "_MARKER_POOL", production_cap)
     state = _state(chronicle, "full")

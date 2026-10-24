@@ -27,6 +27,13 @@ Design invariants held here:
     door and the foyer render from one ranked list; the slice to the rows a
     door shows is still the renderer's.
 
+  * PROTECTED RECORDS ARE THRESHOLDS HERE, AT EVERY DEPTH. Every insight row a
+    door renders (a marker, the foyer's pin, an activity row, the foyer's
+    "Latest:", a related insight) is a preview surface that never carries the
+    stakes, so ``_withhold_protected`` replaces a protected entry's content with
+    protected.PROTECTED_PREVIEW_NOTICE at the gather, before any renderer sees
+    it (the protected-source preview rule, spec section 5.4).
+
   * NON-BREAKING. The rendered text of each door preserves every existing
     section byte-for-byte; the only additions are the delimited ``━━━ AS OF ━━━``
     receipt block (generated_at + source_high_watermark, plus an incompleteness
@@ -49,11 +56,12 @@ from . import witness
 from .glyphs import SPIRAL
 from .handoff import format_handoff_for_surface
 from .policies import PolicyRegistry
-from .protected import collect_protected_drawer, render_protected_boot_line
+from .protected import collect_protected_drawer, render_protected_boot_line, withhold_preview
 from .witness import (
     _receipt_count_tag,
     format_sentinels,
     format_threads_with_age,
+    held_back_line,
     render_lineage,
     render_self_model,
     render_the_ground,
@@ -370,6 +378,37 @@ def _pending_for_reader(handoff_engine, reader: str, thread: str | None, limit: 
         )
 
 
+def _withhold_protected(entries: list[dict] | None) -> list[dict] | None:
+    """Withhold every protected entry's content to the preview notice.
+
+    Standing law surfaces a protected record only as its threshold, and the
+    protected-source preview rule (spec section 5.4, e133ede) says how a surface
+    honors it: one that previews or truncates can never carry the full stakes,
+    so it withholds. Every insight row the boot doors render is such a surface,
+    and none renders the stakes, so even the whole body under ``full_content``
+    would travel decoupled. Before this, the marker lines, the foyer's pin, the
+    activity rows, the foyer's "Latest:" and the related-insight rows printed a
+    coupled record's body bare (Task 2 review, finding I-1 and its pre-existing
+    twin on the activity rows).
+
+    The read chokepoint (memory.finalize_read, stage B) marks each protected
+    entry ``_protected``, the coupled form and the withheld sentinel alike, and
+    The Descent keys on the same mark; both forms leave here as
+    protected.withhold_preview copies, so a door says one thing for a protected
+    record whether or not its stakes verified. The copy keeps the locators
+    (timestamp, domain, vantage, intensity, receipts, the supersession
+    annotation), so the rank, the counts, the aperture's shown set and the
+    watermark do not move. The filter itself (protected.py, finalize_read) is
+    untouched: this applies its own preview building block, as The Ground does
+    at its loader (ground.load_ground_entries), and prints the notice The
+    Descent prints for a protected close. Never mutates its input; None and []
+    pass through.
+    """
+    if not entries:
+        return entries
+    return [withhold_preview(e) if e.get("_protected") else e for e in entries]
+
+
 # The persistent-marker pool's read cap (design B2). The pool is every
 # ground-truth entry at or above 0.9 (582 on 2026-10-23), ranked after the read,
 # so the cap is headroom, not a selection. When a read fills it, what got in is
@@ -468,7 +507,7 @@ def build_arrival_state(
             pool = experiential.recall_insights(
                 min_intensity=0.9, layer_filter="ground_truth", limit=_MARKER_POOL
             )
-            sentinel_pool = witness.rank_markers(pool)
+            sentinel_pool = _withhold_protected(witness.rank_markers(pool))
             sentinel_held_back = sum(1 for e in pool if "_superseded_by" in e)
             sentinel_pool_truncated = len(pool) == _MARKER_POOL
             receipts.append(SectionReceipt("sentinels", len(pool), _newest(pool), False, None))
@@ -572,6 +611,11 @@ def build_arrival_state(
                 resonance = reflexive_surface.surface(
                     domain_tags=domain_tags, project=project, limit_per_bucket=3
                 )
+                if isinstance(resonance, dict) and resonance.get("related_insights"):
+                    resonance = {
+                        **resonance,
+                        "related_insights": _withhold_protected(resonance["related_insights"]),
+                    }
             except Exception as exc:
                 resonance_error = str(exc)
                 _degrade("reflexive_surface", exc)
@@ -590,7 +634,9 @@ def build_arrival_state(
             _degrade("uncertainties", exc)
         _gather_markers()
         try:
-            recent_activity = experiential.recall_insights(since_last_reflection=True, limit=50)
+            recent_activity = _withhold_protected(
+                experiential.recall_insights(since_last_reflection=True, limit=50)
+            )
             receipts.append(
                 SectionReceipt(
                     "recent_activity",
@@ -630,7 +676,9 @@ def build_arrival_state(
             _degrade("handoffs", exc)
         _gather_markers()
         try:
-            recent_activity = experiential.recall_insights(since_last_reflection=True, limit=50)
+            recent_activity = _withhold_protected(
+                experiential.recall_insights(since_last_reflection=True, limit=50)
+            )
             receipts.append(
                 SectionReceipt(
                     "recent_activity",
@@ -1259,12 +1307,7 @@ def render_foyer(state: ArrivalState) -> str:
     # Outside the pin's branch on purpose: when every marker was superseded
     # nothing is pinned, and the count is the one thing left to say.
     if state.sentinel_held_back:
-        held = state.sentinel_held_back
-        plural = "s" if held != 1 else ""
-        lines.append(
-            f"  ({held} superseded marker{plural} held back; "
-            "recall_insights(exclude_superseded=false) shows the chain)"
-        )
+        lines.append(held_back_line(state.sentinel_held_back))
     if state.policy_boot_line:
         lines.append(f"  {state.policy_boot_line}")
     if lineage_count is None:

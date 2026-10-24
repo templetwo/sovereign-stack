@@ -484,10 +484,14 @@ class TestFormatSentinels:
         text = "\n".join(lines)
         assert "successor marker" in text
         assert "old marker" not in text
+        # The line names no successor: under the ground-truth marker pool a
+        # retirement has none, and a successor shows only if it is itself a live
+        # marker that ranks in the rows shown (Task 2 review, finding I-2).
         assert (
-            "  (1 superseded marker held back — successors shown; "
+            "  (1 superseded marker held back; "
             "recall_insights(exclude_superseded=false) shows the chain)" in lines
         )
+        assert "successors shown" not in text
 
     def test_holdback_pluralizes(self):
         entries = [

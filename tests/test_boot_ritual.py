@@ -177,7 +177,11 @@ class TestProtectedDrawerBootLine:
     exercise the REAL assembled boot output, not just the helper in isolation,
     so the unconditional announcement and the no-leak guarantee are verified at
     the integration layer. The protected ledger is redirected to a tmp_path via
-    server.DEFAULT_ROOT — no real record is ever designated."""
+    server.DEFAULT_ROOT — no real record is ever designated — and so is the
+    server.experiential singleton: it is bound to the chronicle at import
+    (server.py:200), so with DEFAULT_ROOT alone the marker and activity gathers
+    read the LIVE chronicle and the tmp record never reached them, and the
+    no-leak assertion below could not fail (Task 2 review, finding I-1)."""
 
     def test_empty_drawer_announced_in_real_boot(self, tmp_path: Path):
         # Isolated tmp .sovereign root with zero designated protected
@@ -188,10 +192,14 @@ class TestProtectedDrawerBootLine:
         # code path the live-empty-drawer case used to exercise, without the
         # dependency.
         from sovereign_stack import server
+        from sovereign_stack.memory import ExperientialMemory
 
         root = tmp_path / ".sovereign"
         (root / "chronicle").mkdir(parents=True, exist_ok=True)
-        with patch.object(server, "DEFAULT_ROOT", str(root)):
+        with (
+            patch.object(server, "DEFAULT_ROOT", str(root)),
+            patch.object(server, "experiential", ExperientialMemory(root=str(root / "chronicle"))),
+        ):
             text = _call_boot()
         assert "PROTECTED RECORDS (the coupled drawer)" in text
         assert "drawer is empty" in text
@@ -199,7 +207,11 @@ class TestProtectedDrawerBootLine:
     def test_present_record_announced_with_no_card_or_content(self, tmp_path: Path):
         from sovereign_stack import server
         from sovereign_stack.memory import ExperientialMemory
-        from sovereign_stack.protected import designate_protected
+        from sovereign_stack.protected import (
+            PROTECTED_PREVIEW_NOTICE,
+            audit_decoupling,
+            designate_protected,
+        )
         from sovereign_stack.provenance import derive_claim_id
 
         # Build a tmp chronicle with one designated protected record.
@@ -226,8 +238,13 @@ class TestProtectedDrawerBootLine:
             emotion=secret_emotion,
         )
 
-        # Redirect the boot's DEFAULT_ROOT at the tmp sovereign root.
-        with patch.object(server, "DEFAULT_ROOT", str(root)):
+        # Redirect the boot's DEFAULT_ROOT AND its experiential singleton at the
+        # tmp sovereign root, so the record reaches every gather that reads it
+        # (a ground-truth 0.9 entry: the marker pool and the activity window).
+        with (
+            patch.object(server, "DEFAULT_ROOT", str(root)),
+            patch.object(server, "experiential", mem),
+        ):
             text = _call_boot()
 
         assert "PROTECTED RECORDS (the coupled drawer)" in text
@@ -237,6 +254,11 @@ class TestProtectedDrawerBootLine:
         assert secret_subject not in text
         assert secret_emotion not in text
         assert secret_content not in text
+        assert "a lived weight held coupled to the words" not in text
+        assert audit_decoupling(text, mem.root) == []
+        # The record DID reach the boot, as its threshold only: the marker line
+        # and the activity row both carry the preview notice in its place.
+        assert text.count(PROTECTED_PREVIEW_NOTICE) == 2
 
 
 # ── Protected-records drawer boot line — arrive_lineage (Policy 2c) ──────────

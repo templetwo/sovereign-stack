@@ -1108,11 +1108,34 @@ def rank_markers(entries: list[dict]) -> list[dict]:
 
 # The line format_sentinels adds when the pool filled its cap. The number is
 # arrival_state._MARKER_POOL, the production cap (tests/test_boot_markers_rule.py
-# holds the two equal).
+# holds the two equal). It names the cap and what the cap cost, and NO CALL: the
+# published recall_insights declares neither layer_filter nor min_intensity, and a
+# read tool runs without an undeclared argument, so the call this line first named
+# returned the newest rows of every layer at any intensity, the opposite of the
+# pool. No published call lists the ground-truth entries at >= 0.9.
 _MARKER_POOL_TRUNCATED_LINE = (
-    "  (pool truncated at 1000; "
-    'recall_insights(layer_filter="ground_truth", min_intensity=0.9) shows all)'
+    "  (pool truncated at 1000; entries past the cap were not read, "
+    "so the ranking and the counts above cover only the pool)"
 )
+
+
+def held_back_line(count: int) -> str:
+    """
+    The one holdback line both marker surfaces print, the full door's
+    PERSISTENT MARKERS section and the foyer under its pin, so the two doors
+    word one count one way: how many superseded or retired markers the ranking
+    held back, and the call that reveals the chain.
+
+    It names no successor. Under the ground-truth pool a retirement has none,
+    and a successor is shown only when it is itself a live marker that ranks in
+    the rows shown, so the clause the full door carried before ("successors
+    shown") was false for exactly the pools this line exists for.
+    """
+    plural = "s" if count != 1 else ""
+    return (
+        f"  ({count} superseded marker{plural} held back; "
+        "recall_insights(exclude_superseded=false) shows the chain)"
+    )
 
 
 def _receipt_count_tag(entry: dict) -> str:
@@ -1174,11 +1197,7 @@ def format_sentinels(
         content = raw_c if cap is None else raw_c[:cap]
         lines.append(f"  [{ts}] [{dom}] {content}{_receipt_count_tag(s)}")
     if held_back >= 1:
-        plural = "s" if held_back != 1 else ""
-        lines.append(
-            f"  ({held_back} superseded marker{plural} held back — successors shown; "
-            "recall_insights(exclude_superseded=false) shows the chain)"
-        )
+        lines.append(held_back_line(held_back))
     if truncated:
         lines.append(_MARKER_POOL_TRUNCATED_LINE)
     lines.append("")
