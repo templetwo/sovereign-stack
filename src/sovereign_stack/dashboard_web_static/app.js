@@ -2201,6 +2201,27 @@ function initHqPanel() {
   }).catch(() => { /* status unreachable: the poll will say so */ });
 }
 
+// The panel seat itself (design A2, decision 6): GET /hq/status `push.seat`,
+// read by the push poller from the panel transcript on every poll. Dark is a
+// login-expired API-error turn as HQ's newest turn; any other API error is a
+// stall, and batches keep flowing; an unreadable or stale transcript is
+// unknown, never dark. The stamps are the transcript's own UTC "Z" stamps, so
+// HH:MM goes through Date (this browser's local time), never sliced as digits.
+function hqSeatWord(seat) {
+  if (!seat || typeof seat !== 'object') return '';
+  if (seat.dark === true) {
+    const t = Date.parse(typeof seat.last_answered_at === 'string' ? seat.last_answered_at : '');
+    const n = typeof seat.unanswered_batches === 'number' ? seat.unanswered_batches : 0;
+    const batches = n === 1 ? '1 batch unanswered' : `${n} batches unanswered`;
+    const why = typeof seat.dark_reason === 'string' && seat.dark_reason ? seat.dark_reason : 'login expired';
+    return `last answered ${Number.isFinite(t) ? fmtHM(t) : 'unknown'}, ${batches}, ${why}`;
+  }
+  if (seat.transcript === 'unreadable') return 'panel transcript unreadable';
+  if (seat.transcript === 'stale') return 'panel transcript stale';
+  if (typeof seat.stalled === 'string' && seat.stalled) return `HQ stalled (${seat.stalled})`;
+  return '';
+}
+
 // `listening` is the Phase 3 push link — whether the console can hand batches
 // INTO HQ's session over Claude Code's cross-session socket — not the iMessage
 // listener. The snapshot carries only the boolean; the reason, the waiting count,
@@ -2217,10 +2238,17 @@ function hqLinkWord(hp, detail) {
   const blind = p && Array.isArray(p.blind) && p.blind.length
     ? ` · blind to ${p.blind.filter((b) => typeof b === 'string').join(', ')}` : '';
   const last = detail && p && typeof p.last_handed_at === 'string' ? ` · last handed ${p.last_handed_at}` : '';
+  const held = !!(p && p.inbound === 'hold' && !p.last_error);
+  // The seat's own word comes first while a panel runs and the link has its
+  // target (on, or held as launched): dark, unknown and stalled each have a
+  // branch, ahead of the link word. A link that is off says why below, and its
+  // reason already names a dark seat ("seat dark since HH:MM ...").
+  const seat = hp.running && (hp.listening || held) ? hqSeatWord(p && p.seat) : '';
+  if (seat) return `${seat}${last}${blind}${waiting}`;
   if (hp.listening) return `push link on${last}${blind}${waiting}`;
   // Inbound hold (the shipped default): measured, Claude Code holds each batch
   // with no review dialog, so it prints in the panel and never reaches HQ.
-  if (p && p.inbound === 'hold' && !p.last_error) {
+  if (held) {
     return `push link held, batches print in the panel and do not reach HQ${last}${blind}${waiting}`;
   }
   const why = p && typeof p.reason === 'string' && p.reason ? ` (${p.reason})` : '';

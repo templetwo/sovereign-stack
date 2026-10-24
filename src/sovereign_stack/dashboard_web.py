@@ -566,7 +566,13 @@ def _snapshot_hq_panel() -> dict:
 def _hq_status_payload() -> dict:
     """GET /hq/status: the full session status plus a nested `comms` object
     (None when the spool reader has nothing or fails) and the `push` object
-    (Phase 3: link state, reason, events waiting, last hand-over HH:MM)."""
+    (Phase 3: link state, reason, events waiting, last hand-over HH:MM).
+
+    Design A2 (decision 6): `push.seat` is the panel seat as the push poller
+    last read it from the panel transcript (dark, stalled, unknown; the last
+    answer, the unanswered batches, the last close). Its stamps are activity
+    data, so like the rest of `push` it rides this Studio-only route and never
+    /snapshot.json, which keeps its 21 keys."""
     st = hq_panel.get_session().status()
     comms = _safe_section(dashboard_readers.read_comms)
     st["comms"] = {k: comms.get(k) for k in _HQ_COMMS_FIELDS} if isinstance(comms, dict) else None

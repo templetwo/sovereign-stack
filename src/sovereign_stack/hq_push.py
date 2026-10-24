@@ -64,6 +64,7 @@ WHAT THIS MODULE NEVER DOES:
 
 from __future__ import annotations
 
+import collections
 import contextlib
 import hashlib
 import json
@@ -76,7 +77,7 @@ import subprocess
 import threading
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 # ── configuration ──────────────────────────────────────────────────────────
@@ -106,9 +107,27 @@ DEFAULT_INBOUND = "hold"  # never "accept" by default: see the module docstring
 #: Bounded tail of the spool's inbound.jsonl (records are a few hundred bytes).
 SPOOL_TAIL_BYTES = 256 * 1024
 
+#: Design A2 (decision 6): the bounded tail of the panel transcript read on every
+#: tick. 16 records in the live panel transcript exceed 256 KiB (the largest is
+#: 827,991 B, measured 2026-10-23), so a smaller tail could hold no whole record.
+TRANSCRIPT_TAIL_BYTES = 1_048_576
+#: A transcript whose newest record predates the last hand by more than this is
+#: one the panel no longer writes (a /clear the registry has not told us about).
+TRANSCRIPT_STALE_S = 60
+#: Hand stamps kept for the unanswered count (per panel session).
+HANDED_KEEP = 100
+#: The one API error that marks the seat dark, and the words for it.
+DARK_ERROR = "authentication_failed"
+DARK_REASON = "login expired"
+
 _RE_HEX_TOKEN = re.compile(r"^[0-9a-f]{16,256}$")
 # [0-9], never \d: \d matches every Unicode digit (HQ review C4).
 _RE_EASTERN_HM = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}[ T]([0-9]{2}):([0-9]{2})")
+# A session id becomes a file name: ASCII letters, digits and hyphens only
+# (Claude Code's are UUIDs), so no separator or dot can reach the path.
+_RE_SESSION_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,127}")
+# A stall is shown as the transcript's own error word only when it is a plain word.
+_RE_STALL_WORD = re.compile(r"[a-z][a-z0-9_]{0,63}")
 
 
 def inbound_value(env: dict | None = None) -> str:
@@ -155,6 +174,10 @@ def _min_interval() -> int:
 
 def _sessions_dir() -> Path:
     return Path(os.environ.get("HQ_PUSH_SESSIONS_DIR") or Path.home() / ".claude" / "sessions")
+
+
+def _projects_dir() -> Path:
+    return Path(os.environ.get("HQ_PUSH_PROJECTS_DIR") or Path.home() / ".claude" / "projects")
 
 
 def _sovereign_root() -> Path:
@@ -207,7 +230,12 @@ def resolve_target(
     """The socket path and peer token for the panel child `pid`. Raises
     TargetError with a fixed reason on any doubt. `spawned_at` is the console's
     own clock at spawn: a registry record older than the spawn belongs to an
-    earlier process that held the same pid, never to this child."""
+    earlier process that held the same pid, never to this child.
+
+    Design A2: the record's ``sessionId`` and ``cwd`` ride along as
+    ``session_id`` and ``cwd``, the address of the panel transcript. Either is
+    None when the record carries no value that can name a file safely; that
+    never fails the resolution (the seat then reads unknown, the link works)."""
     d = sessions_dir or _sessions_dir()
     rec_path = d / f"{int(pid)}.json"
     try:
@@ -266,7 +294,14 @@ def resolve_target(
         raise TargetError("inbox key unreadable") from None
     if not isinstance(token, str) or not _RE_HEX_TOKEN.match(token):
         raise TargetError("inbox key malformed")
-    return {"socket": sock, "token": token}
+    session_id = rec.get("sessionId")
+    cwd = rec.get("cwd")
+    return {
+        "socket": sock,
+        "token": token,
+        "session_id": session_id if _valid_session_id(session_id) else None,
+        "cwd": cwd if _valid_cwd(cwd) else None,
+    }
 
 
 def send_frame(
@@ -353,6 +388,254 @@ def read_counters(root: Path) -> dict:
         halts = root / "daemons" / "halts"
         out["halts"] = len(list(halts.glob("*.md"))) if halts.is_dir() else 0
     return out
+
+
+# ── the panel seat: is HQ answering? (design A2, decision 6) ────────────────
+#
+# The 2026-10-20/21 dark window ran 23.9 h with nothing watching the seat: the
+# panel's login had expired, and every batch the console handed came back as a
+# "Login expired" API-error turn. The console reads ONE file to see it, the
+# panel transcript, and never the Stack. What it reads is the seat's state on
+# /hq/status; it never leaves the machine and never restarts anything.
+
+
+def _valid_session_id(value) -> bool:
+    return isinstance(value, str) and _RE_SESSION_ID.fullmatch(value) is not None
+
+
+def _valid_cwd(value) -> bool:
+    return isinstance(value, str) and value.startswith("/") and len(value) <= 4096
+
+
+def transcript_path(session_id: str, cwd: str, projects_dir: Path | None = None) -> Path:
+    """Where Claude Code writes the transcript of session `session_id` started
+    in `cwd`: it folds EVERY non-alphanumeric character of the cwd to "-"
+    (measured as directory names under ~/.claude/projects: /Users/tony_studio is
+    -Users-tony-studio and /Users/tony_studio/.cache/wt-descend-stack is
+    -Users-tony-studio--cache-wt-descend-stack). The default projects dir is
+    HQ_PUSH_PROJECTS_DIR or ~/.claude/projects."""
+    base = projects_dir if projects_dir is not None else _projects_dir()
+    return base / re.sub(r"[^A-Za-z0-9]", "-", cwd) / f"{session_id}.jsonl"
+
+
+def read_transcript_tail(path: Path, max_bytes: int = TRANSCRIPT_TAIL_BYTES) -> list[dict] | None:
+    """The JSON records in the last `max_bytes` of the transcript, oldest first.
+
+    A first line the window starts inside is partial and dropped; one that
+    starts exactly at the window's first byte is whole and kept (the byte
+    before the window says which). Unparseable lines are dropped, a torn last
+    line among them. None when the file cannot be read: missing, a permission
+    error, or not a regular file (opened non-blocking, so a FIFO planted at the
+    path can never hang the poller). A readable tail that parses to [] is for
+    the caller to treat as unreadable too (seat_state does)."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+    except OSError:
+        return None
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            return None
+        start = max(0, st.st_size - max(1, int(max_bytes)))
+        lead = 1 if start > 0 else 0
+        offset, want, chunks = start - lead, st.st_size - start + lead, []
+        while want > 0:
+            chunk = os.pread(fd, want, offset)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            offset += len(chunk)
+            want -= len(chunk)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+    data = b"".join(chunks)
+    if lead:
+        newline = data.find(b"\n")
+        if newline < 0:
+            return []  # one record longer than the window: nothing whole in it
+        data = data[newline + 1 :]
+    records: list[dict] = []
+    for line in data.split(b"\n"):
+        if not line.strip():
+            continue
+        try:
+            rec = json.loads(line)
+        except ValueError:  # UnicodeDecodeError is a ValueError
+            continue
+        if isinstance(rec, dict):
+            records.append(rec)
+    return records
+
+
+def _parse_stamp(value) -> datetime | None:
+    """An aware UTC datetime from a transcript's ISO 8601 stamp, or None. "Z" is
+    rewritten to "+00:00" first (fromisoformat reads no "Z" before 3.11), and a
+    stamp with no offset is None: it cannot be compared with a hand's instant."""
+    if not isinstance(value, str) or not 0 < len(value) <= 64:
+        return None
+    try:
+        at = datetime.fromisoformat(value[:-1] + "+00:00" if value.endswith("Z") else value)
+    except ValueError:
+        return None
+    return at.astimezone(timezone.utc) if at.tzinfo is not None else None
+
+
+def _hand_instants(handed_at) -> list[datetime]:
+    """The console's hand stamps (epoch floats) as aware UTC datetimes."""
+    out = []
+    for x in handed_at or ():
+        if isinstance(x, bool) or not isinstance(x, (int, float)):
+            continue
+        try:
+            out.append(datetime.fromtimestamp(x, tz=timezone.utc))
+        except (OverflowError, OSError, ValueError):
+            continue
+    return out
+
+
+def _is_api_error_turn(rec: dict) -> bool:
+    return rec.get("isApiErrorMessage") is True
+
+
+def _is_close_turn(rec: dict) -> bool:
+    """An assistant record that calls close_session (under any MCP server prefix)."""
+    message = rec.get("message")
+    content = message.get("content") if isinstance(message, dict) else None
+    return isinstance(content, list) and any(
+        isinstance(block, dict)
+        and block.get("type") == "tool_use"
+        and isinstance(block.get("name"), str)
+        and block["name"].endswith("close_session")
+        for block in content
+    )
+
+
+def _unknown_seat(transcript: str) -> dict:
+    """The seat when the transcript says nothing usable: no dark mark, no
+    "answered" claim, no count. A count against a file the panel no longer
+    writes would be a number about nothing."""
+    return {
+        "transcript": transcript,
+        "dark": False,
+        "dark_reason": None,
+        "dark_since": None,
+        "stalled": None,
+        "last_answered_at": None,
+        "unanswered_batches": 0,
+        "closed_at": None,
+    }
+
+
+def follow_continuation(records: list[dict], path: Path) -> Path | None:
+    """The file a /clear continued this transcript in: the ``continuedInSessionId``
+    of the newest ``continued-in`` record, resolved beside `path`, else None.
+
+    The caller follows it once, before any state is computed. A sibling that is
+    not there (yet) is still where the seat went, so it reads unreadable, never
+    the old file: Claude Code keeps appending queue records to the old file
+    after a continuation (measured 2026-10-23), which would keep it looking
+    current while its assistant records stay frozen."""
+    best: tuple[tuple[datetime, int], str] | None = None
+    for i, rec in enumerate(records or ()):
+        if not isinstance(rec, dict) or rec.get("type") != "continued-in":
+            continue
+        session_id = rec.get("continuedInSessionId")
+        if not _valid_session_id(session_id):
+            continue
+        key = (_parse_stamp(rec.get("timestamp")) or datetime.min.replace(tzinfo=timezone.utc), i)
+        if best is None or key > best[0]:
+            best = (key, session_id)
+    if best is None:
+        return None
+    sibling = Path(path).with_name(f"{best[1]}.jsonl")
+    return None if sibling == Path(path) else sibling
+
+
+def seat_state(records: list[dict] | None, handed_at) -> dict:
+    """What the panel transcript says about the seat, as eight keys.
+
+    `records` are the transcript's tail (read_transcript_tail); `handed_at` the
+    console's hand stamps for this panel session (epoch floats). Every stamp
+    comparison is between aware UTC datetimes; the strings returned are the
+    transcript's own stamps.
+
+    * ``transcript``: "ok", or UNKNOWN as "unreadable" (None, [], or no record
+      with a usable stamp) or "stale" (the newest timestamped record of ANY
+      type predates the last hand by more than TRANSCRIPT_STALE_S: a handed
+      peer message leaves a queue-operation record, so a long tool run never
+      reads stale). Unknown zeroes every other field and is never dark.
+    * ``dark``: the newest assistant record is an API-error turn (an assistant
+      record with isApiErrorMessage true) whose error is authentication_failed;
+      ``dark_reason`` "login expired"; ``dark_since`` the first such turn after
+      the last answer.
+    * ``stalled``: any other API error on the newest assistant record
+      (rate_limit and the rest), named by the transcript's own word. A stall is
+      not dark: batches keep flowing.
+    * ``last_answered_at``: the newest assistant record that is not an API-error
+      turn; ``unanswered_batches``: hands newer than it.
+    * ``closed_at``: the newest assistant record that calls close_session.
+    """
+    timed = []
+    for i, rec in enumerate(records or ()):
+        if isinstance(rec, dict):
+            at = _parse_stamp(rec.get("timestamp"))
+            if at is not None:
+                timed.append((at, i, rec))
+    if not timed:
+        return _unknown_seat("unreadable")
+    timed.sort(key=lambda t: (t[0], t[1]))
+    hands = _hand_instants(handed_at)
+    if hands and timed[-1][0] < max(hands) - timedelta(seconds=TRANSCRIPT_STALE_S):
+        return _unknown_seat("stale")
+    turns = [t for t in timed if t[2].get("type") == "assistant"]
+    answers = [t for t in turns if not _is_api_error_turn(t[2])]
+    last_answer = answers[-1] if answers else None
+    dark, dark_since, stalled = False, None, None
+    if turns and _is_api_error_turn(turns[-1][2]):
+        error = turns[-1][2].get("error")
+        if error == DARK_ERROR:
+            dark = True
+            # Ordered by (stamp, file position), so a tie with the last answer
+            # still finds the newest turn, which is itself after it.
+            dark_since = next(
+                rec["timestamp"]
+                for at, i, rec in turns
+                if _is_api_error_turn(rec)
+                and rec.get("error") == DARK_ERROR
+                and (last_answer is None or (at, i) > last_answer[:2])
+            )
+        else:
+            plain = isinstance(error, str) and _RE_STALL_WORD.fullmatch(error) is not None
+            stalled = error if plain else "api_error"
+    closes = [rec for _, _, rec in turns if _is_close_turn(rec)]
+    answered = last_answer[0] if last_answer else None
+    return {
+        "transcript": "ok",
+        "dark": dark,
+        "dark_reason": DARK_REASON if dark else None,
+        "dark_since": dark_since,
+        "stalled": stalled,
+        "last_answered_at": last_answer[2]["timestamp"] if last_answer else None,
+        "unanswered_batches": sum(1 for h in hands if answered is None or h > answered),
+        "closed_at": closes[-1]["timestamp"] if closes else None,
+    }
+
+
+def _seat_reason(base: str, seat: dict) -> str:
+    """The link's reason as the seat colours it: a dark seat replaces it (the
+    batches are held, whatever the link could do), a stall is appended to it."""
+    if seat.get("dark"):
+        since = _parse_stamp(seat.get("dark_since"))
+        at = f" since {_hm(since.timestamp())}" if since else ""
+        return (
+            f"seat dark{at} ({seat.get('dark_reason') or DARK_REASON}): batches held, "
+            f"{int(seat.get('unanswered_batches') or 0)} unanswered"
+        )
+    if seat.get("stalled"):
+        return f"{base}; HQ stalled ({seat['stalled']})"
+    return base
 
 
 # ── the batch text: the ONLY place message content is made ─────────────────
@@ -511,7 +794,12 @@ class PushLink:
     Baselines live as long as the console: the first observation after the
     console starts sets them and reports nothing, so a restart never announces
     the whole backlog. Sources are observed on every tick, panel running or not,
-    so a text that lands between two panel sessions is handed to the next one."""
+    so a text that lands between two panel sessions is handed to the next one.
+
+    Design A2: every tick that reaches the target also reads the panel
+    transcript (seat_state) and caches what it says for status(). A dark seat
+    is handed no batch until a real turn lands; an unknown one is handed
+    batches as before."""
 
     def __init__(
         self,
@@ -557,6 +845,15 @@ class PushLink:
         self._last_error: str | None = None
         self._last_handed_at: float | None = None
         self._handed_total = 0
+        # Design A2, per panel session: the last HANDED_KEEP hand stamps (the
+        # unanswered count and the stale test read them), the seat as the last
+        # tick read it, the 24 h crossing, the newest close seen, and the first
+        # error turn of the dark episode already recorded.
+        self._handed_at: collections.deque[float] = collections.deque(maxlen=HANDED_KEEP)
+        self._seat: dict = _unknown_seat("unreadable")
+        self._over_24h_at: float | None = None
+        self._last_close_at: datetime | None = None
+        self._dark_recorded_since: str | None = None
 
     def root(self) -> Path:
         return self._root or _sovereign_root()
@@ -594,6 +891,13 @@ class PushLink:
         self._pending.pop("over_24h", None)
         if not _has_events(self._pending):
             self._pending_since = None
+        # So did its hands, its closes and its dark episode: a batch handed to a
+        # child that is gone can never be answered by this one.
+        self._handed_at.clear()
+        self._seat = _unknown_seat("unreadable")
+        self._over_24h_at = None
+        self._last_close_at = None
+        self._dark_recorded_since = None
 
     def _read_sources(self) -> dict:
         """The file reads, OUTSIDE the lock (a snapshot poll must not wait on them)."""
@@ -695,6 +999,7 @@ class PushLink:
                 self._listening = False
                 self._reason = "push poller error"
                 self._last_error = type(e).__name__
+                self._seat = _unknown_seat("unreadable")
         finally:
             with self._lock:
                 self._last_tick_at = self._clock()
@@ -710,13 +1015,17 @@ class PushLink:
             if not running or not _is_int(pid):
                 self._listening = False
                 self._reason = "no panel session"
+                self._seat = _unknown_seat("unreadable")
                 if self._pid is not None:
                     self._pid = None
                 return
             if pid != self._pid:
                 self._new_session(pid)
             if st.get("over_24h") and not self._over_24h_sent:
-                self._pending["over_24h"] = {"at": self._clock()}
+                # The crossing itself is an event and fires one batch; every
+                # later batch carries the line as well, until a close lands.
+                self._over_24h_at = self._clock()
+                self._pending["over_24h"] = {"at": self._over_24h_at}
                 self._over_24h_sent = True
                 self._mark_pending()
             inbound = command_inbound(getattr(session, "last_command", None))
@@ -727,19 +1036,28 @@ class PushLink:
                     if inbound is None
                     else "push link off: inbound set to refuse"
                 )
+                self._seat = _unknown_seat("unreadable")
                 return
             spawned_at = getattr(session, "spawned_at", None)
+            handed = list(self._handed_at)
         try:
             target = self._resolve(pid, spawned_at)
         except TargetError as e:
             with self._lock:
                 self._listening = False
                 self._reason = str(e)
+                self._seat = _unknown_seat("unreadable")
             return
+        # Read before any batch goes out, with the hands as they stood: a
+        # stamp added by this tick's own send would make an idle seat's
+        # transcript look a hand behind.
+        seat = self._read_seat(target, handed)
         now = self._clock()
         with self._lock:
             if self._pid != pid:  # the session changed while we resolved
                 return
+            self._seat = seat
+            rows = self._seat_rows_locked(seat, pid)
             if self._send_failing:
                 # HQ review R1: the target resolving is not the link working.
                 # Until a send succeeds the link stays off with the failure
@@ -748,17 +1066,30 @@ class PushLink:
             else:
                 self._listening = _link_on(inbound)
                 self._reason = _on_reason(inbound)
+            line_24h = self._over_24h_at is not None and not self._closed_since_crossing_locked()
+            # A close since the crossing makes a first notice still waiting moot.
+            moot = not line_24h and self._pending.pop("over_24h", None) is not None
+            if moot and not _has_events(self._pending):
+                self._pending_since = None
             due = (
-                _has_events(self._pending)
+                # A dark seat is handed nothing until a real turn is newer than
+                # its first error turn; unknown and stalled seats are handed
+                # batches as before.
+                not seat["dark"]
+                and _has_events(self._pending)
                 and (self._last_sent_at is None or now - self._last_sent_at >= _min_interval())
                 and (self._last_attempt_at is None or now - self._last_attempt_at >= RETRY_S)
             )
-            if not due:
-                return
-            pending = json.loads(json.dumps(self._pending))
-            batch_no = self._batches + 1
-            since = self._pending_since
-            self._last_attempt_at = now
+            if due:
+                pending = json.loads(json.dumps(self._pending))
+                if line_24h:
+                    pending["over_24h"] = {"at": self._over_24h_at}
+                batch_no = self._batches + 1
+                since = self._pending_since
+                self._last_attempt_at = now
+        self._record_panel_rows(rows)
+        if not due:
+            return
         text = format_batch(
             pending,
             batch_no=batch_no,
@@ -782,6 +1113,7 @@ class PushLink:
                 self._pending_since = None
             self._last_sent_at = now
             self._last_handed_at = now
+            self._handed_at.append(now)
             self._batches = batch_no
             self._handed_total += 1
             self._last_error = None
@@ -809,6 +1141,65 @@ class PushLink:
         if rendered.get("over_24h"):
             self._pending.pop("over_24h", None)
 
+    # ── the panel seat (design A2) ──
+    def _read_seat(self, target: dict, handed: list[float]) -> dict:
+        """The seat from its transcript, OUTSIDE the lock. Follows a /clear's
+        continued-in record once. Never raises: a transcript the console cannot
+        locate, read or parse is unknown, never dark and never a poller error."""
+        try:
+            session_id, cwd = target.get("session_id"), target.get("cwd")
+            if not _valid_session_id(session_id) or not _valid_cwd(cwd):
+                return _unknown_seat("unreadable")
+            path = transcript_path(session_id, cwd)
+            records = read_transcript_tail(path)
+            if records:
+                sibling = follow_continuation(records, path)
+                if sibling is not None:
+                    records = read_transcript_tail(sibling)
+            return seat_state(records, handed)
+        except Exception:
+            return _unknown_seat("unreadable")
+
+    def _closed_since_crossing_locked(self) -> bool:
+        if self._over_24h_at is None or self._last_close_at is None:
+            return False
+        return self._last_close_at > datetime.fromtimestamp(self._over_24h_at, tz=timezone.utc)
+
+    def _seat_rows_locked(self, seat: dict, pid: int) -> list[tuple[str, dict]]:
+        """The panel_sessions.jsonl rows this read earns (decided under the
+        lock, written after it): ``dark`` once per episode, keyed on its first
+        error turn, and ``close`` once for each close newer than the last one
+        seen in this panel session, which covers the close that ends a 24 h
+        crossing. A seat's return from dark is no row: the status shows it."""
+        rows: list[tuple[str, dict]] = []
+        if seat["dark"] and seat["dark_since"] != self._dark_recorded_since:
+            self._dark_recorded_since = seat["dark_since"]
+            rows.append(
+                (
+                    "dark",
+                    {
+                        "pid": pid,
+                        "since": seat["dark_since"],
+                        "reason": seat["dark_reason"],
+                        "unanswered": seat["unanswered_batches"],
+                    },
+                )
+            )
+        closed = _parse_stamp(seat["closed_at"])
+        if closed is not None and (self._last_close_at is None or closed > self._last_close_at):
+            self._last_close_at = closed
+            rows.append(("close", {"pid": pid, "closed_at": seat["closed_at"]}))
+        return rows
+
+    def _record_panel_rows(self, rows: list[tuple[str, dict]]) -> None:
+        if not rows:
+            return
+        from . import hq_panel  # local: hq_panel imports this module at its top
+
+        root = self.root()
+        for event, fields in rows:
+            hq_panel.note_panel_event(root, event, **fields)
+
     # ── status ──
     def _stale_locked(self) -> bool:
         if self._last_tick_at is None:
@@ -828,12 +1219,17 @@ class PushLink:
             waiting += int((p.get("halts") or {}).get("new", 0))
             waiting += int((p.get("drops") or {}).get("count", 0))
             waiting += 1 if p.get("over_24h") else 0
+            # A poller that never ticked, or has stopped, knows nothing current
+            # about the seat: it reads unknown, never the last thing it saw.
             if self._last_tick_at is None:
                 reason = "push poller not started"
+                seat = _unknown_seat("unreadable")
             elif self._stale_locked():
                 reason = "push poller stopped"
+                seat = _unknown_seat("unreadable")
             else:
-                reason = self._reason
+                seat = dict(self._seat)
+                reason = _seat_reason(self._reason, seat)
             blind = sorted(k for k, v in self._sources.items() if v not in ("ok", "unknown"))
             return {
                 "listening": self._listening and not self._stale_locked(),
@@ -852,6 +1248,9 @@ class PushLink:
                 "events_waiting": waiting,
                 "min_interval_s": _min_interval(),
                 "last_error": self._last_error,
+                # Design A2: the cached read of the panel transcript. This
+                # method never reads the transcript itself.
+                "seat": seat,
             }
 
 

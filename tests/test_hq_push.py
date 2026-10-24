@@ -220,9 +220,15 @@ class TestInboundFlag:
 
 class TestResolveTarget:
     def test_resolves(self, tmp_path, inbox):
-        write_registry(tmp_path, 7, inbox.path, started_ms=1_000_500)
+        write_registry(tmp_path, 7, inbox.path, started_ms=1_000_500, rec_extra={"cwd": "/Users/x"})
         t = hq_push.resolve_target(7, 1000.0, tmp_path)
-        assert t == {"socket": inbox.path, "token": "ab" * 32}
+        # Design A2: the record's sessionId and cwd ride along, to find the transcript.
+        assert t == {
+            "socket": inbox.path,
+            "token": "ab" * 32,
+            "session_id": "s-1",
+            "cwd": "/Users/x",
+        }
 
     def test_key_name_is_sha256_of_socket_path(self):
         # Measured on the Studio: /tmp/cc-socks/18109.sock -> e14f56af31233cbc...

@@ -161,9 +161,35 @@ class TestHqRoutes:
             "sources",
             "blind",
             "nonce_file_ok",
+            "seat",  # design A2: the panel seat read from its transcript
         }
         # Never ticked (the suite keeps the poller off): it says so (HQ review A6).
         assert push["reason"] == "push poller not started"
+
+    def test_hq_status_carries_seat(self, running_server, panel_env):
+        """Design A2, decision 6: the seat rides this Studio-only route as eight
+        keys, and never crosses into the CORS-wildcard snapshot."""
+        host, port = running_server
+        status, body, _ = _req(f"http://{host}:{port}/hq/status")
+        assert status == 200
+        seat = json.loads(body)["push"]["seat"]
+        assert set(seat) == {
+            "transcript",
+            "dark",
+            "dark_reason",
+            "dark_since",
+            "stalled",
+            "last_answered_at",
+            "unanswered_batches",
+            "closed_at",
+        }
+        # Never ticked: unknown, never "ok" and never dark (Task 20's validation
+        # needs a never-found transcript to read as something other than ok).
+        assert seat["transcript"] == "unreadable" and seat["dark"] is False
+        assert seat["last_answered_at"] is None and seat["unanswered_batches"] == 0
+        _, snap, _ = _req(f"http://{host}:{port}/snapshot.json")
+        hp = json.loads(snap)["hq_panel"]
+        assert "seat" not in hp and "unanswered_batches" not in json.dumps(hp)
 
     def test_status_never_carries_token(self, running_server, panel_env):
         host, port = running_server

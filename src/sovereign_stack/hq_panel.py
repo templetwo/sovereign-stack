@@ -16,6 +16,14 @@ panel's review queue. `accept` is never the default: 2.1.296 has no sender
 allowlist, so it would admit every same-user peer unheld. HQ_PANEL_INBOUND=accept
 is Anthony's switch (gate-shape:channel-trust); see hq_push. Flag settings for
 this one process: ~/.claude/settings.json and the Terminal seat are untouched.
+
+Design A2 (decision 6) adds a durable log of the panel seat,
+<root>/hq/cockpit/panel_sessions.jsonl, with exactly four events: ``start`` and
+``stop`` (with ``last_exit``), written here, and ``dark`` and ``close``, written
+by the push link (hq_push), which reads the panel transcript. A seat's return
+from dark is read from the transcript and shown on /hq/status, never a fifth
+event. A row that cannot be written never stops the panel, its reader or the
+poller (``note_panel_event``).
 """
 
 from __future__ import annotations
@@ -37,7 +45,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import hq_push
+from . import hq_push, live_store_guard
 
 #: The command before the Phase 3 inbound flag; default_command() inserts it.
 DEFAULT_COMMAND = ["claude", "-n", "HQ", "/hq-boot"]
@@ -153,6 +161,66 @@ def _utc(ts: float | None) -> str | None:
     if ts is None:
         return None
     return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
+
+
+# ── panel_sessions.jsonl (design A2, decision 6) ────────────────────────────
+
+#: The design's four events, and no fifth.
+PANEL_EVENTS = ("start", "stop", "dark", "close")
+PANEL_SESSIONS_STORE = "hq/cockpit/panel_sessions"
+# The panel's reader thread and the push poller append from one process.
+_PANEL_EVENTS_LOCK = threading.Lock()
+
+
+def panel_sessions_path(root: Path) -> Path:
+    return Path(root) / "hq" / "cockpit" / "panel_sessions.jsonl"
+
+
+def record_panel_event(root: Path, event: str, **fields) -> None:
+    """Append one ``{"event", "at", "pid", ...}`` row to root/hq/cockpit/
+    panel_sessions.jsonl. ``at`` is this moment in UTC (ISO 8601); ``pid`` (a
+    keyword, required) is the panel child's. The live-store guard runs first,
+    so a pytest run aimed at the live root is refused before anything is made,
+    then the directory is created (tmp_sovereign_root does not make
+    hq/cockpit). Never glued onto a torn last line. Raises on a refusal, an
+    unknown event, a missing pid or an OSError; callers whose own work must go
+    on use note_panel_event."""
+    path = panel_sessions_path(root)
+    live_store_guard.refuse_if_test_targets_live(path, store=PANEL_SESSIONS_STORE)
+    if event not in PANEL_EVENTS:
+        raise ValueError(f"unknown panel event {event!r}; the events are {PANEL_EVENTS}")
+    pid = fields.pop("pid", None)
+    if not isinstance(pid, int) or isinstance(pid, bool):
+        raise ValueError("a panel event names the panel child's pid")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    row = {"event": event, "at": _utc(time.time()), "pid": pid, **fields}
+    data = (json.dumps(row, ensure_ascii=False) + "\n").encode("utf-8")
+    with _PANEL_EVENTS_LOCK, path.open("ab+") as fh:
+        end = fh.seek(0, os.SEEK_END)
+        if end:
+            fh.seek(end - 1)
+            if fh.read(1) != b"\n":
+                data = b"\n" + data
+        fh.write(data)
+
+
+def note_panel_event(root: Path, event: str, **fields) -> str:
+    """record_panel_event for a caller whose own work must go on whatever the
+    log does: the panel's start, its reader's cleanup, the push poller's tick.
+    Returns "written", "refused" (the live-store guard: a test aimed at the
+    live root, nothing landed) or "failed" (an OSError, named on stderr, which
+    the console's launchd log keeps). Never raises either of those."""
+    try:
+        record_panel_event(root, event, **fields)
+    except live_store_guard.LiveStoreWriteRefused:
+        return "refused"
+    except OSError as e:
+        print(
+            f"hq_panel: panel_sessions.jsonl {event} row not written ({type(e).__name__})",
+            file=sys.stderr,
+        )
+        return "failed"
+    return "written"
 
 
 class HQSession:
@@ -316,7 +384,16 @@ class HQSession:
             self._seq_changed_at = None
             self._last_input_at = None
         self._set_winsize(cols, rows)
-        self._reader = threading.Thread(target=self._read_loop, args=(master, proc), daemon=True)
+        # The store is fixed here, for this child's start AND stop rows. A
+        # start the guard refused (a test whose store resolves to the live
+        # root) gets no stop row either: the reader may outlive the test, and
+        # outside a test the guard no longer refuses.
+        events_root: Path | None = hq_push._sovereign_root()
+        if note_panel_event(events_root, "start", pid=proc.pid) == "refused":
+            events_root = None
+        self._reader = threading.Thread(
+            target=self._read_loop, args=(master, proc, events_root), daemon=True
+        )
         self._reader.start()
         return True, f"started pid {proc.pid}"
 
@@ -344,7 +421,7 @@ class HQSession:
         with self._lock:
             self._last_input_at = time.time()
 
-    def _read_loop(self, fd: int, proc: subprocess.Popen) -> None:
+    def _read_loop(self, fd: int, proc: subprocess.Popen, events_root: Path | None = None) -> None:
         cap = self._cap()
         try:
             while True:
@@ -380,6 +457,10 @@ class HQSession:
                     self._seq += 1
                     self._seq_changed_at = time.time()
                     self._cond.notify_all()
+            # After the cleanup and outside the lock: every child that had a start
+            # row gets its stop row, and a slow or failing write holds nothing.
+            if events_root is not None:
+                note_panel_event(events_root, "stop", pid=proc.pid, last_exit=code)
 
     def replay(self, after: int) -> tuple[list[tuple[int, bytes]], int | None]:
         with self._lock:
